@@ -30,6 +30,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
@@ -1737,6 +1738,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 	h.syncVirtualAuthChildren(ctx, updatedAuth)
+	if req.WSHandshakeDebug != nil && *req.WSHandshakeDebug {
+		runtimeexecutor.CloseCodexWebsocketSessionsForAuthID(updatedAuth.ID, "handshake_debug_enabled")
+	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "file": h.buildAuthFileEntry(updatedAuth)})
 }

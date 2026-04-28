@@ -161,6 +161,7 @@ type authFallbackExecutor struct {
 	executeCalls      []string
 	streamCalls       []string
 	executeErrors     map[string]error
+	streamErrors      map[string]error
 	streamFirstErrors map[string]error
 }
 
@@ -182,9 +183,13 @@ func (e *authFallbackExecutor) Execute(_ context.Context, auth *Auth, _ cliproxy
 func (e *authFallbackExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.mu.Lock()
 	e.streamCalls = append(e.streamCalls, auth.ID)
+	errDirect := e.streamErrors[auth.ID]
 	err := e.streamFirstErrors[auth.ID]
 	e.mu.Unlock()
 
+	if errDirect != nil {
+		return nil, errDirect
+	}
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	if err != nil {
 		ch <- cliproxyexecutor.StreamChunk{Err: err}
@@ -479,6 +484,92 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 	if state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+}
+
+func TestManagerExecuteStream_CodexWebsocketDebugFailureFallsBackToHTTPAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		streamErrors: map[string]error{
+			"aa-ws-debug": &Error{
+				HTTPStatus: http.StatusServiceUnavailable,
+				Message:    "codex websocket handshake debug: disconnected after successful upstream handshake",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "codex-test-model"
+	wsDebugAuth := &Auth{
+		ID:       "aa-ws-debug",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"websockets":                "true",
+			"websocket_handshake_debug": "true",
+		},
+		Metadata: map[string]any{
+			"websockets":                true,
+			"websocket_handshake_debug": true,
+		},
+	}
+	httpAuth := &Auth{ID: "bb-http", Provider: "codex"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(wsDebugAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(httpAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(wsDebugAuth.ID)
+		reg.UnregisterClient(httpAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), wsDebugAuth); errRegister != nil {
+		t.Fatalf("register websocket debug auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), httpAuth); errRegister != nil {
+		t.Fatalf("register http auth: %v", errRegister)
+	}
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	streamResult, errExecute := m.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want fallback success", errExecute)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("execute stream chunk error = %v, want success", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != httpAuth.ID {
+		t.Fatalf("execute stream payload = %q, want %q", string(payload), httpAuth.ID)
+	}
+
+	got := executor.StreamCalls()
+	want := []string{wsDebugAuth.ID, httpAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedDebug, ok := m.GetByID(wsDebugAuth.ID)
+	if !ok || updatedDebug == nil {
+		t.Fatalf("expected websocket debug auth to remain registered")
+	}
+	state := updatedDebug.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected websocket debug auth model state for %q", model)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected websocket debug auth model state to be unavailable")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected websocket debug auth model state cooldown to be set")
 	}
 }
 

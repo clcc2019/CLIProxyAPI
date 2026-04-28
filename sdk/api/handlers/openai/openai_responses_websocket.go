@@ -251,6 +251,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, currentExecutionSessionID)
+		if pinnedAuthID != "" && !h.responsesWebsocketPinnedAuthReusable(pinnedAuthID) {
+			pinnedAuthID = ""
+		}
 		if pinnedAuthID != "" {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 		} else {
@@ -620,6 +623,21 @@ func responsesWebsocketHandshakeDebugEnabled(attributes map[string]string, metad
 	default:
 	}
 	return false
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketPinnedAuthReusable(authID string) bool {
+	authID = strings.TrimSpace(authID)
+	if authID == "" || h == nil || h.AuthManager == nil {
+		return false
+	}
+	auth, ok := h.AuthManager.GetByID(authID)
+	if !ok || auth == nil {
+		return false
+	}
+	if auth.Disabled || auth.Unavailable || auth.Status == coreauth.StatusDisabled {
+		return false
+	}
+	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
 }
 
 func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputForModel(modelName string) bool {

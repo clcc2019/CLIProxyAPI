@@ -1274,6 +1274,103 @@ func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketClearsPinnedAuthWhenHandshakeDebugEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	selector := &orderedWebsocketSelector{order: []string{"auth-ws", "auth-sse"}}
+	executor := &websocketAuthCaptureExecutor{}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(executor)
+
+	authWS := &coreauth.Auth{
+		ID:         "auth-ws",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), authWS); err != nil {
+		t.Fatalf("Register websocket auth: %v", err)
+	}
+	authSSE := &coreauth.Auth{
+		ID:       "auth-sse",
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), authSSE); err != nil {
+		t.Fatalf("Register SSE auth: %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(authWS.ID, authWS.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authSSE.ID, authSSE.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authWS.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authSSE.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	first := `{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(first)); errWrite != nil {
+		t.Fatalf("write first websocket message: %v", errWrite)
+	}
+	_, firstPayload, errReadFirst := conn.ReadMessage()
+	if errReadFirst != nil {
+		t.Fatalf("read first websocket message: %v", errReadFirst)
+	}
+	if got := gjson.GetBytes(firstPayload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("first payload type = %s, want %s", got, wsEventTypeCompleted)
+	}
+
+	updatedWS, ok := manager.GetByID("auth-ws")
+	if !ok || updatedWS == nil {
+		t.Fatal("expected auth-ws to exist")
+	}
+	if updatedWS.Attributes == nil {
+		updatedWS.Attributes = make(map[string]string)
+	}
+	updatedWS.Attributes["websocket_handshake_debug"] = "true"
+	if updatedWS.Metadata == nil {
+		updatedWS.Metadata = make(map[string]any)
+	}
+	updatedWS.Metadata["websocket_handshake_debug"] = true
+	if _, err := manager.Update(context.Background(), updatedWS); err != nil {
+		t.Fatalf("Update auth-ws: %v", err)
+	}
+
+	second := `{"type":"response.create","input":[{"type":"message","id":"msg-2"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(second)); errWrite != nil {
+		t.Fatalf("write second websocket message: %v", errWrite)
+	}
+	_, secondPayload, errReadSecond := conn.ReadMessage()
+	if errReadSecond != nil {
+		t.Fatalf("read second websocket message: %v", errReadSecond)
+	}
+	if got := gjson.GetBytes(secondPayload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("second payload type = %s, want %s", got, wsEventTypeCompleted)
+	}
+
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth-ws" || got[1] != "auth-sse" {
+		t.Fatalf("selected auth IDs = %v, want [auth-ws auth-sse]", got)
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestTreatsTranscriptReplacementAsReset(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"},{"type":"function_call","id":"fc-1","call_id":"call-1"},{"type":"function_call_output","id":"tool-out-1","call_id":"call-1"},{"type":"message","id":"assistant-1","role":"assistant"}]}`)
 	lastResponseOutput := []byte(`[
