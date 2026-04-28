@@ -413,21 +413,8 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	}
 
 	existingInput := gjson.GetBytes(lastRequest, "input")
-	mergedInput, errMerge := mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
-	if errMerge != nil {
-		return nil, lastRequest, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("invalid previous response output: %w", errMerge),
-		}
-	}
-
-	mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, nextInput.Raw)
-	if errMerge != nil {
-		return nil, lastRequest, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("invalid request input: %w", errMerge),
-		}
-	}
+	mergedInput := mergeJSONArrayRawTrusted(existingInput.Raw, trustedJSONArrayRawString(lastResponseOutput))
+	mergedInput = mergeJSONArrayRawTrusted(mergedInput, nextInput.Raw)
 	dedupedInput, errDedupeFunctionCalls := dedupeFunctionCallsByCallID(mergedInput)
 	if errDedupeFunctionCalls == nil {
 		mergedInput = dedupedInput
@@ -524,8 +511,30 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 	result := gjson.Parse(rawArray)
 	itemCount := int(result.Get("#").Int())
 	var seenCallIDs map[string]struct{}
-	filtered := make([]string, 0, itemCount)
 	duplicated := false
+	result.ForEach(func(_, item gjson.Result) bool {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if isResponsesToolCallType(itemType) {
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID != "" {
+				if seenCallIDs == nil {
+					seenCallIDs = make(map[string]struct{}, itemCount)
+				}
+				if _, ok := seenCallIDs[callID]; ok {
+					duplicated = true
+					return false
+				}
+				seenCallIDs[callID] = struct{}{}
+			}
+		}
+		return true
+	})
+	if !duplicated {
+		return rawArray, nil
+	}
+
+	seenCallIDs = nil
+	filtered := make([]string, 0, itemCount)
 	result.ForEach(func(_, item gjson.Result) bool {
 		itemRaw := strings.TrimSpace(item.Raw)
 		if itemRaw == "" {
@@ -539,7 +548,6 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 					seenCallIDs = make(map[string]struct{}, itemCount)
 				}
 				if _, ok := seenCallIDs[callID]; ok {
-					duplicated = true
 					return true
 				}
 				seenCallIDs[callID] = struct{}{}
@@ -548,10 +556,6 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 		filtered = append(filtered, itemRaw)
 		return true
 	})
-	if !duplicated {
-		return rawArray, nil
-	}
-
 	return joinJSONArrayRaw(filtered), nil
 }
 
@@ -741,6 +745,51 @@ func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
 	return builder.String(), nil
 }
 
+func mergeJSONArrayRawTrusted(existingRaw, appendRaw string) string {
+	existingRaw = trustedJSONArrayRawStringFromString(existingRaw)
+	appendRaw = trustedJSONArrayRawStringFromString(appendRaw)
+	if existingRaw == "[]" {
+		return appendRaw
+	}
+	if appendRaw == "[]" {
+		return existingRaw
+	}
+
+	existingBody := strings.TrimSpace(existingRaw[1 : len(existingRaw)-1])
+	appendBody := strings.TrimSpace(appendRaw[1 : len(appendRaw)-1])
+	if existingBody == "" {
+		return appendRaw
+	}
+	if appendBody == "" {
+		return existingRaw
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(existingBody) + len(appendBody) + 3)
+	builder.WriteByte('[')
+	builder.WriteString(existingBody)
+	builder.WriteByte(',')
+	builder.WriteString(appendBody)
+	builder.WriteByte(']')
+	return builder.String()
+}
+
+func trustedJSONArrayRawString(raw []byte) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
+		return "[]"
+	}
+	return string(trimmed)
+}
+
+func trustedJSONArrayRawStringFromString(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
+		return "[]"
+	}
+	return trimmed
+}
+
 func normalizeJSONArrayRaw(raw []byte) string {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
@@ -924,9 +973,16 @@ func responseCompletedOutputFromPayload(payload []byte) []byte {
 
 func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 	payloads := make([][]byte, 0, 2)
-	lines := bytes.Split(chunk, []byte("\n"))
-	for i := range lines {
-		line := bytes.TrimSpace(lines[i])
+	remaining := chunk
+	for len(remaining) > 0 {
+		line := remaining
+		if idx := bytes.IndexByte(remaining, '\n'); idx >= 0 {
+			line = remaining[:idx]
+			remaining = remaining[idx+1:]
+		} else {
+			remaining = nil
+		}
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 || bytes.HasPrefix(line, []byte("event:")) {
 			continue
 		}
@@ -937,7 +993,7 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 			continue
 		}
 		if json.Valid(line) {
-			payloads = append(payloads, bytes.Clone(line))
+			payloads = append(payloads, line)
 		}
 	}
 
@@ -950,7 +1006,7 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
 	}
 	if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte(wsDoneMarker)) && json.Valid(trimmed) {
-		payloads = append(payloads, bytes.Clone(trimmed))
+		payloads = append(payloads, trimmed)
 	}
 	return payloads
 }

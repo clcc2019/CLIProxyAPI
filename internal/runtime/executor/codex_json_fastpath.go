@@ -72,6 +72,57 @@ func codexAppendTopLevelSingleStringObjectField(body []byte, field string, key s
 	return buf, true
 }
 
+func codexAppendTopLevelRawField(body []byte, field string, rawValue []byte) ([]byte, bool) {
+	return codexAppendTopLevelRawFields(body, []codexTopLevelRawField{{field: field, rawValue: rawValue}})
+}
+
+type codexTopLevelRawField struct {
+	field    string
+	rawValue []byte
+}
+
+func codexAppendTopLevelRawFields(body []byte, fields []codexTopLevelRawField) ([]byte, bool) {
+	if len(fields) == 0 {
+		return nil, false
+	}
+	trimmed, suffix, hasFields, ok := codexPrepareTopLevelObjectAppend(body)
+	if !ok {
+		return nil, false
+	}
+
+	extra := 0
+	fieldCount := 0
+	for _, entry := range fields {
+		if entry.field == "" || len(entry.rawValue) == 0 {
+			continue
+		}
+		fieldCount++
+		extra += len(entry.field) + len(entry.rawValue) + 4
+	}
+	if fieldCount == 0 {
+		return nil, false
+	}
+
+	buf := make([]byte, 0, len(body)+extra)
+	buf = append(buf, trimmed[:len(trimmed)-1]...)
+	needComma := hasFields
+	for _, entry := range fields {
+		if entry.field == "" || len(entry.rawValue) == 0 {
+			continue
+		}
+		if needComma {
+			buf = append(buf, ',')
+		}
+		buf = strconv.AppendQuote(buf, entry.field)
+		buf = append(buf, ':')
+		buf = append(buf, entry.rawValue...)
+		needComma = true
+	}
+	buf = append(buf, '}')
+	buf = append(buf, suffix...)
+	return buf, true
+}
+
 func codexPrepareTopLevelObjectAppend(body []byte) (trimmed []byte, suffix []byte, hasFields bool, ok bool) {
 	trimmed = bytes.TrimRight(body, " \t\r\n")
 	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -16,31 +17,33 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		return
 	}
 
-	keys := normalizeKeys(cfg.APIKeys)
-	if len(keys) == 0 {
+	entries := normalizeEntries(cfg.APIKeys)
+	if len(entries) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
 	}
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, entries),
 	)
 }
 
 type provider struct {
 	name string
-	keys map[string]struct{}
+	keys map[string]internalconfig.ClientAPIKeyEntry
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys internalconfig.ClientAPIKeys) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
 	}
-	keySet := make(map[string]struct{}, len(keys))
+	keySet := make(map[string]internalconfig.ClientAPIKeyEntry, len(keys))
 	for _, key := range keys {
-		keySet[key] = struct{}{}
+		if trimmed := strings.TrimSpace(key.APIKey); trimmed != "" {
+			keySet[trimmed] = key
+		}
 	}
 	return &provider{name: providerName, keys: keySet}
 }
@@ -89,13 +92,20 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		if entry, ok := p.keys[candidate.value]; ok {
+			meta := map[string]string{
+				"source": candidate.source,
+			}
+			if len(entry.AllowedModels) > 0 {
+				meta["allowed_models"] = strings.Join(entry.AllowedModels, ",")
+			}
+			if len(entry.ExcludedModels) > 0 {
+				meta["excluded_models"] = strings.Join(entry.ExcludedModels, ",")
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
-				Metadata: map[string]string{
-					"source": candidate.source,
-				},
+				Metadata:  meta,
 			}, nil
 		}
 	}
@@ -117,25 +127,9 @@ func extractBearerToken(header string) string {
 	return strings.TrimSpace(parts[1])
 }
 
-func normalizeKeys(keys []string) []string {
+func normalizeEntries(keys internalconfig.ClientAPIKeys) internalconfig.ClientAPIKeys {
 	if len(keys) == 0 {
 		return nil
 	}
-	normalized := make([]string, 0, len(keys))
-	seen := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		trimmedKey := strings.TrimSpace(key)
-		if trimmedKey == "" {
-			continue
-		}
-		if _, exists := seen[trimmedKey]; exists {
-			continue
-		}
-		seen[trimmedKey] = struct{}{}
-		normalized = append(normalized, trimmedKey)
-	}
-	if len(normalized) == 0 {
-		return nil
-	}
-	return normalized
+	return internalconfig.NormalizeClientAPIKeys(keys)
 }

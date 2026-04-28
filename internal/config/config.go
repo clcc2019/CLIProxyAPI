@@ -688,6 +688,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	// Sanitize client-facing API key configuration and keep legacy string entries compatible.
+	cfg.SanitizeClientAPIKeys()
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -982,28 +985,8 @@ func NormalizeHeaders(headers map[string]string) map[string]string {
 }
 
 // NormalizeExcludedModels trims, lowercases, and deduplicates model exclusion patterns.
-// It preserves the order of first occurrences and drops empty entries.
 func NormalizeExcludedModels(models []string) []string {
-	if len(models) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(models))
-	out := make([]string, 0, len(models))
-	for _, raw := range models {
-		trimmed := strings.ToLower(strings.TrimSpace(raw))
-		if trimmed == "" {
-			continue
-		}
-		if _, exists := seen[trimmed]; exists {
-			continue
-		}
-		seen[trimmed] = struct{}{}
-		out = append(out, trimmed)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	return NormalizeModelPatternList(models)
 }
 
 // NormalizeOAuthExcludedModels cleans provider -> excluded models mappings by normalizing provider keys

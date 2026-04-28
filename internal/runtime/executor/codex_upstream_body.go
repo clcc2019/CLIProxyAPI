@@ -73,27 +73,36 @@ var codexAllowedCompactFinalUpstreamFields = map[string]struct{}{
 }
 
 func codexEnsureFinalUpstreamBodyDefaults(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
+	appendFields := make([]codexTopLevelRawField, 0, 4)
 	edits := make([]helps.JSONEdit, 0, 4)
+	addDefault := func(field string, rawValue []byte) {
+		current := gjson.GetBytes(body, field)
+		if !current.Exists() {
+			appendFields = append(appendFields, codexTopLevelRawField{field: field, rawValue: rawValue})
+			return
+		}
+		if current.Type == gjson.Null {
+			edits = append(edits, helps.SetRawJSONEdit(field, rawValue))
+		}
+	}
+
 	switch opts.requestKind {
 	case codexFinalUpstreamCompact:
-		if tools := gjson.GetBytes(body, "tools"); !tools.Exists() || tools.Type == gjson.Null {
-			edits = append(edits, helps.SetRawJSONEdit("tools", []byte("[]")))
-		}
-		if parallel := gjson.GetBytes(body, "parallel_tool_calls"); !parallel.Exists() || parallel.Type == gjson.Null {
-			edits = append(edits, helps.SetJSONEdit("parallel_tool_calls", true))
-		}
+		addDefault("tools", []byte("[]"))
+		addDefault("parallel_tool_calls", []byte("true"))
 	default:
-		if tools := gjson.GetBytes(body, "tools"); !tools.Exists() || tools.Type == gjson.Null {
-			edits = append(edits, helps.SetRawJSONEdit("tools", []byte("[]")))
-		}
-		if toolChoice := gjson.GetBytes(body, "tool_choice"); !toolChoice.Exists() || toolChoice.Type == gjson.Null {
-			edits = append(edits, helps.SetJSONEdit("tool_choice", "auto"))
-		}
-		if parallel := gjson.GetBytes(body, "parallel_tool_calls"); !parallel.Exists() || parallel.Type == gjson.Null {
-			edits = append(edits, helps.SetJSONEdit("parallel_tool_calls", true))
-		}
-		if include := gjson.GetBytes(body, "include"); !include.Exists() || include.Type == gjson.Null {
-			edits = append(edits, helps.SetRawJSONEdit("include", []byte("[]")))
+		addDefault("tools", []byte("[]"))
+		addDefault("tool_choice", []byte(`"auto"`))
+		addDefault("parallel_tool_calls", []byte("true"))
+		addDefault("include", []byte("[]"))
+	}
+	if len(appendFields) > 0 {
+		if updated, ok := codexAppendTopLevelRawFields(body, appendFields); ok {
+			body = updated
+		} else {
+			for _, entry := range appendFields {
+				edits = append(edits, helps.SetRawJSONEdit(entry.field, entry.rawValue))
+			}
 		}
 	}
 	if len(edits) == 0 {
@@ -146,35 +155,50 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 
 	body = codexEnsureFinalUpstreamBodyDefaults(body, opts)
 
-	edits := []helps.JSONEdit{
-		helps.SetJSONEdit("model", baseModel),
-		helps.DeleteJSONEdit("prompt_cache_retention"),
-		helps.DeleteJSONEdit("safety_identifier"),
-		helps.DeleteJSONEdit("stream_options"),
-		helps.DeleteJSONEdit("max_output_tokens"),
-		helps.DeleteJSONEdit("max_completion_tokens"),
-		helps.DeleteJSONEdit("temperature"),
-		helps.DeleteJSONEdit("top_p"),
-		helps.DeleteJSONEdit("truncation"),
-		helps.DeleteJSONEdit("user"),
-		helps.DeleteJSONEdit("context_management"),
+	edits := make([]helps.JSONEdit, 0, 3)
+	if model := gjson.GetBytes(body, "model"); !model.Exists() || model.Type != gjson.String || model.String() != baseModel {
+		edits = append(edits, helps.SetJSONEdit("model", baseModel))
 	}
 	if opts.requestKind == codexFinalUpstreamResponses {
-		edits = append(edits, helps.SetJSONEdit("store", false))
-	}
-	if !opts.preservePreviousResponseID {
-		edits = append(edits, helps.DeleteJSONEdit("previous_response_id"))
+		store := gjson.GetBytes(body, "store")
+		if !store.Exists() {
+			if updated, ok := codexAppendTopLevelRawField(body, "store", []byte("false")); ok {
+				body = updated
+			} else {
+				edits = append(edits, helps.SetRawJSONEdit("store", []byte("false")))
+			}
+		} else if store.Type != gjson.False {
+			edits = append(edits, helps.SetRawJSONEdit("store", []byte("false")))
+		}
 	}
 	switch opts.streamMode {
 	case codexStreamFieldTrue:
-		edits = append(edits, helps.SetJSONEdit("stream", true))
+		if stream := gjson.GetBytes(body, "stream"); !stream.Exists() {
+			if updated, ok := codexAppendTopLevelRawField(body, "stream", []byte("true")); ok {
+				body = updated
+			} else {
+				edits = append(edits, helps.SetRawJSONEdit("stream", []byte("true")))
+			}
+		} else if stream.Type != gjson.True {
+			edits = append(edits, helps.SetRawJSONEdit("stream", []byte("true")))
+		}
 	case codexStreamFieldFalse:
-		edits = append(edits, helps.SetJSONEdit("stream", false))
+		if stream := gjson.GetBytes(body, "stream"); !stream.Exists() {
+			if updated, ok := codexAppendTopLevelRawField(body, "stream", []byte("false")); ok {
+				body = updated
+			} else {
+				edits = append(edits, helps.SetRawJSONEdit("stream", []byte("false")))
+			}
+		} else if stream.Type != gjson.False {
+			edits = append(edits, helps.SetRawJSONEdit("stream", []byte("false")))
+		}
 	case codexStreamFieldDelete:
 		edits = append(edits, helps.DeleteJSONEdit("stream"))
 	}
 
-	body = helps.EditJSONBytes(body, edits...)
+	if len(edits) > 0 {
+		body = helps.EditJSONBytes(body, edits...)
+	}
 	body = pruneCodexFinalUpstreamBody(body, opts)
 	return body
 }

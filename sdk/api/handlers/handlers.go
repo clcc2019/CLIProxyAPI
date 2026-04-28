@@ -662,6 +662,9 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+	if !clientModelAllowedForContext(ctx, normalizedModel) {
+		return nil, nil, clientModelAccessError(normalizedModel)
+	}
 	reqMeta := requestExecutionMetadata(ctx)
 	if reqMeta == nil {
 		reqMeta = make(map[string]any, 1)
@@ -714,6 +717,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if !clientModelAllowedForContext(ctx, normalizedModel) {
+		return nil, nil, clientModelAccessError(normalizedModel)
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	if reqMeta == nil {
@@ -769,6 +775,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
+	if !clientModelAllowedForContext(ctx, normalizedModel) {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- clientModelAccessError(normalizedModel)
 		close(errChan)
 		return nil, nil, errChan
 	}

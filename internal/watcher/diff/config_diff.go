@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -94,7 +95,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
 		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
-	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
+	} else if !reflect.DeepEqual(redactedClientAPIKeys(oldCfg.APIKeys), redactedClientAPIKeys(newCfg.APIKeys)) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
@@ -331,6 +332,22 @@ func trimStrings(in []string) []string {
 	out := make([]string, len(in))
 	for i := range in {
 		out[i] = strings.TrimSpace(in[i])
+	}
+	return out
+}
+
+func redactedClientAPIKeys(in config.ClientAPIKeys) []string {
+	out := make([]string, 0, len(in))
+	for _, entry := range in {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(entry.APIKey)))
+		parts := []string{fmt.Sprintf("key=redacted:%x", sum)}
+		if len(entry.AllowedModels) > 0 {
+			parts = append(parts, "allowed="+strings.Join(entry.AllowedModels, ","))
+		}
+		if len(entry.ExcludedModels) > 0 {
+			parts = append(parts, "excluded="+strings.Join(entry.ExcludedModels, ","))
+		}
+		out = append(out, strings.Join(parts, "|"))
 	}
 	return out
 }

@@ -478,16 +478,21 @@ func isAPIKeyAuth(auth *Auth) bool {
 }
 
 func isOpenAICompatAPIKeyAuth(auth *Auth) bool {
-	if !isAPIKeyAuth(auth) {
+	if auth == nil {
 		return false
 	}
+	// Scheduler snapshots intentionally omit api_key, so identify OpenAI-compatible
+	// API-key auths from their stable provider/config markers as well.
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 		return true
 	}
 	if auth.Attributes == nil {
 		return false
 	}
-	return strings.TrimSpace(auth.Attributes["compat_name"]) != ""
+	if strings.TrimSpace(auth.Attributes["compat_name"]) != "" || strings.TrimSpace(auth.Attributes["provider_key"]) != "" {
+		return true
+	}
+	return false
 }
 
 func openAICompatProviderKey(auth *Auth) string {

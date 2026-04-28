@@ -21,8 +21,10 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
-	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// APIKeys is the list of keys for authenticating clients to this proxy server.
+	// Entries may be plain strings for the legacy format or structured objects with
+	// model restrictions.
+	APIKeys ClientAPIKeys `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).

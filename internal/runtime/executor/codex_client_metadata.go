@@ -73,13 +73,15 @@ func codexApplyWebsocketClientMetadata(ctx context.Context, body []byte, headers
 	}
 
 	source := codexGinHeadersFromContext(ctx)
-	body = codexSetClientMetadataString(body, codexClientMetadataInstallationID, codexResolvedInstallationID(headers, source, auth, cfg), false)
-	body = codexSetClientMetadataString(body, codexClientMetadataWindowID, firstNonEmptyHeaderValue(headers, source, codexHeaderWindowID), false)
-	body = codexSetClientMetadataString(body, codexClientMetadataSubagent, firstNonEmptyHeaderValue(headers, source, "X-OpenAI-Subagent"), false)
-	body = codexSetClientMetadataString(body, codexClientMetadataParentThreadID, firstNonEmptyHeaderValue(headers, source, codexHeaderParentThreadID), false)
-	body = codexSetClientMetadataString(body, codexClientMetadataTurnMetadata, firstNonEmptyHeaderValue(headers, source, codexHeaderTurnMetadata), false)
-	body = codexSetClientMetadataString(body, codexWSClientMetadataTraceparent, firstNonEmptyHeaderValue(headers, source, "Traceparent"), false)
-	body = codexSetClientMetadataString(body, codexWSClientMetadataTracestate, firstNonEmptyHeaderValue(headers, source, "Tracestate"), false)
+	body = codexSetClientMetadataStrings(body, []codexClientMetadataEntry{
+		{key: codexClientMetadataInstallationID, value: codexResolvedInstallationID(headers, source, auth, cfg)},
+		{key: codexClientMetadataWindowID, value: firstNonEmptyHeaderValue(headers, source, codexHeaderWindowID)},
+		{key: codexClientMetadataSubagent, value: firstNonEmptyHeaderValue(headers, source, "X-OpenAI-Subagent")},
+		{key: codexClientMetadataParentThreadID, value: firstNonEmptyHeaderValue(headers, source, codexHeaderParentThreadID)},
+		{key: codexClientMetadataTurnMetadata, value: firstNonEmptyHeaderValue(headers, source, codexHeaderTurnMetadata)},
+		{key: codexWSClientMetadataTraceparent, value: firstNonEmptyHeaderValue(headers, source, "Traceparent")},
+		{key: codexWSClientMetadataTracestate, value: firstNonEmptyHeaderValue(headers, source, "Tracestate")},
+	}, false)
 
 	// codex-rs carries websocket trace context through client_metadata, not a
 	// top-level trace field.
@@ -118,27 +120,55 @@ func codexResetRequestBody(req *http.Request, body []byte) {
 	}
 }
 
-func codexSetClientMetadataString(body []byte, key string, value string, overwrite bool) []byte {
-	value = strings.TrimSpace(value)
-	if value == "" || key == "" || len(bytes.TrimSpace(body)) == 0 {
-		return body
-	}
+type codexClientMetadataEntry struct {
+	key   string
+	value string
+}
 
-	path := "client_metadata." + key
-	if !overwrite && gjson.GetBytes(body, path).Exists() {
+func codexSetClientMetadataString(body []byte, key string, value string, overwrite bool) []byte {
+	return codexSetClientMetadataStrings(body, []codexClientMetadataEntry{{key: key, value: value}}, overwrite)
+}
+
+func codexSetClientMetadataStrings(body []byte, entries []codexClientMetadataEntry, overwrite bool) []byte {
+	if len(entries) == 0 || len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
 	metadata := gjson.GetBytes(body, "client_metadata")
-	if !metadata.Exists() {
-		if updated, ok := codexAppendTopLevelSingleStringObjectField(body, "client_metadata", key, value); ok {
-			return updated
-		}
-	}
 	if metadata.Exists() && metadata.Type != gjson.Null && !metadata.IsObject() {
 		return body
 	}
-	updated, err := sjson.SetBytes(body, path, value)
-	if err != nil {
+
+	metadataBody := []byte(`{}`)
+	if metadata.Exists() && metadata.IsObject() {
+		metadataBody = []byte(metadata.Raw)
+	}
+	changed := false
+	for _, entry := range entries {
+		key := strings.TrimSpace(entry.key)
+		value := strings.TrimSpace(entry.value)
+		if value == "" || key == "" {
+			continue
+		}
+		if !overwrite && gjson.GetBytes(metadataBody, key).Exists() {
+			continue
+		}
+		updated, errSet := sjson.SetBytes(metadataBody, key, value)
+		if errSet != nil {
+			continue
+		}
+		metadataBody = updated
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	if !metadata.Exists() {
+		if updated, ok := codexAppendTopLevelRawField(body, "client_metadata", metadataBody); ok {
+			return updated
+		}
+	}
+	updated, errSet := sjson.SetRawBytes(body, "client_metadata", metadataBody)
+	if errSet != nil {
 		return body
 	}
 	return updated

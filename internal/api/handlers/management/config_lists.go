@@ -106,16 +106,155 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+
+func parseClientAPIKeysBody(data []byte) (config.ClientAPIKeys, error) {
+	var arr config.ClientAPIKeys
+	if err := json.Unmarshal(data, &arr); err == nil {
+		return config.NormalizeClientAPIKeys(arr), nil
+	}
+
+	var obj struct {
+		Items config.ClientAPIKeys `json:"items"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, err
+	}
+	return config.NormalizeClientAPIKeys(obj.Items), nil
+}
+
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	arr, err := parseClientAPIKeysBody(data)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	h.mu.Lock()
+	h.cfg.APIKeys = arr
+	h.mu.Unlock()
+	h.persist(c)
 }
+
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	var body struct {
+		Index *int    `json:"index"`
+		Value *string `json:"value"`
+		Old   *string `json:"old"`
+		New   *string `json:"new"`
+		Entry any     `json:"entry"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	parseEntry := func(raw any) (*config.ClientAPIKeyEntry, error) {
+		if raw == nil {
+			return nil, nil
+		}
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return nil, err
+		}
+		var entries config.ClientAPIKeys
+		if err := json.Unmarshal([]byte("["+string(data)+"]"), &entries); err != nil {
+			return nil, err
+		}
+		if len(entries) == 0 {
+			return &config.ClientAPIKeyEntry{}, nil
+		}
+		entry := entries[0]
+		return &entry, nil
+	}
+
+	var nextEntry *config.ClientAPIKeyEntry
+	var err error
+	if body.Entry != nil {
+		nextEntry, err = parseEntry(body.Entry)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid entry"})
+			return
+		}
+	} else if body.Value != nil {
+		nextEntry = &config.ClientAPIKeyEntry{APIKey: strings.TrimSpace(*body.Value)}
+	} else if body.New != nil {
+		nextEntry = &config.ClientAPIKeyEntry{APIKey: strings.TrimSpace(*body.New)}
+	}
+	if nextEntry == nil {
+		c.JSON(400, gin.H{"error": "missing fields"})
+		return
+	}
+	normalizedEntry := config.NormalizeClientAPIKeys(config.ClientAPIKeys{*nextEntry})
+	var replacement config.ClientAPIKeyEntry
+	if len(normalizedEntry) > 0 {
+		replacement = normalizedEntry[0]
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeys) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Old != nil {
+		match := strings.TrimSpace(*body.Old)
+		for index := range h.cfg.APIKeys {
+			if h.cfg.APIKeys[index].APIKey == match {
+				targetIndex = index
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		if replacement.APIKey == "" {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
+		}
+		h.cfg.APIKeys = append(h.cfg.APIKeys, replacement)
+		h.cfg.SanitizeClientAPIKeys()
+		h.persistLocked(c)
+		return
+	}
+	if replacement.APIKey == "" {
+		h.cfg.APIKeys = append(h.cfg.APIKeys[:targetIndex], h.cfg.APIKeys[targetIndex+1:]...)
+		h.cfg.SanitizeClientAPIKeys()
+		h.persistLocked(c)
+		return
+	}
+	h.cfg.APIKeys[targetIndex] = replacement
+	h.cfg.SanitizeClientAPIKeys()
+	h.persistLocked(c)
 }
+
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.APIKeys) {
+			h.cfg.APIKeys = append(h.cfg.APIKeys[:idx], h.cfg.APIKeys[idx+1:]...)
+			h.persistLocked(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("value")); val != "" {
+		out := make(config.ClientAPIKeys, 0, len(h.cfg.APIKeys))
+		for _, entry := range h.cfg.APIKeys {
+			if strings.TrimSpace(entry.APIKey) != val {
+				out = append(out, entry)
+			}
+		}
+		h.cfg.APIKeys = out
+		h.persistLocked(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
 // gemini-api-key: []GeminiKey

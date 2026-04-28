@@ -798,8 +798,31 @@ func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []by
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
-	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
 	turnMetadataHeader = strings.TrimSpace(turnMetadataHeader)
+	typeResult := gjson.GetBytes(body, "type")
+	requestType := strings.TrimSpace(typeResult.String())
+	turnMetadataMatches := turnMetadataHeader == "" || gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").String() == turnMetadataHeader
+	if requestType == "response.create" && turnMetadataMatches {
+		return body
+	}
+	if !typeResult.Exists() && turnMetadataMatches {
+		if updated, ok := codexAppendTopLevelStringField(body, "type", "response.create"); ok {
+			return updated
+		}
+	}
+	if !typeResult.Exists() {
+		bodyWithMetadata := body
+		if turnMetadataHeader != "" {
+			bodyWithMetadata = codexSetClientMetadataString(body, codexClientMetadataTurnMetadata, turnMetadataHeader, true)
+		}
+		if turnMetadataHeader == "" || gjson.GetBytes(bodyWithMetadata, "client_metadata.x-codex-turn-metadata").String() == turnMetadataHeader {
+			if updated, ok := codexAppendTopLevelStringField(bodyWithMetadata, "type", "response.create"); ok {
+				return updated
+			}
+		}
+	}
+
+	wsReqBody, errSet := sjson.SetBytes(body, "type", "response.create")
 	if errSet == nil && turnMetadataHeader != "" && gjson.GetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata").String() != turnMetadataHeader {
 		wsReqBody, errSet = sjson.SetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata", turnMetadataHeader)
 	}

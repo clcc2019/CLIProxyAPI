@@ -211,10 +211,10 @@ func cloneAuthAttributesForScheduler(src map[string]string) map[string]string {
 		return nil
 	}
 	var dst map[string]string
-	for _, key := range []string{"priority", "websockets", "gemini_virtual_parent"} {
+	for _, key := range []string{"priority", "websockets", "gemini_virtual_parent", "compat_name", "provider_key"} {
 		if value := src[key]; value != "" {
 			if dst == nil {
-				dst = make(map[string]string, 3)
+				dst = make(map[string]string, 5)
 			}
 			dst[key] = value
 		}

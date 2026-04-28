@@ -31,7 +31,7 @@ func newTestServer(t *testing.T) *Server {
 
 	cfg := &proxyconfig.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
+			APIKeys: proxyconfig.ClientAPIKeys{{APIKey: "test-key"}},
 		},
 		Port:                   0,
 		AuthDir:                authDir,
@@ -60,7 +60,7 @@ func newManagementTestServer(t *testing.T) *Server {
 
 	cfg := &proxyconfig.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
+			APIKeys: proxyconfig.ClientAPIKeys{{APIKey: "test-key"}},
 		},
 		Port:                   0,
 		AuthDir:                authDir,
@@ -179,7 +179,7 @@ func TestManagementUsageDetailRetentionLimitRoute(t *testing.T) {
 
 	cfg := &proxyconfig.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
+			APIKeys: proxyconfig.ClientAPIKeys{{APIKey: "test-key"}},
 		},
 		AuthDir:                   authDir,
 		UsageDetailRetentionLimit: 7,
