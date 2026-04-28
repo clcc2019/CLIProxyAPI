@@ -33,6 +33,8 @@ const (
 	wsTurnStateHeader    = "x-codex-turn-state"
 	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
 
+	responsesWebsocketHandshakeDebugKey = "websocket_handshake_debug"
+
 	maxResponsesWebsocketTimelineBytes      = 4 << 20
 	maxResponsesWebsocketErrorTimelineBytes = 64 << 10
 )
@@ -560,6 +562,9 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 }
 
 func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, metadata map[string]any) bool {
+	if responsesWebsocketHandshakeDebugEnabled(attributes, metadata) {
+		return false
+	}
 	if len(attributes) > 0 {
 		if raw := strings.TrimSpace(attributes["websockets"]); raw != "" {
 			parsed, errParse := strconv.ParseBool(raw)
@@ -572,6 +577,35 @@ func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, met
 		return false
 	}
 	raw, ok := metadata["websockets"]
+	if !ok || raw == nil {
+		return false
+	}
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case string:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(value))
+		if errParse == nil {
+			return parsed
+		}
+	default:
+	}
+	return false
+}
+
+func responsesWebsocketHandshakeDebugEnabled(attributes map[string]string, metadata map[string]any) bool {
+	if len(attributes) > 0 {
+		if raw := strings.TrimSpace(attributes[responsesWebsocketHandshakeDebugKey]); raw != "" {
+			parsed, errParse := strconv.ParseBool(raw)
+			if errParse == nil {
+				return parsed
+			}
+		}
+	}
+	if len(metadata) == 0 {
+		return false
+	}
+	raw, ok := metadata[responsesWebsocketHandshakeDebugKey]
 	if !ok || raw == nil {
 		return false
 	}

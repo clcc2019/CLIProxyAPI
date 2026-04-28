@@ -40,7 +40,10 @@ const (
 	codexResponsesWebsocketProbeIdle       = 45 * time.Second
 	codexResponsesWebsocketProbeWriteTO    = 10 * time.Second
 	codexResponsesWebsocketReadBuffer      = 256
+	codexWebsocketHandshakeDebugKey        = "websocket_handshake_debug"
 )
+
+const codexWebsocketHandshakeDebugMessage = "codex websocket handshake debug: disconnected after successful upstream handshake"
 
 var codexResponsesWebsocketParkTTL = 30 * time.Second
 
@@ -307,6 +310,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	sess := prepared.sess
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
+	handshakeDebug := codexWebsocketHandshakeDebugEnabled(auth)
+	if handshakeDebug {
+		e.closeExistingHandshakeDebugSessionConn(sess)
+	}
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
@@ -326,6 +333,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+	if handshakeDebug {
+		err = newCodexWebsocketHandshakeDebugError()
+		e.disconnectAfterHandshakeDebug(ctx, sess, conn, executionSessionID, authID, wsURL, err)
+		return resp, err
+	}
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
 		defer func() {
@@ -461,6 +473,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	sess := prepared.sess
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
+	handshakeDebug := codexWebsocketHandshakeDebugEnabled(auth)
+	if handshakeDebug {
+		e.closeExistingHandshakeDebugSessionConn(sess)
+	}
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 	var upstreamHeaders http.Header
 	if respHS != nil {
@@ -485,6 +501,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+	if handshakeDebug {
+		errDebug := newCodexWebsocketHandshakeDebugError()
+		e.disconnectAfterHandshakeDebug(ctx, sess, conn, executionSessionID, authID, wsURL, errDebug)
+		prepared.unlockSession()
+		return nil, errDebug
+	}
 
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
@@ -1482,6 +1504,40 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 	}
 }
 
+func (e *CodexWebsocketsExecutor) closeExistingHandshakeDebugSessionConn(sess *codexWebsocketSession) {
+	if e == nil || sess == nil {
+		return
+	}
+	sess.connMu.Lock()
+	conn := sess.conn
+	sess.connMu.Unlock()
+	if conn == nil {
+		return
+	}
+	e.invalidateUpstreamConn(sess, conn, "handshake_debug_redial", newCodexWebsocketHandshakeDebugError())
+}
+
+func (e *CodexWebsocketsExecutor) disconnectAfterHandshakeDebug(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, executionSessionID string, authID string, wsURL string, debugErr error) {
+	if e != nil {
+		helps.RecordAPIWebsocketError(ctx, e.cfg, "handshake_debug", debugErr)
+	}
+	if sess != nil {
+		e.invalidateUpstreamConn(sess, conn, "handshake_debug", debugErr)
+		return
+	}
+	logCodexWebsocketConnected(executionSessionID, authID, wsURL)
+	logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "handshake_debug", debugErr)
+	if conn != nil {
+		if errClose := conn.Close(); errClose != nil {
+			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+		}
+	}
+}
+
+func newCodexWebsocketHandshakeDebugError() statusErr {
+	return newCodexStatusErr(http.StatusServiceUnavailable, []byte(codexWebsocketHandshakeDebugMessage))
+}
+
 func (e *CodexWebsocketsExecutor) CloseExecutionSession(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if e == nil {
@@ -1863,6 +1919,38 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 		return false
 	}
 	raw, ok := auth.Metadata["websockets"]
+	if !ok || raw == nil {
+		return false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
+		if errParse == nil {
+			return parsed
+		}
+	default:
+	}
+	return false
+}
+
+func codexWebsocketHandshakeDebugEnabled(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if len(auth.Attributes) > 0 {
+		if raw := strings.TrimSpace(auth.Attributes[codexWebsocketHandshakeDebugKey]); raw != "" {
+			parsed, errParse := strconv.ParseBool(raw)
+			if errParse == nil {
+				return parsed
+			}
+		}
+	}
+	if len(auth.Metadata) == 0 {
+		return false
+	}
+	raw, ok := auth.Metadata[codexWebsocketHandshakeDebugKey]
 	if !ok || raw == nil {
 		return false
 	}

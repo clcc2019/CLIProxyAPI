@@ -282,7 +282,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		responseToWrite = response
 	}
 
-	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if errOpen != nil {
 		return fmt.Errorf("failed to create log file: %w", errOpen)
 	}
@@ -404,7 +404,7 @@ func (l *FileRequestLogger) ensureLogsDir() error {
 	if strings.TrimSpace(l.logsDir) == "" {
 		return nil
 	}
-	return os.MkdirAll(l.logsDir, 0755)
+	return os.MkdirAll(l.logsDir, 0o700)
 }
 
 // generateFilename creates a sanitized filename from the URL path and current timestamp.
@@ -1378,7 +1378,7 @@ func (w *FileStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if errOpen != nil {
 		w.cleanupTempFiles()
 		return fmt.Errorf("failed to create log file: %w", errOpen)

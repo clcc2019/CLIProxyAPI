@@ -105,3 +105,29 @@ func TestClientAPIKeysUnmarshalJSONCompatibility(t *testing.T) {
 		t.Fatalf("unexpected api keys: %#v", parsed)
 	}
 }
+
+func TestNormalizeClientAPIKeysDropsExamplePlaceholders(t *testing.T) {
+	keys := NormalizeClientAPIKeys(ClientAPIKeys{
+		{APIKey: "your-api-key-1", AllowedModels: []string{"gpt-*"}},
+		{APIKey: " real-key "},
+		{APIKey: "YOUR-API-KEY-2"},
+		{APIKey: "your-api-key"},
+	})
+
+	want := ClientAPIKeys{{APIKey: "real-key"}}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("unexpected normalized keys: %#v", keys)
+	}
+}
+
+func TestClientAPIKeysValuesDropsExamplePlaceholders(t *testing.T) {
+	keys := ClientAPIKeys{
+		{APIKey: "your-api-key-1"},
+		{APIKey: " real-key "},
+	}
+
+	want := []string{"real-key"}
+	if !reflect.DeepEqual(keys.Values(), want) {
+		t.Fatalf("unexpected key values: %#v", keys.Values())
+	}
+}

@@ -1028,6 +1028,27 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 	}
 }
 
+func TestWebsocketUpstreamSupportsIncrementalInputIgnoresHandshakeDebugAuth(t *testing.T) {
+	if websocketUpstreamSupportsIncrementalInput(
+		map[string]string{"websockets": "true", "websocket_handshake_debug": "true"},
+		nil,
+	) {
+		t.Fatal("handshake debug auth should not be treated as incremental-input capable")
+	}
+	if websocketUpstreamSupportsIncrementalInput(
+		nil,
+		map[string]any{"websockets": true, "websocket_handshake_debug": true},
+	) {
+		t.Fatal("handshake debug metadata should not be treated as incremental-input capable")
+	}
+	if !websocketUpstreamSupportsIncrementalInput(
+		map[string]string{"websockets": "true", "websocket_handshake_debug": "false"},
+		nil,
+	) {
+		t.Fatal("non-debug websocket auth should be treated as incremental-input capable")
+	}
+}
+
 func TestCachedResponsesWebsocketIncrementalInputSupport(t *testing.T) {
 	cache := make(map[string]bool)
 	calls := 0

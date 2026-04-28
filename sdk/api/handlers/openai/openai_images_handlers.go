@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"strconv"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -24,6 +25,7 @@ import (
 const (
 	defaultImagesMainModel = "gpt-5.4-mini"
 	defaultImagesToolModel = "gpt-image-2"
+	maxImageUploadBytes    = 32 << 20
 )
 
 type imageCallResult struct {
@@ -132,8 +134,11 @@ func multipartFileToDataURL(fileHeader *multipart.FileHeader) (string, error) {
 		}
 	}()
 
-	data, err := io.ReadAll(f)
+	data, err := util.ReadResponseBodyLimited(f, maxImageUploadBytes)
 	if err != nil {
+		if errors.Is(err, util.ErrResponseBodyTooLarge) {
+			return "", fmt.Errorf("upload file exceeds maximum allowed size of %d bytes", maxImageUploadBytes)
+		}
 		return "", fmt.Errorf("read upload file failed: %w", err)
 	}
 

@@ -5,12 +5,12 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +23,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
-	"golang.org/x/net/context"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -442,51 +441,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 }
 
-// StartNonStreamingKeepAlive emits blank lines every 5 seconds while waiting for a non-streaming response.
-// It returns a stop function that must be called before writing the final response.
+// StartNonStreamingKeepAlive is intentionally a no-op until non-streaming
+// keep-alives can be sent without committing the final HTTP status code.
+// Writing body bytes before the upstream response arrives makes later upstream
+// errors look like successful HTTP 200 responses to clients.
 func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.Context) func() {
-	if h == nil || c == nil {
-		return func() {}
-	}
-	interval := NonStreamingKeepAliveInterval(h.Cfg)
-	if interval <= 0 {
-		return func() {}
-	}
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		return func() {}
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	stopChan := make(chan struct{})
-	var stopOnce sync.Once
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopChan:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
-			}
-		}
-	}()
-
-	return func() {
-		stopOnce.Do(func() {
-			close(stopChan)
-		})
-		wg.Wait()
-	}
+	return func() {}
 }
 
 // AppendAPIResponseLog preserves any previously captured API response and appends new data.

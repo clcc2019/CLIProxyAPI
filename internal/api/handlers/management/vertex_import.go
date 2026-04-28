@@ -3,15 +3,18 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/vertex"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+const maxVertexCredentialUploadBytes = 1 << 20
 
 // ImportVertexCredential handles uploading a Vertex service account JSON and saving it as an auth record.
 func (h *Handler) ImportVertexCredential(c *gin.Context) {
@@ -37,8 +40,12 @@ func (h *Handler) ImportVertexCredential(c *gin.Context) {
 	}
 	defer file.Close()
 
-	data, err := io.ReadAll(file)
+	data, err := util.ReadResponseBodyLimited(file, maxVertexCredentialUploadBytes)
 	if err != nil {
+		if errors.Is(err, util.ErrResponseBodyTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": fmt.Sprintf("file exceeds maximum allowed size of %d bytes", maxVertexCredentialUploadBytes)})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
 		return
 	}

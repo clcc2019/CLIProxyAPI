@@ -201,7 +201,7 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	body := `{"name":"codex-auth.json","priority":0,"note":"new note","user_agent":"new-ua","headers":{"X-Old":"2","X-New":"3","X-Remove":""},"disable_cooling":false,"excluded_models":[" Model-B ","model-a","model-b"],"websockets":true}`
+	body := `{"name":"codex-auth.json","priority":0,"note":"new note","user_agent":"new-ua","headers":{"X-Old":"2","X-New":"3","X-Remove":""},"disable_cooling":false,"excluded_models":[" Model-B ","model-a","model-b"],"websockets":true,"websocket_handshake_debug":true}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -232,6 +232,9 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	if got, ok := response.File["websockets"].(bool); !ok || !got {
 		t.Fatalf("response.file.websockets = %#v, want true", response.File["websockets"])
 	}
+	if got, ok := response.File["websocket_handshake_debug"].(bool); !ok || !got {
+		t.Fatalf("response.file.websocket_handshake_debug = %#v, want true", response.File["websocket_handshake_debug"])
+	}
 
 	updated, ok := manager.GetByID(auth.ID)
 	if !ok || updated == nil {
@@ -249,6 +252,9 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	if got := updated.Attributes["websockets"]; got != "true" {
 		t.Fatalf("Attributes[websockets] = %q, want %q", got, "true")
 	}
+	if got := updated.Attributes["websocket_handshake_debug"]; got != "true" {
+		t.Fatalf("Attributes[websocket_handshake_debug] = %q, want %q", got, "true")
+	}
 	if got := updated.Attributes["excluded_models"]; got != "model-a,model-b" {
 		t.Fatalf("Attributes[excluded_models] = %q, want %q", got, "model-a,model-b")
 	}
@@ -263,6 +269,9 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	}
 	if _, ok := updated.Metadata["user-agent"]; ok {
 		t.Fatal("Metadata[user-agent] should be removed")
+	}
+	if got, ok := updated.Metadata["websocket_handshake_debug"].(bool); !ok || !got {
+		t.Fatalf("Metadata[websocket_handshake_debug] = %#v, want true", updated.Metadata["websocket_handshake_debug"])
 	}
 
 	persisted, err := os.ReadFile(filePath)
@@ -296,6 +305,9 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	}
 	if _, ok := document["websocket"]; ok {
 		t.Fatal("file.websocket should be removed")
+	}
+	if got, ok := document["websocket_handshake_debug"].(bool); !ok || !got {
+		t.Fatalf("file.websocket_handshake_debug = %#v, want true", document["websocket_handshake_debug"])
 	}
 	excludedModels, ok := document["excluded_models"].([]any)
 	if !ok {

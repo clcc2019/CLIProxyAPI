@@ -35,9 +35,10 @@ func (keys ClientAPIKeys) Values() []string {
 		return nil
 	}
 	out := make([]string, 0, len(keys))
-	for _, entry := range keys {
-		if trimmed := strings.TrimSpace(entry.APIKey); trimmed != "" {
-			out = append(out, trimmed)
+	for _, raw := range keys {
+		entry := normalizeClientAPIKeyEntry(raw)
+		if entry.APIKey != "" {
+			out = append(out, entry.APIKey)
 		}
 	}
 	if len(out) == 0 {
@@ -179,13 +180,23 @@ func extractClientAPIKeyModels(record map[string]any, names ...string) []string 
 
 func normalizeClientAPIKeyEntry(entry ClientAPIKeyEntry) ClientAPIKeyEntry {
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	if isPlaceholderClientAPIKey(entry.APIKey) {
+		return ClientAPIKeyEntry{}
+	}
 	entry.AllowedModels = NormalizeModelPatternList(entry.AllowedModels)
 	entry.ExcludedModels = NormalizeModelPatternList(entry.ExcludedModels)
 	return entry
 }
 
+func isPlaceholderClientAPIKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	return normalized == "your-api-key" || strings.HasPrefix(normalized, "your-api-key-")
+}
+
 // NormalizeClientAPIKeys trims, deduplicates, and merges repeated api-key
-// entries while preserving the order of first appearance.
+// entries while preserving the order of first appearance. Known example
+// placeholders are dropped so copied sample configs do not create real
+// credentials.
 func NormalizeClientAPIKeys(entries ClientAPIKeys) ClientAPIKeys {
 	if len(entries) == 0 {
 		return nil

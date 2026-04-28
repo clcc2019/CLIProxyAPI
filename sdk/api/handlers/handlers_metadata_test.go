@@ -1,13 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"golang.org/x/net/context"
 )
 
 func TestRequestExecutionMetadataUsesIdempotencyHeader(t *testing.T) {

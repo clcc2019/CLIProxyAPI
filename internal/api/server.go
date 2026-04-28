@@ -51,6 +51,7 @@ const (
 	inboundReadHeaderTimeout = 30 * time.Second
 	inboundIdleTimeout       = 120 * time.Second
 	inboundMaxHeaderBytes    = 1 << 20
+	inboundMaxRequestBytes   = 64 << 20
 	corsAllowedMethods       = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 	corsAllowedHeaders       = "Authorization, Content-Type, Accept, X-Requested-With, Idempotency-Key, X-Local-Password, X-API-Key, Anthropic-Beta, OpenAI-Beta"
 )
@@ -228,6 +229,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(middleware.RequestBodyLimitMiddleware(inboundMaxRequestBytes))
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}

@@ -44,11 +44,8 @@ auth-dir: "~/.cli-proxy-api"
 #   on-startup: true
 #   batch-size: 2
 
-# API keys for authentication
-api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+# API keys for client authentication. Add your own high-entropy keys.
+api-keys: []
 
 # Enable debug logging
 debug: false
@@ -299,11 +296,11 @@ nonstream-keepalive-interval: 0
 #   upstream-api-keys:
 #     - upstream-api-key: "amp_key_for_team_a"    # Upstream key to use for these clients
 #       api-keys:                                 # Client keys that use this upstream key
-#         - "your-api-key-1"
-#         - "your-api-key-2"
+#         - "client-key-team-a"
+#         - "client-key-team-a-ci"
 #     - upstream-api-key: "amp_key_for_team_b"
 #       api-keys:
-#         - "your-api-key-3"
+#         - "client-key-team-b"
 #   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
 #   restrict-management-to-localhost: false
 #   # Force model mappings to run before checking local API keys (default: false)

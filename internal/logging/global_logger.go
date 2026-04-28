@@ -155,7 +155,7 @@ func ConfigureLogOutput(cfg *config.Config) error {
 
 	protectedPath := ""
 	if cfg.LoggingToFile {
-		if err := os.MkdirAll(logDir, 0o755); err != nil {
+		if err := os.MkdirAll(logDir, 0o700); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
 		}
 		if logWriter != nil {

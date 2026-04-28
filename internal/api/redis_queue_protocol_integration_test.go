@@ -204,6 +204,46 @@ func TestRedisProtocol_ManagementDisabled_RejectsConnection(t *testing.T) {
 	}
 }
 
+func TestMuxProtocol_IdleConnectionDoesNotBlockRedisConnection(t *testing.T) {
+	const managementPassword = "test-management-password"
+
+	t.Setenv("MANAGEMENT_PASSWORD", managementPassword)
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+
+	server := newTestServer(t)
+	if !server.managementRoutesEnabled.Load() {
+		t.Fatalf("expected managementRoutesEnabled to be true")
+	}
+
+	addr, stop := startRedisMuxListener(t, server)
+	t.Cleanup(stop)
+
+	idleConn, errDialIdle := net.DialTimeout("tcp", addr, time.Second)
+	if errDialIdle != nil {
+		t.Fatalf("failed to dial idle connection: %v", errDialIdle)
+	}
+	t.Cleanup(func() { _ = idleConn.Close() })
+
+	conn, errDial := net.DialTimeout("tcp", addr, time.Second)
+	if errDial != nil {
+		t.Fatalf("failed to dial redis listener: %v", errDial)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	reader := bufio.NewReader(conn)
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	if errWrite := writeTestRESPCommand(conn, "PING"); errWrite != nil {
+		t.Fatalf("failed to write RESP command: %v", errWrite)
+	}
+	if msg, err := readTestRESPError(reader); err != nil {
+		t.Fatalf("second connection was not served while idle connection was open: %v", err)
+	} else if msg != "NOAUTH Authentication required." {
+		t.Fatalf("unexpected PING response before AUTH: %q", msg)
+	}
+}
+
 func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 	const managementPassword = "test-management-password"
 

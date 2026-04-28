@@ -44,11 +44,14 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort = 54545
-	geminiCallbackPort    = 8085
-	codexCallbackPort     = 1455
-	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion      = "v1internal"
+	anthropicCallbackPort  = 54545
+	geminiCallbackPort     = 8085
+	codexCallbackPort      = 1455
+	geminiCLIEndpoint      = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion       = "v1internal"
+	maxAuthFileUploadBytes = 2 << 20
+
+	authFileWebsocketHandshakeDebugKey = "websocket_handshake_debug"
 )
 
 type callbackForwarder struct {
@@ -369,6 +372,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						}
 					}
 				}
+				if wdv := gjson.GetBytes(data, authFileWebsocketHandshakeDebugKey); wdv.Exists() {
+					if parsed, ok := parseAuthFileBoolValue(wdv.Value()); ok {
+						fileData[authFileWebsocketHandshakeDebugKey] = parsed
+					}
+				}
 			}
 
 			files = append(files, fileData)
@@ -489,6 +497,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if websockets, ok := authFileWebsockets(auth); ok {
 		entry["websockets"] = websockets
 	}
+	if debug, ok := authFileWebsocketHandshakeDebug(auth); ok {
+		entry[authFileWebsocketHandshakeDebugKey] = debug
+	}
 	return entry
 }
 
@@ -555,6 +566,46 @@ func authFileWebsockets(auth *coreauth.Auth) (bool, bool) {
 			if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
 				return parsed, true
 			}
+		}
+	}
+	return false, false
+}
+
+func authFileWebsocketHandshakeDebug(auth *coreauth.Auth) (bool, bool) {
+	if auth == nil {
+		return false, false
+	}
+	if auth.Attributes != nil {
+		if raw := strings.TrimSpace(auth.Attributes[authFileWebsocketHandshakeDebugKey]); raw != "" {
+			if value, err := strconv.ParseBool(raw); err == nil {
+				return value, true
+			}
+		}
+	}
+	if auth.Metadata == nil {
+		return false, false
+	}
+	if raw, ok := auth.Metadata[authFileWebsocketHandshakeDebugKey]; ok {
+		return parseAuthFileBoolValue(raw)
+	}
+	return false, false
+}
+
+func parseAuthFileBoolValue(raw any) (bool, bool) {
+	switch value := raw.(type) {
+	case bool:
+		return value, true
+	case string:
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+			return parsed, true
+		}
+	case float64:
+		return value != 0, true
+	case int:
+		return value != 0, true
+	case json.Number:
+		if parsed, err := strconv.ParseFloat(string(value), 64); err == nil {
+			return parsed != 0, true
 		}
 	}
 	return false, false
@@ -691,6 +742,10 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json"})
 				return
 			}
+			if errors.Is(errUpload, util.ErrResponseBodyTooLarge) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": fmt.Sprintf("auth file exceeds maximum allowed size of %d bytes", maxAuthFileUploadBytes)})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errUpload.Error()})
 			return
 		}
@@ -710,6 +765,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 				msg := errUpload.Error()
 				if errors.Is(errUpload, errAuthFileMustBeJSON) {
 					msg = "file must be .json"
+				} else if errors.Is(errUpload, util.ErrResponseBodyTooLarge) {
+					msg = fmt.Sprintf("auth file exceeds maximum allowed size of %d bytes", maxAuthFileUploadBytes)
 				}
 				failed = append(failed, gin.H{"name": failureName, "error": msg})
 				continue
@@ -741,8 +798,12 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name must end with .json"})
 		return
 	}
-	data, err := io.ReadAll(c.Request.Body)
+	data, err := util.ReadResponseBodyLimited(c.Request.Body, maxAuthFileUploadBytes)
 	if err != nil {
+		if errors.Is(err, util.ErrResponseBodyTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": fmt.Sprintf("auth file exceeds maximum allowed size of %d bytes", maxAuthFileUploadBytes)})
+			return
+		}
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
@@ -873,8 +934,11 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 	}
 	defer src.Close()
 
-	data, err := io.ReadAll(src)
+	data, err := util.ReadResponseBodyLimited(src, maxAuthFileUploadBytes)
 	if err != nil {
+		if errors.Is(err, util.ErrResponseBodyTooLarge) {
+			return "", fmt.Errorf("uploaded auth file exceeds maximum allowed size of %d bytes: %w", maxAuthFileUploadBytes, err)
+		}
 		return "", fmt.Errorf("failed to read uploaded file: %w", err)
 	}
 	if err := h.writeAuthFile(ctx, name, data); err != nil {
@@ -1148,16 +1212,17 @@ func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) err
 }
 
 type patchAuthFileFieldsRequest struct {
-	Name           string            `json:"name"`
-	Prefix         *string           `json:"prefix"`
-	ProxyURL       *string           `json:"proxy_url"`
-	Headers        map[string]string `json:"headers"`
-	Priority       json.RawMessage   `json:"priority"`
-	Note           *string           `json:"note"`
-	UserAgent      *string           `json:"user_agent"`
-	ExcludedModels *[]string         `json:"excluded_models"`
-	DisableCooling json.RawMessage   `json:"disable_cooling"`
-	Websockets     *bool             `json:"websockets"`
+	Name             string            `json:"name"`
+	Prefix           *string           `json:"prefix"`
+	ProxyURL         *string           `json:"proxy_url"`
+	Headers          map[string]string `json:"headers"`
+	Priority         json.RawMessage   `json:"priority"`
+	Note             *string           `json:"note"`
+	UserAgent        *string           `json:"user_agent"`
+	ExcludedModels   *[]string         `json:"excluded_models"`
+	DisableCooling   json.RawMessage   `json:"disable_cooling"`
+	Websockets       *bool             `json:"websockets"`
+	WSHandshakeDebug *bool             `json:"websocket_handshake_debug"`
 }
 
 func resolvePatchAuthFilePath(targetAuth *coreauth.Auth, authDir, fallbackName string) string {
@@ -1283,6 +1348,9 @@ func applyPatchAuthFileDocument(
 	if req.Websockets != nil {
 		delete(doc, "websocket")
 		doc["websockets"] = *req.Websockets
+	}
+	if req.WSHandshakeDebug != nil {
+		doc[authFileWebsocketHandshakeDebugKey] = *req.WSHandshakeDebug
 	}
 }
 
@@ -1565,7 +1633,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if priorityPresent || req.Note != nil || req.UserAgent != nil || disableCoolingPresent || req.Websockets != nil {
+	if priorityPresent || req.Note != nil || req.UserAgent != nil || disableCoolingPresent || req.Websockets != nil || req.WSHandshakeDebug != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -1620,6 +1688,10 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			delete(targetAuth.Metadata, "websocket")
 			targetAuth.Metadata["websockets"] = *req.Websockets
 			targetAuth.Attributes["websockets"] = strconv.FormatBool(*req.Websockets)
+		}
+		if req.WSHandshakeDebug != nil {
+			targetAuth.Metadata[authFileWebsocketHandshakeDebugKey] = *req.WSHandshakeDebug
+			targetAuth.Attributes[authFileWebsocketHandshakeDebugKey] = strconv.FormatBool(*req.WSHandshakeDebug)
 		}
 		changed = true
 	}
