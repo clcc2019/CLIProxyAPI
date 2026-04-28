@@ -569,29 +569,33 @@ func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, met
 		return false
 	}
 	if len(attributes) > 0 {
-		if raw := strings.TrimSpace(attributes["websockets"]); raw != "" {
-			parsed, errParse := strconv.ParseBool(raw)
-			if errParse == nil {
-				return parsed
+		for _, key := range []string{"websockets", "websocket"} {
+			if raw := strings.TrimSpace(attributes[key]); raw != "" {
+				parsed, errParse := strconv.ParseBool(raw)
+				if errParse == nil {
+					return parsed
+				}
 			}
 		}
 	}
 	if len(metadata) == 0 {
 		return false
 	}
-	raw, ok := metadata["websockets"]
-	if !ok || raw == nil {
-		return false
-	}
-	switch value := raw.(type) {
-	case bool:
-		return value
-	case string:
-		parsed, errParse := strconv.ParseBool(strings.TrimSpace(value))
-		if errParse == nil {
-			return parsed
+	for _, key := range []string{"websockets", "websocket"} {
+		raw, ok := metadata[key]
+		if !ok || raw == nil {
+			continue
 		}
-	default:
+		switch value := raw.(type) {
+		case bool:
+			return value
+		case string:
+			parsed, errParse := strconv.ParseBool(strings.TrimSpace(value))
+			if errParse == nil {
+				return parsed
+			}
+		default:
+		}
 	}
 	return false
 }

@@ -1047,6 +1047,12 @@ func TestWebsocketUpstreamSupportsIncrementalInputIgnoresHandshakeDebugAuth(t *t
 	) {
 		t.Fatal("non-debug websocket auth should be treated as incremental-input capable")
 	}
+	if !websocketUpstreamSupportsIncrementalInput(
+		nil,
+		map[string]any{"websocket": true},
+	) {
+		t.Fatal("legacy websocket metadata should be treated as incremental-input capable")
+	}
 }
 
 func TestCachedResponsesWebsocketIncrementalInputSupport(t *testing.T) {

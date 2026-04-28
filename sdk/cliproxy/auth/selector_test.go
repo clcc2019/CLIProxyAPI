@@ -104,6 +104,37 @@ func TestAuthPriorityCachesTrimmedValues(t *testing.T) {
 	}
 }
 
+func TestAuthWebsocketsEnabledAcceptsLegacyWebsocketField(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		auth *Auth
+	}{
+		{
+			name: "metadata legacy websocket",
+			auth: &Auth{Metadata: map[string]any{"websocket": true}},
+		},
+		{
+			name: "attribute legacy websocket",
+			auth: &Auth{Attributes: map[string]string{"websocket": "true"}},
+		},
+		{
+			name: "metadata websockets",
+			auth: &Auth{Metadata: map[string]any{"websockets": true}},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if !authWebsocketsEnabled(tc.auth) {
+				t.Fatalf("authWebsocketsEnabled() = false, want true")
+			}
+		})
+	}
+}
+
 func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	t.Parallel()
 

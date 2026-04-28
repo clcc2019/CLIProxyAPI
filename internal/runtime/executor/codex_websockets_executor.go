@@ -1822,11 +1822,12 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 	}
 }
 
-// CodexAutoExecutor routes Codex requests to the websocket transport only when:
-//  1. The downstream transport is websocket, and
-//  2. The selected auth enables websockets.
+// CodexAutoExecutor routes Codex requests to the websocket transport when the
+// selected auth enables websockets and either the downstream transport is
+// websocket or websocket handshake debug is enabled.
 //
-// For non-websocket downstream requests, it always uses the legacy HTTP implementation.
+// For non-websocket downstream requests without handshake debug, it uses the
+// legacy HTTP implementation.
 type CodexAutoExecutor struct {
 	httpExec *CodexExecutor
 	wsExec   *CodexWebsocketsExecutor
@@ -1859,7 +1860,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if codexUseWebsocketTransport(ctx, auth) {
 		return e.wsExec.Execute(ctx, auth, req, opts)
 	}
 	return e.httpExec.Execute(ctx, auth, req, opts)
@@ -1869,7 +1870,7 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if codexUseWebsocketTransport(ctx, auth) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
@@ -1903,34 +1904,45 @@ func (e *CodexAutoExecutor) ResetExecutionSession(sessionID string) {
 	e.wsExec.ResetExecutionSession(sessionID)
 }
 
+func codexUseWebsocketTransport(ctx context.Context, auth *cliproxyauth.Auth) bool {
+	if !codexWebsocketsEnabled(auth) {
+		return false
+	}
+	return cliproxyexecutor.DownstreamWebsocket(ctx) || codexWebsocketHandshakeDebugEnabled(auth)
+}
+
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 	if auth == nil {
 		return false
 	}
 	if len(auth.Attributes) > 0 {
-		if raw := strings.TrimSpace(auth.Attributes["websockets"]); raw != "" {
-			parsed, errParse := strconv.ParseBool(raw)
-			if errParse == nil {
-				return parsed
+		for _, key := range []string{"websockets", "websocket"} {
+			if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
+				parsed, errParse := strconv.ParseBool(raw)
+				if errParse == nil {
+					return parsed
+				}
 			}
 		}
 	}
 	if len(auth.Metadata) == 0 {
 		return false
 	}
-	raw, ok := auth.Metadata["websockets"]
-	if !ok || raw == nil {
-		return false
-	}
-	switch v := raw.(type) {
-	case bool:
-		return v
-	case string:
-		parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
-		if errParse == nil {
-			return parsed
+	for _, key := range []string{"websockets", "websocket"} {
+		raw, ok := auth.Metadata[key]
+		if !ok || raw == nil {
+			continue
 		}
-	default:
+		switch v := raw.(type) {
+		case bool:
+			return v
+		case string:
+			parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
+			if errParse == nil {
+				return parsed
+			}
+		default:
+		}
 	}
 	return false
 }
