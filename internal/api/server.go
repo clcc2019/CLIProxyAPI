@@ -298,15 +298,19 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Setup routes
 	s.setupRoutes()
 
-	// Register Amp module using V2 interface with Context
-	s.ampModule = ampmodule.NewLegacy(accessManager, AuthMiddleware(accessManager))
+	// Register Amp module.
+	ampAuthMiddleware := AuthMiddleware(accessManager)
+	s.ampModule = ampmodule.New(
+		ampmodule.WithAccessManager(accessManager),
+		ampmodule.WithAuthMiddleware(ampAuthMiddleware),
+	)
 	ctx := modules.Context{
 		Engine:         engine,
 		BaseHandler:    s.handlers,
 		Config:         cfg,
-		AuthMiddleware: AuthMiddleware(accessManager),
+		AuthMiddleware: ampAuthMiddleware,
 	}
-	if err := modules.RegisterModule(ctx, s.ampModule); err != nil {
+	if err := s.ampModule.Register(ctx); err != nil {
 		log.Errorf("Failed to register Amp module: %v", err)
 	}
 

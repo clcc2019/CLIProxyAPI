@@ -101,6 +101,18 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 	}
 }
 
+func TestRewriteStreamChunk_EventDataPairWithBlankLine(t *testing.T) {
+	rw := &ResponseRewriter{originalModel: "gpt-5.2-codex"}
+
+	chunk := []byte("event: response.created\n\ndata: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.3-codex\"}}\n\n")
+	result := rw.rewriteStreamChunk(chunk)
+
+	expected := "event: response.created\n\ndata: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.2-codex\"}}\n\n"
+	if string(result) != expected {
+		t.Errorf("expected %s, got %s", expected, string(result))
+	}
+}
+
 func TestRewriteStreamChunk_PreservesThinkingWithSignatureInjection(t *testing.T) {
 	rw := &ResponseRewriter{}
 

@@ -226,23 +226,21 @@ func TestRegisterProviderAliases_V1BetaRoutes(t *testing.T) {
 	}
 }
 
-func TestRegisterProviderAliases_NoAuthMiddleware(t *testing.T) {
-	// Test that routes still register even if auth middleware is nil (fallback behavior)
+func TestRegisterProviderAliases_UsesProvidedAuthMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
 	base := &handlers.BaseAPIHandler{}
 
-	m := &AmpModule{authMiddleware_: nil} // No auth middleware
+	m := &AmpModule{}
 	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/api/provider/openai/models", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	// Should still work (with fallback no-op auth)
 	if w.Code == http.StatusNotFound {
-		t.Fatal("routes should register even without auth middleware")
+		t.Fatal("routes should register with provided auth middleware")
 	}
 }
 

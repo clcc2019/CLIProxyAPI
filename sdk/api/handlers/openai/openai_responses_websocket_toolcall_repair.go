@@ -13,6 +13,8 @@ import (
 
 const (
 	websocketToolOutputCacheMaxPerSession = 256
+	websocketToolOutputCacheMaxItemBytes  = 1 << 20
+	websocketToolOutputCacheMaxBytes      = 8 << 20
 	websocketToolOutputCacheTTL           = 30 * time.Minute
 )
 
@@ -31,6 +33,8 @@ type websocketToolOutputCache struct {
 	mu            sync.Mutex
 	ttl           time.Duration
 	maxPerSession int
+	maxItemBytes  int
+	maxBytes      int
 	sessions      map[string]*websocketToolOutputSession
 }
 
@@ -38,18 +42,31 @@ type websocketToolOutputSession struct {
 	lastSeen time.Time
 	outputs  map[string]json.RawMessage
 	order    []string
+	bytes    int
 }
 
 func newWebsocketToolOutputCache(ttl time.Duration, maxPerSession int) *websocketToolOutputCache {
+	return newWebsocketToolOutputCacheWithLimits(ttl, maxPerSession, websocketToolOutputCacheMaxItemBytes, websocketToolOutputCacheMaxBytes)
+}
+
+func newWebsocketToolOutputCacheWithLimits(ttl time.Duration, maxPerSession int, maxItemBytes int, maxBytes int) *websocketToolOutputCache {
 	if ttl < 0 {
 		ttl = websocketToolOutputCacheTTL
 	}
 	if maxPerSession <= 0 {
 		maxPerSession = websocketToolOutputCacheMaxPerSession
 	}
+	if maxItemBytes <= 0 {
+		maxItemBytes = websocketToolOutputCacheMaxItemBytes
+	}
+	if maxBytes <= 0 {
+		maxBytes = websocketToolOutputCacheMaxBytes
+	}
 	return &websocketToolOutputCache{
 		ttl:           ttl,
 		maxPerSession: maxPerSession,
+		maxItemBytes:  maxItemBytes,
+		maxBytes:      maxBytes,
 		sessions:      make(map[string]*websocketToolOutputSession),
 	}
 }
@@ -60,6 +77,7 @@ func (c *websocketToolOutputCache) record(sessionKey string, callID string, item
 	if sessionKey == "" || callID == "" || c == nil {
 		return
 	}
+	oversized := len(item) > c.maxItemBytes
 
 	now := time.Now()
 	c.mu.Lock()
@@ -68,6 +86,9 @@ func (c *websocketToolOutputCache) record(sessionKey string, callID string, item
 	c.cleanupLocked(now)
 
 	session, ok := c.sessions[sessionKey]
+	if oversized && (!ok || session == nil) {
+		return
+	}
 	if !ok || session == nil {
 		session = &websocketToolOutputSession{
 			lastSeen: now,
@@ -76,16 +97,50 @@ func (c *websocketToolOutputCache) record(sessionKey string, callID string, item
 		c.sessions[sessionKey] = session
 	}
 	session.lastSeen = now
+	if oversized {
+		session.remove(callID)
+		return
+	}
 
 	if _, exists := session.outputs[callID]; !exists {
 		session.order = append(session.order, callID)
+	} else {
+		session.bytes -= len(session.outputs[callID])
 	}
 	session.outputs[callID] = append(json.RawMessage(nil), item...)
+	session.bytes += len(item)
 
-	for len(session.order) > c.maxPerSession {
+	for len(session.order) > c.maxPerSession || session.bytes > c.maxBytes {
 		evict := session.order[0]
 		session.order = session.order[1:]
+		if previous, ok := session.outputs[evict]; ok {
+			session.bytes -= len(previous)
+		}
 		delete(session.outputs, evict)
+	}
+	if session.bytes < 0 {
+		session.bytes = 0
+	}
+}
+
+func (s *websocketToolOutputSession) remove(callID string) {
+	if s == nil || callID == "" || len(s.outputs) == 0 {
+		return
+	}
+	if previous, ok := s.outputs[callID]; ok {
+		s.bytes -= len(previous)
+		delete(s.outputs, callID)
+	}
+	for i, existing := range s.order {
+		if existing != callID {
+			continue
+		}
+		copy(s.order[i:], s.order[i+1:])
+		s.order = s.order[:len(s.order)-1]
+		break
+	}
+	if s.bytes < 0 {
+		s.bytes = 0
 	}
 }
 

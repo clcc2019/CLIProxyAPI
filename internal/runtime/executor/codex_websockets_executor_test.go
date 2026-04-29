@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1322,215 +1323,37 @@ func TestCodexWebsocketsExecuteStreamTranslatesAndNormalizesOpenAIChatRequest(t 
 	}
 }
 
-func TestCodexWebsocketsExecuteStreamHandshakeDebugDisconnectsBeforeRequestMessage(t *testing.T) {
-	var (
-		upgrader     = websocket.Upgrader{}
-		handshakeCh  = make(chan struct{}, 1)
-		messageCh    = make(chan []byte, 1)
-		readErrCh    = make(chan error, 1)
-		requestCount atomic.Int32
-	)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses" {
-			http.NotFound(w, r)
-			return
-		}
-		requestCount.Add(1)
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("Upgrade() error = %v", err)
-			return
-		}
-		defer func() { _ = conn.Close() }()
-
-		handshakeCh <- struct{}{}
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		_, payload, err := conn.ReadMessage()
-		if err != nil {
-			readErrCh <- err
-			return
-		}
-		messageCh <- append([]byte(nil), payload...)
-	}))
-	defer server.Close()
-
+func TestCodexWebsocketParkExecutionSessionCapsParkedSessions(t *testing.T) {
 	executor := NewCodexWebsocketsExecutor(nil)
-	auth := &cliproxyauth.Auth{
-		ID:       "auth-1",
-		Provider: "codex",
-		Attributes: map[string]string{
-			"api_key":                   "sk-test",
-			"base_url":                  server.URL,
-			"websockets":                "true",
-			"websocket_handshake_debug": "true",
-		},
+	executor.store = &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
 	}
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","input":"hello","store":true,"stream":true}`),
-	}
-	opts := cliproxyexecutor.Options{
-		Stream:          true,
-		SourceFormat:    sdktranslator.FromString("openai-response"),
-		OriginalRequest: req.Payload,
-	}
+	t.Cleanup(func() {
+		executor.closeAllExecutionSessions("test_cleanup")
+	})
 
-	result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
-	if err == nil {
-		if result != nil {
-			for range result.Chunks {
-			}
+	for i := 0; i < codexResponsesWebsocketMaxParked+2; i++ {
+		sess := &codexWebsocketSession{
+			sessionID: fmt.Sprintf("session-%d", i),
+			reuseKey:  fmt.Sprintf("reuse-%d", i),
 		}
-		t.Fatal("ExecuteStream() error = nil, want handshake debug error")
-	}
-	if result != nil {
-		t.Fatalf("ExecuteStream() result = %#v, want nil", result)
-	}
-	statusProvider, ok := err.(interface{ StatusCode() int })
-	if !ok {
-		t.Fatalf("ExecuteStream() error type = %T, want StatusCode()", err)
-	}
-	if got := statusProvider.StatusCode(); got != http.StatusServiceUnavailable {
-		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusServiceUnavailable)
-	}
-	if !strings.Contains(err.Error(), "handshake debug") {
-		t.Fatalf("error = %q, want handshake debug", err.Error())
+		sess.lastActivityUnixNano.Store(int64(i + 1))
+		if !executor.parkExecutionSession(sess) {
+			t.Fatalf("parkExecutionSession(%d) = false, want true", i)
+		}
 	}
 
-	select {
-	case <-handshakeCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not observe websocket handshake")
+	executor.store.mu.Lock()
+	defer executor.store.mu.Unlock()
+	if got := len(executor.store.parked); got != codexResponsesWebsocketMaxParked {
+		t.Fatalf("parked sessions = %d, want %d", got, codexResponsesWebsocketMaxParked)
 	}
-	if got := requestCount.Load(); got != 1 {
-		t.Fatalf("handshake requests = %d, want 1", got)
+	if _, exists := executor.store.parked["reuse-0"]; exists {
+		t.Fatal("oldest parked session should be evicted")
 	}
-
-	select {
-	case payload := <-messageCh:
-		t.Fatalf("server received websocket message after debug handshake: %s", payload)
-	case <-readErrCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not observe client disconnect after debug handshake")
-	}
-}
-
-func TestCodexAutoExecutorHandshakeDebugUsesWebsocketForNonWebsocketDownstream(t *testing.T) {
-	testCases := []struct {
-		name   string
-		invoke func(*CodexAutoExecutor, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) error
-	}{
-		{
-			name: "execute",
-			invoke: func(executor *CodexAutoExecutor, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
-				_, err := executor.Execute(context.Background(), auth, req, opts)
-				return err
-			},
-		},
-		{
-			name: "execute_stream",
-			invoke: func(executor *CodexAutoExecutor, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
-				result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
-				if result != nil {
-					for range result.Chunks {
-					}
-				}
-				return err
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			var (
-				upgrader     = websocket.Upgrader{}
-				handshakeCh  = make(chan struct{}, 1)
-				messageCh    = make(chan []byte, 1)
-				readErrCh    = make(chan error, 1)
-				requestCount atomic.Int32
-			)
-
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/responses" {
-					http.NotFound(w, r)
-					return
-				}
-				requestCount.Add(1)
-				conn, err := upgrader.Upgrade(w, r, nil)
-				if err != nil {
-					t.Errorf("Upgrade() error = %v", err)
-					return
-				}
-				defer func() { _ = conn.Close() }()
-
-				handshakeCh <- struct{}{}
-				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-				_, payload, err := conn.ReadMessage()
-				if err != nil {
-					readErrCh <- err
-					return
-				}
-				messageCh <- append([]byte(nil), payload...)
-			}))
-			defer server.Close()
-
-			executor := NewCodexAutoExecutor(nil)
-			auth := &cliproxyauth.Auth{
-				ID:       "auth-1",
-				Provider: "codex",
-				Attributes: map[string]string{
-					"api_key":  "sk-test",
-					"base_url": server.URL,
-				},
-				Metadata: map[string]any{
-					"websocket":                 true,
-					"websocket_handshake_debug": true,
-				},
-			}
-			req := cliproxyexecutor.Request{
-				Model:   "gpt-5.4",
-				Payload: []byte(`{"model":"gpt-5.4","input":"hello","store":true,"stream":true}`),
-			}
-			opts := cliproxyexecutor.Options{
-				Stream:          true,
-				SourceFormat:    sdktranslator.FromString("openai-response"),
-				OriginalRequest: req.Payload,
-			}
-
-			err := tc.invoke(executor, auth, req, opts)
-			if err == nil {
-				t.Fatal("CodexAutoExecutor error = nil, want handshake debug error")
-			}
-			statusProvider, ok := err.(interface{ StatusCode() int })
-			if !ok {
-				t.Fatalf("CodexAutoExecutor error type = %T, want StatusCode()", err)
-			}
-			if got := statusProvider.StatusCode(); got != http.StatusServiceUnavailable {
-				t.Fatalf("StatusCode() = %d, want %d", got, http.StatusServiceUnavailable)
-			}
-			if !strings.Contains(err.Error(), "handshake debug") {
-				t.Fatalf("error = %q, want handshake debug", err.Error())
-			}
-
-			select {
-			case <-handshakeCh:
-			case <-time.After(2 * time.Second):
-				t.Fatal("server did not observe websocket handshake")
-			}
-			if got := requestCount.Load(); got != 1 {
-				t.Fatalf("handshake requests = %d, want 1", got)
-			}
-
-			select {
-			case payload := <-messageCh:
-				t.Fatalf("server received websocket message after debug handshake: %s", payload)
-			case <-readErrCh:
-			case <-time.After(2 * time.Second):
-				t.Fatal("server did not observe client disconnect after debug handshake")
-			}
-		})
+	if _, exists := executor.store.parked[fmt.Sprintf("reuse-%d", codexResponsesWebsocketMaxParked+1)]; !exists {
+		t.Fatal("newest parked session should remain")
 	}
 }
 

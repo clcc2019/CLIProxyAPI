@@ -81,84 +81,18 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return
 	}
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	endpoint := "/chat/completions"
-	if opts.Alt == "responses/compact" {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/responses/compact"
-	}
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalPayload := originalPayloadSource
-	translated, originalTranslated := helps.TranslateRequestWithOriginal(e.cfg, from, to, baseModel, req.Payload, originalPayload, opts.Stream)
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
-	if opts.Alt == "responses/compact" {
-		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
-			translated = updated
-		}
-	}
-
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	plan, err := e.buildNonStreamPlan(req, opts, baseModel)
 	if err != nil {
 		return resp, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	url := strings.TrimSuffix(baseURL, "/") + plan.endpoint
+	httpResp, err := e.executeUpstreamJSON(ctx, auth, apiKey, url, plan.translated, false)
 	if err != nil {
 		return resp, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header,
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	defer closeOpenAICompatResponseBody(httpResp)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("openai compat executor: close response body error: %v", errClose)
-		}
-	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := helps.ReadErrorResponseBody(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
 	body, err := helps.ReadNonStreamResponseBody(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -169,10 +103,62 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
-	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	out := body
+	if !plan.nativeImagesGenerations {
+		var param any
+		out = sdktranslator.TranslateNonStream(ctx, plan.to, plan.from, req.Model, opts.OriginalRequest, plan.translated, body, &param)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+type openAICompatNonStreamPlan struct {
+	from                    sdktranslator.Format
+	to                      sdktranslator.Format
+	endpoint                string
+	translated              []byte
+	nativeImagesGenerations bool
+}
+
+func (e *OpenAICompatExecutor) buildNonStreamPlan(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (openAICompatNonStreamPlan, error) {
+	plan := openAICompatNonStreamPlan{
+		from:     opts.SourceFormat,
+		to:       sdktranslator.FromString("openai"),
+		endpoint: "/chat/completions",
+	}
+	alt := strings.Trim(strings.TrimSpace(opts.Alt), "/")
+	compactResponses := alt == "responses/compact"
+	plan.nativeImagesGenerations = alt == "images/generations"
+	if plan.nativeImagesGenerations {
+		plan.endpoint = "/images/generations"
+	} else if compactResponses {
+		plan.to = sdktranslator.FromString("openai-response")
+		plan.endpoint = "/responses/compact"
+	}
+
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	if plan.nativeImagesGenerations {
+		plan.translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, plan.to.String(), "", originalPayloadSource, originalPayloadSource, requestedModel)
+		plan.translated = e.overrideModel(plan.translated, baseModel)
+		return plan, nil
+	}
+
+	originalPayload := originalPayloadSource
+	translated, originalTranslated := helps.TranslateRequestWithOriginal(e.cfg, plan.from, plan.to, baseModel, req.Payload, originalPayload, opts.Stream)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, plan.to.String(), "", translated, originalTranslated, requestedModel)
+	if compactResponses {
+		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
+			translated = updated
+		}
+	}
+
+	var err error
+	plan.translated, err = thinking.ApplyThinking(translated, req.Model, plan.from.String(), plan.to.String(), e.Identifier())
+	return plan, err
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -209,71 +195,46 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	httpResp, err := e.executeUpstreamJSON(ctx, auth, apiKey, url, translated, true)
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Cache-Control", "no-cache")
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header,
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := helps.ReadErrorResponseBody(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("openai compat executor: close response body error: %v", errClose)
-		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
-	}
+	out := e.streamOpenAICompatChunks(openAICompatStreamState{
+		ctx:        ctx,
+		resp:       httpResp,
+		reporter:   reporter,
+		from:       from,
+		to:         to,
+		req:        req,
+		opts:       opts,
+		translated: translated,
+	})
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+type openAICompatStreamState struct {
+	ctx        context.Context
+	resp       *http.Response
+	reporter   *helps.UsageReporter
+	from       sdktranslator.Format
+	to         sdktranslator.Format
+	req        cliproxyexecutor.Request
+	opts       cliproxyexecutor.Options
+	translated []byte
+}
+
+func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStreamState) <-chan cliproxyexecutor.StreamChunk {
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("openai compat executor: close response body error: %v", errClose)
-			}
-		}()
+		defer closeOpenAICompatResponseBody(state.resp)
 		var param any
-		passthroughOpenAI := from == to
-		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+		passthroughOpenAI := state.from == state.to
+		errRead := helps.ReadStreamLines(state.resp.Body, func(line []byte) error {
+			helps.AppendAPIResponseChunk(state.ctx, e.cfg, line)
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
+				state.reporter.Publish(state.ctx, detail)
 			}
 			if len(line) == 0 {
 				return nil
@@ -293,29 +254,29 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, line, &param)
+			chunks := sdktranslator.TranslateStream(state.ctx, state.to, state.from, state.req.Model, state.opts.OriginalRequest, state.translated, line, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 			return nil
 		})
 		if errRead != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			reporter.PublishFailure(ctx)
+			helps.RecordAPIResponseError(state.ctx, e.cfg, errRead)
+			state.reporter.PublishFailure(state.ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 		} else if !passthroughOpenAI {
 			// In case the upstream close the stream without a terminal [DONE] marker.
 			// Feed a synthetic done marker through the translator so pending
 			// response.completed events are still emitted exactly once.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
+			chunks := sdktranslator.TranslateStream(state.ctx, state.to, state.from, state.req.Model, state.opts.OriginalRequest, state.translated, []byte("data: [DONE]"), &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
 		// Ensure we record the request if no usage chunk was ever seen
-		reporter.EnsurePublished(ctx)
+		state.reporter.EnsurePublished(state.ctx)
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	return out
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -365,31 +326,76 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 	return
 }
 
-func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
-	if auth == nil || e.cfg == nil {
-		return nil
+func (e *OpenAICompatExecutor) executeUpstreamJSON(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, url string, payload []byte, stream bool) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
 	}
-	candidates := make([]string, 0, 3)
-	if auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["compat_name"]); v != "" {
-			candidates = append(candidates, v)
-		}
-		if v := strings.TrimSpace(auth.Attributes["provider_key"]); v != "" {
-			candidates = append(candidates, v)
-		}
+	e.prepareUpstreamRequest(httpReq, auth, apiKey, stream)
+	authID, authLabel, authType, authValue := openAICompatAuthInfo(auth)
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header,
+		Body:      payload,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return nil, err
 	}
-	if v := strings.TrimSpace(auth.Provider); v != "" {
-		candidates = append(candidates, v)
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
+	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+		return httpResp, nil
 	}
-	for i := range e.cfg.OpenAICompatibility {
-		compat := &e.cfg.OpenAICompatibility[i]
-		for _, candidate := range candidates {
-			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
-				return compat
-			}
-		}
+
+	b, _ := helps.ReadErrorResponseBody(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+	helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+	status := httpResp.StatusCode
+	closeOpenAICompatResponseBody(httpResp)
+	return nil, statusErr{code: status, msg: string(b)}
+}
+
+func closeOpenAICompatResponseBody(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
 	}
-	return nil
+	if errClose := resp.Body.Close(); errClose != nil {
+		log.Errorf("openai compat executor: close response body error: %v", errClose)
+	}
+}
+
+func (e *OpenAICompatExecutor) prepareUpstreamRequest(req *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool) {
+	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(apiKey))
+	}
+	req.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	if stream {
+		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("Cache-Control", "no-cache")
+	}
+}
+
+func openAICompatAuthInfo(auth *cliproxyauth.Auth) (id, label, accountType, accountValue string) {
+	if auth == nil {
+		return "", "", "", ""
+	}
+	accountType, accountValue = auth.AccountInfo()
+	return auth.ID, auth.Label, accountType, accountValue
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {

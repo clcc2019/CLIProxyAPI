@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -277,16 +278,6 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	chunks := make([][]byte, 0)
-
-	lines := bytes.Split(rawJSON, []byte("\n"))
-	for _, line := range lines {
-		if !bytes.HasPrefix(line, dataTag) {
-			continue
-		}
-		chunks = append(chunks, bytes.TrimSpace(line[5:]))
-	}
-
 	// Base OpenAI non-streaming response template
 	out := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`)
 
@@ -298,7 +289,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	var reasoningParts []string
 	toolCallsAccumulator := make(map[int]*ToolCallAccumulator)
 
-	for _, chunk := range chunks {
+	translatorcommon.ForEachSSEDataLine(rawJSON, func(chunk []byte) bool {
 		root := gjson.ParseBytes(chunk)
 		eventType := root.Get("type").String()
 
@@ -317,7 +308,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				blockType := contentBlock.Get("type").String()
 				if blockType == "thinking" {
 					// Start of thinking/reasoning content - skip for now as it's handled in delta
-					continue
+					return true
 				} else if blockType == "tool_use" {
 					// Initialize tool call accumulator for this index
 					index := int(root.Get("index").Int())
@@ -378,7 +369,8 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				out, _ = sjson.SetBytes(out, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
 			}
 		}
-	}
+		return true
+	})
 
 	// Set basic response fields including message ID, creation time, and model
 	out, _ = sjson.SetBytes(out, "id", messageID)

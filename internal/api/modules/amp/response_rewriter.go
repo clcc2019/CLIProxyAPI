@@ -18,7 +18,7 @@ import (
 // and to keep Amp-compatible response shapes.
 type ResponseRewriter struct {
 	gin.ResponseWriter
-	body             *bytes.Buffer
+	body             bytes.Buffer
 	originalModel    string
 	isStreaming      bool
 	suppressThinking bool
@@ -28,7 +28,6 @@ type ResponseRewriter struct {
 func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRewriter {
 	return &ResponseRewriter{
 		ResponseWriter: w,
-		body:           &bytes.Buffer{},
 		originalModel:  originalModel,
 	}
 }
@@ -36,7 +35,14 @@ func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRe
 const maxBufferedResponseBytes = 2 * 1024 * 1024 // 2MB safety cap
 
 func looksLikeSSEChunk(data []byte) bool {
-	for _, line := range bytes.Split(data, []byte("\n")) {
+	for len(data) > 0 {
+		line := data
+		if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
+			line = data[:idx]
+			data = data[idx+1:]
+		} else {
+			data = nil
+		}
 		trimmed := bytes.TrimSpace(line)
 		if bytes.HasPrefix(trimmed, []byte("data:")) ||
 			bytes.HasPrefix(trimmed, []byte("event:")) {
@@ -52,7 +58,7 @@ func (rw *ResponseRewriter) enableStreaming(reason string) error {
 	}
 	rw.isStreaming = true
 
-	if rw.body != nil && rw.body.Len() > 0 {
+	if rw.body.Len() > 0 {
 		buf := rw.body.Bytes()
 		toFlush := make([]byte, len(buf))
 		copy(toFlush, buf)
@@ -121,7 +127,11 @@ func (rw *ResponseRewriter) Flush() {
 	}
 }
 
-var modelFieldPaths = []string{"message.model", "model", "modelVersion", "response.model", "response.modelVersion"}
+var (
+	modelFieldPaths = []string{"message.model", "model", "modelVersion", "response.model", "response.modelVersion"}
+	sseEventPrefix  = []byte("event: ")
+	sseDataPrefix   = []byte("data: ")
+)
 
 // ensureAmpSignature injects empty signature fields into tool_use/thinking blocks
 // in API responses so that the Amp TUI does not crash on P.signature.length.
@@ -196,77 +206,124 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 }
 
 func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
-	lines := bytes.Split(chunk, []byte("\n"))
-	var out [][]byte
+	if len(chunk) == 0 {
+		return chunk
+	}
 
-	i := 0
-	for i < len(lines) {
-		line := lines[i]
+	var out bytes.Buffer
+	out.Grow(len(chunk))
+	wroteLine := false
+	writeLine := func(line []byte) {
+		if wroteLine {
+			out.WriteByte('\n')
+		}
+		_, _ = out.Write(line)
+		wroteLine = true
+	}
+	writeDataLine := func(data []byte) {
+		if wroteLine {
+			out.WriteByte('\n')
+		}
+		_, _ = out.Write(sseDataPrefix)
+		_, _ = out.Write(data)
+		wroteLine = true
+	}
+
+	for pos := 0; ; {
+		line, next, ok := nextRewriteLine(chunk, pos)
+		if !ok {
+			break
+		}
 		trimmed := bytes.TrimSpace(line)
 
 		// Case 1: "event:" line - look ahead for its "data:" line
-		if bytes.HasPrefix(trimmed, []byte("event: ")) {
-			// Scan forward past blank lines to find the data: line
-			dataIdx := -1
-			for j := i + 1; j < len(lines); j++ {
-				t := bytes.TrimSpace(lines[j])
-				if len(t) == 0 {
-					continue
-				}
-				if bytes.HasPrefix(t, []byte("data: ")) {
-					dataIdx = j
-				}
-				break
-			}
-
-			if dataIdx >= 0 {
+		if bytes.HasPrefix(trimmed, sseEventPrefix) {
+			dataStart, dataLine, dataNext, foundData := findRewriteDataLine(chunk, next)
+			if foundData {
 				// Found event+data pair - process through rewriter
-				jsonData := bytes.TrimPrefix(bytes.TrimSpace(lines[dataIdx]), []byte("data: "))
+				jsonData := bytes.TrimPrefix(bytes.TrimSpace(dataLine), sseDataPrefix)
 				if len(jsonData) > 0 && jsonData[0] == '{' {
 					rewritten := rw.rewriteStreamEvent(jsonData)
 					if rewritten == nil {
-						i = dataIdx + 1
+						pos = dataNext
 						continue
 					}
-					// Emit event line
-					out = append(out, line)
-					// Emit blank lines between event and data
-					for k := i + 1; k < dataIdx; k++ {
-						out = append(out, lines[k])
+					writeLine(line)
+					for blankPos := next; blankPos < dataStart; {
+						blankLine, blankNext, ok := nextRewriteLine(chunk, blankPos)
+						if !ok {
+							break
+						}
+						writeLine(blankLine)
+						blankPos = blankNext
 					}
-					// Emit rewritten data
-					out = append(out, append([]byte("data: "), rewritten...))
-					i = dataIdx + 1
+					writeDataLine(rewritten)
+					pos = dataNext
 					continue
 				}
 			}
 
 			// No data line found (orphan event from cross-chunk split)
 			// Pass it through as-is - the data will arrive in the next chunk
-			out = append(out, line)
-			i++
+			writeLine(line)
+			pos = next
 			continue
 		}
 
 		// Case 2: standalone "data:" line (no preceding event: in this chunk)
-		if bytes.HasPrefix(trimmed, []byte("data: ")) {
-			jsonData := bytes.TrimPrefix(trimmed, []byte("data: "))
+		if bytes.HasPrefix(trimmed, sseDataPrefix) {
+			jsonData := bytes.TrimPrefix(trimmed, sseDataPrefix)
 			if len(jsonData) > 0 && jsonData[0] == '{' {
 				rewritten := rw.rewriteStreamEvent(jsonData)
 				if rewritten != nil {
-					out = append(out, append([]byte("data: "), rewritten...))
+					writeDataLine(rewritten)
 				}
-				i++
+				pos = next
 				continue
 			}
 		}
 
 		// Case 3: everything else
-		out = append(out, line)
-		i++
+		writeLine(line)
+		pos = next
 	}
 
-	return bytes.Join(out, []byte("\n"))
+	return out.Bytes()
+}
+
+func nextRewriteLine(chunk []byte, pos int) (line []byte, next int, ok bool) {
+	if len(chunk) == 0 || pos > len(chunk) {
+		return nil, pos, false
+	}
+	if pos == len(chunk) {
+		if chunk[len(chunk)-1] != '\n' {
+			return nil, pos, false
+		}
+		return nil, pos + 1, true
+	}
+	if idx := bytes.IndexByte(chunk[pos:], '\n'); idx >= 0 {
+		return chunk[pos : pos+idx], pos + idx + 1, true
+	}
+	return chunk[pos:], len(chunk), true
+}
+
+func findRewriteDataLine(chunk []byte, pos int) (start int, line []byte, next int, ok bool) {
+	for {
+		lineStart := pos
+		line, lineNext, hasLine := nextRewriteLine(chunk, pos)
+		if !hasLine {
+			return 0, nil, pos, false
+		}
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			pos = lineNext
+			continue
+		}
+		if bytes.HasPrefix(trimmed, sseDataPrefix) {
+			return lineStart, line, lineNext, true
+		}
+		return 0, nil, pos, false
+	}
 }
 
 // rewriteStreamEvent processes a single JSON event in the SSE stream.

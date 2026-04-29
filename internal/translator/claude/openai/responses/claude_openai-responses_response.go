@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -438,23 +437,6 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	// We follow the same aggregation logic as the streaming variant but produce
 	// one final object matching docs/out.json structure.
 
-	// Collect SSE data: lines start with "data: "; ignore others
-	var chunks [][]byte
-	{
-		// Use a simple scanner to iterate through raw bytes
-		// Note: extremely large responses may require increasing the buffer
-		scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-		buf := make([]byte, 52_428_800) // 50MB
-		scanner.Buffer(buf, 52_428_800)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if !bytes.HasPrefix(line, dataTag) {
-				continue
-			}
-			chunks = append(chunks, line[len(dataTag):])
-		}
-	}
-
 	// Base OpenAI Responses (non-stream) object
 	out := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null,"output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{},"total_tokens":0}}`)
 
@@ -481,7 +463,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	toolCalls := make(map[int]*toolState)
 
 	// Walk through SSE chunks to fill state
-	for _, ch := range chunks {
+	translatorcommon.ForEachSSEDataLine(rawJSON, func(ch []byte) bool {
 		root := gjson.ParseBytes(ch)
 		ev := root.Get("type").String()
 
@@ -498,7 +480,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		case "content_block_start":
 			cb := root.Get("content_block")
 			if !cb.Exists() {
-				continue
+				return true
 			}
 			idx := int(root.Get("index").Int())
 			typ := cb.Get("type").String()
@@ -522,7 +504,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		case "content_block_delta":
 			d := root.Get("delta")
 			if !d.Exists() {
-				continue
+				return true
 			}
 			dt := d.Get("type").String()
 			switch dt {
@@ -555,7 +537,8 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				outputTokens = usage.Get("output_tokens").Int()
 			}
 		}
-	}
+		return true
+	})
 
 	// Populate base fields
 	out, _ = sjson.SetBytes(out, "id", responseID)

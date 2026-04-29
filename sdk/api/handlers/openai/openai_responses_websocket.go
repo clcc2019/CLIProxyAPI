@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,10 +34,9 @@ const (
 	wsTurnStateHeader    = "x-codex-turn-state"
 	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
 
-	responsesWebsocketHandshakeDebugKey = "websocket_handshake_debug"
-
-	maxResponsesWebsocketTimelineBytes      = 4 << 20
-	maxResponsesWebsocketErrorTimelineBytes = 64 << 10
+	maxResponsesWebsocketTimelineBytes      = 1 << 20
+	maxResponsesWebsocketErrorTimelineBytes = 16 << 10
+	maxResponsesWebsocketInboundBytes       = 64 << 20
 )
 
 const responsesWebsocketTimelineTruncatedMarker = "\n...[websocket timeline truncated]...\n"
@@ -61,12 +61,15 @@ func responsesWebsocketTimelineLimit(h *OpenAIResponsesAPIHandler) int {
 }
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	WriteBufferPool: &responsesWebsocketWriteBufferPool,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
 }
+
+var responsesWebsocketWriteBufferPool sync.Pool
 
 // ResponsesWebsocket handles websocket requests for /v1/responses.
 // It accepts `response.create` and `response.append` requests and streams
@@ -76,6 +79,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(maxResponsesWebsocketInboundBytes)
 	connectionID := uuid.NewString()
 	fallbackExecutionSessionID := uuid.NewString()
 	activeExecutionSessionID := ""
@@ -565,9 +569,6 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 }
 
 func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, metadata map[string]any) bool {
-	if responsesWebsocketHandshakeDebugEnabled(attributes, metadata) {
-		return false
-	}
 	if len(attributes) > 0 {
 		for _, key := range []string{"websockets", "websocket"} {
 			if raw := strings.TrimSpace(attributes[key]); raw != "" {
@@ -596,35 +597,6 @@ func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, met
 			}
 		default:
 		}
-	}
-	return false
-}
-
-func responsesWebsocketHandshakeDebugEnabled(attributes map[string]string, metadata map[string]any) bool {
-	if len(attributes) > 0 {
-		if raw := strings.TrimSpace(attributes[responsesWebsocketHandshakeDebugKey]); raw != "" {
-			parsed, errParse := strconv.ParseBool(raw)
-			if errParse == nil {
-				return parsed
-			}
-		}
-	}
-	if len(metadata) == 0 {
-		return false
-	}
-	raw, ok := metadata[responsesWebsocketHandshakeDebugKey]
-	if !ok || raw == nil {
-		return false
-	}
-	switch value := raw.(type) {
-	case bool:
-		return value
-	case string:
-		parsed, errParse := strconv.ParseBool(strings.TrimSpace(value))
-		if errParse == nil {
-			return parsed
-		}
-	default:
 	}
 	return false
 }

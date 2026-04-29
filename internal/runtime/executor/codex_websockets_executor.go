@@ -39,13 +39,14 @@ const (
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 	codexResponsesWebsocketProbeIdle       = 45 * time.Second
 	codexResponsesWebsocketProbeWriteTO    = 10 * time.Second
-	codexResponsesWebsocketReadBuffer      = 256
-	codexWebsocketHandshakeDebugKey        = "websocket_handshake_debug"
+	codexResponsesWebsocketReadBuffer      = 32
+	codexResponsesWebsocketReadLimit       = 64 << 20
+	codexResponsesWebsocketMaxParked       = 64
 )
 
-const codexWebsocketHandshakeDebugMessage = "codex websocket handshake debug: disconnected after successful upstream handshake"
-
 var codexResponsesWebsocketParkTTL = 30 * time.Second
+
+var codexWebsocketWriteBufferPool sync.Pool
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
 //
@@ -310,10 +311,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	sess := prepared.sess
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
-	handshakeDebug := codexWebsocketHandshakeDebugEnabled(auth)
-	if handshakeDebug {
-		e.closeExistingHandshakeDebugSessionConn(sess)
-	}
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
@@ -333,11 +330,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
-	if handshakeDebug {
-		err = newCodexWebsocketHandshakeDebugError()
-		e.disconnectAfterHandshakeDebug(ctx, sess, conn, executionSessionID, authID, wsURL, err)
-		return resp, err
-	}
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
 		defer func() {
@@ -473,10 +465,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	sess := prepared.sess
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
-	handshakeDebug := codexWebsocketHandshakeDebugEnabled(auth)
-	if handshakeDebug {
-		e.closeExistingHandshakeDebugSessionConn(sess)
-	}
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 	var upstreamHeaders http.Header
 	if respHS != nil {
@@ -501,12 +489,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
-	if handshakeDebug {
-		errDebug := newCodexWebsocketHandshakeDebugError()
-		e.disconnectAfterHandshakeDebug(ctx, sess, conn, executionSessionID, authID, wsURL, errDebug)
-		prepared.unlockSession()
-		return nil, errDebug
-	}
 
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
@@ -795,6 +777,7 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	}
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if conn != nil {
+		conn.SetReadLimit(codexResponsesWebsocketReadLimit)
 		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
 		// Negotiating permessage-deflate is fine; we just don't compress outbound messages.
 		conn.EnableWriteCompression(false)
@@ -895,6 +878,9 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
 	dialer := &websocket.Dialer{
+		ReadBufferSize:    1024,
+		WriteBufferSize:   1024,
+		WriteBufferPool:   &codexWebsocketWriteBufferPool,
 		Proxy:             http.ProxyFromEnvironment,
 		HandshakeTimeout:  codexResponsesWebsocketHandshakeTO,
 		EnableCompression: true,
@@ -1504,40 +1490,6 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 	}
 }
 
-func (e *CodexWebsocketsExecutor) closeExistingHandshakeDebugSessionConn(sess *codexWebsocketSession) {
-	if e == nil || sess == nil {
-		return
-	}
-	sess.connMu.Lock()
-	conn := sess.conn
-	sess.connMu.Unlock()
-	if conn == nil {
-		return
-	}
-	e.invalidateUpstreamConn(sess, conn, "handshake_debug_redial", newCodexWebsocketHandshakeDebugError())
-}
-
-func (e *CodexWebsocketsExecutor) disconnectAfterHandshakeDebug(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, executionSessionID string, authID string, wsURL string, debugErr error) {
-	if e != nil {
-		helps.RecordAPIWebsocketError(ctx, e.cfg, "handshake_debug", debugErr)
-	}
-	if sess != nil {
-		e.invalidateUpstreamConn(sess, conn, "handshake_debug", debugErr)
-		return
-	}
-	logCodexWebsocketConnected(executionSessionID, authID, wsURL)
-	logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "handshake_debug", debugErr)
-	if conn != nil {
-		if errClose := conn.Close(); errClose != nil {
-			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
-		}
-	}
-}
-
-func newCodexWebsocketHandshakeDebugError() statusErr {
-	return newCodexStatusErr(http.StatusServiceUnavailable, []byte(codexWebsocketHandshakeDebugMessage))
-}
-
 func (e *CodexWebsocketsExecutor) CloseExecutionSession(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if e == nil {
@@ -1682,6 +1634,12 @@ func (e *CodexWebsocketsExecutor) parkExecutionSession(sess *codexWebsocketSessi
 		}
 		go closeCodexWebsocketSession(existing, "parked_replaced")
 	}
+	if _, exists := store.parked[reuseKey]; !exists && len(store.parked) >= codexResponsesWebsocketMaxParked {
+		evicted := evictOldestParkedCodexWebsocketSessionLocked(store)
+		if evicted != nil {
+			go closeCodexWebsocketSession(evicted, "parked_capacity")
+		}
+	}
 	if sess.parkTimer != nil {
 		sess.parkTimer.Stop()
 	}
@@ -1699,6 +1657,36 @@ func (e *CodexWebsocketsExecutor) parkExecutionSession(sess *codexWebsocketSessi
 		}
 	})
 	return true
+}
+
+func evictOldestParkedCodexWebsocketSessionLocked(store *codexWebsocketSessionStore) *codexWebsocketSession {
+	if store == nil || len(store.parked) == 0 {
+		return nil
+	}
+	var oldestKey string
+	var oldest *codexWebsocketSession
+	var oldestActivity int64
+	for key, sess := range store.parked {
+		if sess == nil {
+			delete(store.parked, key)
+			continue
+		}
+		activity := sess.lastActivityUnixNano.Load()
+		if oldest == nil || activity < oldestActivity {
+			oldestKey = key
+			oldest = sess
+			oldestActivity = activity
+		}
+	}
+	if oldest == nil {
+		return nil
+	}
+	delete(store.parked, oldestKey)
+	if oldest.parkTimer != nil {
+		oldest.parkTimer.Stop()
+		oldest.parkTimer = nil
+	}
+	return oldest
 }
 
 func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
@@ -1823,11 +1811,8 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport when the
-// selected auth enables websockets and either the downstream transport is
-// websocket or websocket handshake debug is enabled.
-//
-// For non-websocket downstream requests without handshake debug, it uses the
-// legacy HTTP implementation.
+// selected auth enables websockets and the downstream transport is websocket.
+// Other requests use the legacy HTTP implementation.
 type CodexAutoExecutor struct {
 	httpExec *CodexExecutor
 	wsExec   *CodexWebsocketsExecutor
@@ -1908,7 +1893,7 @@ func codexUseWebsocketTransport(ctx context.Context, auth *cliproxyauth.Auth) bo
 	if !codexWebsocketsEnabled(auth) {
 		return false
 	}
-	return cliproxyexecutor.DownstreamWebsocket(ctx) || codexWebsocketHandshakeDebugEnabled(auth)
+	return cliproxyexecutor.DownstreamWebsocket(ctx)
 }
 
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
@@ -1943,38 +1928,6 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 			}
 		default:
 		}
-	}
-	return false
-}
-
-func codexWebsocketHandshakeDebugEnabled(auth *cliproxyauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if len(auth.Attributes) > 0 {
-		if raw := strings.TrimSpace(auth.Attributes[codexWebsocketHandshakeDebugKey]); raw != "" {
-			parsed, errParse := strconv.ParseBool(raw)
-			if errParse == nil {
-				return parsed
-			}
-		}
-	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	raw, ok := auth.Metadata[codexWebsocketHandshakeDebugKey]
-	if !ok || raw == nil {
-		return false
-	}
-	switch v := raw.(type) {
-	case bool:
-		return v
-	case string:
-		parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
-		if errParse == nil {
-			return parsed
-		}
-	default:
 	}
 	return false
 }

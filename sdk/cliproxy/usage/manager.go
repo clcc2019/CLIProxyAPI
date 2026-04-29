@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -58,12 +59,14 @@ type Manager struct {
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
+	snapshot  atomic.Value // stores []Plugin
 }
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
 	m := &Manager{maxQueue: buffer}
 	m.cond = sync.NewCond(&m.mu)
+	m.snapshot.Store([]Plugin{})
 	return m
 }
 
@@ -91,10 +94,7 @@ func (m *Manager) Stop() {
 		if m.cancel != nil {
 			m.cancel()
 		}
-		m.mu.Lock()
-		m.closed = true
-		m.mu.Unlock()
-		m.cond.Broadcast()
+		m.close()
 	})
 }
 
@@ -105,6 +105,8 @@ func (m *Manager) Register(plugin Plugin) {
 	}
 	m.pluginsMu.Lock()
 	m.plugins = append(m.plugins, plugin)
+	plugins := append([]Plugin(nil), m.plugins...)
+	m.snapshot.Store(plugins)
 	m.pluginsMu.Unlock()
 }
 
@@ -166,6 +168,19 @@ func (m *Manager) Flush(ctx context.Context) error {
 }
 
 func (m *Manager) run(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	contextDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			m.close()
+		case <-contextDone:
+		}
+	}()
+	defer close(contextDone)
+
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {
@@ -194,6 +209,15 @@ func (m *Manager) run(ctx context.Context) {
 	}
 }
 
+func (m *Manager) close() {
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		m.cond.Broadcast()
+	}
+	m.mu.Unlock()
+}
+
 func clearQueueItem(item *queueItem) {
 	if item == nil {
 		return
@@ -202,10 +226,7 @@ func clearQueueItem(item *queueItem) {
 }
 
 func (m *Manager) dispatch(item queueItem) {
-	m.pluginsMu.RLock()
-	plugins := make([]Plugin, len(m.plugins))
-	copy(plugins, m.plugins)
-	m.pluginsMu.RUnlock()
+	plugins, _ := m.snapshot.Load().([]Plugin)
 	if len(plugins) == 0 {
 		return
 	}

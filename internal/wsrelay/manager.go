@@ -56,6 +56,7 @@ func NewManager(opts Options) *Manager {
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
+			WriteBufferPool: &wsrelayWriteBufferPool,
 			CheckOrigin: func(r *http.Request) bool {
 				return true
 			},
@@ -78,6 +79,8 @@ func NewManager(opts Options) *Manager {
 	}
 	return mgr
 }
+
+var wsrelayWriteBufferPool sync.Pool
 
 // Path returns the HTTP path the manager expects for websocket upgrades.
 func (m *Manager) Path() string {

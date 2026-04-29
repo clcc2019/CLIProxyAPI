@@ -26,7 +26,10 @@ func TestAmpModule_New(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	authMiddleware := func(c *gin.Context) { c.Next() }
 
-	m := NewLegacy(accessManager, authMiddleware)
+	m := New(
+		WithAccessManager(accessManager),
+		WithAuthMiddleware(authMiddleware),
+	)
 
 	if m.accessManager != accessManager {
 		t.Fatal("accessManager not set")
@@ -53,7 +56,10 @@ func TestAmpModule_Register_WithUpstream(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(
+		WithAccessManager(accessManager),
+		WithAuthMiddleware(func(c *gin.Context) { c.Next() }),
+	)
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -85,7 +91,10 @@ func TestAmpModule_Register_WithoutUpstream(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(
+		WithAccessManager(accessManager),
+		WithAuthMiddleware(func(c *gin.Context) { c.Next() }),
+	)
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -122,7 +131,10 @@ func TestAmpModule_Register_InvalidUpstream(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(
+		WithAccessManager(accessManager),
+		WithAuthMiddleware(func(c *gin.Context) { c.Next() }),
+	)
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -204,34 +216,11 @@ func TestAmpModule_OnConfigUpdated_NonMultiSourceSecret(t *testing.T) {
 	}
 }
 
-func TestAmpModule_AuthMiddleware_Fallback(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
+func TestAmpModule_AuthMiddleware_Required(t *testing.T) {
+	m := New()
 
-	// Create module with no auth middleware
-	m := &AmpModule{authMiddleware_: nil}
-
-	// Get the fallback middleware via getAuthMiddleware
-	ctx := modules.Context{Engine: r, AuthMiddleware: nil}
-	middleware := m.getAuthMiddleware(ctx)
-
-	if middleware == nil {
-		t.Fatal("getAuthMiddleware should return a fallback, not nil")
-	}
-
-	// Test that it works
-	called := false
-	r.GET("/test", middleware, func(c *gin.Context) {
-		called = true
-		c.String(200, "ok")
-	})
-
-	req := httptest.NewRequest("GET", "/test", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if !called {
-		t.Fatal("fallback middleware should allow requests through")
+	if _, err := m.getAuthMiddleware(modules.Context{}); err == nil {
+		t.Fatal("expected missing auth middleware to fail")
 	}
 }
 
@@ -245,7 +234,10 @@ func TestAmpModule_SecretSource_FromConfig(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(
+		WithAccessManager(accessManager),
+		WithAuthMiddleware(func(c *gin.Context) { c.Next() }),
+	)
 
 	// Config with explicit API key
 	cfg := &config.Config{
@@ -292,7 +284,10 @@ func TestAmpModule_ProviderAliasesAlwaysRegistered(t *testing.T) {
 			accessManager := sdkaccess.NewManager()
 			base := &handlers.BaseAPIHandler{}
 
-			m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+			m := New(
+				WithAccessManager(accessManager),
+				WithAuthMiddleware(func(c *gin.Context) { c.Next() }),
+			)
 
 			cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: scenario.configURL}}
 

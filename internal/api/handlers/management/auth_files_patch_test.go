@@ -121,21 +121,3 @@ func TestBuildAuthFileEntryExposesWebsockets(t *testing.T) {
 		t.Fatalf("entry[websockets] = %#v, want true", entry["websockets"])
 	}
 }
-
-func TestBuildAuthFileEntryExposesWebsocketHandshakeDebug(t *testing.T) {
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
-	auth := &coreauth.Auth{
-		ID:       "codex-auth.json",
-		FileName: "codex-auth.json",
-		Provider: "codex",
-		Attributes: map[string]string{
-			"path":                      "/tmp/codex-auth.json",
-			"websocket_handshake_debug": "true",
-		},
-	}
-
-	entry := h.buildAuthFileEntry(auth)
-	if got, ok := entry["websocket_handshake_debug"].(bool); !ok || !got {
-		t.Fatalf("entry[websocket_handshake_debug] = %#v, want true", entry["websocket_handshake_debug"])
-	}
-}

@@ -17,7 +17,11 @@ import (
 
 const (
 	codexFinalUpstreamBodyMemoMaxEntries = 256
+	codexFinalUpstreamBodyMemoMaxBytes   = 16 << 20
+	codexFinalUpstreamBodyMemoMaxItem    = 1 << 20
 	codexPromptResolutionMemoMaxEntries  = 512
+	codexPromptResolutionMemoMaxBytes    = 8 << 20
+	codexPromptResolutionMemoMaxPayload  = 256 << 10
 )
 
 var (
@@ -33,6 +37,7 @@ type codexFinalUpstreamBodyMemoEntry struct {
 	opts      codexFinalUpstreamBodyOptions
 	input     []byte
 	output    []byte
+	size      int
 }
 
 type codexFinalUpstreamBodyMemo struct {
@@ -40,6 +45,7 @@ type codexFinalUpstreamBodyMemo struct {
 	entries map[uint64]codexFinalUpstreamBodyMemoEntry
 	order   []uint64
 	next    int
+	bytes   int
 }
 
 func (m *codexFinalUpstreamBodyMemo) get(baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
@@ -61,12 +67,17 @@ func (m *codexFinalUpstreamBodyMemo) set(baseModel string, opts codexFinalUpstre
 	if m == nil || len(input) == 0 || len(output) == 0 {
 		return
 	}
+	size := len(input) + len(output)
+	if size > codexFinalUpstreamBodyMemoMaxItem || size > codexFinalUpstreamBodyMemoMaxBytes {
+		return
+	}
 	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, input)
 	entry := codexFinalUpstreamBodyMemoEntry{
 		baseModel: baseModel,
 		opts:      opts,
 		input:     bytes.Clone(input),
 		output:    bytes.Clone(output),
+		size:      size,
 	}
 
 	m.mu.Lock()
@@ -74,10 +85,20 @@ func (m *codexFinalUpstreamBodyMemo) set(baseModel string, opts codexFinalUpstre
 	if m.entries == nil {
 		m.entries = make(map[uint64]codexFinalUpstreamBodyMemoEntry, codexFinalUpstreamBodyMemoMaxEntries)
 	}
-	if _, exists := m.entries[hash]; !exists {
+	_, exists := m.entries[hash]
+	if exists {
+		previous := m.entries[hash]
+		m.bytes -= previous.size
+	}
+	if m.bytes+size > codexFinalUpstreamBodyMemoMaxBytes {
+		m.clearLocked()
+		exists = false
+	}
+	if !exists {
 		m.record(hash, codexFinalUpstreamBodyMemoMaxEntries)
 	}
 	m.entries[hash] = entry
+	m.bytes += size
 }
 
 type codexPromptResolutionMemoEntry struct {
@@ -87,6 +108,7 @@ type codexPromptResolutionMemoEntry struct {
 	payload            []byte
 	executionSessionID string
 	resolution         codexPromptCacheResolution
+	size               int
 }
 
 type codexPromptResolutionMemo struct {
@@ -94,6 +116,7 @@ type codexPromptResolutionMemo struct {
 	entries map[uint64]codexPromptResolutionMemoEntry
 	order   []uint64
 	next    int
+	bytes   int
 }
 
 func (m *codexPromptResolutionMemo) get(from sdktranslator.Format, model string, scope string, executionSessionID string, payload []byte) (codexPromptCacheResolution, bool) {
@@ -120,6 +143,10 @@ func (m *codexPromptResolutionMemo) set(from sdktranslator.Format, model string,
 	if m == nil {
 		return
 	}
+	size := len(payload)
+	if size > codexPromptResolutionMemoMaxPayload || size > codexPromptResolutionMemoMaxBytes {
+		return
+	}
 	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
 	entry := codexPromptResolutionMemoEntry{
 		from:               from,
@@ -128,6 +155,7 @@ func (m *codexPromptResolutionMemo) set(from sdktranslator.Format, model string,
 		payload:            bytes.Clone(payload),
 		executionSessionID: executionSessionID,
 		resolution:         resolution,
+		size:               size,
 	}
 
 	m.mu.Lock()
@@ -135,21 +163,51 @@ func (m *codexPromptResolutionMemo) set(from sdktranslator.Format, model string,
 	if m.entries == nil {
 		m.entries = make(map[uint64]codexPromptResolutionMemoEntry, codexPromptResolutionMemoMaxEntries)
 	}
-	if _, exists := m.entries[hash]; !exists {
+	_, exists := m.entries[hash]
+	if exists {
+		previous := m.entries[hash]
+		m.bytes -= previous.size
+	}
+	if m.bytes+size > codexPromptResolutionMemoMaxBytes {
+		m.clearLocked()
+		exists = false
+	}
+	if !exists {
 		m.record(hash, codexPromptResolutionMemoMaxEntries)
 	}
 	m.entries[hash] = entry
+	m.bytes += size
 }
 
 func (m *codexFinalUpstreamBodyMemo) record(hash uint64, maxEntries int) {
-	recordCodexMemoHash(&m.order, &m.next, m.entries, hash, maxEntries)
+	recordCodexMemoHash(&m.order, &m.next, m.entries, hash, maxEntries, func(entry codexFinalUpstreamBodyMemoEntry) {
+		m.bytes -= entry.size
+	})
 }
 
 func (m *codexPromptResolutionMemo) record(hash uint64, maxEntries int) {
-	recordCodexMemoHash(&m.order, &m.next, m.entries, hash, maxEntries)
+	recordCodexMemoHash(&m.order, &m.next, m.entries, hash, maxEntries, func(entry codexPromptResolutionMemoEntry) {
+		m.bytes -= entry.size
+	})
 }
 
-func recordCodexMemoHash[T any](order *[]uint64, next *int, entries map[uint64]T, hash uint64, maxEntries int) {
+func (m *codexFinalUpstreamBodyMemo) clearLocked() {
+	clear(m.entries)
+	clear(m.order)
+	m.order = m.order[:0]
+	m.next = 0
+	m.bytes = 0
+}
+
+func (m *codexPromptResolutionMemo) clearLocked() {
+	clear(m.entries)
+	clear(m.order)
+	m.order = m.order[:0]
+	m.next = 0
+	m.bytes = 0
+}
+
+func recordCodexMemoHash[T any](order *[]uint64, next *int, entries map[uint64]T, hash uint64, maxEntries int, onEvict func(T)) {
 	if maxEntries <= 0 {
 		return
 	}
@@ -161,6 +219,11 @@ func recordCodexMemoHash[T any](order *[]uint64, next *int, entries map[uint64]T
 		return
 	}
 	old := (*order)[*next]
+	if onEvict != nil {
+		if entry, ok := entries[old]; ok {
+			onEvict(entry)
+		}
+	}
 	delete(entries, old)
 	(*order)[*next] = hash
 	*next = (*next + 1) % len(*order)

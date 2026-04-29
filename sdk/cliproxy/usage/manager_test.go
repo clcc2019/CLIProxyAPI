@@ -94,3 +94,69 @@ func TestManagerDropsOldestQueuedRecordWhenFull(t *testing.T) {
 		}
 	}
 }
+
+func TestManagerDispatchUsesLatestRegisteredPluginSnapshot(t *testing.T) {
+	manager := NewManager(4)
+	firstSeen := make(chan string, 2)
+	secondSeen := make(chan string, 1)
+
+	manager.Register(pluginFunc(func(_ context.Context, record Record) {
+		firstSeen <- record.Provider
+	}))
+	manager.Publish(context.Background(), Record{Provider: "before"})
+	if err := manager.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush returned error: %v", err)
+	}
+
+	manager.Register(pluginFunc(func(_ context.Context, record Record) {
+		secondSeen <- record.Provider
+	}))
+	manager.Publish(context.Background(), Record{Provider: "after"})
+	if err := manager.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush returned error: %v", err)
+	}
+
+	if got := receiveUsageTestRecord(t, firstSeen); got != "before" {
+		t.Fatalf("first plugin initial record = %q, want before", got)
+	}
+	if got := receiveUsageTestRecord(t, firstSeen); got != "after" {
+		t.Fatalf("first plugin second record = %q, want after", got)
+	}
+	if got := receiveUsageTestRecord(t, secondSeen); got != "after" {
+		t.Fatalf("second plugin record = %q, want after", got)
+	}
+}
+
+func TestManagerStartContextCancellationClosesManager(t *testing.T) {
+	manager := NewManager(4)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	manager.Start(ctx)
+	cancel()
+
+	deadline := time.After(time.Second)
+	for {
+		manager.mu.Lock()
+		closed := manager.closed
+		manager.mu.Unlock()
+		if closed {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("manager did not close after start context cancellation")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func receiveUsageTestRecord(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for usage record")
+		return ""
+	}
+}

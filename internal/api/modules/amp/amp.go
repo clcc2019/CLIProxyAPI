@@ -18,7 +18,7 @@ import (
 // Option configures the AmpModule.
 type Option func(*AmpModule)
 
-// AmpModule implements the RouteModuleV2 interface for Amp CLI integration.
+// AmpModule implements the modules.RouteModule interface for Amp CLI integration.
 // It provides:
 //   - Reverse proxy to Amp control plane for OAuth/management
 //   - Provider-specific route aliases (/api/provider/{provider}/...)
@@ -43,6 +43,8 @@ type AmpModule struct {
 	lastConfig *config.AmpCode
 }
 
+var _ modules.RouteModule = (*AmpModule)(nil)
+
 // New creates a new Amp routing module with the given options.
 // This is the preferred constructor using the Option pattern.
 //
@@ -61,17 +63,6 @@ func New(opts ...Option) *AmpModule {
 		opt(m)
 	}
 	return m
-}
-
-// NewLegacy creates a new Amp routing module using the legacy constructor signature.
-// This is provided for backwards compatibility.
-//
-// DEPRECATED: Use New with options instead.
-func NewLegacy(accessManager *sdkaccess.Manager, authMiddleware gin.HandlerFunc) *AmpModule {
-	return New(
-		WithAccessManager(accessManager),
-		WithAuthMiddleware(authMiddleware),
-	)
 }
 
 // WithSecretSource sets a custom secret source for the module.
@@ -111,14 +102,17 @@ func (m *AmpModule) forceModelMappings() bool {
 }
 
 // Register sets up Amp routes if configured.
-// This implements the RouteModuleV2 interface with Context.
+// This implements the modules.RouteModule interface with Context.
 // Routes are registered only once via sync.Once for idempotent behavior.
 func (m *AmpModule) Register(ctx modules.Context) error {
 	settings := ctx.Config.AmpCode
 	upstreamURL := strings.TrimSpace(settings.UpstreamURL)
 
 	// Determine auth middleware (from module or context)
-	auth := m.getAuthMiddleware(ctx)
+	auth, err := m.getAuthMiddleware(ctx)
+	if err != nil {
+		return err
+	}
 
 	// Use registerOnce to ensure routes are only registered once
 	var regErr error
@@ -159,19 +153,15 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 }
 
 // getAuthMiddleware returns the authentication middleware, preferring the
-// module's configured middleware, then the context middleware, then a fallback.
-func (m *AmpModule) getAuthMiddleware(ctx modules.Context) gin.HandlerFunc {
+// module's configured middleware, then the context middleware.
+func (m *AmpModule) getAuthMiddleware(ctx modules.Context) (gin.HandlerFunc, error) {
 	if m.authMiddleware_ != nil {
-		return m.authMiddleware_
+		return m.authMiddleware_, nil
 	}
 	if ctx.AuthMiddleware != nil {
-		return ctx.AuthMiddleware
+		return ctx.AuthMiddleware, nil
 	}
-	// Fallback: no authentication (should not happen in production)
-	log.Warn("amp module: no auth middleware provided, allowing all requests")
-	return func(c *gin.Context) {
-		c.Next()
-	}
+	return nil, fmt.Errorf("amp module: auth middleware is required")
 }
 
 // OnConfigUpdated handles configuration updates with partial reload support.

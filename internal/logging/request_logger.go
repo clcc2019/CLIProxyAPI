@@ -32,6 +32,7 @@ var requestLogID atomic.Uint64
 const (
 	maxDecompressedLogBodyBytes    = 4 << 20
 	decompressedLogTruncatedMarker = "\n...[decompressed log body truncated]...\n"
+	streamingLogChunkQueueSize     = 16
 )
 
 var (
@@ -380,7 +381,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		requestBodyPath:  requestBodyPath,
 		responseBodyPath: responseBodyPath,
 		responseBodyFile: responseBodyFile,
-		chunkChan:        make(chan []byte, 100), // Buffered channel for async writes
+		chunkChan:        make(chan []byte, streamingLogChunkQueueSize),
 		closeChan:        make(chan struct{}),
 		errorChan:        make(chan error, 1),
 	}
@@ -1256,7 +1257,10 @@ type FileStreamingLogWriter struct {
 // Parameters:
 //   - chunk: The response chunk to write
 func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
-	if w.chunkChan == nil {
+	if w.chunkChan == nil || len(chunk) == 0 {
+		return
+	}
+	if len(w.chunkChan) >= cap(w.chunkChan) {
 		return
 	}
 

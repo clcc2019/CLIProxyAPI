@@ -6,7 +6,6 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"strings"
@@ -283,22 +282,6 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	// Set model version
 	template, _ = sjson.SetBytes(template, "modelVersion", modelName)
 
-	streamingEvents := make([][]byte, 0)
-
-	scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-	buffer := make([]byte, 52_428_800) // 50MB
-	scanner.Buffer(buffer, 52_428_800)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// log.Debug(string(line))
-		if bytes.HasPrefix(line, dataTag) {
-			jsonData := bytes.TrimSpace(line[5:])
-			streamingEvents = append(streamingEvents, jsonData)
-		}
-	}
-	// log.Debug("streamingEvents: ", streamingEvents)
-	// log.Debug("rawJSON: ", string(rawJSON))
-
 	// Initialize parameters for streaming conversion with proper state management
 	newParam := &ConvertAnthropicResponseToGeminiParams{
 		Model:             modelName,
@@ -316,11 +299,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	var responseID string
 	var createdAt int64
 
-	for _, eventData := range streamingEvents {
-		if len(eventData) == 0 {
-			continue
-		}
-
+	translatorcommon.ForEachSSEDataLine(rawJSON, func(eventData []byte) bool {
 		root := gjson.ParseBytes(eventData)
 		eventType := root.Get("type").String()
 
@@ -350,7 +329,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 					}
 				}
 			}
-			continue
+			return true
 
 		case "content_block_delta":
 			// Handle content delta (text, thinking, or tool input)
@@ -455,7 +434,8 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 				finalUsageJSON = usageJSON
 			}
 		}
-	}
+		return true
+	})
 
 	// Set response metadata
 	if responseID != "" {
