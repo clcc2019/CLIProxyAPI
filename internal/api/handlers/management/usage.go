@@ -3,11 +3,14 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -27,6 +30,15 @@ type usageImportPayload struct {
 	SourceID   string                         `json:"source_id,omitempty"`
 	Usage      usage.StatisticsSnapshot       `json:"usage"`
 	Aggregated *usage.AggregatedUsageSnapshot `json:"aggregated,omitempty"`
+}
+
+type usageQueueRecord []byte
+
+func (r usageQueueRecord) MarshalJSON() ([]byte, error) {
+	if json.Valid(r) {
+		return append([]byte(nil), r...), nil
+	}
+	return json.Marshal(string(r))
 }
 
 // GetUsageStatistics returns a lightweight in-memory statistics snapshot for dashboards.
@@ -116,6 +128,28 @@ func flushUsageStatistics(parent context.Context) error {
 	return coreusage.FlushDefault(flushCtx)
 }
 
+// GetUsageQueue pops queued usage records from the in-memory Redis usage queue.
+func (h *Handler) GetUsageQueue(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+
+	count, errCount := parseUsageQueueCount(c.Query("count"))
+	if errCount != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errCount.Error()})
+		return
+	}
+
+	items := redisqueue.PopOldest(count)
+	records := make([]usageQueueRecord, 0, len(items))
+	for _, item := range items {
+		records = append(records, usageQueueRecord(append([]byte(nil), item...)))
+	}
+
+	c.JSON(http.StatusOK, records)
+}
+
 // ImportUsageStatistics merges a previously exported usage snapshot into memory.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	if h == nil || h.usageStats == nil {
@@ -191,6 +225,18 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		"total_requests":  snapshot.TotalRequests,
 		"failed_requests": snapshot.FailureCount,
 	})
+}
+
+func parseUsageQueueCount(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 1, nil
+	}
+	count, errCount := strconv.Atoi(value)
+	if errCount != nil || count <= 0 {
+		return 0, errors.New("count must be a positive integer")
+	}
+	return count, nil
 }
 
 func usageSnapshotContainsDetails(snapshot usage.StatisticsSnapshot) bool {

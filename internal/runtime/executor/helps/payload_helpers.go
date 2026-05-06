@@ -15,24 +15,35 @@ import (
 // and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
-func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
+// requestPath is optional and used for endpoint-scoped gates such as image-generation filtering.
+func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string, requestPath ...string) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
+	inboundPath := ""
+	if len(requestPath) > 0 {
+		inboundPath = strings.TrimSpace(requestPath[0])
+	}
+	out := payload
+	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
+		if cfg.DisableImageGeneration != config.DisableImageGenerationChat || !isImagesEndpointRequestPath(inboundPath) {
+			out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
+			out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
+		}
+	}
 	if !payloadRulesConfigured(cfg) {
-		return payload
+		return out
 	}
 	rules := cfg.Payload
 	model = strings.TrimSpace(model)
 	requestedModel = strings.TrimSpace(requestedModel)
 	if model == "" && requestedModel == "" {
-		return payload
+		return out
 	}
 	candidates := payloadModelCandidates(model, requestedModel)
-	out := payload
 	source := original
 	if len(source) == 0 {
-		source = payload
+		source = out
 	}
 	matchedDefaults := matchingPayloadRules(rules.Default, protocol, candidates)
 	matchedDefaultRaws := matchingPayloadRules(rules.DefaultRaw, protocol, candidates)
@@ -211,6 +222,85 @@ func payloadRulesConfigured(cfg *config.Config) bool {
 		len(rules.Override) > 0 ||
 		len(rules.OverrideRaw) > 0 ||
 		len(rules.Filter) > 0
+}
+
+func isImagesEndpointRequestPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if path == "/v1/images/generations" || path == "/v1/images/edits" {
+		return true
+	}
+	return strings.HasSuffix(path, "/v1/images/generations") ||
+		strings.HasSuffix(path, "/v1/images/edits") ||
+		strings.HasSuffix(path, "/images/generations") ||
+		strings.HasSuffix(path, "/images/edits")
+}
+
+func removeToolTypeFromPayloadWithRoot(payload []byte, root, toolType string) []byte {
+	toolsPath := buildPayloadPath(root, "tools")
+	if toolsPath == "" {
+		return payload
+	}
+	tools := gjson.GetBytes(payload, toolsPath)
+	if !tools.Exists() || !tools.IsArray() {
+		return payload
+	}
+	items := tools.Array()
+	filtered := make([]json.RawMessage, 0, len(items))
+	changed := false
+	for i := range items {
+		item := items[i]
+		if strings.EqualFold(strings.TrimSpace(item.Get("type").String()), toolType) {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, json.RawMessage(item.Raw))
+	}
+	if !changed {
+		return payload
+	}
+	raw, err := json.Marshal(filtered)
+	if err != nil {
+		return payload
+	}
+	updated, err := SetRawJSONBytes(payload, toolsPath, raw)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func removeToolChoiceFromPayloadWithRoot(payload []byte, root, toolType string) []byte {
+	toolChoicePath := buildPayloadPath(root, "tool_choice")
+	if toolChoicePath == "" {
+		return payload
+	}
+	choice := gjson.GetBytes(payload, toolChoicePath)
+	if !choice.Exists() {
+		return payload
+	}
+	shouldDelete := false
+	switch {
+	case choice.Type == gjson.String:
+		shouldDelete = strings.EqualFold(strings.TrimSpace(choice.String()), toolType)
+	case choice.IsObject():
+		choiceType := strings.TrimSpace(choice.Get("type").String())
+		choiceName := strings.TrimSpace(choice.Get("name").String())
+		functionName := strings.TrimSpace(choice.Get("function.name").String())
+		shouldDelete = strings.EqualFold(choiceType, toolType) ||
+			(strings.EqualFold(choiceType, "tool") && strings.EqualFold(choiceName, toolType)) ||
+			strings.EqualFold(functionName, toolType)
+	}
+	if !shouldDelete {
+		return payload
+	}
+	updated, err := DeleteJSONBytes(payload, toolChoicePath)
+	if err != nil {
+		return payload
+	}
+	return updated
 }
 
 func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, models []string) bool {

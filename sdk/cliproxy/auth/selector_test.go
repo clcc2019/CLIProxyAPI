@@ -829,7 +829,7 @@ func TestExtractSessionID_CodexHeaders(t *testing.T) {
 	headers.Set("Session_id", "codex-session")
 
 	got := ExtractSessionID(headers, nil, nil)
-	want := "header:codex-session"
+	want := "codex:codex-session"
 	if got != want {
 		t.Errorf("ExtractSessionID() with Session_id = %q, want %q", got, want)
 	}

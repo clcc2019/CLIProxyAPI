@@ -127,6 +127,11 @@ func (c *Client) GetConfig() (map[string]any, error) {
 	return c.getJSON("/v0/management/config")
 }
 
+// GetUsage fetches management usage statistics for the TUI usage tab.
+func (c *Client) GetUsage() (map[string]any, error) {
+	return c.getJSON("/v0/management/usage")
+}
+
 // GetConfigYAML fetches the raw config.yaml content.
 func (c *Client) GetConfigYAML() (string, error) {
 	data, err := c.get("/v0/management/config.yaml")
@@ -140,11 +145,6 @@ func (c *Client) GetConfigYAML() (string, error) {
 func (c *Client) PutConfigYAML(yamlContent string) error {
 	_, err := c.put("/v0/management/config.yaml", strings.NewReader(yamlContent))
 	return err
-}
-
-// GetUsage fetches usage statistics.
-func (c *Client) GetUsage() (map[string]any, error) {
-	return c.getJSON("/v0/management/usage")
 }
 
 // GetAuthFiles lists auth credential files.

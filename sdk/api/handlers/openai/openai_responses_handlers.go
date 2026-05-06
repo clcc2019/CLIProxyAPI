@@ -115,6 +115,25 @@ func responsesSSEFrameLen(chunk []byte) int {
 	}
 }
 
+func responsesSSEDataPayload(frame []byte) ([]byte, bool) {
+	if len(frame) == 0 {
+		return nil, false
+	}
+	lines := bytes.Split(frame, []byte("\n"))
+	var payload []byte
+	for i := range lines {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+		payload = append(payload, line[len("data: "):]...)
+	}
+	if len(payload) == 0 {
+		return nil, false
+	}
+	return payload, true
+}
+
 func responsesSSENeedsMoreData(chunk []byte) bool {
 	trimmed := bytes.TrimSpace(chunk)
 	if len(trimmed) == 0 {

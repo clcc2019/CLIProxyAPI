@@ -52,3 +52,4 @@ _bmad-output/*
 ._*
 # Added by code-review-graph
 .code-review-graph/
+.gocache/

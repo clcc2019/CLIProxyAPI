@@ -33,9 +33,13 @@ func TestCodexStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
 	}
 }
 
-func TestCodexFreeStaticModelsDoNotIncludeGPT55(t *testing.T) {
-	if info := findModelInfo(GetCodexFreeModels(), "gpt-5.5"); info != nil {
-		t.Fatal("gpt-5.5 should not be available for codex-free")
+func TestCodexFreeStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
+	info := findModelInfo(GetCodexFreeModels(), "gpt-5.5")
+	if info == nil {
+		t.Fatal("gpt-5.5 not found in codex-free")
+	}
+	if info.ContextLength != 272000 {
+		t.Fatalf("context length = %d, want 272000", info.ContextLength)
 	}
 }
 

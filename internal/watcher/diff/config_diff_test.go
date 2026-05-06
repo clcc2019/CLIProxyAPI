@@ -403,9 +403,10 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			SecretKey:              "",
 		},
 		SDKConfig: sdkconfig.SDKConfig{
-			RequestLog: true,
-			ProxyURL:   "http://new-proxy",
-			APIKeys:    config.ClientAPIKeys{{APIKey: "keyB"}},
+			RequestLog:             true,
+			ProxyURL:               "http://new-proxy",
+			APIKeys:                config.ClientAPIKeys{{APIKey: "keyB"}},
+			DisableImageGeneration: config.DisableImageGenerationAll,
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"b", "c"}, "p2": {"d"}},
 		OpenAICompatibility: []config.OpenAICompatibility{

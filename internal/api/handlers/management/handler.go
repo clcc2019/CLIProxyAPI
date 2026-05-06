@@ -124,9 +124,6 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	h.mu.Unlock()
 }
 
-// SetUsageStatistics allows replacing the usage statistics reference.
-func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
-
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
 
