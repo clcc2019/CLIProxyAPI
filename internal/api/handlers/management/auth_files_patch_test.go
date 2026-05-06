@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -119,5 +120,80 @@ func TestBuildAuthFileEntryExposesWebsockets(t *testing.T) {
 	entry := h.buildAuthFileEntry(auth)
 	if got, ok := entry["websockets"].(bool); !ok || !got {
 		t.Fatalf("entry[websockets] = %#v, want true", entry["websockets"])
+	}
+}
+
+func TestBuildAuthFileEntryExposesLastErrorAndModelStates(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	auth := &coreauth.Auth{
+		ID:            "claude-auth.json",
+		FileName:      "claude-auth.json",
+		Provider:      "claude",
+		Status:        coreauth.StatusError,
+		StatusMessage: "request failed",
+		LastError: &coreauth.Error{
+			Code:       "upstream_failure",
+			Message:    "provider 502",
+			Retryable:  true,
+			HTTPStatus: http.StatusBadGateway,
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"claude-sonnet-4-5": {
+				Status:         coreauth.StatusError,
+				StatusMessage:  "quota exhausted",
+				Unavailable:    true,
+				NextRetryAfter: time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC),
+				LastError: &coreauth.Error{
+					Code:       "rate_limited",
+					Message:    "429 too many requests",
+					Retryable:  true,
+					HTTPStatus: http.StatusTooManyRequests,
+				},
+			},
+		},
+		Attributes: map[string]string{
+			"path": "/tmp/claude-auth.json",
+		},
+	}
+
+	entry := h.buildAuthFileEntry(auth)
+
+	lastError, ok := entry["last_error"].(gin.H)
+	if !ok {
+		t.Fatalf("entry[last_error] = %#v, want gin.H", entry["last_error"])
+	}
+	if got := lastError["code"]; got != "upstream_failure" {
+		t.Fatalf("entry[last_error][code] = %#v, want %q", got, "upstream_failure")
+	}
+	if got := lastError["message"]; got != "provider 502" {
+		t.Fatalf("entry[last_error][message] = %#v, want %q", got, "provider 502")
+	}
+	if got := lastError["retryable"]; got != true {
+		t.Fatalf("entry[last_error][retryable] = %#v, want true", got)
+	}
+	if got := lastError["http_status"]; got != http.StatusBadGateway {
+		t.Fatalf("entry[last_error][http_status] = %#v, want %d", got, http.StatusBadGateway)
+	}
+
+	modelStates, ok := entry["model_states"].(map[string]gin.H)
+	if !ok {
+		t.Fatalf("entry[model_states] = %#v, want map[string]gin.H", entry["model_states"])
+	}
+	modelState, ok := modelStates["claude-sonnet-4-5"]
+	if !ok {
+		t.Fatalf("expected model state for claude-sonnet-4-5, got %#v", modelStates)
+	}
+	if got := modelState["status_message"]; got != "quota exhausted" {
+		t.Fatalf("model_state[status_message] = %#v, want %q", got, "quota exhausted")
+	}
+	modelLastError, ok := modelState["last_error"].(gin.H)
+	if !ok {
+		t.Fatalf("model_state[last_error] = %#v, want gin.H", modelState["last_error"])
+	}
+	if got := modelLastError["code"]; got != "rate_limited" {
+		t.Fatalf("model_state[last_error][code] = %#v, want %q", got, "rate_limited")
+	}
+	if got := modelLastError["http_status"]; got != http.StatusTooManyRequests {
+		t.Fatalf("model_state[last_error][http_status] = %#v, want %d", got, http.StatusTooManyRequests)
 	}
 }

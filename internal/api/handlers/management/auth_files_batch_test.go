@@ -150,6 +150,104 @@ func TestUploadAuthFile_BatchMultipart_InvalidJSONDoesNotOverwriteExistingFile(t
 	}
 }
 
+func TestUploadAuthFile_ConvertsOpenAISessionExportToCodexAuth(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	sessionExport := `{"WARNING_BANNER":"sensitive","accessToken":"oauth-token","authProvider":"openai","user":{"email":"codex@example.com"},"account":{"id":"acct_123","planType":"plus"}}`
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files?name=session.json", bytes.NewBufferString(sessionExport))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	h.UploadAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected upload status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(authDir, "session.json"))
+	if err != nil {
+		t.Fatalf("expected normalized auth file to exist: %v", err)
+	}
+
+	var stored map[string]any
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("failed to decode stored auth file: %v", err)
+	}
+	if got := stored["type"]; got != "codex" {
+		t.Fatalf("type = %#v, want %q", got, "codex")
+	}
+	if got := stored["access_token"]; got != "oauth-token" {
+		t.Fatalf("access_token = %#v, want %q", got, "oauth-token")
+	}
+	if got := stored["email"]; got != "codex@example.com" {
+		t.Fatalf("email = %#v, want %q", got, "codex@example.com")
+	}
+	if got := stored["account_id"]; got != "acct_123" {
+		t.Fatalf("account_id = %#v, want %q", got, "acct_123")
+	}
+	if got := stored["plan_type"]; got != "plus" {
+		t.Fatalf("plan_type = %#v, want %q", got, "plus")
+	}
+	if _, ok := stored["sessionToken"]; ok {
+		t.Fatal("sessionToken should not be persisted in normalized auth file")
+	}
+
+	auths := manager.List()
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth entry, got %d", len(auths))
+	}
+	if got := auths[0].Provider; got != "codex" {
+		t.Fatalf("provider = %q, want %q", got, "codex")
+	}
+}
+
+func TestUploadAuthFile_DoesNotConvertLookalikeJSONWithoutOpenAIProvider(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	lookalike := `{"accessToken":"oauth-token","user":{"email":"codex@example.com"},"account":{"id":"acct_123"}}`
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files?name=session.json", bytes.NewBufferString(lookalike))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	h.UploadAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected upload status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(authDir, "session.json"))
+	if err != nil {
+		t.Fatalf("expected uploaded auth file to exist: %v", err)
+	}
+	if string(data) != lookalike {
+		t.Fatalf("stored auth file = %q, want unchanged %q", string(data), lookalike)
+	}
+
+	auths := manager.List()
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth entry, got %d", len(auths))
+	}
+	if got := auths[0].Provider; got != "unknown" {
+		t.Fatalf("provider = %q, want %q", got, "unknown")
+	}
+}
+
 func TestDeleteAuthFile_BatchQuery(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

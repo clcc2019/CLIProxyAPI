@@ -410,6 +410,12 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"source":         "memory",
 		"size":           int64(0),
 	}
+	if serialized := serializeAuthError(auth.LastError); serialized != nil {
+		entry["last_error"] = serialized
+	}
+	if serialized := serializeModelStates(auth.ModelStates); len(serialized) > 0 {
+		entry["model_states"] = serialized
+	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
@@ -496,6 +502,67 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	return entry
 }
 
+func serializeAuthError(err *coreauth.Error) gin.H {
+	if err == nil {
+		return nil
+	}
+	entry := gin.H{}
+	if code := strings.TrimSpace(err.Code); code != "" {
+		entry["code"] = code
+	}
+	if message := strings.TrimSpace(err.Message); message != "" {
+		entry["message"] = message
+	}
+	entry["retryable"] = err.Retryable
+	if err.HTTPStatus > 0 {
+		entry["http_status"] = err.HTTPStatus
+	}
+	if len(entry) == 0 {
+		return nil
+	}
+	return entry
+}
+
+func serializeModelStates(states map[string]*coreauth.ModelState) map[string]gin.H {
+	if len(states) == 0 {
+		return nil
+	}
+	result := make(map[string]gin.H, len(states))
+	for model, state := range states {
+		model = strings.TrimSpace(model)
+		if model == "" || state == nil {
+			continue
+		}
+		entry := gin.H{
+			"status":         state.Status,
+			"status_message": state.StatusMessage,
+			"unavailable":    state.Unavailable,
+		}
+		if !state.NextRetryAfter.IsZero() {
+			entry["next_retry_after"] = state.NextRetryAfter
+		}
+		if serialized := serializeAuthError(state.LastError); serialized != nil {
+			entry["last_error"] = serialized
+		}
+		if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+			entry["quota"] = gin.H{
+				"exceeded":        state.Quota.Exceeded,
+				"reason":          state.Quota.Reason,
+				"next_recover_at": state.Quota.NextRecoverAt,
+				"backoff_level":   state.Quota.BackoffLevel,
+			}
+		}
+		if !state.UpdatedAt.IsZero() {
+			entry["updated_at"] = state.UpdatedAt
+		}
+		result[model] = entry
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func authFileUserAgent(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -571,25 +638,44 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
+	result := gin.H{}
+	if v := strings.TrimSpace(valueAsString(auth.Metadata["account_id"])); v != "" {
+		result["chatgpt_account_id"] = v
+	}
+	if v := strings.TrimSpace(valueAsString(auth.Metadata["plan_type"])); v != "" {
+		result["plan_type"] = v
+	}
+
 	idTokenRaw, ok := auth.Metadata["id_token"].(string)
 	if !ok {
-		return nil
+		if len(result) == 0 {
+			return nil
+		}
+		return result
 	}
 	idToken := strings.TrimSpace(idTokenRaw)
 	if idToken == "" {
-		return nil
+		if len(result) == 0 {
+			return nil
+		}
+		return result
 	}
 	claims, err := codex.ParseJWTToken(idToken)
 	if err != nil || claims == nil {
-		return nil
+		if len(result) == 0 {
+			return nil
+		}
+		return result
 	}
-
-	result := gin.H{}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
-		result["chatgpt_account_id"] = v
+	if _, ok := result["chatgpt_account_id"]; !ok {
+		if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+			result["chatgpt_account_id"] = v
+		}
 	}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
-		result["plan_type"] = v
+	if _, ok := result["plan_type"]; !ok {
+		if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
+			result["plan_type"] = v
+		}
 	}
 	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
 		result["chatgpt_subscription_active_start"] = v
@@ -911,7 +997,11 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	dataToWrite, _, errNormalize := normalizeImportedAuthJSON(data)
+	if errNormalize != nil {
+		return fmt.Errorf("invalid auth file: %w", errNormalize)
+	}
+	if errWrite := os.WriteFile(dst, dataToWrite, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
@@ -1101,8 +1191,12 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 			return nil, fmt.Errorf("failed to read auth file: %w", err)
 		}
 	}
+	normalizedData, _, errNormalize := normalizeImportedAuthJSON(data)
+	if errNormalize != nil {
+		return nil, fmt.Errorf("invalid auth file: %w", errNormalize)
+	}
 	metadata := make(map[string]any)
-	if err := json.Unmarshal(data, &metadata); err != nil {
+	if err := json.Unmarshal(normalizedData, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", err)
 	}
 	provider, _ := metadata["type"].(string)
@@ -1147,8 +1241,26 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 			auth.Runtime = existing.Runtime
 		}
 	}
+	coreauth.ApplyCodexMetadataFromMetadata(auth)
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+func normalizeImportedAuthJSON(data []byte) ([]byte, bool, error) {
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, false, err
+	}
+	normalized, changed := coreauth.NormalizeImportedAuthMetadata(metadata)
+	if !changed {
+		return data, false, nil
+	}
+	normalizedData, err := json.MarshalIndent(normalized, "", "  ")
+	if err != nil {
+		return nil, false, err
+	}
+	normalizedData = append(normalizedData, '\n')
+	return normalizedData, true, nil
 }
 
 func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) error {
@@ -2473,9 +2585,13 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
+				"email":        tokenStorage.Email,
+				"account_id":   tokenStorage.AccountID,
+				"access_token": tokenStorage.AccessToken,
 			},
+		}
+		if planType != "" {
+			record.Metadata["plan_type"] = planType
 		}
 		if requestUserAgent != "" {
 			record.Metadata["user_agent"] = requestUserAgent

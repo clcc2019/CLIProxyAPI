@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -307,7 +308,100 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		sb.WriteString("\n")
 	}
 
+	if detail := renderAuthErrorDetail(f, labelStyle, valueStyle); detail != "" {
+		sb.WriteString(detail)
+	}
+
+	if detail := renderAuthModelStatesDetail(f, labelStyle, valueStyle); detail != "" {
+		sb.WriteString(detail)
+	}
+
 	sb.WriteString("    └─────────────────────────────────────────────\n")
+	return sb.String()
+}
+
+func renderAuthErrorDetail(f map[string]any, labelStyle, valueStyle lipgloss.Style) string {
+	lastError, ok := f["last_error"].(map[string]any)
+	if !ok || len(lastError) == 0 {
+		return ""
+	}
+
+	message := strings.TrimSpace(getAnyString(lastError, "message"))
+	code := strings.TrimSpace(getAnyString(lastError, "code"))
+	status := strings.TrimSpace(getAnyString(lastError, "http_status"))
+	retryable := strings.TrimSpace(getAnyString(lastError, "retryable"))
+	if message == "" && code == "" && status == "" {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("    │ %s %s\n",
+		labelStyle.Render(fmt.Sprintf("%-12s:", "Last Error")),
+		valueStyle.Render(message)))
+	if code != "" {
+		sb.WriteString(fmt.Sprintf("    │ %s %s\n",
+			labelStyle.Render(fmt.Sprintf("%-12s:", "Error Code")),
+			valueStyle.Render(code)))
+	}
+	if status != "" {
+		sb.WriteString(fmt.Sprintf("    │ %s %s\n",
+			labelStyle.Render(fmt.Sprintf("%-12s:", "HTTP Status")),
+			valueStyle.Render(status)))
+	}
+	if retryable != "" {
+		sb.WriteString(fmt.Sprintf("    │ %s %s\n",
+			labelStyle.Render(fmt.Sprintf("%-12s:", "Retryable")),
+			valueStyle.Render(retryable)))
+	}
+	return sb.String()
+}
+
+func renderAuthModelStatesDetail(f map[string]any, labelStyle, valueStyle lipgloss.Style) string {
+	rawStates, ok := f["model_states"].(map[string]any)
+	if !ok || len(rawStates) == 0 {
+		return ""
+	}
+
+	models := make([]string, 0, len(rawStates))
+	for model := range rawStates {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+
+	var sb strings.Builder
+	for _, model := range models {
+		state, ok := rawStates[model].(map[string]any)
+		if !ok || len(state) == 0 {
+			continue
+		}
+		statusMessage := strings.TrimSpace(getAnyString(state, "status_message"))
+		lastError, _ := state["last_error"].(map[string]any)
+		lastErrorMessage := strings.TrimSpace(getAnyString(lastError, "message"))
+		httpStatus := strings.TrimSpace(getAnyString(lastError, "http_status"))
+
+		summaryParts := make([]string, 0, 3)
+		if status := strings.TrimSpace(getAnyString(state, "status")); status != "" {
+			summaryParts = append(summaryParts, status)
+		}
+		if statusMessage != "" {
+			summaryParts = append(summaryParts, statusMessage)
+		} else if lastErrorMessage != "" {
+			summaryParts = append(summaryParts, lastErrorMessage)
+		}
+		if httpStatus != "" {
+			summaryParts = append(summaryParts, "HTTP "+httpStatus)
+		}
+		if len(summaryParts) == 0 {
+			continue
+		}
+
+		sb.WriteString(fmt.Sprintf("    │ %s %s\n",
+			labelStyle.Render(fmt.Sprintf("%-12s:", "Model")),
+			valueStyle.Render(model)))
+		sb.WriteString(fmt.Sprintf("    │ %s %s\n",
+			labelStyle.Render(fmt.Sprintf("%-12s:", "Model State")),
+			valueStyle.Render(strings.Join(summaryParts, " | "))))
+	}
 	return sb.String()
 }
 

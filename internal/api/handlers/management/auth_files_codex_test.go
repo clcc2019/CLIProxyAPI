@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestCodexLoginRequestUserAgentUsesNonWebUIHeader(t *testing.T) {
@@ -31,5 +32,23 @@ func TestCodexLoginRequestUserAgentSkipsWebUIBrowserHeader(t *testing.T) {
 
 	if got := codexLoginRequestUserAgent(ctx); got != "" {
 		t.Fatalf("codexLoginRequestUserAgent() = %q, want empty", got)
+	}
+}
+
+func TestExtractCodexIDTokenClaimsFallsBackToMetadata(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"account_id": "acct_123",
+			"plan_type":  "plus",
+		},
+	}
+
+	got := extractCodexIDTokenClaims(auth)
+	if got["chatgpt_account_id"] != "acct_123" {
+		t.Fatalf("chatgpt_account_id = %#v, want %q", got["chatgpt_account_id"], "acct_123")
+	}
+	if got["plan_type"] != "plus" {
+		t.Fatalf("plan_type = %#v, want %q", got["plan_type"], "plus")
 	}
 }

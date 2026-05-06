@@ -166,6 +166,131 @@ func TestFileSynthesizer_Synthesize_CodexAuthFileUserAgentOverride(t *testing.T)
 	}
 }
 
+func TestFileSynthesizer_Synthesize_CodexMinimalMetadataWithoutIDToken(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":         "codex",
+		"email":        "codex@example.com",
+		"access_token": "oauth-token",
+		"account_id":   "acct_123",
+		"plan_type":    "plus",
+	}
+	data, _ := json.Marshal(authData)
+	err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0o644)
+	if err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	if got := auths[0].Attributes["email"]; got != "codex@example.com" {
+		t.Fatalf("email = %q, want %q", got, "codex@example.com")
+	}
+	if got := auths[0].Attributes["account_id"]; got != "acct_123" {
+		t.Fatalf("account_id = %q, want %q", got, "acct_123")
+	}
+	if got := auths[0].Attributes["plan_type"]; got != "plus" {
+		t.Fatalf("plan_type = %q, want %q", got, "plus")
+	}
+}
+
+func TestFileSynthesizer_Synthesize_OpenAISessionExportAsCodexAuth(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"WARNING_BANNER": "sensitive",
+		"accessToken":    "oauth-token",
+		"authProvider":   "openai",
+		"user": map[string]any{
+			"email": "codex@example.com",
+		},
+		"account": map[string]any{
+			"id":       "acct_123",
+			"planType": "plus",
+		},
+	}
+	data, _ := json.Marshal(authData)
+	err := os.WriteFile(filepath.Join(tempDir, "codex-session.json"), data, 0o644)
+	if err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Provider; got != "codex" {
+		t.Fatalf("provider = %q, want %q", got, "codex")
+	}
+	if got := auths[0].Metadata["access_token"]; got != "oauth-token" {
+		t.Fatalf("access_token = %#v, want %q", got, "oauth-token")
+	}
+	if got := auths[0].Attributes["plan_type"]; got != "plus" {
+		t.Fatalf("plan_type = %q, want %q", got, "plus")
+	}
+}
+
+func TestFileSynthesizer_Synthesize_IgnoresLookalikeWithoutOpenAIProvider(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"accessToken": "oauth-token",
+		"user": map[string]any{
+			"email": "codex@example.com",
+		},
+		"account": map[string]any{
+			"id": "acct_123",
+		},
+	}
+	data, _ := json.Marshal(authData)
+	err := os.WriteFile(filepath.Join(tempDir, "codex-session.json"), data, 0o644)
+	if err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 0 {
+		t.Fatalf("expected no synthesized auths, got %d", len(auths))
+	}
+}
+
 func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	tempDir := t.TempDir()
 

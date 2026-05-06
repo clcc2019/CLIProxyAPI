@@ -575,6 +575,56 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.
 	}
 }
 
+func TestManager_MarkResult_PreservesStructuredAuthError(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-structured-error",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-structured-error"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			Code:       "rate_limited",
+			Message:    "quota exceeded",
+			Retryable:  true,
+			HTTPStatus: http.StatusTooManyRequests,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.LastError == nil {
+		t.Fatal("expected auth.LastError to be recorded")
+	}
+	if updated.LastError.Code != "rate_limited" {
+		t.Fatalf("auth.LastError.Code = %q, want %q", updated.LastError.Code, "rate_limited")
+	}
+	if !updated.LastError.Retryable {
+		t.Fatal("expected auth.LastError.Retryable to be true")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.LastError == nil {
+		t.Fatalf("expected model state last error to be recorded, got %#v", state)
+	}
+	if state.LastError.Code != "rate_limited" {
+		t.Fatalf("model LastError.Code = %q, want %q", state.LastError.Code, "rate_limited")
+	}
+	if state.LastError.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("model LastError.HTTPStatus = %d, want %d", state.LastError.HTTPStatus, http.StatusTooManyRequests)
+	}
+}
+
 func TestManager_MarkResult_SkipsCleanModelSuccess(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 

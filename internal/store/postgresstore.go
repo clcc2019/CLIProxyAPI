@@ -289,6 +289,9 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			log.WithError(err).Warnf("postgres store: skipping auth %s with invalid json", id)
 			continue
 		}
+		if normalized, changed := cliproxyauth.NormalizeImportedAuthMetadata(metadata); changed {
+			metadata = normalized
+		}
 		provider := strings.TrimSpace(valueAsString(metadata["type"]))
 		if provider == "" {
 			provider = "unknown"
@@ -310,6 +313,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			LastRefreshedAt:  time.Time{},
 			NextRefreshAfter: time.Time{},
 		}
+		cliproxyauth.ApplyCodexMetadataFromMetadata(auth)
 		cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 		auths = append(auths, auth)
 	}

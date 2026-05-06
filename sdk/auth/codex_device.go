@@ -274,7 +274,20 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	originator := codexLoginOriginator(opts)
 	userAgent := codexLoginUserAgent(opts)
 	metadata := map[string]any{
-		"email": tokenStorage.Email,
+		"email":        tokenStorage.Email,
+		"access_token": tokenStorage.AccessToken,
+	}
+	if tokenStorage.AccountID != "" {
+		metadata["account_id"] = tokenStorage.AccountID
+	}
+	if planType != "" {
+		metadata["plan_type"] = planType
+	}
+	if tokenStorage.RefreshToken != "" {
+		metadata["refresh_token"] = tokenStorage.RefreshToken
+	}
+	if tokenStorage.IDToken != "" {
+		metadata["id_token"] = tokenStorage.IDToken
 	}
 	if originator != "" {
 		metadata["originator"] = originator
@@ -288,8 +301,12 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 		fmt.Println("Codex API key obtained and stored")
 	}
 
-	attrs := map[string]string{
-		"plan_type": planType,
+	attrs := map[string]string{}
+	if planType != "" {
+		attrs["plan_type"] = planType
+	}
+	if tokenStorage.AccountID != "" {
+		attrs["account_id"] = tokenStorage.AccountID
 	}
 	if originator != "" {
 		attrs["header:Originator"] = originator

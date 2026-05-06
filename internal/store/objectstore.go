@@ -565,6 +565,9 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
+	if normalized, changed := cliproxyauth.NormalizeImportedAuthMetadata(metadata); changed {
+		metadata = normalized
+	}
 	provider := strings.TrimSpace(valueAsString(metadata["type"]))
 	if provider == "" {
 		provider = "unknown"
@@ -595,6 +598,7 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: time.Time{},
 	}
+	cliproxyauth.ApplyCodexMetadataFromMetadata(auth)
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
 }
