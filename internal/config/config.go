@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 )
 
@@ -68,6 +68,9 @@ type Config struct {
 	// UsageDetailRetentionLimit limits per-model detailed usage records kept in memory.
 	// <= 0 keeps all detailed records for backward compatibility.
 	UsageDetailRetentionLimit int `yaml:"usage-detail-retention-limit" json:"usage-detail-retention-limit"`
+
+	// ModelPrices configures USD-per-1M-token prices used for server-side spend calculations.
+	ModelPrices ModelPrices `yaml:"model-prices,omitempty" json:"model-prices,omitempty"`
 
 	// RedisUsageQueueRetentionSeconds controls how long (in seconds) usage queue items
 	// are retained in memory for the Redis RESP interface (LPOP/RPOP).
@@ -219,7 +222,8 @@ type RemoteManagement struct {
 	// When false (the default), the background updater remains enabled; when true, the panel is only downloaded on first access if missing.
 	DisableAutoUpdatePanel bool `yaml:"disable-auto-update-panel"`
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
-	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
+	// When no explicit tag is provided, the latest release tag is used by default.
+	// Accepts either a repository URL, a GitHub releases page URL, or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
 }
 
@@ -737,6 +741,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize client-facing API key configuration and keep legacy string entries compatible.
 	cfg.SanitizeClientAPIKeys()
+
+	cfg.ModelPrices = NormalizeModelPrices(cfg.ModelPrices)
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()

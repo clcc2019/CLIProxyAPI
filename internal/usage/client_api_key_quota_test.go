@@ -10,21 +10,25 @@ import (
 
 func TestClientAPIKeyQuotaTrackerChecksCompletedUsage(t *testing.T) {
 	tracker := newClientAPIKeyQuotaTracker()
+	tracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1, Completion: 2, Cache: 0.5},
+	})
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
 	tracker.record(coreusage.Record{
 		APIKey:      "client-key",
 		RequestedAt: now.Add(-time.Hour),
+		Model:       "gpt-test",
 		Detail: coreusage.Detail{
-			InputTokens:  40,
-			OutputTokens: 60,
+			InputTokens:  1_000_000,
+			OutputTokens: 500_000,
 		},
 	})
 
-	exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{DailyTokens: 100}, now)
+	exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{DailyCost: 2}, now)
 	if exceeded == nil {
-		t.Fatal("expected daily token quota to be exceeded")
+		t.Fatal("expected daily cost quota to be exceeded")
 	}
-	if exceeded.Scope != "daily" || exceeded.Resource != "tokens" || exceeded.Limit != 100 || exceeded.Used != 100 {
+	if exceeded.Scope != "daily" || exceeded.Resource != "cost" || exceeded.Limit != 2 || exceeded.Used != 2 {
 		t.Fatalf("unexpected exceeded quota: %#v", exceeded)
 	}
 	if want := time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC); !exceeded.ResetAt.Equal(want) {
@@ -34,17 +38,21 @@ func TestClientAPIKeyQuotaTrackerChecksCompletedUsage(t *testing.T) {
 
 func TestClientAPIKeyQuotaTrackerUsesUTCWindows(t *testing.T) {
 	tracker := newClientAPIKeyQuotaTracker()
+	tracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1},
+	})
 	now := time.Date(2026, 5, 7, 0, 30, 0, 0, time.UTC)
 	tracker.record(coreusage.Record{
 		APIKey:      "client-key",
 		RequestedAt: now.Add(-time.Hour),
-		Detail:      coreusage.Detail{TotalTokens: 1000},
+		Model:       "gpt-test",
+		Detail:      coreusage.Detail{InputTokens: 1_000_000},
 	})
 
-	if exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{DailyRequests: 1}, now); exceeded != nil {
+	if exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{DailyCost: 1}, now); exceeded != nil {
 		t.Fatalf("previous UTC day should not count toward current daily quota: %#v", exceeded)
 	}
-	if exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{MonthlyRequests: 1}, now); exceeded == nil {
+	if exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{MonthlyCost: 1}, now); exceeded == nil {
 		t.Fatal("same UTC month should count toward monthly quota")
 	}
 }

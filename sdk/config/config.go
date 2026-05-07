@@ -10,6 +10,8 @@ type SDKConfig = internalconfig.SDKConfig
 type ClientAPIKeyEntry = internalconfig.ClientAPIKeyEntry
 type ClientAPIKeyQuota = internalconfig.ClientAPIKeyQuota
 type ClientAPIKeys = internalconfig.ClientAPIKeys
+type ModelPrice = internalconfig.ModelPrice
+type ModelPrices = internalconfig.ModelPrices
 
 type Config = internalconfig.Config
 

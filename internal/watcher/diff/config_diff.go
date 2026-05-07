@@ -43,6 +43,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.UsageDetailRetentionLimit != newCfg.UsageDetailRetentionLimit {
 		changes = append(changes, fmt.Sprintf("usage-detail-retention-limit: %d -> %d", oldCfg.UsageDetailRetentionLimit, newCfg.UsageDetailRetentionLimit))
 	}
+	if !reflect.DeepEqual(oldCfg.ModelPrices, newCfg.ModelPrices) {
+		changes = append(changes, "model-prices: updated")
+	}
 	if oldCfg.RedisUsageQueueRetentionSeconds != newCfg.RedisUsageQueueRetentionSeconds {
 		changes = append(changes, fmt.Sprintf("redis-usage-queue-retention-seconds: %d -> %d", oldCfg.RedisUsageQueueRetentionSeconds, newCfg.RedisUsageQueueRetentionSeconds))
 	}

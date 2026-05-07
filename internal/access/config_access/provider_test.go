@@ -11,12 +11,9 @@ import (
 
 func TestAuthenticateIncludesClientAPIKeyQuotaMetadata(t *testing.T) {
 	quota := internalconfig.ClientAPIKeyQuota{
-		DailyTokens:     100,
-		MonthlyTokens:   200,
-		TotalTokens:     300,
-		DailyRequests:   10,
-		MonthlyRequests: 20,
-		TotalRequests:   30,
+		DailyCost:   1.5,
+		MonthlyCost: 30,
+		TotalCost:   100,
 	}
 	provider := newProvider("test", internalconfig.ClientAPIKeys{{
 		APIKey: "quota-key",

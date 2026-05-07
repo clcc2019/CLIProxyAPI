@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -29,11 +30,17 @@ func TestAuthMiddlewareRejectsClientAPIKeyQuotaExceeded(t *testing.T) {
 
 	apiKey := "quota-middleware-key"
 	now := time.Now().UTC()
+	usage.SetClientAPIKeyQuotaModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1},
+	})
+	t.Cleanup(func() {
+		usage.SetClientAPIKeyQuotaModelPrices(nil)
+	})
 	coreusage.PublishRecord(context.Background(), coreusage.Record{
 		APIKey:      apiKey,
 		RequestedAt: now,
 		Model:       "gpt-test",
-		Detail:      coreusage.Detail{TotalTokens: 10},
+		Detail:      coreusage.Detail{InputTokens: 1_000_000},
 	})
 	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -42,7 +49,7 @@ func TestAuthMiddlewareRejectsClientAPIKeyQuotaExceeded(t *testing.T) {
 	}
 
 	metadata := map[string]string{}
-	config.AddClientAPIKeyQuotaMetadata(metadata, config.ClientAPIKeyQuota{DailyRequests: 1})
+	config.AddClientAPIKeyQuotaMetadata(metadata, config.ClientAPIKeyQuota{DailyCost: 1})
 	manager := sdkaccess.NewManager()
 	manager.SetProviders([]sdkaccess.Provider{staticAccessProvider{result: &sdkaccess.Result{
 		Provider:  "static",
@@ -65,7 +72,7 @@ func TestAuthMiddlewareRejectsClientAPIKeyQuotaExceeded(t *testing.T) {
 		t.Fatal("expected Retry-After header")
 	}
 	body := resp.Body.String()
-	for _, expected := range []string{`"error":"api key quota exceeded"`, `"scope":"daily"`, `"resource":"requests"`} {
+	for _, expected := range []string{`"error":"api key quota exceeded"`, `"scope":"daily"`, `"resource":"cost"`, `"currency":"USD"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("body %q missing %s", body, expected)
 		}

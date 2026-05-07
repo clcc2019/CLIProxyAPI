@@ -560,6 +560,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-detail-retention-limit", s.mgmt.GetUsageDetailRetentionLimit)
 		mgmt.PUT("/usage-detail-retention-limit", s.mgmt.PutUsageDetailRetentionLimit)
 		mgmt.PATCH("/usage-detail-retention-limit", s.mgmt.PutUsageDetailRetentionLimit)
+		mgmt.GET("/model-prices", s.mgmt.GetModelPrices)
+		mgmt.PUT("/model-prices", s.mgmt.PutModelPrices)
+		mgmt.PATCH("/model-prices", s.mgmt.PutModelPrices)
 
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
@@ -1059,6 +1062,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if oldCfg == nil || oldCfg.UsageDetailRetentionLimit != cfg.UsageDetailRetentionLimit {
 		usage.SetDetailRetentionLimit(cfg.UsageDetailRetentionLimit)
 	}
+	if oldCfg == nil || !reflect.DeepEqual(oldCfg.ModelPrices, cfg.ModelPrices) {
+		usage.SetClientAPIKeyQuotaModelPrices(cfg.ModelPrices)
+	}
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
@@ -1242,6 +1248,7 @@ func enforceClientAPIKeyQuota(c *gin.Context, result *sdkaccess.Result) bool {
 		"resource": exceeded.Resource,
 		"limit":    exceeded.Limit,
 		"used":     exceeded.Used,
+		"currency": "USD",
 	}
 	if !exceeded.ResetAt.IsZero() {
 		payload["reset_at"] = exceeded.ResetAt.Format(time.RFC3339)

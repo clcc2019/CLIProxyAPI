@@ -53,7 +53,7 @@ func TestClientAPIKeysMarshalYAMLPreservesLegacyShape(t *testing.T) {
 			APIKey:         "key-b",
 			AllowedModels:  []string{"gpt-5-*"},
 			ExcludedModels: []string{"*-mini"},
-			Quota:          ClientAPIKeyQuota{DailyTokens: 1000, MonthlyRequests: 50},
+			Quota:          ClientAPIKeyQuota{DailyCost: 1.5, MonthlyCost: 30},
 		},
 	}
 
@@ -89,7 +89,7 @@ func TestClientAPIKeysMarshalYAMLPreservesLegacyShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected quota to be ClientAPIKeyQuota, got %T", second["quota"])
 	}
-	if quota.DailyTokens != 1000 || quota.MonthlyRequests != 50 {
+	if quota.DailyCost != 1.5 || quota.MonthlyCost != 30 {
 		t.Fatalf("unexpected quota: %#v", quota)
 	}
 }
@@ -127,13 +127,13 @@ func TestClientAPIKeysQuotaCompatibility(t *testing.T) {
 api-keys:
   - api-key: "quota-key"
     quota:
-      daily-tokens: 100
-      monthly-requests: 50
-      total-tokens: -1
+      daily-cost: 1.5
+      monthly-cost: 30
+      total-cost: -1
   - api-key: "quota-key"
     quota:
-      daily-tokens: 90
-      total-tokens: 1000
+      daily-cost: 1
+      total-cost: 100
 `
 
 	var parsed payload
@@ -144,9 +144,9 @@ api-keys:
 	want := ClientAPIKeys{{
 		APIKey: "quota-key",
 		Quota: ClientAPIKeyQuota{
-			DailyTokens:     90,
-			MonthlyRequests: 50,
-			TotalTokens:     1000,
+			DailyCost:   1,
+			MonthlyCost: 30,
+			TotalCost:   100,
 		},
 	}}
 	if !reflect.DeepEqual(parsed.APIKeys, want) {
@@ -159,9 +159,9 @@ func TestClientAPIKeysQuotaJSONAliases(t *testing.T) {
 		{
 			"api-key": "quota-key",
 			"quota": {
-				"dailyTokens": 100,
-				"monthly-token-limit": "200",
-				"totalRequests": 300
+				"dailyCost": 1.25,
+				"monthly-cost": "20",
+				"totalSpend": 100
 			}
 		}
 	]`)
@@ -174,9 +174,9 @@ func TestClientAPIKeysQuotaJSONAliases(t *testing.T) {
 	want := ClientAPIKeys{{
 		APIKey: "quota-key",
 		Quota: ClientAPIKeyQuota{
-			DailyTokens:   100,
-			MonthlyTokens: 200,
-			TotalRequests: 300,
+			DailyCost:   1.25,
+			MonthlyCost: 20,
+			TotalCost:   100,
 		},
 	}}
 	if !reflect.DeepEqual(parsed, want) {

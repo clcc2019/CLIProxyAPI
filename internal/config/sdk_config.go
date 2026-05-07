@@ -33,7 +33,7 @@ type SDKConfig struct {
 
 	// APIKeys is the list of keys for authenticating clients to this proxy server.
 	// Entries may be plain strings for the legacy format or structured objects with
-	// model restrictions and quota limits.
+	// model restrictions and USD spend quota limits.
 	APIKeys ClientAPIKeys `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.

@@ -22,20 +22,17 @@ func (clientAPIKeyQuotaPlugin) HandleUsage(_ context.Context, record coreusage.R
 
 // ClientAPIKeyQuotaUsage is the quota-relevant usage already recorded for one API key.
 type ClientAPIKeyQuotaUsage struct {
-	DailyRequests   int64
-	MonthlyRequests int64
-	TotalRequests   int64
-	DailyTokens     int64
-	MonthlyTokens   int64
-	TotalTokens     int64
+	DailyCost   float64
+	MonthlyCost float64
+	TotalCost   float64
 }
 
 // ClientAPIKeyQuotaExceeded describes the first configured quota limit that has been reached.
 type ClientAPIKeyQuotaExceeded struct {
 	Scope    string
 	Resource string
-	Limit    int64
-	Used     int64
+	Limit    float64
+	Used     float64
 	ResetAt  time.Time
 }
 
@@ -55,15 +52,15 @@ func (e *ClientAPIKeyQuotaExceeded) RetryAfter(now time.Time) time.Duration {
 }
 
 type clientAPIKeyQuotaCounters struct {
-	requests int64
-	tokens   int64
+	cost float64
 }
 
 type clientAPIKeyQuotaTracker struct {
-	mu      sync.RWMutex
-	total   map[string]clientAPIKeyQuotaCounters
-	daily   map[string]map[string]clientAPIKeyQuotaCounters
-	monthly map[string]map[string]clientAPIKeyQuotaCounters
+	mu          sync.RWMutex
+	modelPrices config.ModelPrices
+	total       map[string]clientAPIKeyQuotaCounters
+	daily       map[string]map[string]clientAPIKeyQuotaCounters
+	monthly     map[string]map[string]clientAPIKeyQuotaCounters
 }
 
 var defaultClientAPIKeyQuotaTracker = newClientAPIKeyQuotaTracker()
@@ -81,6 +78,20 @@ func CheckClientAPIKeyQuota(apiKey string, quota config.ClientAPIKeyQuota, now t
 	return defaultClientAPIKeyQuotaTracker.check(apiKey, quota, now)
 }
 
+// SetClientAPIKeyQuotaModelPrices updates server-side model prices used for spend quotas.
+func SetClientAPIKeyQuotaModelPrices(prices config.ModelPrices) {
+	defaultClientAPIKeyQuotaTracker.setModelPrices(prices)
+}
+
+func (t *clientAPIKeyQuotaTracker) setModelPrices(prices config.ModelPrices) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.modelPrices = config.NormalizeModelPrices(config.CloneModelPrices(prices))
+}
+
 func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) {
 	if t == nil {
 		return
@@ -94,17 +105,18 @@ func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) {
 	if timestamp.IsZero() {
 		timestamp = time.Now().UTC()
 	}
-	tokens := normaliseDetail(record.Detail).TotalTokens
-	if tokens < 0 {
-		tokens = 0
-	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.addCountersLocked(t.total, apiKey, "", 1, tokens)
-	t.addCountersLocked(t.daily, apiKey, timestamp.Format("2006-01-02"), 1, tokens)
-	t.addCountersLocked(t.monthly, apiKey, timestamp.Format("2006-01"), 1, tokens)
+	cost := t.costForRecordLocked(record)
+	if cost <= 0 {
+		return
+	}
+
+	t.addCountersLocked(t.total, apiKey, "", cost)
+	t.addCountersLocked(t.daily, apiKey, timestamp.Format("2006-01-02"), cost)
+	t.addCountersLocked(t.monthly, apiKey, timestamp.Format("2006-01"), cost)
 	t.pruneLocked(timestamp)
 }
 
@@ -123,23 +135,14 @@ func (t *clientAPIKeyQuotaTracker) check(apiKey string, quota config.ClientAPIKe
 	}
 
 	usage := t.usage(apiKey, now)
-	if quota.TotalRequests > 0 && usage.TotalRequests >= quota.TotalRequests {
-		return &ClientAPIKeyQuotaExceeded{Scope: "total", Resource: "requests", Limit: quota.TotalRequests, Used: usage.TotalRequests}
+	if quota.TotalCost > 0 && usage.TotalCost >= quota.TotalCost {
+		return &ClientAPIKeyQuotaExceeded{Scope: "total", Resource: "cost", Limit: quota.TotalCost, Used: usage.TotalCost}
 	}
-	if quota.TotalTokens > 0 && usage.TotalTokens >= quota.TotalTokens {
-		return &ClientAPIKeyQuotaExceeded{Scope: "total", Resource: "tokens", Limit: quota.TotalTokens, Used: usage.TotalTokens}
+	if quota.MonthlyCost > 0 && usage.MonthlyCost >= quota.MonthlyCost {
+		return &ClientAPIKeyQuotaExceeded{Scope: "monthly", Resource: "cost", Limit: quota.MonthlyCost, Used: usage.MonthlyCost, ResetAt: nextMonthlyResetUTC(now)}
 	}
-	if quota.MonthlyRequests > 0 && usage.MonthlyRequests >= quota.MonthlyRequests {
-		return &ClientAPIKeyQuotaExceeded{Scope: "monthly", Resource: "requests", Limit: quota.MonthlyRequests, Used: usage.MonthlyRequests, ResetAt: nextMonthlyResetUTC(now)}
-	}
-	if quota.MonthlyTokens > 0 && usage.MonthlyTokens >= quota.MonthlyTokens {
-		return &ClientAPIKeyQuotaExceeded{Scope: "monthly", Resource: "tokens", Limit: quota.MonthlyTokens, Used: usage.MonthlyTokens, ResetAt: nextMonthlyResetUTC(now)}
-	}
-	if quota.DailyRequests > 0 && usage.DailyRequests >= quota.DailyRequests {
-		return &ClientAPIKeyQuotaExceeded{Scope: "daily", Resource: "requests", Limit: quota.DailyRequests, Used: usage.DailyRequests, ResetAt: nextDailyResetUTC(now)}
-	}
-	if quota.DailyTokens > 0 && usage.DailyTokens >= quota.DailyTokens {
-		return &ClientAPIKeyQuotaExceeded{Scope: "daily", Resource: "tokens", Limit: quota.DailyTokens, Used: usage.DailyTokens, ResetAt: nextDailyResetUTC(now)}
+	if quota.DailyCost > 0 && usage.DailyCost >= quota.DailyCost {
+		return &ClientAPIKeyQuotaExceeded{Scope: "daily", Resource: "cost", Limit: quota.DailyCost, Used: usage.DailyCost, ResetAt: nextDailyResetUTC(now)}
 	}
 	return nil
 }
@@ -160,12 +163,9 @@ func (t *clientAPIKeyQuotaTracker) usage(apiKey string, now time.Time) ClientAPI
 	daily := lookupClientAPIKeyQuotaCounters(t.daily, apiKey, now.Format("2006-01-02"))
 	monthly := lookupClientAPIKeyQuotaCounters(t.monthly, apiKey, now.Format("2006-01"))
 	return ClientAPIKeyQuotaUsage{
-		DailyRequests:   daily.requests,
-		MonthlyRequests: monthly.requests,
-		TotalRequests:   total.requests,
-		DailyTokens:     daily.tokens,
-		MonthlyTokens:   monthly.tokens,
-		TotalTokens:     total.tokens,
+		DailyCost:   daily.cost,
+		MonthlyCost: monthly.cost,
+		TotalCost:   total.cost,
 	}
 }
 
@@ -180,12 +180,11 @@ func lookupClientAPIKeyQuotaCounters(source map[string]map[string]clientAPIKeyQu
 	return buckets[bucket]
 }
 
-func (t *clientAPIKeyQuotaTracker) addCountersLocked(source any, apiKey, bucket string, requests, tokens int64) {
+func (t *clientAPIKeyQuotaTracker) addCountersLocked(source any, apiKey, bucket string, cost float64) {
 	switch typed := source.(type) {
 	case map[string]clientAPIKeyQuotaCounters:
 		current := typed[apiKey]
-		current.requests += requests
-		current.tokens += tokens
+		current.cost += cost
 		typed[apiKey] = current
 	case map[string]map[string]clientAPIKeyQuotaCounters:
 		buckets := typed[apiKey]
@@ -194,10 +193,55 @@ func (t *clientAPIKeyQuotaTracker) addCountersLocked(source any, apiKey, bucket 
 			typed[apiKey] = buckets
 		}
 		current := buckets[bucket]
-		current.requests += requests
-		current.tokens += tokens
+		current.cost += cost
 		buckets[bucket] = current
 	}
+}
+
+func (t *clientAPIKeyQuotaTracker) costForRecordLocked(record coreusage.Record) float64 {
+	if t == nil || len(t.modelPrices) == 0 {
+		return 0
+	}
+	price, ok := lookupClientAPIKeyQuotaModelPrice(t.modelPrices, record.Model, record.Alias)
+	if !ok {
+		return 0
+	}
+	detail := normaliseDetail(record.Detail)
+	cachedTokens := maxInt64(detail.CachedTokens, 0)
+	inputTokens := maxInt64(detail.InputTokens, 0)
+	outputTokens := maxInt64(detail.OutputTokens, 0)
+	promptTokens := inputTokens - cachedTokens
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	const tokensPerPriceUnit = 1_000_000
+	cost := (float64(promptTokens)/tokensPerPriceUnit)*price.Prompt +
+		(float64(cachedTokens)/tokensPerPriceUnit)*price.Cache +
+		(float64(outputTokens)/tokensPerPriceUnit)*price.Completion
+	if cost <= 0 {
+		return 0
+	}
+	return cost
+}
+
+func lookupClientAPIKeyQuotaModelPrice(prices config.ModelPrices, names ...string) (config.ModelPrice, bool) {
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if price, ok := prices[name]; ok {
+			return price, true
+		}
+	}
+	return config.ModelPrice{}, false
+}
+
+func maxInt64(value, minimum int64) int64 {
+	if value < minimum {
+		return minimum
+	}
+	return value
 }
 
 func (t *clientAPIKeyQuotaTracker) pruneLocked(reference time.Time) {

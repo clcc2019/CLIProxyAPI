@@ -312,24 +312,49 @@ func resolveReleaseURL(repo string) string {
 	}
 
 	host := strings.ToLower(parsed.Host)
-	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	pathParts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
 
 	if host == "api.github.com" {
-		if !strings.HasSuffix(strings.ToLower(parsed.Path), "/releases/latest") {
-			parsed.Path = parsed.Path + "/releases/latest"
-		}
-		return parsed.String()
+		return resolveGitHubAPIReleaseURL(pathParts)
 	}
 
 	if host == "github.com" {
-		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
-			repoName := strings.TrimSuffix(parts[1], ".git")
-			return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", parts[0], repoName)
-		}
+		return resolveGitHubReleasePageURL(pathParts)
 	}
 
 	return defaultManagementReleaseURL
+}
+
+func resolveGitHubAPIReleaseURL(parts []string) string {
+	if len(parts) < 3 || !strings.EqualFold(parts[0], "repos") || parts[1] == "" || parts[2] == "" {
+		return defaultManagementReleaseURL
+	}
+
+	repoName := strings.TrimSuffix(parts[2], ".git")
+	base := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", parts[1], repoName)
+	if len(parts) < 4 {
+		return base + "/latest"
+	}
+	if !strings.EqualFold(parts[3], "releases") {
+		return defaultManagementReleaseURL
+	}
+	if len(parts) >= 6 && strings.EqualFold(parts[4], "tags") && strings.TrimSpace(parts[5]) != "" {
+		return base + "/tags/" + parts[5]
+	}
+	return base + "/latest"
+}
+
+func resolveGitHubReleasePageURL(parts []string) string {
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return defaultManagementReleaseURL
+	}
+
+	repoName := strings.TrimSuffix(parts[1], ".git")
+	base := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", parts[0], repoName)
+	if len(parts) >= 5 && strings.EqualFold(parts[2], "releases") && strings.EqualFold(parts[3], "tag") && strings.TrimSpace(parts[4]) != "" {
+		return base + "/tags/" + parts[4]
+	}
+	return base + "/latest"
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {

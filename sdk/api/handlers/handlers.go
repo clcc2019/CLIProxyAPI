@@ -254,6 +254,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return meta
 }
 
+func requestHeadersFromContext(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.Header == nil {
+		return nil
+	}
+	return ginCtx.Request.Header.Clone()
+}
+
 func pinnedAuthIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -656,6 +667,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
+		Headers:         requestHeadersFromContext(ctx),
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
@@ -712,6 +724,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
+		Headers:         requestHeadersFromContext(ctx),
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
@@ -775,6 +788,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
+		Headers:         requestHeadersFromContext(ctx),
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
