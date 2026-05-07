@@ -69,6 +69,8 @@ var codexAllowedCompactFinalUpstreamFields = map[string]struct{}{
 	"tools":               {},
 	"parallel_tool_calls": {},
 	"reasoning":           {},
+	"service_tier":        {},
+	"prompt_cache_key":    {},
 	"text":                {},
 }
 

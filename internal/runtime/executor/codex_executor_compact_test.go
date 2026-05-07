@@ -100,6 +100,7 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 			"stream":true,
 			"tool_choice":"required",
 			"include":["reasoning.encrypted_content"],
+			"service_tier":"flex",
 			"prompt_cache_key":"pc-1",
 			"previous_response_id":"resp_1",
 			"client_metadata":{"x-codex-installation-id":"install-1"}
@@ -113,10 +114,16 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	for _, field := range []string{"store", "stream", "tool_choice", "include", "prompt_cache_key", "client_metadata"} {
+	for _, field := range []string{"store", "stream", "tool_choice", "include", "client_metadata"} {
 		if gjson.GetBytes(gotBody, field).Exists() {
 			t.Fatalf("%s should not be sent to responses/compact: %s", field, gotBody)
 		}
+	}
+	if got := gjson.GetBytes(gotBody, "prompt_cache_key").String(); got != "pc-1" {
+		t.Fatalf("prompt_cache_key = %q, want pc-1; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "flex" {
+		t.Fatalf("service_tier = %q, want flex; body=%s", got, gotBody)
 	}
 	if got := gjson.GetBytes(gotBody, "tools").IsArray(); !got {
 		t.Fatalf("tools should default to an empty array for compact: %s", gotBody)

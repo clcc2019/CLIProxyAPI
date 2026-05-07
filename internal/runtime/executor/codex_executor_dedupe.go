@@ -70,7 +70,7 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 	cache := resolution.cache
 	body := rawJSON
 	isCompact := strings.HasSuffix(strings.TrimSuffix(url, "/"), "/responses/compact")
-	if cache.ID != "" && !isCompact {
+	if cache.ID != "" {
 		body = codexSetPromptCacheKey(body, cache.ID)
 	}
 

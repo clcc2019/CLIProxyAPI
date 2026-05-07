@@ -337,9 +337,22 @@ func TestCodexExecutorCacheHelper_CompactUsesCallerProvidedPromptCacheKeyAsSessi
 	payload := []byte(`{"model":"gpt-5","prompt_cache_key":"caller-owned-id","input":"hello"}`)
 	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
 
-	got := assertPreparedSessionID(t, executor, ctx, "openai-response", "https://example.com/responses/compact", req, payload)
-	if got != "caller-owned-id" {
+	httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), "https://example.com/responses/compact", req, payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "caller-owned-id" {
+		t.Fatalf("prompt_cache_key = %q, want caller-owned-id; body=%s", got, body)
+	}
+	if got := httpReq.Header.Get(codexHeaderSessionID); got != "caller-owned-id" {
 		t.Fatalf("Session_id = %q, want %q", got, "caller-owned-id")
+	}
+	if got := httpReq.Header.Get(codexHeaderThreadID); got != "caller-owned-id" {
+		t.Fatalf("Thread_id = %q, want %q", got, "caller-owned-id")
 	}
 }
 
