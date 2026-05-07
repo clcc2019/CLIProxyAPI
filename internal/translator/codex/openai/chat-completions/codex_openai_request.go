@@ -58,7 +58,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				out.Input = append(out.Input, codexFunctionCallOutput{
 					Type:   "function_call_output",
 					CallID: m.Get("tool_call_id").String(),
-					Output: m.Get("content").String(),
+					Output: codexToolOutputValue(m.Get("content")),
 				})
 				continue
 			}
@@ -204,11 +204,15 @@ type codexTextContent struct {
 type codexImageContent struct {
 	Type     string `json:"type"`
 	ImageURL string `json:"image_url,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 type codexFileContent struct {
 	Type     string `json:"type"`
-	FileData string `json:"file_data"`
+	FileID   string `json:"file_id,omitempty"`
+	FileData string `json:"file_data,omitempty"`
+	FileURL  string `json:"file_url,omitempty"`
 	Filename string `json:"filename,omitempty"`
 }
 
@@ -222,7 +226,7 @@ type codexFunctionCall struct {
 type codexFunctionCallOutput struct {
 	Type   string `json:"type"`
 	CallID string `json:"call_id"`
-	Output string `json:"output"`
+	Output any    `json:"output"`
 }
 
 type codexTool struct {
@@ -323,6 +327,75 @@ func appendCodexMessageContent(parts *[]any, role string, content gjson.Result) 
 				Filename: it.Get("file.filename").String(),
 			})
 		}
+	}
+}
+
+func codexToolOutputValue(content gjson.Result) any {
+	if !content.Exists() {
+		return ""
+	}
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.Type == gjson.Null {
+		return content.Raw
+	}
+	if !content.IsArray() {
+		if content.Raw == "" {
+			return content.String()
+		}
+		return json.RawMessage(content.Raw)
+	}
+
+	items := content.Array()
+	parts := make([]any, 0, len(items))
+	for i := 0; i < len(items); i++ {
+		if part, ok := codexToolOutputPart(items[i]); ok {
+			parts = append(parts, part)
+			continue
+		}
+		parts = append(parts, codexTextContent{
+			Type: "input_text",
+			Text: items[i].Raw,
+		})
+	}
+	return parts
+}
+
+func codexToolOutputPart(item gjson.Result) (any, bool) {
+	switch item.Get("type").String() {
+	case "text":
+		return codexTextContent{
+			Type: "input_text",
+			Text: item.Get("text").String(),
+		}, true
+	case "image_url":
+		image := item.Get("image_url")
+		out := codexImageContent{
+			Type:     "input_image",
+			ImageURL: image.Get("url").String(),
+			FileID:   image.Get("file_id").String(),
+			Detail:   image.Get("detail").String(),
+		}
+		if out.ImageURL == "" && out.FileID == "" {
+			return nil, false
+		}
+		return out, true
+	case "file":
+		file := item.Get("file")
+		out := codexFileContent{
+			Type:     "input_file",
+			FileID:   file.Get("file_id").String(),
+			FileData: file.Get("file_data").String(),
+			FileURL:  file.Get("file_url").String(),
+			Filename: file.Get("filename").String(),
+		}
+		if out.FileID == "" && out.FileData == "" && out.FileURL == "" {
+			return nil, false
+		}
+		return out, true
+	default:
+		return nil, false
 	}
 }
 

@@ -2052,7 +2052,11 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		return
 	}
 
-	loadReqBody := `{"metadata":{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}`
+	loadUserAgent := misc.AntigravityLoadCodeAssistUserAgent(resolveUserAgent(auth))
+	loadReqBody := fmt.Sprintf(
+		`{"metadata":{"ide_name":"antigravity","ide_type":"ANTIGRAVITY","ide_version":%q}}`,
+		misc.AntigravityVersionFromUserAgent(loadUserAgent),
+	)
 	endpointURL := "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(loadReqBody))
 	if errReq != nil {
@@ -2061,7 +2065,8 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
+	httpReq.Header.Set("User-Agent", loadUserAgent)
+	httpReq.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)

@@ -6,6 +6,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/signal"
 	"syscall"
 	"time"
@@ -24,7 +25,7 @@ import (
 //   - cfg: The application configuration
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
-func StartService(cfg *config.Config, configPath string, localPassword string) {
+func StartService(cfg *config.Config, configPath string, localPassword string) error {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -45,14 +46,14 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 	service, err := builder.Build()
 	if err != nil {
-		log.Errorf("failed to build proxy service: %v", err)
-		return
+		return fmt.Errorf("failed to build proxy service: %w", err)
 	}
 
 	err = service.Run(runCtx)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("proxy service exited with error: %v", err)
+		return fmt.Errorf("proxy service exited with error: %w", err)
 	}
+	return nil
 }
 
 // StartServiceBackground starts the proxy service in a background goroutine

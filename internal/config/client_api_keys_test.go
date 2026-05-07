@@ -49,7 +49,12 @@ api-keys:
 func TestClientAPIKeysMarshalYAMLPreservesLegacyShape(t *testing.T) {
 	keys := ClientAPIKeys{
 		{APIKey: "key-a"},
-		{APIKey: "key-b", AllowedModels: []string{"gpt-5-*"}, ExcludedModels: []string{"*-mini"}},
+		{
+			APIKey:         "key-b",
+			AllowedModels:  []string{"gpt-5-*"},
+			ExcludedModels: []string{"*-mini"},
+			Quota:          ClientAPIKeyQuota{DailyTokens: 1000, MonthlyRequests: 50},
+		},
 	}
 
 	serialized, err := keys.MarshalYAML()
@@ -80,6 +85,13 @@ func TestClientAPIKeysMarshalYAMLPreservesLegacyShape(t *testing.T) {
 	if !reflect.DeepEqual(second["excluded-models"], []string{"*-mini"}) {
 		t.Fatalf("unexpected excluded-models: %#v", second["excluded-models"])
 	}
+	quota, ok := second["quota"].(ClientAPIKeyQuota)
+	if !ok {
+		t.Fatalf("expected quota to be ClientAPIKeyQuota, got %T", second["quota"])
+	}
+	if quota.DailyTokens != 1000 || quota.MonthlyRequests != 50 {
+		t.Fatalf("unexpected quota: %#v", quota)
+	}
 }
 
 func TestClientAPIKeysUnmarshalJSONCompatibility(t *testing.T) {
@@ -101,6 +113,72 @@ func TestClientAPIKeysUnmarshalJSONCompatibility(t *testing.T) {
 		{APIKey: "key-a"},
 		{APIKey: "key-b", AllowedModels: []string{"gpt-5-*"}, ExcludedModels: []string{"*-mini"}},
 	}
+	if !reflect.DeepEqual(parsed, want) {
+		t.Fatalf("unexpected api keys: %#v", parsed)
+	}
+}
+
+func TestClientAPIKeysQuotaCompatibility(t *testing.T) {
+	type payload struct {
+		APIKeys ClientAPIKeys `yaml:"api-keys"`
+	}
+
+	input := `
+api-keys:
+  - api-key: "quota-key"
+    quota:
+      daily-tokens: 100
+      monthly-requests: 50
+      total-tokens: -1
+  - api-key: "quota-key"
+    quota:
+      daily-tokens: 90
+      total-tokens: 1000
+`
+
+	var parsed payload
+	if err := yaml.Unmarshal([]byte(input), &parsed); err != nil {
+		t.Fatalf("yaml unmarshal failed: %v", err)
+	}
+
+	want := ClientAPIKeys{{
+		APIKey: "quota-key",
+		Quota: ClientAPIKeyQuota{
+			DailyTokens:     90,
+			MonthlyRequests: 50,
+			TotalTokens:     1000,
+		},
+	}}
+	if !reflect.DeepEqual(parsed.APIKeys, want) {
+		t.Fatalf("unexpected api keys: %#v", parsed.APIKeys)
+	}
+}
+
+func TestClientAPIKeysQuotaJSONAliases(t *testing.T) {
+	input := []byte(`[
+		{
+			"api-key": "quota-key",
+			"quota": {
+				"dailyTokens": 100,
+				"monthly-token-limit": "200",
+				"totalRequests": 300
+			}
+		}
+	]`)
+
+	var parsed ClientAPIKeys
+	if err := json.Unmarshal(input, &parsed); err != nil {
+		t.Fatalf("json unmarshal failed: %v", err)
+	}
+
+	want := ClientAPIKeys{{
+		APIKey: "quota-key",
+		Quota: ClientAPIKeyQuota{
+			DailyTokens:   100,
+			MonthlyTokens: 200,
+			TotalRequests: 300,
+		},
+	}}
 	if !reflect.DeepEqual(parsed, want) {
 		t.Fatalf("unexpected api keys: %#v", parsed)
 	}

@@ -1204,6 +1204,9 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
+				if enforceClientAPIKeyQuota(c, result) {
+					return
+				}
 			}
 			c.Next()
 			return
@@ -1215,6 +1218,53 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+func enforceClientAPIKeyQuota(c *gin.Context, result *sdkaccess.Result) bool {
+	if c == nil || result == nil {
+		return false
+	}
+	quota := config.ClientAPIKeyQuotaFromMetadata(result.Metadata)
+	if !quota.HasLimits() {
+		return false
+	}
+	now := time.Now().UTC()
+	exceeded := usage.CheckClientAPIKeyQuota(result.Principal, quota, now)
+	if exceeded == nil {
+		return false
+	}
+
+	if retryAfter := exceeded.RetryAfter(now); retryAfter > 0 {
+		c.Header("Retry-After", fmt.Sprintf("%d", retryAfterHeaderSeconds(retryAfter)))
+	}
+	payload := gin.H{
+		"scope":    exceeded.Scope,
+		"resource": exceeded.Resource,
+		"limit":    exceeded.Limit,
+		"used":     exceeded.Used,
+	}
+	if !exceeded.ResetAt.IsZero() {
+		payload["reset_at"] = exceeded.ResetAt.Format(time.RFC3339)
+	}
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+		"error": "api key quota exceeded",
+		"quota": payload,
+	})
+	return true
+}
+
+func retryAfterHeaderSeconds(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	seconds := duration / time.Second
+	if duration%time.Second != 0 {
+		seconds++
+	}
+	if seconds <= 0 {
+		return 1
+	}
+	return int64(seconds)
 }
 
 func configuredSignatureCacheEnabled(cfg *config.Config) bool {

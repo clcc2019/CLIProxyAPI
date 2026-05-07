@@ -13,12 +13,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -30,6 +32,7 @@ type responsesSSEFramer struct {
 	pending      []byte
 	noticeFilter *responsesNoticeFilter
 	trustedData  bool
+	repairState  responsesCompletedOutputRepairState
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) bool {
@@ -37,7 +40,7 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) bool {
 		return false
 	}
 	if len(f.pending) == 0 && responsesSSECanWriteDirect(chunk, f.trustedData, f.noticeFilter) {
-		return writeResponsesSSEChunk(w, chunk)
+		return writeResponsesSSEChunk(w, f.processFrame(chunk))
 	}
 	if responsesSSENeedsLineBreak(f.pending, chunk) {
 		f.pending = append(f.pending, '\n')
@@ -50,9 +53,7 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) bool {
 			break
 		}
 		frame := f.pending[:frameLen]
-		if f.noticeFilter != nil {
-			frame = f.noticeFilter.FilterSSEFrame(frame)
-		}
+		frame = f.processFrame(frame)
 		wrote = writeResponsesSSEChunk(w, frame) || wrote
 		copy(f.pending, f.pending[frameLen:])
 		f.pending = f.pending[:len(f.pending)-frameLen]
@@ -65,9 +66,7 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) bool {
 		return wrote
 	}
 	frame := f.pending
-	if f.noticeFilter != nil {
-		frame = f.noticeFilter.FilterSSEFrame(frame)
-	}
+	frame = f.processFrame(frame)
 	wrote = writeResponsesSSEChunk(w, frame) || wrote
 	f.pending = f.pending[:0]
 	return wrote
@@ -86,12 +85,144 @@ func (f *responsesSSEFramer) Flush(w io.Writer) bool {
 		return false
 	}
 	frame := f.pending
-	if f.noticeFilter != nil {
-		frame = f.noticeFilter.FilterSSEFrame(frame)
-	}
+	frame = f.processFrame(frame)
 	wrote := writeResponsesSSEChunk(w, frame)
 	f.pending = f.pending[:0]
 	return wrote
+}
+
+func (f *responsesSSEFramer) processFrame(frame []byte) []byte {
+	if len(frame) == 0 {
+		return frame
+	}
+	if f.noticeFilter != nil {
+		frame = f.noticeFilter.FilterSSEFrame(frame)
+	}
+	if len(frame) == 0 {
+		return frame
+	}
+	return f.repairState.PatchFrame(frame)
+}
+
+type responsesCompletedOutputRepairState struct {
+	outputItemsByIndex  map[int64]json.RawMessage
+	outputItemsFallback []json.RawMessage
+}
+
+func (s *responsesCompletedOutputRepairState) PatchFrame(frame []byte) []byte {
+	payload, ok := responsesSSEDataPayload(frame)
+	if !ok || !json.Valid(payload) {
+		return frame
+	}
+
+	switch gjson.GetBytes(payload, "type").String() {
+	case "response.output_item.done":
+		s.recordOutputItem(payload)
+		return frame
+	case "response.completed":
+		patched := s.patchCompletedPayload(payload)
+		if bytes.Equal(patched, payload) {
+			return frame
+		}
+		return responsesSSEFrameWithDataPayload(frame, patched)
+	default:
+		return frame
+	}
+}
+
+func (s *responsesCompletedOutputRepairState) recordOutputItem(payload []byte) {
+	item := gjson.GetBytes(payload, "item")
+	if !item.Exists() || !item.IsObject() {
+		return
+	}
+	itemJSON := json.RawMessage(item.Raw)
+	outputIndex := gjson.GetBytes(payload, "output_index")
+	if outputIndex.Exists() {
+		if s.outputItemsByIndex == nil {
+			s.outputItemsByIndex = make(map[int64]json.RawMessage)
+		}
+		s.outputItemsByIndex[outputIndex.Int()] = itemJSON
+		return
+	}
+	s.outputItemsFallback = append(s.outputItemsFallback, itemJSON)
+}
+
+func (s *responsesCompletedOutputRepairState) patchCompletedPayload(payload []byte) []byte {
+	output := gjson.GetBytes(payload, "response.output")
+	if !output.Exists() || !output.IsArray() || len(output.Array()) != 0 {
+		return payload
+	}
+
+	items := s.outputItems()
+	if len(items) == 0 {
+		return payload
+	}
+
+	rawItems, err := json.Marshal(items)
+	if err != nil {
+		return payload
+	}
+	patched, err := sjson.SetRawBytes(payload, "response.output", rawItems)
+	if err != nil {
+		return payload
+	}
+	return patched
+}
+
+func (s *responsesCompletedOutputRepairState) outputItems() []json.RawMessage {
+	total := len(s.outputItemsFallback)
+	if s.outputItemsByIndex != nil {
+		total += len(s.outputItemsByIndex)
+	}
+	if total == 0 {
+		return nil
+	}
+
+	items := make([]json.RawMessage, 0, total)
+	if len(s.outputItemsByIndex) > 0 {
+		indexes := make([]int64, 0, len(s.outputItemsByIndex))
+		for index := range s.outputItemsByIndex {
+			indexes = append(indexes, index)
+		}
+		sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
+		for _, index := range indexes {
+			items = append(items, s.outputItemsByIndex[index])
+		}
+	}
+	items = append(items, s.outputItemsFallback...)
+	return items
+}
+
+func responsesSSEFrameWithDataPayload(frame, payload []byte) []byte {
+	lines := bytes.Split(bytes.TrimRight(frame, "\r\n"), []byte("\n"))
+	out := make([][]byte, 0, len(lines)+1)
+	dataWritten := false
+	for _, line := range lines {
+		line = bytes.TrimRight(line, "\r")
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("data:")) {
+			if !dataWritten {
+				out = appendResponsesSSEDataLines(out, payload)
+				dataWritten = true
+			}
+			continue
+		}
+		if len(line) > 0 {
+			out = append(out, line)
+		}
+	}
+	if !dataWritten {
+		out = appendResponsesSSEDataLines(out, payload)
+	}
+	return append(bytes.Join(out, []byte("\n")), '\n', '\n')
+}
+
+func appendResponsesSSEDataLines(out [][]byte, payload []byte) [][]byte {
+	payloadLines := bytes.Split(payload, []byte("\n"))
+	for _, line := range payloadLines {
+		out = append(out, append([]byte("data: "), line...))
+	}
+	return out
 }
 
 func responsesSSEFrameLen(chunk []byte) int {

@@ -191,15 +191,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
-	oauthToolNamesRemapped := false
-	if oauthToken && !auth.ToolPrefixDisabled() {
-		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
-	}
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
 	// fingerprinting the request as third-party via tool naming patterns.
+	var oauthToolReverseMap map[string]string
 	if oauthToken {
-		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
+		bodyForUpstream, oauthToolReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
@@ -283,6 +280,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if strings.Contains(strings.ToLower(httpResp.Header.Get("Content-Type")), "text/event-stream") {
+		if err := validateClaudeAggregatedStream(data); err != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
+	}
 	if stream {
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
@@ -293,12 +296,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
-	}
 	// Reverse the OAuth tool name remap so the downstream client sees original names.
-	if isClaudeOAuthToken(apiKey) && oauthToolNamesRemapped {
-		data = reverseRemapOAuthToolNames(data)
+	if isClaudeOAuthToken(apiKey) {
+		data = restoreClaudeOAuthToolNamesFromResponse(data, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolReverseMap)
 	}
 	var param any
 	out := sdktranslator.TranslateNonStream(
@@ -373,15 +373,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
-	oauthToolNamesRemapped := false
-	if oauthToken && !auth.ToolPrefixDisabled() {
-		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
-	}
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
 	// fingerprinting the request as third-party via tool naming patterns.
+	var oauthToolReverseMap map[string]string
 	if oauthToken {
-		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
+		bodyForUpstream, oauthToolReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -469,11 +466,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}
-				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-				}
-				if isClaudeOAuthToken(apiKey) && oauthToolNamesRemapped {
-					line = reverseRemapOAuthToolNamesFromStreamLine(line)
+				if isClaudeOAuthToken(apiKey) {
+					line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolReverseMap)
 				}
 				// Forward the line as-is to preserve SSE format
 				line = append(line, '\n')
@@ -495,11 +489,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-			}
-			if isClaudeOAuthToken(apiKey) && oauthToolNamesRemapped {
-				line = reverseRemapOAuthToolNamesFromStreamLine(line)
+			if isClaudeOAuthToken(apiKey) {
+				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolReverseMap)
 			}
 			chunks := sdktranslator.TranslateStream(
 				ctx,
@@ -551,12 +542,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-		body = applyClaudeToolPrefix(body, claudeToolPrefix)
-	}
 	// Remap tool names for OAuth token requests to avoid third-party fingerprinting.
 	if isClaudeOAuthToken(apiKey) {
-		body, _ = remapOAuthToolNames(body)
+		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -729,6 +717,52 @@ func normalizeClaudeTemperatureForThinking(body []byte) []byte {
 		body, _ = sjson.SetBytes(body, "temperature", 1)
 	}
 	return body
+}
+
+func validateClaudeAggregatedStream(data []byte) error {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return statusErr{code: http.StatusBadGateway, msg: "empty stream response"}
+	}
+
+	seenEvent := false
+	seenMessageStart := false
+	seenMessageStop := false
+	seenCompletionDelta := false
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		payload := helps.JSONPayload(line)
+		if len(payload) == 0 || !gjson.ValidBytes(payload) {
+			continue
+		}
+		seenEvent = true
+		root := gjson.ParseBytes(payload)
+		switch root.Get("type").String() {
+		case "error":
+			msg := strings.TrimSpace(root.Get("error.message").String())
+			if msg == "" {
+				msg = strings.TrimSpace(root.Get("message").String())
+			}
+			if msg == "" {
+				msg = "upstream Claude stream error"
+			}
+			return statusErr{code: http.StatusBadGateway, msg: msg}
+		case "message_start":
+			seenMessageStart = true
+		case "message_delta":
+			if root.Get("delta.stop_reason").Exists() {
+				seenCompletionDelta = true
+			}
+		case "message_stop":
+			seenMessageStop = true
+		}
+	}
+
+	if !seenEvent {
+		return nil
+	}
+	if seenMessageStart && (!seenMessageStop || !seenCompletionDelta) {
+		return statusErr{code: http.StatusBadGateway, msg: "Claude stream ended before message completion"}
+	}
+	return nil
 }
 
 type compositeReadCloser struct {
@@ -1003,8 +1037,8 @@ func isClaudeOAuthToken(apiKey string) bool {
 // It operates on: tools[].name, tool_choice.name, and all tool_use/tool_reference
 // references in messages. Removed tools' corresponding tool_result blocks are preserved
 // (they just become orphaned, which is safe for Claude).
-func remapOAuthToolNames(body []byte) ([]byte, bool) {
-	renamed := false
+func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
+	reverseMap := make(map[string]string)
 	// 1. Rewrite tools array in a single pass (if present).
 	// IMPORTANT: do not mutate names first and then rebuild from an older gjson
 	// snapshot. gjson results are snapshots of the original bytes; rebuilding from a
@@ -1037,7 +1071,7 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 				updatedTool, err := sjson.Set(toolJSON, "name", newName)
 				if err == nil {
 					toolJSON = updatedTool
-					renamed = true
+					recordOAuthToolReverseMap(reverseMap, name, newName)
 				}
 			}
 
@@ -1062,7 +1096,7 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
 		} else if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
-			renamed = true
+			recordOAuthToolReverseMap(reverseMap, tcName, newName)
 		}
 	}
 
@@ -1082,14 +1116,14 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 					if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
-						renamed = true
+						recordOAuthToolReverseMap(reverseMap, name, newName)
 					}
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
 					if newName, ok := oauthToolRenameMap[toolName]; ok && newName != toolName {
 						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
-						renamed = true
+						recordOAuthToolReverseMap(reverseMap, toolName, newName)
 					}
 				case "tool_result":
 					// Handle nested tool_reference blocks inside tool_result.content[]
@@ -1103,7 +1137,7 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 								if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, newName)
-									renamed = true
+									recordOAuthToolReverseMap(reverseMap, nestedToolName, newName)
 								}
 							}
 							return true
@@ -1116,13 +1150,45 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 		})
 	}
 
-	return body, renamed
+	return body, reverseMap
 }
 
-// reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses.
-// It maps Claude Code TitleCase names back to the original lowercase names so the
-// downstream client receives tool names it recognizes.
-func reverseRemapOAuthToolNames(body []byte) []byte {
+func recordOAuthToolReverseMap(reverseMap map[string]string, originalName, upstreamName string) {
+	if reverseMap == nil || originalName == "" || upstreamName == "" || originalName == upstreamName {
+		return
+	}
+	reverseMap[upstreamName] = originalName
+}
+
+func prepareClaudeOAuthToolNamesForUpstream(body []byte, prefix string, prefixDisabled bool) ([]byte, map[string]string) {
+	body, reverseMap := remapOAuthToolNames(body)
+	if !prefixDisabled {
+		body = applyClaudeToolPrefix(body, prefix)
+	}
+	return body, reverseMap
+}
+
+func restoreClaudeOAuthToolNamesFromResponse(body []byte, prefix string, prefixDisabled bool, reverseMap map[string]string) []byte {
+	if !prefixDisabled {
+		body = stripClaudeToolPrefixFromResponse(body, prefix)
+	}
+	return reverseRemapOAuthToolNames(body, reverseMap)
+}
+
+func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, prefix string, prefixDisabled bool, reverseMap map[string]string) []byte {
+	if !prefixDisabled {
+		line = stripClaudeToolPrefixFromStreamLine(line, prefix)
+	}
+	return reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+}
+
+// reverseRemapOAuthToolNames reverses only the tool names renamed for this
+// request. Using the global inverse map corrupts clients that already sent
+// Claude Code TitleCase names such as "Bash".
+func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) []byte {
+	if len(reverseMap) == 0 {
+		return body
+	}
 	content := gjson.GetBytes(body, "content")
 	if !content.Exists() || !content.IsArray() {
 		return body
@@ -1132,13 +1198,13 @@ func reverseRemapOAuthToolNames(body []byte) []byte {
 		switch partType {
 		case "tool_use":
 			name := part.Get("name").String()
-			if origName, ok := oauthToolRenameReverseMap[name]; ok {
+			if origName, ok := reverseMap[name]; ok {
 				path := fmt.Sprintf("content.%d.name", index.Int())
 				body, _ = sjson.SetBytes(body, path, origName)
 			}
 		case "tool_reference":
 			toolName := part.Get("tool_name").String()
-			if origName, ok := oauthToolRenameReverseMap[toolName]; ok {
+			if origName, ok := reverseMap[toolName]; ok {
 				path := fmt.Sprintf("content.%d.tool_name", index.Int())
 				body, _ = sjson.SetBytes(body, path, origName)
 			}
@@ -1149,7 +1215,10 @@ func reverseRemapOAuthToolNames(body []byte) []byte {
 }
 
 // reverseRemapOAuthToolNamesFromStreamLine reverses the tool name mapping for SSE stream lines.
-func reverseRemapOAuthToolNamesFromStreamLine(line []byte) []byte {
+func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string]string) []byte {
+	if len(reverseMap) == 0 {
+		return line
+	}
 	payload := helps.JSONPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return line
@@ -1167,7 +1236,7 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte) []byte {
 	switch blockType {
 	case "tool_use":
 		name := contentBlock.Get("name").String()
-		if origName, ok := oauthToolRenameReverseMap[name]; ok {
+		if origName, ok := reverseMap[name]; ok {
 			updated, err = sjson.SetBytes(payload, "content_block.name", origName)
 			if err != nil {
 				return line
@@ -1177,7 +1246,7 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte) []byte {
 		}
 	case "tool_reference":
 		toolName := contentBlock.Get("tool_name").String()
-		if origName, ok := oauthToolRenameReverseMap[toolName]; ok {
+		if origName, ok := reverseMap[toolName]; ok {
 			updated, err = sjson.SetBytes(payload, "content_block.tool_name", origName)
 			if err != nil {
 				return line

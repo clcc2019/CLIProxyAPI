@@ -102,6 +102,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			if len(entry.ExcludedModels) > 0 {
 				meta["excluded_models"] = strings.Join(entry.ExcludedModels, ",")
 			}
+			internalconfig.AddClientAPIKeyQuotaMetadata(meta, entry.Quota)
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,

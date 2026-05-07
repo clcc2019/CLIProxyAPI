@@ -67,7 +67,16 @@ In the CLI server and `sdk/cliproxy`, this provider is registered automatically 
 api-keys:
   - sk-test-123
   - sk-prod-456
+  - api-key: sk-limited-789
+    allowed-models: ["gpt-*"]
+    quota:
+      daily-requests: 1000
+      monthly-requests: 30000
+      daily-tokens: 100000
+      monthly-tokens: 3000000
 ```
+
+`quota` supports `daily`, `monthly`, and `total` windows for `requests` and `tokens`. Windows are evaluated in UTC. Token quotas are checked against completed usage records, so in-flight token usage is not pre-reserved.
 
 ## Loading Providers from External Go Modules
 

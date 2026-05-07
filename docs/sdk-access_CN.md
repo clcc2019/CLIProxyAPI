@@ -67,7 +67,16 @@ default:
 api-keys:
   - sk-test-123
   - sk-prod-456
+  - api-key: sk-limited-789
+    allowed-models: ["gpt-*"]
+    quota:
+      daily-requests: 1000
+      monthly-requests: 30000
+      daily-tokens: 100000
+      monthly-tokens: 3000000
 ```
+
+`quota` 支持 `daily/monthly/total` 三类窗口，资源类型为 `requests` 和 `tokens`。窗口按 UTC 计算；token 额度基于已完成并写入 usage 的请求判断，因此不会预扣正在并发执行的 token。
 
 ## 引入外部 Go 模块提供者
 

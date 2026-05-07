@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
@@ -29,10 +30,13 @@ func main() {
 	state, err := prepareStartup(flags)
 	if err != nil {
 		log.Errorf("startup failed: %v", err)
-		return
+		os.Exit(1)
 	}
 
-	dispatchCommand(flags, state)
+	if err := dispatchCommand(flags, state); err != nil {
+		log.Errorf("runtime failed: %v", err)
+		os.Exit(1)
+	}
 }
 
 func printVersion() {

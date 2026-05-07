@@ -126,7 +126,7 @@ func detectConfigReady(cloudDeploy bool, configFilePath string, cfg *config.Conf
 	return true
 }
 
-func dispatchCommand(flags runtimeFlags, state startupState) {
+func dispatchCommand(flags runtimeFlags, state startupState) error {
 	switch {
 	case flags.vertexImport != "":
 		cmd.DoVertexImport(state.cfg, flags.vertexImport, flags.vertexImportPrefix)
@@ -143,34 +143,35 @@ func dispatchCommand(flags runtimeFlags, state startupState) {
 	case flags.kimiLogin:
 		cmd.DoKimiLogin(state.cfg, state.loginOptions)
 	default:
-		runApplication(flags, state)
+		return runApplication(flags, state)
 	}
+	return nil
 }
 
-func runApplication(flags runtimeFlags, state startupState) {
+func runApplication(flags runtimeFlags, state startupState) error {
 	if state.cloudDeploy && !state.configReady {
 		cmd.WaitForCloudDeploy()
-		return
+		return nil
 	}
 	if flags.localModel && (!flags.tuiMode || flags.standalone) {
 		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 	}
 	if flags.tuiMode {
-		runTUI(flags, state)
-		return
+		return runTUI(flags, state)
 	}
 	startSupportServices(state.configFilePath, flags.localModel)
-	cmd.StartService(state.cfg, state.configFilePath, flags.password)
+	return cmd.StartService(state.cfg, state.configFilePath, flags.password)
 }
 
-func runTUI(flags runtimeFlags, state startupState) {
+func runTUI(flags runtimeFlags, state startupState) error {
 	if flags.standalone {
-		runStandaloneTUI(state, flags.password, flags.localModel)
-		return
+		return runStandaloneTUI(state, flags.password, flags.localModel)
 	}
 	if err := tui.Run(state.cfg.Port, flags.password, nil, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		return err
 	}
+	return nil
 }
 
 func startSupportServices(configFilePath string, localModel bool) {
@@ -181,7 +182,7 @@ func startSupportServices(configFilePath string, localModel bool) {
 	}
 }
 
-func runStandaloneTUI(state startupState, password string, localModel bool) {
+func runStandaloneTUI(state startupState, password string, localModel bool) error {
 	startSupportServices(state.configFilePath, localModel)
 
 	hook := tui.NewLogHook(2000)
@@ -202,8 +203,7 @@ func runStandaloneTUI(state startupState, password string, localModel bool) {
 		}
 		cancel()
 		<-done
-		fmt.Fprintf(os.Stderr, "TUI error: embedded server is not ready\n")
-		return
+		return fmt.Errorf("embedded server is not ready")
 	}
 
 	runErr := tui.Run(state.cfg.Port, password, hook, ioState.output())
@@ -216,6 +216,7 @@ func runStandaloneTUI(state startupState, password string, localModel bool) {
 
 	cancel()
 	<-done
+	return runErr
 }
 
 func suppressProcessIO() (*ioState, error) {
