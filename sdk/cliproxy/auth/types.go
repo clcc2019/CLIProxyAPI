@@ -142,6 +142,8 @@ type AuthRuntimeState struct {
 	UpdatedAt      time.Time              `json:"updated_at,omitempty"`
 }
 
+const runtimeStateMetadataKey = "cliproxy_runtime_state"
+
 // QuotaState contains limiter tracking data for a credential.
 type QuotaState struct {
 	// Exceeded indicates the credential recently hit a quota error.
@@ -255,6 +257,77 @@ func (a *Auth) RuntimeStateSnapshot() AuthRuntimeState {
 		ModelStates:    cloneModelStates(a.ModelStates),
 		UpdatedAt:      a.UpdatedAt,
 	}
+}
+
+func (a *Auth) SetRuntimeStateMetadata() {
+	if a == nil {
+		return
+	}
+	state := a.RuntimeStateSnapshot()
+	if !runtimeStateHasPersistentContent(state) {
+		if a.Metadata != nil {
+			delete(a.Metadata, runtimeStateMetadataKey)
+		}
+		return
+	}
+	if a.Metadata == nil {
+		a.Metadata = make(map[string]any)
+	}
+	a.Metadata[runtimeStateMetadataKey] = state
+}
+
+func (a *Auth) ApplyRuntimeStateFromMetadata() bool {
+	state, ok := a.runtimeStateFromMetadata()
+	if !ok {
+		return false
+	}
+	a.ApplyRuntimeState(state)
+	return true
+}
+
+func (a *Auth) runtimeStateFromMetadata() (AuthRuntimeState, bool) {
+	if a == nil || len(a.Metadata) == 0 {
+		return AuthRuntimeState{}, false
+	}
+	raw, ok := a.Metadata[runtimeStateMetadataKey]
+	if !ok || raw == nil {
+		return AuthRuntimeState{}, false
+	}
+	switch state := raw.(type) {
+	case AuthRuntimeState:
+		return state, runtimeStateHasPersistentContent(state)
+	case *AuthRuntimeState:
+		if state == nil {
+			return AuthRuntimeState{}, false
+		}
+		return *state, runtimeStateHasPersistentContent(*state)
+	default:
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return AuthRuntimeState{}, false
+		}
+		var decoded AuthRuntimeState
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			return AuthRuntimeState{}, false
+		}
+		return decoded, runtimeStateHasPersistentContent(decoded)
+	}
+}
+
+func runtimeStateHasPersistentContent(state AuthRuntimeState) bool {
+	if state.Success != 0 || state.Failed != 0 || len(state.RecentRequests) > 0 {
+		return true
+	}
+	if state.Status != "" && state.Status != StatusActive {
+		return true
+	}
+	if state.StatusMessage != "" || state.Unavailable || state.LastError != nil || !state.NextRetryAfter.IsZero() {
+		return true
+	}
+	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+		return true
+	}
+	return len(state.ModelStates) > 0
 }
 
 func (a *Auth) ApplyRuntimeState(state AuthRuntimeState) {

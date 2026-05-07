@@ -286,6 +286,9 @@ func TestGetDetailedUsageStatisticsReturnsDetails(t *testing.T) {
 	if got := len(model.Details); got != 1 {
 		t.Fatalf("details len = %d, want 1", got)
 	}
+	if got := model.Details[0].APIKey; got != "detail-test" {
+		t.Fatalf("detail api_key = %q, want %q", got, "detail-test")
+	}
 }
 
 func TestGetAggregatedUsageStatisticsReturnsWindowedPayload(t *testing.T) {

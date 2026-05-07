@@ -291,10 +291,10 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
 // registry snapshot for one auth.
 //
-// Supported models are reset to a clean state because re-registration already
-// cleared the registry-side cooldown/suspension snapshot. ModelStates for
-// models that are no longer present in the registry are pruned entirely so
-// renamed/removed models cannot keep auth-level status stale.
+// Active quota cooldowns for supported models are preserved because they may
+// have been restored from runtime persistence before model registration.
+// ModelStates for models that are no longer present in the registry are pruned
+// entirely so renamed/removed models cannot keep auth-level status stale.
 func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID string) {
 	if m == nil || authID == "" {
 		return
@@ -311,12 +311,16 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 
 	var snapshot *Auth
+	var runtimeSnapshot *Auth
+	var quotaModelsToRestore []string
+	var quotaModelsToClear []string
 	now := time.Now()
 
 	m.mu.Lock()
 	auth, ok := m.auths[authID]
 	if ok && auth != nil && len(auth.ModelStates) > 0 {
 		changed := false
+		schedulerRefresh := false
 		for modelKey, state := range auth.ModelStates {
 			baseModel := canonicalModelKey(modelKey)
 			if baseModel == "" {
@@ -328,6 +332,9 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				// status, management output, and websocket fallback checks.
 				delete(auth.ModelStates, modelKey)
 				changed = true
+				if state != nil && state.Quota.Exceeded {
+					quotaModelsToClear = append(quotaModelsToClear, baseModel)
+				}
 				continue
 			}
 			if state == nil {
@@ -335,6 +342,16 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			}
 			if modelStateIsClean(state) {
 				continue
+			}
+			if shouldPreserveModelStateOnReconcile(state, now) {
+				schedulerRefresh = true
+				if state.Quota.Exceeded {
+					quotaModelsToRestore = append(quotaModelsToRestore, baseModel)
+				}
+				continue
+			}
+			if state.Quota.Exceeded {
+				quotaModelsToClear = append(quotaModelsToClear, baseModel)
 			}
 			resetModelState(state, now)
 			changed = true
@@ -353,14 +370,41 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if errPersist := m.persist(ctx, auth); errPersist != nil {
 				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
 			}
+			runtimeSnapshot = auth.Clone()
+			snapshot = auth.CloneForScheduler()
+		} else if schedulerRefresh {
 			snapshot = auth.CloneForScheduler()
 		}
 	}
 	m.mu.Unlock()
 
+	if runtimeSnapshot != nil {
+		if errPersist := m.persistRuntimeState(ctx, runtimeSnapshot); errPersist != nil {
+			logEntryWithRequestID(ctx).WithField("auth_id", runtimeSnapshot.ID).Warnf("failed to persist auth runtime state during model state reconciliation: %v", errPersist)
+		}
+	}
+	for _, model := range quotaModelsToClear {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(authID, model)
+	}
+	for _, model := range quotaModelsToRestore {
+		registry.GetGlobalRegistry().SetModelQuotaExceeded(authID, model)
+	}
 	if m.scheduler != nil && snapshot != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}
+}
+
+func shouldPreserveModelStateOnReconcile(state *ModelState, now time.Time) bool {
+	if state == nil || modelStateIsClean(state) {
+		return false
+	}
+	if !state.Unavailable || state.NextRetryAfter.IsZero() || !state.NextRetryAfter.After(now) {
+		return false
+	}
+	if state.Quota.Exceeded || strings.EqualFold(state.Quota.Reason, "quota") {
+		return true
+	}
+	return statusCodeFromResult(state.LastError) == http.StatusTooManyRequests
 }
 
 func (m *Manager) SetSelector(selector Selector) {
@@ -1225,6 +1269,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
+	auth.ApplyRuntimeStateFromMetadata()
 	m.mu.Lock()
 	m.applyPersistedRuntimeStateLocked(auth)
 	authClone := auth.Clone()
@@ -1262,6 +1307,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			}
 		}
 	} else {
+		auth.ApplyRuntimeStateFromMetadata()
 		m.applyPersistedRuntimeStateLocked(auth)
 	}
 	auth.EnsureIndex()
@@ -1300,6 +1346,7 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
+		auth.ApplyRuntimeStateFromMetadata()
 		m.applyPersistedRuntimeStateLocked(auth)
 		m.auths[auth.ID] = auth.Clone()
 	}
@@ -3659,7 +3706,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
-	_, err := m.store.Save(ctx, auth)
+	persistAuth := auth.Clone()
+	persistAuth.SetRuntimeStateMetadata()
+	_, err := m.store.Save(ctx, persistAuth)
 	return err
 }
 

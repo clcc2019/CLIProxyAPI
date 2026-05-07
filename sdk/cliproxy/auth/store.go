@@ -12,8 +12,8 @@ type Store interface {
 	Delete(ctx context.Context, id string) error
 }
 
-// RuntimeStateStore persists mutable runtime state that is intentionally kept
-// out of auth credential files, such as request counters and quota cooldowns.
+// RuntimeStateStore persists mutable runtime state to an optional external
+// store, such as Redis. Auth credential files may also carry a metadata copy.
 type RuntimeStateStore interface {
 	Load(ctx context.Context) (map[string]AuthRuntimeState, error)
 	Save(ctx context.Context, authID string, state AuthRuntimeState) error

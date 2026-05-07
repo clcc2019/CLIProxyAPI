@@ -39,6 +39,7 @@ func normalizeImportedRequestDetail(detail RequestDetail) RequestDetail {
 	if detail.LatencyMs < 0 {
 		detail.LatencyMs = 0
 	}
+	detail.APIKey = strings.TrimSpace(detail.APIKey)
 	detail.Source = strings.TrimSpace(detail.Source)
 	detail.AuthIndex = strings.TrimSpace(detail.AuthIndex)
 	detail.ModelReasoningEffort = strings.TrimSpace(detail.ModelReasoningEffort)

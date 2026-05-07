@@ -134,6 +134,7 @@ type usageAggregateRecord struct {
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
 	Timestamp            time.Time  `json:"timestamp"`
+	APIKey               string     `json:"api_key,omitempty"`
 	LatencyMs            int64      `json:"latency_ms"`
 	Source               string     `json:"source"`
 	AuthIndex            string     `json:"auth_index"`
@@ -225,7 +226,8 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	detail := normaliseDetail(record.Detail)
 	totalTokens := detail.TotalTokens
-	statsKey := record.APIKey
+	apiKey := strings.TrimSpace(record.APIKey)
+	statsKey := apiKey
 	if statsKey == "" {
 		statsKey = resolveAPIIdentifier(ctx, record)
 	}
@@ -259,6 +261,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	requestDetail := RequestDetail{
 		Timestamp:            timestamp,
+		APIKey:               apiKey,
 		LatencyMs:            normaliseLatency(record.Latency),
 		Source:               record.Source,
 		AuthIndex:            record.AuthIndex,
@@ -787,10 +790,11 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
+		strings.TrimSpace(detail.APIKey),
 		detail.Source,
 		detail.AuthIndex,
 		strings.TrimSpace(detail.ModelReasoningEffort),

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -101,6 +102,104 @@ func TestManager_RefreshSchedulerEntry_RebuildsSupportedModelSetAfterModelRegist
 				t.Fatalf("pickSingle() after refresh auth = %v, want %q", got, auth.ID)
 			}
 		})
+	}
+}
+
+func TestManager_ReconcileRegistryModelStates_PreservesActiveQuotaCooldown(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	model := "gpt-5.4-codex"
+	authID := "codex-quota-preserve"
+	registerSchedulerModels(t, "codex", model, authID)
+
+	if _, errRegister := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "codex",
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	retryAfter := 2 * time.Hour
+	manager.MarkResult(ctx, Result{
+		AuthID:     authID,
+		Provider:   "codex",
+		Model:      model,
+		Success:    false,
+		RetryAfter: &retryAfter,
+		Error:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+	})
+
+	manager.ReconcileRegistryModelStates(ctx, authID)
+
+	got, ok := manager.GetByID(authID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	state := got.ModelStates[model]
+	if state == nil {
+		t.Fatalf("model state missing after reconcile: %#v", got.ModelStates)
+	}
+	if !state.Quota.Exceeded || !state.Unavailable || !state.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("quota cooldown was not preserved: %#v", state)
+	}
+
+	picked, errPick := manager.scheduler.pickSingle(ctx, "codex", model, cliproxyexecutor.Options{}, nil)
+	var cooldownErr *modelCooldownError
+	if !errors.As(errPick, &cooldownErr) {
+		t.Fatalf("pickSingle() error = %v, want modelCooldownError", errPick)
+	}
+	if picked != nil {
+		t.Fatalf("pickSingle() auth = %v, want nil while quota cooldown is active", picked)
+	}
+}
+
+func TestManager_ReconcileRegistryModelStates_ClearsExpiredQuotaCooldown(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	model := "gpt-5.4-codex"
+	authID := "codex-quota-expired"
+	registerSchedulerModels(t, "codex", model, authID)
+
+	past := time.Now().Add(-1 * time.Minute)
+	if _, errRegister := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   StatusError,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted",
+				Unavailable:    true,
+				NextRetryAfter: past,
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: past},
+				LastError:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage_limit_reached"},
+				UpdatedAt:      past,
+			},
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.ReconcileRegistryModelStates(ctx, authID)
+
+	got, ok := manager.GetByID(authID)
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	state := got.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if !modelStateIsClean(state) {
+		t.Fatalf("expired quota cooldown was not cleared: %#v", state)
+	}
+
+	picked, errPick := manager.scheduler.pickSingle(ctx, "codex", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after expired cooldown error = %v", errPick)
+	}
+	if picked == nil || picked.ID != authID {
+		t.Fatalf("pickSingle() auth = %v, want %q", picked, authID)
 	}
 }
 

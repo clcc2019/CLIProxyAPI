@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -28,6 +29,29 @@ func (s *fakeRuntimeStateStore) Save(_ context.Context, authID string, state Aut
 }
 
 func (s *fakeRuntimeStateStore) Delete(context.Context, string) error { return nil }
+
+type captureAuthStore struct {
+	items []*Auth
+	saved map[string]*Auth
+}
+
+func (s *captureAuthStore) List(context.Context) ([]*Auth, error) {
+	out := make([]*Auth, 0, len(s.items))
+	for _, item := range s.items {
+		out = append(out, item.Clone())
+	}
+	return out, nil
+}
+
+func (s *captureAuthStore) Save(_ context.Context, auth *Auth) (string, error) {
+	if s.saved == nil {
+		s.saved = make(map[string]*Auth)
+	}
+	s.saved[auth.ID] = auth.Clone()
+	return "", nil
+}
+
+func (s *captureAuthStore) Delete(context.Context, string) error { return nil }
 
 func TestAuthRuntimeStateRoundTrip(t *testing.T) {
 	now := time.Date(2026, 5, 7, 12, 30, 0, 0, time.UTC)
@@ -74,6 +98,142 @@ func TestAuthRuntimeStateRoundTrip(t *testing.T) {
 	}
 	if restored.ModelStates["gpt-5"] == nil || !restored.ModelStates["gpt-5"].Quota.Exceeded {
 		t.Fatalf("model quota state not restored: %#v", restored.ModelStates)
+	}
+}
+
+func TestAuthRuntimeStateMetadataRoundTrip(t *testing.T) {
+	now := time.Date(2026, 5, 7, 12, 30, 0, 0, time.UTC)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		Status:   StatusError,
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5-codex": {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted",
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Hour),
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour), BackoffLevel: 1},
+				LastError:      &Error{HTTPStatus: 429, Message: "usage_limit_reached"},
+				UpdatedAt:      now,
+			},
+		},
+	}
+
+	auth.SetRuntimeStateMetadata()
+	if _, ok := auth.Metadata[runtimeStateMetadataKey]; !ok {
+		t.Fatalf("runtime state metadata key %q missing", runtimeStateMetadataKey)
+	}
+
+	rawMetadata, errMarshal := json.Marshal(auth.Metadata)
+	if errMarshal != nil {
+		t.Fatalf("marshal metadata: %v", errMarshal)
+	}
+	var metadata map[string]any
+	if errUnmarshal := json.Unmarshal(rawMetadata, &metadata); errUnmarshal != nil {
+		t.Fatalf("unmarshal metadata: %v", errUnmarshal)
+	}
+
+	restored := &Auth{ID: "auth-1", Provider: "codex", Status: StatusActive, Metadata: metadata}
+	if !restored.ApplyRuntimeStateFromMetadata() {
+		t.Fatal("runtime state metadata was not applied")
+	}
+	state := restored.ModelStates["gpt-5-codex"]
+	if state == nil || !state.Quota.Exceeded || !state.NextRetryAfter.After(now) {
+		t.Fatalf("metadata quota state not restored: %#v", restored.ModelStates)
+	}
+}
+
+func TestManagerLoadAppliesRuntimeStateFromAuthMetadata(t *testing.T) {
+	now := time.Date(2026, 5, 7, 12, 30, 0, 0, time.UTC)
+	state := AuthRuntimeState{
+		Version:        1,
+		Status:         StatusError,
+		StatusMessage:  "quota exhausted",
+		Unavailable:    true,
+		NextRetryAfter: now.Add(time.Hour),
+		Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour)},
+		ModelStates: map[string]*ModelState{
+			"gpt-5-codex": {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted",
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Hour),
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(time.Hour)},
+			},
+		},
+	}
+	store := &captureAuthStore{
+		items: []*Auth{{
+			ID:       "auth-1",
+			Provider: "codex",
+			Status:   StatusActive,
+			Metadata: map[string]any{
+				"type":                  "codex",
+				runtimeStateMetadataKey: state,
+			},
+		}},
+	}
+	mgr := NewManager(store, nil, nil)
+	if err := mgr.Load(context.Background()); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+
+	got, ok := mgr.GetByID("auth-1")
+	if !ok {
+		t.Fatal("auth not loaded")
+	}
+	if got.Status != StatusError || !got.Quota.Exceeded {
+		t.Fatalf("runtime state metadata not applied: status=%s quota=%#v", got.Status, got.Quota)
+	}
+	if got.ModelStates["gpt-5-codex"] == nil || !got.ModelStates["gpt-5-codex"].Quota.Exceeded {
+		t.Fatalf("model quota state not applied: %#v", got.ModelStates)
+	}
+}
+
+func TestManagerPersistEmbedsRuntimeStateInAuthMetadata(t *testing.T) {
+	store := &captureAuthStore{}
+	mgr := NewManager(store, nil, nil)
+	if _, err := mgr.Register(context.Background(), &Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "codex"},
+	}); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+	store.saved = nil
+
+	retryAfter := time.Hour
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:     "auth-1",
+		Provider:   "codex",
+		Model:      "gpt-5-codex",
+		Success:    false,
+		RetryAfter: &retryAfter,
+		Error:      &Error{HTTPStatus: 429, Message: "usage_limit_reached"},
+	})
+	mgr.flushPersistQueue()
+
+	saved := store.saved["auth-1"]
+	if saved == nil {
+		t.Fatal("auth was not persisted")
+	}
+	raw := saved.Metadata[runtimeStateMetadataKey]
+	if raw == nil {
+		t.Fatalf("runtime state metadata key %q missing: %#v", runtimeStateMetadataKey, saved.Metadata)
+	}
+	data, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		t.Fatalf("marshal runtime metadata: %v", errMarshal)
+	}
+	var state AuthRuntimeState
+	if errUnmarshal := json.Unmarshal(data, &state); errUnmarshal != nil {
+		t.Fatalf("unmarshal runtime metadata: %v", errUnmarshal)
+	}
+	if state.ModelStates["gpt-5-codex"] == nil || !state.ModelStates["gpt-5-codex"].Quota.Exceeded {
+		t.Fatalf("persisted runtime metadata missing quota state: %#v", state.ModelStates)
 	}
 }
 
