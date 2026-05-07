@@ -89,6 +89,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// usagePersistence periodically snapshots usage statistics to disk.
+	usagePersistence *usagePersistenceRunner
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -504,6 +507,10 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.ensureAuthDir(); err != nil {
 		return err
 	}
+	if err := s.loadUsagePersistence(); err != nil {
+		log.Warnf("failed to load persisted usage statistics: %v", err)
+	}
+	s.startUsagePersistence()
 
 	s.applyRetryConfig(s.cfg)
 
@@ -794,6 +801,18 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				if shutdownErr == nil {
 					shutdownErr = err
 				}
+			}
+		}
+
+		flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+		if errFlush := usage.FlushDefault(flushCtx); errFlush != nil {
+			log.Warnf("failed to flush usage statistics before persistence: %v", errFlush)
+		}
+		cancelFlush()
+		if errPersist := s.stopUsagePersistence(); errPersist != nil {
+			log.Errorf("failed to persist usage statistics: %v", errPersist)
+			if shutdownErr == nil {
+				shutdownErr = errPersist
 			}
 		}
 

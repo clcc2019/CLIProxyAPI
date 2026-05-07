@@ -395,6 +395,15 @@ func (s *RequestStatistics) snapshotWithDetails(includeDetails bool) StatisticsS
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	return s.snapshotWithDetailsLocked(includeDetails)
+}
+
+func (s *RequestStatistics) snapshotWithDetailsLocked(includeDetails bool) StatisticsSnapshot {
+	result := StatisticsSnapshot{}
+	if s == nil {
+		return result
+	}
+
 	result.TotalRequests = s.totalRequests
 	result.SuccessCount = s.successCount
 	result.FailureCount = s.failureCount
