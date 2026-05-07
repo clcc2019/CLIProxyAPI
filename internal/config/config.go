@@ -74,6 +74,10 @@ type Config struct {
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
 
+	// Redis enables durable runtime state storage for usage statistics and auth
+	// request/quota state.
+	Redis RedisConfig `yaml:"redis" json:"redis"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -217,6 +221,17 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+// RedisConfig controls optional Redis-backed runtime state persistence.
+type RedisConfig struct {
+	Enabled   bool   `yaml:"enabled" json:"enabled"`
+	URL       string `yaml:"url,omitempty" json:"url,omitempty"`
+	Addr      string `yaml:"addr" json:"addr"`
+	Username  string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password  string `yaml:"password,omitempty" json:"password,omitempty"`
+	DB        int    `yaml:"db" json:"db"`
+	KeyPrefix string `yaml:"key-prefix" json:"key-prefix"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -633,6 +648,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.UsageDetailRetentionLimit = 0
 	cfg.RedisUsageQueueRetentionSeconds = 60
+	cfg.Redis.Addr = "127.0.0.1:6379"
+	cfg.Redis.KeyPrefix = "cliproxyapi"
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -699,6 +716,19 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	} else if cfg.RedisUsageQueueRetentionSeconds > 3600 {
 		log.WithField("value", cfg.RedisUsageQueueRetentionSeconds).Warn("redis-usage-queue-retention-seconds too large; clamping to 3600")
 		cfg.RedisUsageQueueRetentionSeconds = 3600
+	}
+	cfg.Redis.URL = strings.TrimSpace(cfg.Redis.URL)
+	cfg.Redis.Addr = strings.TrimSpace(cfg.Redis.Addr)
+	if cfg.Redis.Addr == "" {
+		cfg.Redis.Addr = "127.0.0.1:6379"
+	}
+	cfg.Redis.Username = strings.TrimSpace(cfg.Redis.Username)
+	cfg.Redis.KeyPrefix = strings.Trim(strings.TrimSpace(cfg.Redis.KeyPrefix), ":")
+	if cfg.Redis.KeyPrefix == "" {
+		cfg.Redis.KeyPrefix = "cliproxyapi"
+	}
+	if cfg.Redis.DB < 0 {
+		cfg.Redis.DB = 0
 	}
 
 	if cfg.MaxRetryCredentials < 0 {

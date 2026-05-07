@@ -36,10 +36,9 @@ func SavePersistedState(path string, stats *RequestStatistics) error {
 		return fmt.Errorf("usage: request statistics is nil")
 	}
 
-	state := stats.persistedState()
-	data, errMarshal := json.Marshal(state)
+	data, errMarshal := MarshalPersistedState(stats)
 	if errMarshal != nil {
-		return fmt.Errorf("usage: marshal persisted state: %w", errMarshal)
+		return errMarshal
 	}
 
 	dir := filepath.Dir(path)
@@ -77,6 +76,32 @@ func LoadPersistedState(path string, stats *RequestStatistics) (bool, error) {
 	}
 	if len(data) == 0 {
 		return false, nil
+	}
+
+	return LoadPersistedStateBytes(data, stats)
+}
+
+// MarshalPersistedState serializes the current statistics state for durable
+// storage backends.
+func MarshalPersistedState(stats *RequestStatistics) ([]byte, error) {
+	if stats == nil {
+		return nil, fmt.Errorf("usage: request statistics is nil")
+	}
+	state := stats.persistedState()
+	data, errMarshal := json.Marshal(state)
+	if errMarshal != nil {
+		return nil, fmt.Errorf("usage: marshal persisted state: %w", errMarshal)
+	}
+	return data, nil
+}
+
+// LoadPersistedStateBytes restores statistics from a serialized persisted state.
+func LoadPersistedStateBytes(data []byte, stats *RequestStatistics) (bool, error) {
+	if len(data) == 0 {
+		return false, nil
+	}
+	if stats == nil {
+		return false, fmt.Errorf("usage: request statistics is nil")
 	}
 
 	var state persistedStatisticsState

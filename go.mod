@@ -17,6 +17,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.18.5
 	github.com/minio/minio-go/v7 v7.0.66
+	github.com/redis/go-redis/v9 v9.19.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sirupsen/logrus v1.9.4
 	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966
@@ -33,10 +34,12 @@ require (
 
 require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 )
 
 require (

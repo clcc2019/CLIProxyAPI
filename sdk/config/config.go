@@ -14,6 +14,7 @@ type OAuthRefreshConfig = internalconfig.OAuthRefreshConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
+type RedisConfig = internalconfig.RedisConfig
 type AmpCode = internalconfig.AmpCode
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type PayloadConfig = internalconfig.PayloadConfig

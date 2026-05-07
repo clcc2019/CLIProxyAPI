@@ -1,6 +1,8 @@
 package cliproxy
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,9 +18,16 @@ const (
 	usagePersistenceInterval = 30 * time.Second
 )
 
+type usagePersistenceBackend interface {
+	LoadUsageState(ctx context.Context) ([]byte, bool, error)
+	SaveUsageState(ctx context.Context, data []byte) error
+}
+
 type usagePersistenceRunner struct {
-	stats    *internalusage.RequestStatistics
-	path     string
+	stats   *internalusage.RequestStatistics
+	path    string
+	backend usagePersistenceBackend
+
 	interval time.Duration
 
 	mu      sync.Mutex
@@ -28,10 +37,11 @@ type usagePersistenceRunner struct {
 	doneCh  chan struct{}
 }
 
-func newUsagePersistenceRunner(stats *internalusage.RequestStatistics, path string, interval time.Duration) *usagePersistenceRunner {
+func newUsagePersistenceRunner(stats *internalusage.RequestStatistics, path string, backend usagePersistenceBackend, interval time.Duration) *usagePersistenceRunner {
 	return &usagePersistenceRunner{
 		stats:    stats,
 		path:     strings.TrimSpace(path),
+		backend:  backend,
 		interval: interval,
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
@@ -39,7 +49,7 @@ func newUsagePersistenceRunner(stats *internalusage.RequestStatistics, path stri
 }
 
 func (r *usagePersistenceRunner) start() {
-	if r == nil || r.stats == nil || r.path == "" {
+	if r == nil || r.stats == nil || (r.path == "" && r.backend == nil) {
 		return
 	}
 	r.mu.Lock()
@@ -52,6 +62,7 @@ func (r *usagePersistenceRunner) start() {
 	stopCh := r.stopCh
 	doneCh := r.doneCh
 	path := r.path
+	backend := r.backend
 	stats := r.stats
 	r.mu.Unlock()
 
@@ -66,7 +77,7 @@ func (r *usagePersistenceRunner) start() {
 		for {
 			select {
 			case <-ticker.C:
-				if err := internalusage.SavePersistedState(path, stats); err != nil {
+				if err := saveUsageState(path, backend, stats); err != nil {
 					log.Warnf("usage persistence save failed: %v", err)
 				}
 			case <-stopCh:
@@ -77,7 +88,7 @@ func (r *usagePersistenceRunner) start() {
 }
 
 func (r *usagePersistenceRunner) stop() error {
-	if r == nil || r.stats == nil || r.path == "" {
+	if r == nil || r.stats == nil || (r.path == "" && r.backend == nil) {
 		return nil
 	}
 
@@ -95,13 +106,26 @@ func (r *usagePersistenceRunner) stop() error {
 	if started {
 		<-doneCh
 	}
-	return internalusage.SavePersistedState(r.path, r.stats)
+	return saveUsageState(r.path, r.backend, r.stats)
 }
 
 func (s *Service) loadUsagePersistence() error {
 	runner := s.ensureUsagePersistenceRunner()
 	if runner == nil {
 		return nil
+	}
+	if runner.backend != nil {
+		data, loaded, err := runner.backend.LoadUsageState(context.Background())
+		if err != nil {
+			return err
+		}
+		if loaded {
+			if _, errLoad := internalusage.LoadPersistedStateBytes(data, runner.stats); errLoad != nil {
+				return errLoad
+			}
+			log.Infof("restored usage statistics from redis")
+			return nil
+		}
 	}
 	loaded, err := internalusage.LoadPersistedState(runner.path, runner.stats)
 	if err != nil {
@@ -134,10 +158,10 @@ func (s *Service) ensureUsagePersistenceRunner() *usagePersistenceRunner {
 		return s.usagePersistence
 	}
 	path := s.resolveUsagePersistencePath()
-	if path == "" {
+	if path == "" && s.usagePersistenceBackend == nil {
 		return nil
 	}
-	s.usagePersistence = newUsagePersistenceRunner(internalusage.GetRequestStatistics(), path, usagePersistenceInterval)
+	s.usagePersistence = newUsagePersistenceRunner(internalusage.GetRequestStatistics(), path, s.usagePersistenceBackend, usagePersistenceInterval)
 	return s.usagePersistence
 }
 
@@ -156,4 +180,27 @@ func (s *Service) resolveUsagePersistencePath() string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(configPath), usagePersistenceFilename)
+}
+
+func saveUsageState(path string, backend usagePersistenceBackend, stats *internalusage.RequestStatistics) error {
+	if stats == nil {
+		return nil
+	}
+	var errs []error
+	var data []byte
+	if backend != nil {
+		var err error
+		data, err = internalusage.MarshalPersistedState(stats)
+		if err != nil {
+			errs = append(errs, err)
+		} else if errSave := backend.SaveUsageState(context.Background(), data); errSave != nil {
+			errs = append(errs, errSave)
+		}
+	}
+	if strings.TrimSpace(path) != "" {
+		if errSave := internalusage.SavePersistedState(path, stats); errSave != nil {
+			errs = append(errs, errSave)
+		}
+	}
+	return errors.Join(errs...)
 }

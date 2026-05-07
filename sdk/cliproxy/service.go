@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisstate"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
@@ -92,6 +93,12 @@ type Service struct {
 
 	// usagePersistence periodically snapshots usage statistics to disk.
 	usagePersistence *usagePersistenceRunner
+
+	// usagePersistenceBackend optionally mirrors usage state to an external store.
+	usagePersistenceBackend usagePersistenceBackend
+
+	// redisState owns the optional Redis client used for durable runtime state.
+	redisState *redisstate.Store
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -364,6 +371,29 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
 }
 
+func (s *Service) configureRedisState(ctx context.Context) error {
+	if s == nil || s.cfg == nil || !s.cfg.Redis.Enabled {
+		return nil
+	}
+	store, err := redisstate.New(ctx, s.cfg.Redis)
+	if err != nil {
+		return fmt.Errorf("redis state storage: %w", err)
+	}
+	s.redisState = store
+	s.usagePersistenceBackend = store
+	if s.coreManager != nil {
+		s.coreManager.SetRuntimeStateStore(store)
+		if errLoad := s.coreManager.LoadRuntimeStates(ctx); errLoad != nil {
+			_ = store.Close()
+			s.redisState = nil
+			s.usagePersistenceBackend = nil
+			return fmt.Errorf("load redis auth runtime state: %w", errLoad)
+		}
+	}
+	log.Infof("redis state storage enabled: %s", store.Addr())
+	return nil
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false
@@ -505,6 +535,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	if err := s.ensureAuthDir(); err != nil {
+		return err
+	}
+	if err := s.configureRedisState(ctx); err != nil {
 		return err
 	}
 	if err := s.loadUsagePersistence(); err != nil {
@@ -814,6 +847,16 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			if shutdownErr == nil {
 				shutdownErr = errPersist
 			}
+		}
+		if s.redisState != nil {
+			if errClose := s.redisState.Close(); errClose != nil {
+				log.Errorf("failed to close redis state storage: %v", errClose)
+				if shutdownErr == nil {
+					shutdownErr = errClose
+				}
+			}
+			s.redisState = nil
+			s.usagePersistenceBackend = nil
 		}
 
 		usage.StopDefault()

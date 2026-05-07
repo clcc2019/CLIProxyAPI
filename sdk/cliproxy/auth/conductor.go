@@ -156,13 +156,15 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store     Store
-	executors map[string]ProviderExecutor
-	selector  Selector
-	hook      Hook
-	mu        sync.RWMutex
-	auths     map[string]*Auth
-	scheduler *authScheduler
+	store             Store
+	runtimeStateStore RuntimeStateStore
+	executors         map[string]ProviderExecutor
+	selector          Selector
+	hook              Hook
+	mu                sync.RWMutex
+	auths             map[string]*Auth
+	runtimeStates     map[string]AuthRuntimeState
+	scheduler         *authScheduler
 	// routeAwareSingleCache stores provider/model pairs proven safe for scheduler single-provider fast path.
 	routeAwareSingleCache sync.Map
 	// routeAwareMixedCache stores provider/model combinations proven safe for scheduler mixed fast path.
@@ -382,6 +384,62 @@ func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store = store
+}
+
+// SetRuntimeStateStore swaps the optional persistence store for mutable runtime
+// state such as request counters and quota cooldowns.
+func (m *Manager) SetRuntimeStateStore(store RuntimeStateStore) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runtimeStateStore = store
+	if store == nil {
+		m.runtimeStates = nil
+	}
+}
+
+// LoadRuntimeStates reads persisted runtime state and applies it to already
+// loaded auths. Future Register calls also apply the loaded state by auth ID.
+func (m *Manager) LoadRuntimeStates(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	store := m.runtimeStateStore
+	m.mu.RUnlock()
+	if store == nil {
+		return nil
+	}
+	states, err := store.Load(ctx)
+	if err != nil {
+		return err
+	}
+	if states == nil {
+		states = make(map[string]AuthRuntimeState)
+	}
+
+	m.mu.Lock()
+	m.runtimeStates = states
+	var snapshots []*Auth
+	for id, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if state, ok := states[id]; ok {
+			auth.ApplyRuntimeState(state)
+			snapshots = append(snapshots, auth.CloneForScheduler())
+		}
+	}
+	m.mu.Unlock()
+
+	if len(snapshots) > 0 && m.scheduler != nil {
+		for _, snapshot := range snapshots {
+			m.scheduler.upsertAuth(snapshot)
+		}
+	}
+	return nil
 }
 
 // SetRoundTripperProvider register a provider that returns a per-auth RoundTripper.
@@ -1167,8 +1225,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
-	authClone := auth.Clone()
 	m.mu.Lock()
+	m.applyPersistedRuntimeStateLocked(auth)
+	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.clearRouteAwareCaches()
@@ -1178,6 +1237,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
+	if errRuntime := m.persistRuntimeState(ctx, auth); errRuntime != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth runtime state: %v", errRuntime)
+	}
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -1193,14 +1255,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
 		}
-		auth.Success = existing.Success
-		auth.Failed = existing.Failed
-		auth.recentRequests = existing.recentRequests
+		preserveRuntimeState(existing, auth)
 		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 				auth.ModelStates = existing.ModelStates
 			}
 		}
+	} else {
+		m.applyPersistedRuntimeStateLocked(auth)
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
@@ -1213,6 +1275,9 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
+	if errRuntime := m.persistRuntimeState(ctx, auth); errRuntime != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth runtime state: %v", errRuntime)
+	}
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -1235,6 +1300,7 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
+		m.applyPersistedRuntimeStateLocked(auth)
 		m.auths[auth.ID] = auth.Clone()
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
@@ -3597,6 +3663,50 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	return err
 }
 
+func (m *Manager) persistRuntimeState(ctx context.Context, auth *Auth) error {
+	if m == nil || m.runtimeStateStore == nil || auth == nil || auth.ID == "" {
+		return nil
+	}
+	if shouldSkipPersist(ctx) {
+		return nil
+	}
+	if auth.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
+			return nil
+		}
+	}
+	state := auth.RuntimeStateSnapshot()
+	if err := m.runtimeStateStore.Save(ctx, auth.ID, state); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.runtimeStates != nil {
+		m.runtimeStates[auth.ID] = state
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) applyPersistedRuntimeStateLocked(auth *Auth) {
+	if m == nil || auth == nil || auth.ID == "" || len(m.runtimeStates) == 0 {
+		return
+	}
+	state, ok := m.runtimeStates[auth.ID]
+	if !ok {
+		return
+	}
+	auth.ApplyRuntimeState(state)
+}
+
+func preserveRuntimeState(existing, auth *Auth) {
+	if existing == nil || auth == nil {
+		return
+	}
+	auth.Success = existing.Success
+	auth.Failed = existing.Failed
+	auth.recentRequests = existing.recentRequests
+}
+
 func (m *Manager) enqueuePersistAuthID(ctx context.Context, authID string) {
 	if m == nil || shouldSkipPersist(ctx) {
 		return
@@ -3740,6 +3850,11 @@ func (m *Manager) flushPersistQueue() {
 			logEntryWithRequestID(context.Background()).
 				WithField("auth_id", snapshot.ID).
 				Warnf("deferred auth persist failed: %v", err)
+		}
+		if err := m.persistRuntimeState(context.Background(), snapshot); err != nil {
+			logEntryWithRequestID(context.Background()).
+				WithField("auth_id", snapshot.ID).
+				Warnf("deferred auth runtime state persist failed: %v", err)
 		}
 	}
 }

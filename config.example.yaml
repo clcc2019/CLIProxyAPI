@@ -79,6 +79,19 @@ usage-detail-retention-limit: 0
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
 
+# Optional Redis-backed runtime state persistence. When enabled, usage statistics,
+# per-auth request counters/recent buckets, and quota cooldown state are restored
+# after process restarts.
+redis:
+  enabled: false
+  # Either set url, or set addr/username/password/db below.
+  url: ""
+  addr: "127.0.0.1:6379"
+  username: ""
+  password: ""
+  db: 0
+  key-prefix: "cliproxyapi"
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""

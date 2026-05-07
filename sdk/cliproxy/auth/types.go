@@ -120,6 +120,28 @@ type RecentRequestBucket struct {
 	Failed  int64  `json:"failed"`
 }
 
+type RecentRequestState struct {
+	BucketID int64 `json:"bucket_id"`
+	Success  int64 `json:"success"`
+	Failed   int64 `json:"failed"`
+}
+
+type AuthRuntimeState struct {
+	Version        int                    `json:"version"`
+	SavedAt        time.Time              `json:"saved_at"`
+	Success        int64                  `json:"success"`
+	Failed         int64                  `json:"failed"`
+	RecentRequests []RecentRequestState   `json:"recent_requests,omitempty"`
+	Status         Status                 `json:"status,omitempty"`
+	StatusMessage  string                 `json:"status_message,omitempty"`
+	Unavailable    bool                   `json:"unavailable,omitempty"`
+	Quota          QuotaState             `json:"quota"`
+	LastError      *Error                 `json:"last_error,omitempty"`
+	NextRetryAfter time.Time              `json:"next_retry_after,omitempty"`
+	ModelStates    map[string]*ModelState `json:"model_states,omitempty"`
+	UpdatedAt      time.Time              `json:"updated_at,omitempty"`
+}
+
 // QuotaState contains limiter tracking data for a credential.
 type QuotaState struct {
 	// Exceeded indicates the credential recently hit a quota error.
@@ -214,6 +236,92 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 	return out
 }
 
+func (a *Auth) RuntimeStateSnapshot() AuthRuntimeState {
+	if a == nil {
+		return AuthRuntimeState{}
+	}
+	return AuthRuntimeState{
+		Version:        1,
+		SavedAt:        time.Now().UTC(),
+		Success:        a.Success,
+		Failed:         a.Failed,
+		RecentRequests: a.recentRequestState(),
+		Status:         a.Status,
+		StatusMessage:  a.StatusMessage,
+		Unavailable:    a.Unavailable,
+		Quota:          a.Quota,
+		LastError:      cloneError(a.LastError),
+		NextRetryAfter: a.NextRetryAfter,
+		ModelStates:    cloneModelStates(a.ModelStates),
+		UpdatedAt:      a.UpdatedAt,
+	}
+}
+
+func (a *Auth) ApplyRuntimeState(state AuthRuntimeState) {
+	if a == nil {
+		return
+	}
+	a.Success = state.Success
+	a.Failed = state.Failed
+	a.applyRecentRequestState(state.RecentRequests)
+
+	if a.Disabled || a.Status == StatusDisabled {
+		return
+	}
+	if state.Status != "" && state.Status != StatusDisabled {
+		a.Status = state.Status
+	}
+	a.StatusMessage = state.StatusMessage
+	a.Unavailable = state.Unavailable
+	a.Quota = state.Quota
+	a.LastError = cloneError(state.LastError)
+	a.NextRetryAfter = state.NextRetryAfter
+	if state.Version > 0 {
+		a.ModelStates = cloneModelStates(state.ModelStates)
+	} else if len(state.ModelStates) > 0 {
+		a.ModelStates = cloneModelStates(state.ModelStates)
+	}
+	if !state.UpdatedAt.IsZero() && state.UpdatedAt.After(a.UpdatedAt) {
+		a.UpdatedAt = state.UpdatedAt
+	}
+}
+
+func (a *Auth) recentRequestState() []RecentRequestState {
+	if a == nil {
+		return nil
+	}
+	out := make([]RecentRequestState, 0, recentRequestBucketCount)
+	for _, bucket := range a.recentRequests.buckets {
+		if bucket.bucketID == 0 && bucket.success == 0 && bucket.failed == 0 {
+			continue
+		}
+		out = append(out, RecentRequestState{
+			BucketID: bucket.bucketID,
+			Success:  bucket.success,
+			Failed:   bucket.failed,
+		})
+	}
+	return out
+}
+
+func (a *Auth) applyRecentRequestState(items []RecentRequestState) {
+	if a == nil {
+		return
+	}
+	a.recentRequests = recentRequestRing{}
+	for _, item := range items {
+		if item.BucketID == 0 && item.Success == 0 && item.Failed == 0 {
+			continue
+		}
+		idx := recentRequestBucketIndex(item.BucketID)
+		a.recentRequests.buckets[idx] = recentRequestBucket{
+			bucketID: item.BucketID,
+			success:  item.Success,
+			failed:   item.Failed,
+		}
+	}
+}
+
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
 func (a *Auth) Clone() *Auth {
 	if a == nil {
@@ -291,6 +399,17 @@ func cloneAnyMap(src map[string]any) map[string]any {
 	dst := make(map[string]any, len(src))
 	for key, value := range src {
 		dst[key] = value
+	}
+	return dst
+}
+
+func cloneModelStates(src map[string]*ModelState) map[string]*ModelState {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]*ModelState, len(src))
+	for key, state := range src {
+		dst[key] = state.Clone()
 	}
 	return dst
 }

@@ -11,3 +11,11 @@ type Store interface {
 	// Delete removes the auth record identified by id.
 	Delete(ctx context.Context, id string) error
 }
+
+// RuntimeStateStore persists mutable runtime state that is intentionally kept
+// out of auth credential files, such as request counters and quota cooldowns.
+type RuntimeStateStore interface {
+	Load(ctx context.Context) (map[string]AuthRuntimeState, error)
+	Save(ctx context.Context, authID string, state AuthRuntimeState) error
+	Delete(ctx context.Context, authID string) error
+}
