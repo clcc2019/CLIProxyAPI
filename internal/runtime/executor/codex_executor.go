@@ -156,7 +156,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if usageOwner {
 		reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 		reporter.EnsurePublished(ctx)
-		codexAdvanceWindowGeneration(call.prepared.httpReq.Header.Get(codexHeaderSessionID))
+		codexAdvanceWindowGeneration(codexWindowStateKey(call.prepared.httpReq.Header))
 	}
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, data, &param)

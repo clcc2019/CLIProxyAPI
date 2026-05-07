@@ -104,8 +104,8 @@ max-retry-interval: 30
 disable-cooling: false
 
 # disable-image-generation supports: false (default), true, or "chat".
-# - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
-# - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
+# - true: disable image_generation everywhere (also returns 404 for /v1/images/generations, /v1/images/edits, and /v1/images/variations).
+# - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations, /v1/images/edits, and /v1/images/variations enabled.
 disable-image-generation: false
 
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
@@ -139,6 +139,12 @@ enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
+
+# Image stream behavior for /v1/images/* SSE responses. Defaults are disabled.
+# Set keepalive to 10 and data timeout to 900 to mirror sub2api's long-running image stream behavior.
+image-stream-keepalive-seconds: 0
+image-stream-data-interval-timeout-seconds: 0
+
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.

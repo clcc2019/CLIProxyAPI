@@ -14,9 +14,9 @@ type SDKConfig struct {
 	// Supported values:
 	//   - false (default): image_generation is enabled everywhere (normal behavior).
 	//   - true: image_generation is disabled everywhere. The server stops injecting it, removes it from request payloads,
-	//     and returns 404 for /v1/images/generations and /v1/images/edits.
+	//     and returns 404 for /v1/images/generations, /v1/images/edits, and /v1/images/variations.
 	//   - "chat": disable image_generation injection for all non-images endpoints (e.g. /v1/responses, /v1/chat/completions),
-	//     while keeping /v1/images/generations and /v1/images/edits enabled and preserving image_generation there.
+	//     while keeping /v1/images/generations, /v1/images/edits, and /v1/images/variations enabled and preserving image_generation there.
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
@@ -49,6 +49,14 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// ImageStreamDataIntervalTimeoutSeconds controls how long image SSE streams may wait without upstream data.
+	// <= 0 disables image stream idle timeouts. Value is in seconds.
+	ImageStreamDataIntervalTimeoutSeconds int `yaml:"image-stream-data-interval-timeout-seconds,omitempty" json:"image-stream-data-interval-timeout-seconds,omitempty"`
+
+	// ImageStreamKeepAliveSeconds controls how often image SSE streams emit ":" heartbeats while idle.
+	// <= 0 disables image stream keep-alives. Value is in seconds.
+	ImageStreamKeepAliveSeconds int `yaml:"image-stream-keepalive-seconds,omitempty" json:"image-stream-keepalive-seconds,omitempty"`
 }
 
 // OAuthRefreshConfig controls background refresh scheduling for OAuth/file-backed auths.

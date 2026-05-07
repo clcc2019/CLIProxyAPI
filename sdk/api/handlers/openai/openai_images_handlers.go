@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
@@ -25,14 +27,17 @@ import (
 )
 
 const (
-	defaultImagesMainModel = "gpt-5.4-mini"
-	defaultImagesToolModel = "gpt-image-2"
-	maxImageUploadBytes    = 32 << 20
+	defaultImagesMainModel       = "gpt-5.4-mini"
+	defaultImagesToolModel       = "gpt-image-2"
+	defaultImagesVariationPrompt = "Create a variation of the provided image."
+	imageStreamKeepAlivePayload  = ":\n\n"
+	maxImageUploadBytes          = 32 << 20
+	maxImageMultipartBytes       = 128 << 20
 )
 
 var (
-	imageGenerateStringToolFields = []string{"size", "quality", "background", "output_format", "moderation"}
-	imageEditStringToolFields     = []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"}
+	imageGenerateStringToolFields = []string{"size", "quality", "background", "output_format", "moderation", "style"}
+	imageEditStringToolFields     = []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation", "style"}
 	imageNumberToolFields         = []string{"output_compression", "partial_images"}
 )
 
@@ -47,6 +52,111 @@ type imageCallResult struct {
 
 type sseFrameAccumulator struct {
 	pending []byte
+}
+
+type imageStreamTiming struct {
+	keepAliveInterval   time.Duration
+	dataIntervalTimeout time.Duration
+	lastDataAt          time.Time
+	lastWriteAt         time.Time
+	keepAliveTicker     *time.Ticker
+	dataIntervalTicker  *time.Ticker
+	keepAliveC          <-chan time.Time
+	dataIntervalC       <-chan time.Time
+}
+
+func newImageStreamTiming(keepAliveInterval, dataIntervalTimeout time.Duration) *imageStreamTiming {
+	now := time.Now()
+	timing := &imageStreamTiming{
+		keepAliveInterval:   keepAliveInterval,
+		dataIntervalTimeout: dataIntervalTimeout,
+		lastDataAt:          now,
+		lastWriteAt:         now,
+	}
+	if keepAliveInterval > 0 {
+		timing.keepAliveTicker = time.NewTicker(keepAliveInterval)
+		timing.keepAliveC = timing.keepAliveTicker.C
+	}
+	if dataIntervalTimeout > 0 {
+		timing.dataIntervalTicker = time.NewTicker(dataIntervalTimeout)
+		timing.dataIntervalC = timing.dataIntervalTicker.C
+	}
+	return timing
+}
+
+func (h *OpenAIAPIHandler) newImageStreamTiming() *imageStreamTiming {
+	return newImageStreamTiming(h.imageStreamKeepAliveInterval(), h.imageStreamDataIntervalTimeout())
+}
+
+func (t *imageStreamTiming) Stop() {
+	if t == nil {
+		return
+	}
+	if t.keepAliveTicker != nil {
+		t.keepAliveTicker.Stop()
+	}
+	if t.dataIntervalTicker != nil {
+		t.dataIntervalTicker.Stop()
+	}
+}
+
+func (t *imageStreamTiming) MarkData() {
+	if t != nil {
+		t.lastDataAt = time.Now()
+	}
+}
+
+func (t *imageStreamTiming) MarkWrite() {
+	if t != nil {
+		t.lastWriteAt = time.Now()
+	}
+}
+
+func (t *imageStreamTiming) KeepAliveDue(now time.Time) bool {
+	return t != nil && t.keepAliveInterval > 0 && now.Sub(t.lastWriteAt) >= t.keepAliveInterval
+}
+
+func (t *imageStreamTiming) IdleTimedOut(now time.Time) bool {
+	return t != nil && t.dataIntervalTimeout > 0 && now.Sub(t.lastDataAt) >= t.dataIntervalTimeout
+}
+
+func (h *OpenAIAPIHandler) imageStreamKeepAliveInterval() time.Duration {
+	seconds := 0
+	if h != nil && h.Cfg != nil {
+		seconds = h.Cfg.ImageStreamKeepAliveSeconds
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (h *OpenAIAPIHandler) imageStreamDataIntervalTimeout() time.Duration {
+	seconds := 0
+	if h != nil && h.Cfg != nil {
+		seconds = h.Cfg.ImageStreamDataIntervalTimeoutSeconds
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func maybeWriteImageStreamKeepAlive(timing *imageStreamTiming, now time.Time, writeKeepAlive func()) {
+	if timing == nil || !timing.KeepAliveDue(now) || writeKeepAlive == nil {
+		return
+	}
+	writeKeepAlive()
+}
+
+func imageStreamIdleTimeoutError(timeout time.Duration) *interfaces.ErrorMessage {
+	if timeout <= 0 {
+		timeout = 0
+	}
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusGatewayTimeout,
+		Error:      fmt.Errorf("upstream image stream idle for %s", timeout),
+	}
 }
 
 func (a *sseFrameAccumulator) AddChunk(chunk []byte) [][]byte {
@@ -186,6 +296,19 @@ func parseBoolField(raw string, fallback bool) bool {
 	}
 }
 
+func multipartImageFiles(form *multipart.Form) []*multipart.FileHeader {
+	if form == nil {
+		return nil
+	}
+	if files := form.File["image[]"]; len(files) > 0 {
+		return files
+	}
+	if files := form.File["image"]; len(files) > 0 {
+		return files
+	}
+	return nil
+}
+
 func newImageTool(action, model string) []byte {
 	tool := []byte(`{"type":"image_generation"}`)
 	tool, _ = sjson.SetBytes(tool, "action", action)
@@ -229,7 +352,25 @@ func setFormImageToolNumberFields(tool []byte, c *gin.Context, fields ...string)
 	return tool
 }
 
+func (h *OpenAIAPIHandler) rejectImagesEndpointIfDisabled(c *gin.Context) bool {
+	if h == nil || h.Cfg == nil || h.Cfg.DisableImageGeneration != config.DisableImageGenerationAll {
+		return false
+	}
+	c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+		Error: handlers.ErrorDetail{
+			Message: "Image generation endpoints are disabled",
+			Type:    "invalid_request_error",
+			Code:    "not_found",
+		},
+	})
+	return true
+}
+
 func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
+	if h.rejectImagesEndpointIfDisabled(c) {
+		return
+	}
+
 	rawJSON, err := c.GetRawData()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -271,12 +412,12 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
-	if !stream && openAICompatibleImageModel(imageModel) {
+	if openAICompatibleImageModel(imageModel) {
 		nativeJSON := rawJSON
 		if !responseFormatProvided {
 			nativeJSON, _ = sjson.SetBytes(nativeJSON, "response_format", responseFormat)
 		}
-		h.collectImagesFromNative(c, nativeJSON, imageModel)
+		h.dispatchImagesNative(c, nativeJSON, imageModel, stream, "images/generations")
 		return
 	}
 
@@ -288,6 +429,10 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 }
 
 func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
+	if h.rejectImagesEndpointIfDisabled(c) {
+		return
+	}
+
 	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
 	if strings.HasPrefix(contentType, "application/json") {
 		h.imagesEditsFromJSON(c)
@@ -306,7 +451,47 @@ func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
 	})
 }
 
+func (h *OpenAIAPIHandler) ImagesVariations(c *gin.Context) {
+	if h.rejectImagesEndpointIfDisabled(c) {
+		return
+	}
+
+	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
+	if strings.HasPrefix(contentType, "multipart/form-data") || contentType == "" {
+		h.imagesVariationsFromMultipart(c)
+		return
+	}
+
+	c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		Error: handlers.ErrorDetail{
+			Message: fmt.Sprintf("Invalid request: unsupported Content-Type %q", contentType),
+			Type:    "invalid_request_error",
+		},
+	})
+}
+
 func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
+	rawBody, err := util.ReadResponseBodyLimited(c.Request.Body, maxImageMultipartBytes)
+	if err != nil {
+		if errors.Is(err, util.ErrResponseBodyTooLarge) {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: multipart body exceeds maximum allowed size of %d bytes", maxImageMultipartBytes),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
+
 	form, err := c.MultipartForm()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -329,12 +514,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		return
 	}
 
-	var imageFiles []*multipart.FileHeader
-	if files := form.File["image[]"]; len(files) > 0 {
-		imageFiles = files
-	} else if files := form.File["image"]; len(files) > 0 {
-		imageFiles = files
-	}
+	imageFiles := multipartImageFiles(form)
 	if len(imageFiles) == 0 {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
@@ -385,6 +565,11 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
 
+	if openAICompatibleImageModel(imageModel) {
+		h.dispatchImagesNative(c, rawBody, imageModel, stream, "images/edits")
+		return
+	}
+
 	tool := newImageTool("edit", imageModel)
 	tool = setFormImageToolStringFields(tool, c, imageEditStringToolFields...)
 	tool = setFormImageToolNumberFields(tool, c, imageNumberToolFields...)
@@ -394,6 +579,92 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 
 	h.dispatchImagesResponses(c, prompt, images, tool, responseFormat, stream, "image_edit")
+}
+
+func (h *OpenAIAPIHandler) imagesVariationsFromMultipart(c *gin.Context) {
+	rawBody, err := util.ReadResponseBodyLimited(c.Request.Body, maxImageMultipartBytes)
+	if err != nil {
+		if errors.Is(err, util.ErrResponseBodyTooLarge) {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: multipart body exceeds maximum allowed size of %d bytes", maxImageMultipartBytes),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
+
+	form, err := c.MultipartForm()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	imageFiles := multipartImageFiles(form)
+	if len(imageFiles) == 0 {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Invalid request: image is required",
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	imageModel := strings.TrimSpace(c.PostForm("model"))
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+	responseFormat := strings.TrimSpace(c.PostForm("response_format"))
+	if responseFormat == "" {
+		responseFormat = "b64_json"
+	}
+	stream := parseBoolField(c.PostForm("stream"), false)
+
+	if openAICompatibleImageModel(imageModel) {
+		h.dispatchImagesNative(c, rawBody, imageModel, stream, "images/variations")
+		return
+	}
+
+	images := make([]string, 0, len(imageFiles))
+	for _, fh := range imageFiles {
+		dataURL, err := multipartFileToDataURL(fh)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		images = append(images, dataURL)
+	}
+
+	prompt := strings.TrimSpace(c.PostForm("prompt"))
+	if prompt == "" {
+		prompt = defaultImagesVariationPrompt
+	}
+
+	tool := newImageTool("edit", imageModel)
+	tool = setFormImageToolStringFields(tool, c, imageEditStringToolFields...)
+	tool = setFormImageToolNumberFields(tool, c, imageNumberToolFields...)
+
+	h.dispatchImagesResponses(c, prompt, images, tool, responseFormat, stream, "image_variation")
 }
 
 func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
@@ -562,12 +833,20 @@ func openAICompatibleImageModel(modelName string) bool {
 	return false
 }
 
-func (h *OpenAIAPIHandler) collectImagesFromNative(c *gin.Context, rawJSON []byte, modelName string) {
+func (h *OpenAIAPIHandler) dispatchImagesNative(c *gin.Context, rawPayload []byte, modelName string, stream bool, alt string) {
+	if stream {
+		h.streamImagesFromNative(c, rawPayload, modelName, alt)
+		return
+	}
+	h.collectImagesFromNative(c, rawPayload, modelName, alt)
+}
+
+func (h *OpenAIAPIHandler) collectImagesFromNative(c *gin.Context, rawPayload []byte, modelName string, alt string) {
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	out, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, "openai", modelName, rawJSON, "images/generations")
+	out, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, "openai", modelName, rawPayload, alt)
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -583,8 +862,158 @@ func (h *OpenAIAPIHandler) collectImagesFromNative(c *gin.Context, rawJSON []byt
 	cliCancel()
 }
 
+func (h *OpenAIAPIHandler) streamImagesFromNative(c *gin.Context, rawPayload []byte, modelName string, alt string) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Streaming not supported",
+				Type:    "server_error",
+			},
+		})
+		return
+	}
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai", modelName, rawPayload, alt)
+	timing := h.newImageStreamTiming()
+	defer timing.Stop()
+
+	setSSEHeaders := func() {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+	}
+	sseStarted := false
+	ensureSSEStarted := func() {
+		if sseStarted {
+			return
+		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		sseStarted = true
+	}
+
+	writeEvent := func(eventName string, dataJSON []byte) {
+		ensureSSEStarted()
+		if strings.TrimSpace(eventName) != "" {
+			_, _ = fmt.Fprintf(c.Writer, "event: %s\n", eventName)
+		}
+		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(dataJSON))
+		flusher.Flush()
+		timing.MarkWrite()
+	}
+	writeKeepAlive := func() {
+		ensureSSEStarted()
+		_, _ = c.Writer.Write([]byte(imageStreamKeepAlivePayload))
+		flusher.Flush()
+		timing.MarkWrite()
+	}
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cliCancel(c.Request.Context().Err())
+			return
+		case errMsg, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			if sseStarted {
+				emitImagesStreamError(writeEvent, errMsg)
+			} else {
+				h.WriteErrorResponse(c, errMsg)
+			}
+			if errMsg != nil {
+				cliCancel(errMsg.Error)
+			} else {
+				cliCancel(nil)
+			}
+			return
+		case chunk, ok := <-dataChan:
+			if !ok {
+				ensureSSEStarted()
+				_, _ = c.Writer.Write([]byte("\n"))
+				flusher.Flush()
+				timing.MarkWrite()
+				cliCancel(nil)
+				return
+			}
+
+			timing.MarkData()
+			writeNativeImagesStreamChunk(writeEvent, chunk)
+			h.forwardNativeImagesStream(c, func(err error) { cliCancel(err) }, dataChan, errChan, writeEvent, timing, writeKeepAlive)
+			return
+		case now := <-timing.keepAliveC:
+			maybeWriteImageStreamKeepAlive(timing, now, writeKeepAlive)
+		case now := <-timing.dataIntervalC:
+			if !timing.IdleTimedOut(now) {
+				continue
+			}
+			errMsg := imageStreamIdleTimeoutError(timing.dataIntervalTimeout)
+			emitImagesStreamError(writeEvent, errMsg)
+			cliCancel(errMsg.Error)
+			return
+		}
+	}
+}
+
+func (h *OpenAIAPIHandler) forwardNativeImagesStream(c *gin.Context, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, writeEvent imageStreamEventWriter, timing *imageStreamTiming, writeKeepAlive func()) {
+	var keepAliveC, dataIntervalC <-chan time.Time
+	if timing != nil {
+		keepAliveC = timing.keepAliveC
+		dataIntervalC = timing.dataIntervalC
+	}
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cancel(c.Request.Context().Err())
+			return
+		case errMsg, ok := <-errs:
+			if ok && errMsg != nil {
+				emitImagesStreamError(writeEvent, errMsg)
+				cancel(errMsg.Error)
+				return
+			}
+			errs = nil
+		case chunk, ok := <-data:
+			if !ok {
+				cancel(nil)
+				return
+			}
+			timing.MarkData()
+			writeNativeImagesStreamChunk(writeEvent, chunk)
+		case now := <-keepAliveC:
+			maybeWriteImageStreamKeepAlive(timing, now, writeKeepAlive)
+		case now := <-dataIntervalC:
+			if !timing.IdleTimedOut(now) {
+				continue
+			}
+			errMsg := imageStreamIdleTimeoutError(timing.dataIntervalTimeout)
+			emitImagesStreamError(writeEvent, errMsg)
+			cancel(errMsg.Error)
+			return
+		}
+	}
+}
+
+func writeNativeImagesStreamChunk(writeEvent imageStreamEventWriter, chunk []byte) {
+	if len(bytes.TrimSpace(chunk)) == 0 {
+		return
+	}
+	eventName := ""
+	if json.Valid(chunk) {
+		eventName = strings.TrimSpace(gjson.GetBytes(chunk, "type").String())
+	}
+	writeEvent(eventName, chunk)
+}
+
 func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, *interfaces.ErrorMessage) {
 	acc := &sseFrameAccumulator{}
+	state := newImageResponseCollectState()
 
 	processFrame := func(frame []byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		var result []byte
@@ -599,7 +1028,15 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 				return false
 			}
 
-			if gjson.GetBytes(payload, "type").String() != "response.completed" {
+			switch gjson.GetBytes(payload, "type").String() {
+			case "response.output_item.done":
+				if err := state.AddOutputItemDone(payload); err != nil {
+					errMsg = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+					return false
+				}
+				return true
+			case "response.completed":
+			default:
 				return true
 			}
 
@@ -607,6 +1044,12 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 			if err != nil {
 				errMsg = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 				return false
+			}
+			if len(results) == 0 {
+				results = state.PendingResults()
+				if len(results) > 0 {
+					firstMeta = results[0]
+				}
 			}
 			if len(results) == 0 {
 				errMsg = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
@@ -698,6 +1141,83 @@ func extractImagesFromResponsesCompleted(payload []byte) (results []imageCallRes
 	return results, createdAt, usageRaw, firstMeta, nil
 }
 
+type imageResponseCollectState struct {
+	results []imageCallResult
+	seen    map[string]struct{}
+}
+
+func newImageResponseCollectState() *imageResponseCollectState {
+	return &imageResponseCollectState{seen: make(map[string]struct{})}
+}
+
+func (s *imageResponseCollectState) AddOutputItemDone(payload []byte) error {
+	if s == nil {
+		return nil
+	}
+	result, itemID, ok, err := extractImageFromResponsesOutputItemDone(payload)
+	if err != nil || !ok {
+		return err
+	}
+	appendImageCallResultDedup(&s.results, s.seen, itemID, result)
+	return nil
+}
+
+func (s *imageResponseCollectState) PendingResults() []imageCallResult {
+	if s == nil || len(s.results) == 0 {
+		return nil
+	}
+	out := make([]imageCallResult, len(s.results))
+	copy(out, s.results)
+	return out
+}
+
+func extractImageFromResponsesOutputItemDone(payload []byte) (imageCallResult, string, bool, error) {
+	if gjson.GetBytes(payload, "type").String() != "response.output_item.done" {
+		return imageCallResult{}, "", false, fmt.Errorf("unexpected event type")
+	}
+	item := gjson.GetBytes(payload, "item")
+	if !item.Exists() || item.Get("type").String() != "image_generation_call" {
+		return imageCallResult{}, "", false, nil
+	}
+	res := strings.TrimSpace(item.Get("result").String())
+	if res == "" {
+		return imageCallResult{}, "", false, nil
+	}
+	return imageCallResult{
+		Result:        res,
+		RevisedPrompt: strings.TrimSpace(item.Get("revised_prompt").String()),
+		OutputFormat:  strings.TrimSpace(item.Get("output_format").String()),
+		Size:          strings.TrimSpace(item.Get("size").String()),
+		Background:    strings.TrimSpace(item.Get("background").String()),
+		Quality:       strings.TrimSpace(item.Get("quality").String()),
+	}, strings.TrimSpace(item.Get("id").String()), true, nil
+}
+
+func appendImageCallResultDedup(results *[]imageCallResult, seen map[string]struct{}, itemID string, result imageCallResult) bool {
+	if results == nil {
+		return false
+	}
+	key := imageCallResultKey(itemID, result)
+	if key != "" && seen != nil {
+		if _, exists := seen[key]; exists {
+			return false
+		}
+		seen[key] = struct{}{}
+	}
+	*results = append(*results, result)
+	return true
+}
+
+func imageCallResultKey(itemID string, result imageCallResult) string {
+	if strings.TrimSpace(result.Result) != "" {
+		return strings.TrimSpace(result.OutputFormat) + "|" + strings.TrimSpace(result.Result)
+	}
+	if strings.TrimSpace(itemID) != "" {
+		return "item:" + strings.TrimSpace(itemID)
+	}
+	return ""
+}
+
 func buildImagesAPIResponse(results []imageCallResult, createdAt int64, usageRaw []byte, firstMeta imageCallResult, responseFormat string) ([]byte, error) {
 	out := []byte(`{"created":0,"data":[]}`)
 	out, _ = sjson.SetBytes(out, "created", createdAt)
@@ -756,6 +1276,8 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	cliCtx = handlers.WithDisallowFreeAuth(cliCtx)
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
+	timing := h.newImageStreamTiming()
+	defer timing.Stop()
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -763,13 +1285,30 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
+	sseStarted := false
+	ensureSSEStarted := func() {
+		if sseStarted {
+			return
+		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		sseStarted = true
+	}
 
 	writeEvent := func(eventName string, dataJSON []byte) {
+		ensureSSEStarted()
 		if strings.TrimSpace(eventName) != "" {
 			_, _ = fmt.Fprintf(c.Writer, "event: %s\n", eventName)
 		}
 		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(dataJSON))
 		flusher.Flush()
+		timing.MarkWrite()
+	}
+	writeKeepAlive := func() {
+		ensureSSEStarted()
+		_, _ = c.Writer.Write([]byte(imageStreamKeepAlivePayload))
+		flusher.Flush()
+		timing.MarkWrite()
 	}
 
 	// Peek for first chunk/error so we can still return a JSON error body.
@@ -783,7 +1322,11 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 				errChan = nil
 				continue
 			}
-			h.WriteErrorResponse(c, errMsg)
+			if sseStarted {
+				emitImagesStreamError(writeEvent, errMsg)
+			} else {
+				h.WriteErrorResponse(c, errMsg)
+			}
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -792,16 +1335,15 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				ensureSSEStarted()
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
+				timing.MarkWrite()
 				cliCancel(nil)
 				return
 			}
 
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			timing.MarkData()
 
 			h.forwardImagesStream(cliCtx, c, imageStreamForwardOptions{
 				cancel:         func(err error) { cliCancel(err) },
@@ -811,7 +1353,19 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 				responseFormat: responseFormat,
 				streamPrefix:   streamPrefix,
 				writeEvent:     writeEvent,
+				writeKeepAlive: writeKeepAlive,
+				timing:         timing,
 			})
+			return
+		case now := <-timing.keepAliveC:
+			maybeWriteImageStreamKeepAlive(timing, now, writeKeepAlive)
+		case now := <-timing.dataIntervalC:
+			if !timing.IdleTimedOut(now) {
+				continue
+			}
+			errMsg := imageStreamIdleTimeoutError(timing.dataIntervalTimeout)
+			emitImagesStreamError(writeEvent, errMsg)
+			cliCancel(errMsg.Error)
 			return
 		}
 	}
@@ -825,10 +1379,13 @@ type imageStreamForwardOptions struct {
 	responseFormat string
 	streamPrefix   string
 	writeEvent     imageStreamEventWriter
+	writeKeepAlive func()
+	timing         *imageStreamTiming
 }
 
 func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Context, opts imageStreamForwardOptions) {
 	acc := &sseFrameAccumulator{}
+	state := newImageResponseCollectState()
 
 	responseFormat := strings.ToLower(strings.TrimSpace(opts.responseFormat))
 	if responseFormat == "" {
@@ -836,7 +1393,13 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 	}
 
 	processFrame := func(frame []byte) (done bool) {
-		return processImagesStreamFrame(frame, responseFormat, opts.streamPrefix, opts.writeEvent)
+		return processImagesStreamFrame(frame, responseFormat, opts.streamPrefix, opts.writeEvent, state)
+	}
+	timing := opts.timing
+	var keepAliveC, dataIntervalC <-chan time.Time
+	if timing != nil {
+		keepAliveC = timing.keepAliveC
+		dataIntervalC = timing.dataIntervalC
 	}
 
 	for _, frame := range acc.AddChunk(opts.firstChunk) {
@@ -866,22 +1429,36 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 						return
 					}
 				}
+				if pending := state.PendingResults(); len(pending) > 0 {
+					writeImagesCompletedEventsFromResults(pending, nil, responseFormat, opts.streamPrefix, opts.writeEvent)
+				}
 				opts.cancel(nil)
 				return
 			}
+			timing.MarkData()
 			for _, frame := range acc.AddChunk(chunk) {
 				if processFrame(frame) {
 					opts.cancel(nil)
 					return
 				}
 			}
+		case now := <-keepAliveC:
+			maybeWriteImageStreamKeepAlive(timing, now, opts.writeKeepAlive)
+		case now := <-dataIntervalC:
+			if !timing.IdleTimedOut(now) {
+				continue
+			}
+			errMsg := imageStreamIdleTimeoutError(timing.dataIntervalTimeout)
+			emitImagesStreamError(opts.writeEvent, errMsg)
+			opts.cancel(errMsg.Error)
+			return
 		}
 	}
 }
 
 type imageStreamEventWriter func(string, []byte)
 
-func processImagesStreamFrame(frame []byte, responseFormat string, streamPrefix string, writeEvent imageStreamEventWriter) (done bool) {
+func processImagesStreamFrame(frame []byte, responseFormat string, streamPrefix string, writeEvent imageStreamEventWriter, state *imageResponseCollectState) (done bool) {
 	translatorcommon.ForEachSSEDataLine(frame, func(payload []byte) bool {
 		if bytes.Equal(payload, []byte("[DONE]")) || !json.Valid(payload) {
 			return true
@@ -890,8 +1467,14 @@ func processImagesStreamFrame(frame []byte, responseFormat string, streamPrefix 
 		switch gjson.GetBytes(payload, "type").String() {
 		case "response.image_generation_call.partial_image":
 			writeImagesPartialImageEvent(payload, responseFormat, streamPrefix, writeEvent)
+		case "response.output_item.done":
+			if err := state.AddOutputItemDone(payload); err != nil {
+				emitImagesStreamError(writeEvent, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+				done = true
+				return false
+			}
 		case "response.completed":
-			writeImagesCompletedEvents(payload, responseFormat, streamPrefix, writeEvent)
+			writeImagesCompletedEvents(payload, responseFormat, streamPrefix, writeEvent, state)
 			done = true
 			return false
 		}
@@ -920,17 +1503,23 @@ func writeImagesPartialImageEvent(payload []byte, responseFormat string, streamP
 	writeEvent(eventName, data)
 }
 
-func writeImagesCompletedEvents(payload []byte, responseFormat string, streamPrefix string, writeEvent imageStreamEventWriter) {
+func writeImagesCompletedEvents(payload []byte, responseFormat string, streamPrefix string, writeEvent imageStreamEventWriter, state *imageResponseCollectState) {
 	results, _, usageRaw, _, err := extractImagesFromResponsesCompleted(payload)
 	if err != nil {
 		emitImagesStreamError(writeEvent, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 		return
 	}
+	if len(results) == 0 && state != nil {
+		results = state.PendingResults()
+	}
 	if len(results) == 0 {
 		emitImagesStreamError(writeEvent, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")})
 		return
 	}
+	writeImagesCompletedEventsFromResults(results, usageRaw, responseFormat, streamPrefix, writeEvent)
+}
 
+func writeImagesCompletedEventsFromResults(results []imageCallResult, usageRaw []byte, responseFormat string, streamPrefix string, writeEvent imageStreamEventWriter) {
 	eventName := streamPrefix + ".completed"
 	for _, img := range results {
 		data := []byte(`{"type":""}`)

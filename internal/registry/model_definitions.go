@@ -8,7 +8,15 @@ import (
 	"sync/atomic"
 )
 
-const codexBuiltinImageModelID = "gpt-image-2"
+var codexBuiltinImageModels = []struct {
+	id          string
+	displayName string
+	created     int64
+}{
+	{id: "gpt-image-1", displayName: "GPT Image 1", created: 1733875200},
+	{id: "gpt-image-1.5", displayName: "GPT Image 1.5", created: 1735689600},
+	{id: "gpt-image-2", displayName: "GPT Image 2", created: 1738368000},
+}
 
 type staticModelLookupSnapshot struct {
 	data *staticModelsJSON
@@ -94,18 +102,22 @@ func GetAntigravityModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImageModelInfo())
+	extras := make([]*ModelInfo, 0, len(codexBuiltinImageModels))
+	for _, model := range codexBuiltinImageModels {
+		extras = append(extras, codexBuiltinImageModelInfo(model.id, model.displayName, model.created))
+	}
+	return upsertModelInfos(models, extras...)
 }
 
-func codexBuiltinImageModelInfo() *ModelInfo {
+func codexBuiltinImageModelInfo(id string, displayName string, created int64) *ModelInfo {
 	return &ModelInfo{
-		ID:          codexBuiltinImageModelID,
+		ID:          id,
 		Object:      "model",
-		Created:     1704067200, // 2024-01-01
+		Created:     created,
 		OwnedBy:     "openai",
 		Type:        "openai",
-		DisplayName: "GPT Image 2",
-		Version:     codexBuiltinImageModelID,
+		DisplayName: displayName,
+		Version:     id,
 	}
 }
 

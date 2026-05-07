@@ -101,8 +101,12 @@ func codexEnsureResponsesIdentityHeaders(target http.Header, source http.Header)
 	ensureHeaderWithPriority(target, source, codexHeaderMemgenRequest, "", "")
 	ensureHeaderWithPriority(target, source, codexHeaderWindowID, "", "")
 	if strings.TrimSpace(target.Get(codexHeaderWindowID)) == "" {
-		if sessionID := strings.TrimSpace(target.Get(codexHeaderSessionID)); sessionID != "" {
-			if windowID := codexCurrentWindowID(sessionID); windowID != "" {
+		windowKey := firstNonEmptyHeaderValue(target, source, codexHeaderThreadID)
+		if windowKey == "" {
+			windowKey = strings.TrimSpace(target.Get(codexHeaderSessionID))
+		}
+		if windowKey != "" {
+			if windowID := codexCurrentWindowID(windowKey); windowID != "" {
 				target.Set(codexHeaderWindowID, windowID)
 			}
 		}

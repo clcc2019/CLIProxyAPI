@@ -122,9 +122,9 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
-	_, _, errMsg := handler.getRequestDetails("gpt-image-2")
+	_, _, errMsg := handler.getRequestDetails("gpt-image-1.5")
 	if errMsg == nil {
-		t.Fatalf("expected error for gpt-image-2, got nil")
+		t.Fatalf("expected error for gpt-image-1.5, got nil")
 	}
 	if errMsg.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
@@ -133,7 +133,9 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 		t.Fatalf("expected error message, got nil")
 	}
 	msg := errMsg.Error.Error()
-	if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
+	if !strings.Contains(msg, "/v1/images/generations") ||
+		!strings.Contains(msg, "/v1/images/edits") ||
+		!strings.Contains(msg, "/v1/images/variations") {
 		t.Fatalf("unexpected error message: %q", msg)
 	}
 }

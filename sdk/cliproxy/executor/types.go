@@ -14,6 +14,10 @@ const RequestedModelMetadataKey = "requested_model"
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
 
+// RequestContentTypeMetadataKey stores the inbound HTTP Content-Type in Options.Metadata.
+// It is optional and primarily used by raw passthrough endpoints such as multipart image edits.
+const RequestContentTypeMetadataKey = "request_content_type"
+
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 

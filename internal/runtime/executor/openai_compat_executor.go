@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -16,6 +20,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -87,7 +92,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + plan.endpoint
-	httpResp, err := e.executeUpstreamJSON(ctx, auth, apiKey, url, plan.translated, false)
+	httpResp, err := e.executeUpstreamBody(ctx, auth, apiKey, url, plan.translated, plan.contentType, false)
 	if err != nil {
 		return resp, err
 	}
@@ -104,7 +109,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
 	out := body
-	if !plan.nativeImagesGenerations {
+	if !plan.nativeImages {
 		var param any
 		out = sdktranslator.TranslateNonStream(ctx, plan.to, plan.from, req.Model, opts.OriginalRequest, plan.translated, body, &param)
 	}
@@ -113,24 +118,26 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 }
 
 type openAICompatNonStreamPlan struct {
-	from                    sdktranslator.Format
-	to                      sdktranslator.Format
-	endpoint                string
-	translated              []byte
-	nativeImagesGenerations bool
+	from         sdktranslator.Format
+	to           sdktranslator.Format
+	endpoint     string
+	translated   []byte
+	contentType  string
+	nativeImages bool
 }
 
 func (e *OpenAICompatExecutor) buildNonStreamPlan(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (openAICompatNonStreamPlan, error) {
 	plan := openAICompatNonStreamPlan{
-		from:     opts.SourceFormat,
-		to:       sdktranslator.FromString("openai"),
-		endpoint: "/chat/completions",
+		from:        opts.SourceFormat,
+		to:          sdktranslator.FromString("openai"),
+		endpoint:    "/chat/completions",
+		contentType: "application/json",
 	}
 	alt := strings.Trim(strings.TrimSpace(opts.Alt), "/")
 	compactResponses := alt == "responses/compact"
-	plan.nativeImagesGenerations = alt == "images/generations"
-	if plan.nativeImagesGenerations {
-		plan.endpoint = "/images/generations"
+	if endpoint, ok := openAICompatNativeImagesEndpoint(alt); ok {
+		plan.nativeImages = true
+		plan.endpoint = endpoint
 	} else if compactResponses {
 		plan.to = sdktranslator.FromString("openai-response")
 		plan.endpoint = "/responses/compact"
@@ -141,15 +148,20 @@ func (e *OpenAICompatExecutor) buildNonStreamPlan(req cliproxyexecutor.Request, 
 		originalPayloadSource = opts.OriginalRequest
 	}
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	if plan.nativeImagesGenerations {
-		plan.translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, plan.to.String(), "", originalPayloadSource, originalPayloadSource, requestedModel)
-		plan.translated = e.overrideModel(plan.translated, baseModel)
+	requestPath := openAICompatRequestPath(opts)
+	if plan.nativeImages {
+		nativePayload, nativeContentType, err := e.buildNativeImagesPayload(baseModel, requestedModel, requestPath, originalPayloadSource, opts)
+		if err != nil {
+			return plan, err
+		}
+		plan.translated = nativePayload
+		plan.contentType = nativeContentType
 		return plan, nil
 	}
 
 	originalPayload := originalPayloadSource
 	translated, originalTranslated := helps.TranslateRequestWithOriginal(e.cfg, plan.from, plan.to, baseModel, req.Payload, originalPayload, opts.Stream)
-	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, plan.to.String(), "", translated, originalTranslated, requestedModel)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, plan.to.String(), "", translated, originalTranslated, requestedModel, requestPath)
 	if compactResponses {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -174,6 +186,26 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
+	alt := strings.Trim(strings.TrimSpace(opts.Alt), "/")
+	if endpoint, ok := openAICompatNativeImagesEndpoint(alt); ok {
+		originalPayloadSource := req.Payload
+		if len(opts.OriginalRequest) > 0 {
+			originalPayloadSource = opts.OriginalRequest
+		}
+		requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+		nativePayload, contentType, err := e.buildNativeImagesPayload(baseModel, requestedModel, openAICompatRequestPath(opts), originalPayloadSource, opts)
+		if err != nil {
+			return nil, err
+		}
+		url := strings.TrimSuffix(baseURL, "/") + endpoint
+		httpResp, err := e.executeUpstreamBody(ctx, auth, apiKey, url, nativePayload, contentType, true)
+		if err != nil {
+			return nil, err
+		}
+		out := e.streamOpenAICompatNativeChunks(ctx, reporter, httpResp)
+		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	}
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	originalPayloadSource := req.Payload
@@ -183,7 +215,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalPayload := originalPayloadSource
 	translated, originalTranslated := helps.TranslateRequestWithOriginal(e.cfg, from, to, baseModel, req.Payload, originalPayload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, openAICompatRequestPath(opts))
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -195,7 +227,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpResp, err := e.executeUpstreamJSON(ctx, auth, apiKey, url, translated, true)
+	httpResp, err := e.executeUpstreamBody(ctx, auth, apiKey, url, translated, "application/json", true)
 	if err != nil {
 		return nil, err
 	}
@@ -279,6 +311,54 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 	return out
 }
 
+func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Context, reporter *helps.UsageReporter, resp *http.Response) <-chan cliproxyexecutor.StreamChunk {
+	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
+	go func() {
+		defer close(out)
+		defer closeOpenAICompatResponseBody(resp)
+		currentEvent := ""
+		errRead := helps.ReadStreamLines(resp.Body, func(line []byte) error {
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok && reporter != nil {
+				reporter.Publish(ctx, detail)
+			}
+			trimmed := bytes.TrimSpace(line)
+			if len(trimmed) == 0 {
+				currentEvent = ""
+				return nil
+			}
+			if bytes.HasPrefix(trimmed, []byte("event:")) {
+				currentEvent = strings.TrimSpace(string(bytes.TrimSpace(trimmed[6:])))
+				return nil
+			}
+			if !bytes.HasPrefix(trimmed, []byte("data:")) {
+				return nil
+			}
+			payload := bytes.TrimSpace(trimmed[5:])
+			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+				return nil
+			}
+			if currentEvent != "" && gjson.ValidBytes(payload) && !gjson.GetBytes(payload, "type").Exists() {
+				if updated, err := sjson.SetBytes(payload, "type", currentEvent); err == nil {
+					payload = updated
+				}
+			}
+			out <- cliproxyexecutor.StreamChunk{Payload: payload}
+			return nil
+		})
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			if reporter != nil {
+				reporter.PublishFailure(ctx)
+			}
+			out <- cliproxyexecutor.StreamChunk{Err: errRead}
+		} else if reporter != nil {
+			reporter.EnsurePublished(ctx)
+		}
+	}()
+	return out
+}
+
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -326,12 +406,180 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 	return
 }
 
-func (e *OpenAICompatExecutor) executeUpstreamJSON(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, url string, payload []byte, stream bool) (*http.Response, error) {
+func openAICompatNativeImagesEndpoint(alt string) (string, bool) {
+	switch strings.Trim(strings.TrimSpace(alt), "/") {
+	case "images/generations":
+		return "/images/generations", true
+	case "images/edits":
+		return "/images/edits", true
+	case "images/variations":
+		return "/images/variations", true
+	default:
+		return "", false
+	}
+}
+
+func (e *OpenAICompatExecutor) buildNativeImagesPayload(baseModel string, requestedModel string, requestPath string, payload []byte, opts cliproxyexecutor.Options) ([]byte, string, error) {
+	contentType := openAICompatRequestContentType(opts)
+	if isMultipartFormContentType(contentType) {
+		rewritten, rewrittenContentType, err := rewriteOpenAICompatMultipartFields(
+			payload,
+			contentType,
+			map[string]string{"model": baseModel},
+			map[string]string{"response_format": "b64_json"},
+		)
+		if err != nil {
+			return nil, "", err
+		}
+		return rewritten, rewrittenContentType, nil
+	}
+
+	translated := helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "openai", "", payload, payload, requestedModel, requestPath)
+	translated = setOpenAICompatJSONDefault(translated, "response_format", "b64_json")
+	translated = e.overrideModel(translated, baseModel)
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	return translated, contentType, nil
+}
+
+func openAICompatRequestPath(opts cliproxyexecutor.Options) string {
+	return stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestPathMetadataKey)
+}
+
+func openAICompatRequestContentType(opts cliproxyexecutor.Options) string {
+	if opts.Headers != nil {
+		if value := strings.TrimSpace(opts.Headers.Get("Content-Type")); value != "" {
+			return value
+		}
+	}
+	return stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestContentTypeMetadataKey)
+}
+
+func stringMetadataValue(meta map[string]any, key string) string {
+	if len(meta) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	switch v := meta[key].(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
+func isMultipartFormContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(contentType))
+	return err == nil && strings.EqualFold(mediaType, "multipart/form-data")
+}
+
+func setOpenAICompatJSONDefault(payload []byte, path string, value any) []byte {
+	if len(payload) == 0 || strings.TrimSpace(path) == "" || gjson.GetBytes(payload, path).Exists() {
+		return payload
+	}
+	updated, err := sjson.SetBytes(payload, path, value)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func rewriteOpenAICompatMultipartFields(body []byte, contentType string, overrides map[string]string, defaults map[string]string) ([]byte, string, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse multipart content-type: %w", err)
+	}
+	boundary := strings.TrimSpace(params["boundary"])
+	if boundary == "" {
+		return nil, "", fmt.Errorf("multipart boundary is required")
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	seen := make(map[string]struct{}, len(overrides)+len(defaults))
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("read multipart body: %w", err)
+		}
+
+		formName := strings.TrimSpace(part.FormName())
+		partHeader := cloneOpenAICompatMultipartHeader(part.Header)
+		target, err := writer.CreatePart(partHeader)
+		if err != nil {
+			_ = part.Close()
+			return nil, "", fmt.Errorf("create multipart part: %w", err)
+		}
+
+		if part.FileName() == "" {
+			if value, ok := overrides[formName]; ok {
+				if _, err := target.Write([]byte(value)); err != nil {
+					_ = part.Close()
+					return nil, "", fmt.Errorf("rewrite multipart field %s: %w", formName, err)
+				}
+				seen[formName] = struct{}{}
+				_ = part.Close()
+				continue
+			}
+			if _, ok := defaults[formName]; ok {
+				seen[formName] = struct{}{}
+			}
+		}
+
+		if _, err := io.Copy(target, part); err != nil {
+			_ = part.Close()
+			return nil, "", fmt.Errorf("copy multipart part: %w", err)
+		}
+		_ = part.Close()
+	}
+
+	for field, value := range overrides {
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		if err := writer.WriteField(field, value); err != nil {
+			return nil, "", fmt.Errorf("append multipart field %s: %w", field, err)
+		}
+		seen[field] = struct{}{}
+	}
+	for field, value := range defaults {
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		if err := writer.WriteField(field, value); err != nil {
+			return nil, "", fmt.Errorf("append multipart field %s: %w", field, err)
+		}
+		seen[field] = struct{}{}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("finalize multipart body: %w", err)
+	}
+	return buffer.Bytes(), writer.FormDataContentType(), nil
+}
+
+func cloneOpenAICompatMultipartHeader(src textproto.MIMEHeader) textproto.MIMEHeader {
+	dst := make(textproto.MIMEHeader, len(src))
+	for key, values := range src {
+		copied := make([]string, len(values))
+		copy(copied, values)
+		dst[key] = copied
+	}
+	return dst
+}
+
+func (e *OpenAICompatExecutor) executeUpstreamBody(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, url string, payload []byte, contentType string, stream bool) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
-	e.prepareUpstreamRequest(httpReq, auth, apiKey, stream)
+	e.prepareUpstreamRequest(httpReq, auth, apiKey, contentType, stream)
 	authID, authLabel, authType, authValue := openAICompatAuthInfo(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
@@ -373,8 +621,12 @@ func closeOpenAICompatResponseBody(resp *http.Response) {
 	}
 }
 
-func (e *OpenAICompatExecutor) prepareUpstreamRequest(req *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool) {
-	req.Header.Set("Content-Type", "application/json")
+func (e *OpenAICompatExecutor) prepareUpstreamRequest(req *http.Request, auth *cliproxyauth.Auth, apiKey string, contentType string, stream bool) {
+	contentType = strings.TrimSpace(contentType)
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	req.Header.Set("Content-Type", contentType)
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(apiKey))
 	}
@@ -402,8 +654,11 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	if len(payload) == 0 || model == "" {
 		return payload
 	}
-	payload, _ = sjson.SetBytes(payload, "model", model)
-	return payload
+	updated, err := sjson.SetBytes(payload, "model", model)
+	if err != nil {
+		return payload
+	}
+	return updated
 }
 
 type statusErr struct {

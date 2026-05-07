@@ -55,6 +55,8 @@ func TestBuildCodexWebsocketRequestBodyIncludesClientMetadata(t *testing.T) {
 }
 
 func TestPrepareCodexWebsocketRequestBuildsSharedRequestState(t *testing.T) {
+	resetCodexWindowStateStore()
+
 	executor := NewCodexWebsocketsExecutor(&config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent: "config-ua",

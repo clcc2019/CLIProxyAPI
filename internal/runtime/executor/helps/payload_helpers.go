@@ -229,13 +229,15 @@ func isImagesEndpointRequestPath(path string) bool {
 	if path == "" {
 		return false
 	}
-	if path == "/v1/images/generations" || path == "/v1/images/edits" {
+	if path == "/v1/images/generations" || path == "/v1/images/edits" || path == "/v1/images/variations" {
 		return true
 	}
 	return strings.HasSuffix(path, "/v1/images/generations") ||
 		strings.HasSuffix(path, "/v1/images/edits") ||
+		strings.HasSuffix(path, "/v1/images/variations") ||
 		strings.HasSuffix(path, "/images/generations") ||
-		strings.HasSuffix(path, "/images/edits")
+		strings.HasSuffix(path, "/images/edits") ||
+		strings.HasSuffix(path, "/images/variations")
 }
 
 func removeToolTypeFromPayloadWithRoot(payload []byte, root, toolType string) []byte {

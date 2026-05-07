@@ -13,6 +13,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 type failOnceStreamExecutor struct {
@@ -1004,5 +1005,12 @@ func TestExecuteStreamWithAuthManager_BuffersOpenAIResponsesOutputItemBootstrapF
 	}
 	if !strings.Contains(string(got), `"response.completed"`) {
 		t.Fatalf("expected successful retry payload, got %q", string(got))
+	}
+}
+
+func TestOpenAIResponsesContentPartHasMaterialContentRecognizesInputImageURL(t *testing.T) {
+	part := gjson.Parse(`{"type":"input_image","image_url":"data:image/png;base64,AAA"}`)
+	if !openAIResponsesContentPartHasMaterialContent(part) {
+		t.Fatal("official input_image image_url should be treated as material content")
 	}
 }

@@ -114,9 +114,22 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 		return ""
 	}
 	conversationID := firstNonEmptyHeaderValue(target, source, "Conversation_id")
+	threadID := firstNonEmptyHeaderValue(target, source, codexHeaderThreadID)
+	if threadID == "" {
+		threadID = firstNonEmptyHeaderValue(target, source, "X-Thread-ID")
+	}
+	if threadID == "" {
+		threadID = conversationID
+	}
 	sessionID := firstNonEmptyHeaderValue(target, source, "Session_id")
 	if sessionID == "" {
+		sessionID = firstNonEmptyHeaderValue(target, source, "X-Session-ID")
+	}
+	if sessionID == "" {
 		sessionID = conversationID
+	}
+	if sessionID == "" {
+		sessionID = threadID
 	}
 	if sessionID == "" {
 		sessionID = codexTurnMetadataSessionID(target, source)
@@ -129,8 +142,17 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 		}
 	}
 	target.Set("Session_id", sessionID)
+	if threadID == "" {
+		threadID = sessionID
+	}
+	if threadID != "" {
+		target.Set(codexHeaderThreadID, threadID)
+	}
 
 	requestID := firstNonEmptyHeaderValue(target, source, "X-Client-Request-Id")
+	if opts.includeRequestID && requestID == "" {
+		requestID = threadID
+	}
 	if opts.includeRequestID && requestID == "" {
 		requestID = conversationID
 	}

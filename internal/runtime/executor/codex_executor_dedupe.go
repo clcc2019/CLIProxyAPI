@@ -39,6 +39,7 @@ var codexDedupeRelevantHeaders = []string{
 	"Chatgpt-Account-Id",
 	"OpenAI-Beta",
 	"Session_id",
+	codexHeaderThreadID,
 	"X-Codex-Beta-Features",
 	"X-Codex-Installation-Id",
 	misc.CodexResidencyHeader,
@@ -78,11 +79,16 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 		return codexPreparedRequest{}, err
 	}
 	if cache.ID != "" && (!isCompact || resolution.headerEligibleID != "") {
-		sessionHeaderValue := cache.ID
+		fallbackHeaderValue := cache.ID
 		if resolution.headerEligibleID != "" {
-			sessionHeaderValue = resolution.headerEligibleID
+			fallbackHeaderValue = resolution.headerEligibleID
 		}
-		httpReq.Header.Set(codexHeaderSessionID, sessionHeaderValue)
+		if sessionHeaderValue := codexPromptCacheSessionHeaderValue(ctx, fallbackHeaderValue); sessionHeaderValue != "" {
+			httpReq.Header.Set(codexHeaderSessionID, sessionHeaderValue)
+		}
+		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, req.Payload, fallbackHeaderValue); threadHeaderValue != "" {
+			httpReq.Header.Set(codexHeaderThreadID, threadHeaderValue)
+		}
 	}
 	return codexPreparedRequest{
 		httpReq:       httpReq,
@@ -103,9 +109,9 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 //     hint at all, so existing API-key-only deployments still benefit from
 //     some degree of caching.
 //
-// The precedence mirrors what codex-rs does — it uses the caller-owned
-// conversation_id as prompt_cache_key — with additional fallbacks that mine
-// conversation-scoped fields out of common client payloads.
+// The precedence mirrors codex-rs: caller-owned thread/conversation IDs become
+// prompt_cache_key, with additional fallbacks that mine conversation-scoped
+// fields out of common client payloads.
 func (e *CodexExecutor) resolvePromptCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request) helps.CodexCache {
 	return e.resolvePromptCacheResolution(ctx, from, "", req).cache
 }
@@ -138,6 +144,27 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 		}
 	}
 
+	// Path 3: native Codex/OpenAI clients may carry their conversation
+	// identity in the body. Use the caller-owned value directly so the proxy
+	// does not replace a valid upstream cache key with its own synthetic UUID.
+	if key := codexPromptCachePayloadConversationHint(req.Payload); key != "" {
+		return codexPromptCacheResolution{
+			cache:            helps.CodexCache{ID: key},
+			headerEligibleID: key,
+		}
+	}
+
+	// Path 4: native Codex/OpenAI clients often carry their conversation
+	// identity in headers. Use that exact caller-owned key before deriving a
+	// synthetic fingerprint, while preserving official Session_id/Thread_id
+	// separation when both headers are present.
+	if key := codexPromptCacheHeaderHint(ctx); key != "" {
+		return codexPromptCacheResolution{
+			cache:            helps.CodexCache{ID: key},
+			headerEligibleID: key,
+		}
+	}
+
 	if cached, ok := globalCodexPromptResolutionMemo.get(from, req.Model, scope, executionSessionID, req.Payload); ok {
 		return cached
 	}
@@ -148,7 +175,7 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 			return cached, nil
 		}
 		resolution := codexPromptCacheResolution{}
-		// Path 3/4: derive a conversation fingerprint from whatever
+		// Path 5: derive a conversation fingerprint from whatever
 		// conversation-scoped fields the caller happened to include. The
 		// fingerprint goes through codexCacheStore, so repeated requests with the
 		// same fingerprint map to the same stable UUID even after translator
@@ -163,6 +190,9 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
 			return resolution, nil
 		}
+		// Path 6: downstream websocket sessions already have a proxy-owned
+		// execution session ID. Reuse it as the header value while keeping the
+		// upstream prompt_cache_key scoped through codexCacheStore.
 		if executionSessionID = strings.TrimSpace(executionSessionID); executionSessionID != "" {
 			cache := loadOrCreateCodexCache("exec:" + scope + ":" + req.Model + ":" + executionSessionID)
 			resolution = codexPromptCacheResolution{
@@ -172,6 +202,8 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
 			return resolution, nil
 		}
+		// Path 7: final structured fallback for clients without explicit
+		// session signals. This preserves the existing content-based reuse.
 		if fp := conversationContentFingerprint(req); fp != "" {
 			key := "fp:" + scope + ":" + req.Model + ":" + fp
 			resolution = codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
@@ -179,7 +211,7 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 			return resolution, nil
 		}
 
-		// Path 6 (fallback): api_key-level stable UUID. This is strictly less
+		// Path 8 (fallback): api_key-level stable UUID. This is strictly less
 		// precise than a real conversation id but preserves backwards-compatible
 		// behaviour for callers that send neither prompt_cache_key nor any
 		// identifiable content (e.g. the upstream smoke tests that post just
@@ -203,6 +235,82 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 		return codexPromptCacheResolution{}
 	}
 	return resolution
+}
+
+func codexPromptCachePayloadConversationHint(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	for _, field := range []string{
+		"conversation_id",
+		"conversationId",
+		"thread_id",
+		"threadId",
+		"session_id",
+		"sessionId",
+		"metadata.conversation_id",
+		"metadata.conversationId",
+		"metadata.thread_id",
+		"metadata.threadId",
+		"metadata.session_id",
+		"metadata.sessionId",
+	} {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, field).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexPromptCacheHeaderHint(ctx context.Context) string {
+	headers := codexGinHeadersFromContext(ctx)
+	if headers == nil {
+		return ""
+	}
+	for _, key := range []string{codexHeaderThreadID, "X-Thread-ID", "Conversation_id", codexHeaderSessionID, "X-Session-ID"} {
+		if value := strings.TrimSpace(headers.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexPromptCacheSessionHeaderValue(ctx context.Context, fallback string) string {
+	headers := codexGinHeadersFromContext(ctx)
+	for _, key := range []string{codexHeaderSessionID, "X-Session-ID"} {
+		if headers != nil {
+			if value := strings.TrimSpace(headers.Get(key)); value != "" {
+				return value
+			}
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func codexPromptCacheThreadHeaderValue(ctx context.Context, payload []byte, fallback string) string {
+	headers := codexGinHeadersFromContext(ctx)
+	for _, key := range []string{codexHeaderThreadID, "X-Thread-ID"} {
+		if headers != nil {
+			if value := strings.TrimSpace(headers.Get(key)); value != "" {
+				return value
+			}
+		}
+	}
+	if key := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(gjson.GetBytes(payload, "metadata.prompt_cache_key").String()); key != "" {
+		return key
+	}
+	if key := codexPromptCachePayloadConversationHint(payload); key != "" {
+		return key
+	}
+	if headers != nil {
+		if value := strings.TrimSpace(headers.Get("Conversation_id")); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(fallback)
 }
 
 // conversationFingerprint extracts a conversation-scoped hint out of req.Payload.

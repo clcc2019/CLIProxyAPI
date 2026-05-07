@@ -79,6 +79,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.NonStreamKeepAliveInterval != newCfg.NonStreamKeepAliveInterval {
 		changes = append(changes, fmt.Sprintf("nonstream-keepalive-interval: %d -> %d", oldCfg.NonStreamKeepAliveInterval, newCfg.NonStreamKeepAliveInterval))
 	}
+	if oldCfg.ImageStreamKeepAliveSeconds != newCfg.ImageStreamKeepAliveSeconds {
+		changes = append(changes, fmt.Sprintf("image-stream-keepalive-seconds: %d -> %d", oldCfg.ImageStreamKeepAliveSeconds, newCfg.ImageStreamKeepAliveSeconds))
+	}
+	if oldCfg.ImageStreamDataIntervalTimeoutSeconds != newCfg.ImageStreamDataIntervalTimeoutSeconds {
+		changes = append(changes, fmt.Sprintf("image-stream-data-interval-timeout-seconds: %d -> %d", oldCfg.ImageStreamDataIntervalTimeoutSeconds, newCfg.ImageStreamDataIntervalTimeoutSeconds))
+	}
 
 	// Quota-exceeded behavior
 	if oldCfg.QuotaExceeded.SwitchProject != newCfg.QuotaExceeded.SwitchProject {

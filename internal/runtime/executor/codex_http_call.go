@@ -71,8 +71,9 @@ func (e *CodexExecutor) prepareCodexHTTPCall(
 		streamMode = codexStreamFieldDelete
 	}
 	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, codexFinalUpstreamBodyOptions{
-		requestKind: requestKind,
-		streamMode:  streamMode,
+		requestKind:                requestKind,
+		streamMode:                 streamMode,
+		preservePreviousResponseID: true,
 	})
 	if requestKind != codexFinalUpstreamCompact {
 		body = codexApplyHTTPClientMetadataWithSource(body, nil, codexGinHeadersFromContext(ctx), auth, e.cfg)

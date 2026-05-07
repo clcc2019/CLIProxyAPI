@@ -101,6 +101,7 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 			"tool_choice":"required",
 			"include":["reasoning.encrypted_content"],
 			"prompt_cache_key":"pc-1",
+			"previous_response_id":"resp_1",
 			"client_metadata":{"x-codex-installation-id":"install-1"}
 		}`),
 	}, cliproxyexecutor.Options{
@@ -122,6 +123,9 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	}
 	if got := gjson.GetBytes(gotBody, "parallel_tool_calls").Bool(); !got {
 		t.Fatalf("parallel_tool_calls = false, want true; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "previous_response_id").String(); got != "resp_1" {
+		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, gotBody)
 	}
 	if got := gotHeaders.Get(codexHeaderTurnMetadata); got != "" {
 		t.Fatalf("%s should not be sent by default to responses/compact: %q", codexHeaderTurnMetadata, got)

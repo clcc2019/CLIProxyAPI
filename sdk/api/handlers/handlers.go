@@ -211,9 +211,15 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// Only include it when the client explicitly provides it.
 	key := ""
+	requestPath := ""
+	contentType := ""
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
+			contentType = strings.TrimSpace(ginCtx.GetHeader("Content-Type"))
+			if ginCtx.Request.URL != nil {
+				requestPath = strings.TrimSpace(ginCtx.Request.URL.Path)
+			}
 		}
 	}
 
@@ -226,6 +232,12 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if key != "" {
 		appendMeta(idempotencyKeyMetadataKey, key)
+	}
+	if requestPath != "" {
+		appendMeta(coreexecutor.RequestPathMetadataKey, requestPath)
+	}
+	if contentType != "" {
+		appendMeta(coreexecutor.RequestContentTypeMetadataKey, contentType)
 	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		appendMeta(coreexecutor.PinnedAuthMetadataKey, pinnedAuthID)
@@ -1079,6 +1091,7 @@ func openAIResponsesContentPartHasMaterialContent(part gjson.Result) bool {
 		"output",
 		"url",
 		"file_id",
+		"image_url",
 		"image_url.url",
 		"input_image.image_url",
 		"partial_image_b64",
@@ -1121,10 +1134,10 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if strings.EqualFold(baseModel, "gpt-image-2") {
+	if isOpenAIImageOnlyModel(baseModel) {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
-			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
+			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations, /v1/images/edits, and /v1/images/variations", baseModel),
 		}
 	}
 
@@ -1145,6 +1158,10 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func isOpenAIImageOnlyModel(modelName string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "gpt-image-")
 }
 
 func cloneBytes(src []byte) []byte {

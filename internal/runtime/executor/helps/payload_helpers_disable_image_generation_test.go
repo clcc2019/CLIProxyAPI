@@ -81,18 +81,20 @@ func TestApplyPayloadConfigWithRoot_DisableImageGenerationChat_KeepsImageGenerat
 	}
 	payload := []byte(`{"tools":[{"type":"image_generation"},{"type":"function","name":"f1"}],"tool_choice":{"type":"image_generation"}}`)
 
-	out := ApplyPayloadConfigWithRoot(cfg, "gpt-5.4", "openai-response", "", payload, nil, "", "/v1/images/generations")
+	for _, path := range []string{"/v1/images/generations", "/v1/images/edits", "/v1/images/variations"} {
+		out := ApplyPayloadConfigWithRoot(cfg, "gpt-5.4", "openai-response", "", payload, nil, "", path)
 
-	tools := gjson.GetBytes(out, "tools")
-	if !tools.Exists() || !tools.IsArray() {
-		t.Fatalf("expected tools array, got %v", tools.Type)
-	}
-	arr := tools.Array()
-	if len(arr) != 2 {
-		t.Fatalf("expected 2 tools (no removal), got %d", len(arr))
-	}
-	if !gjson.GetBytes(out, "tool_choice").Exists() {
-		t.Fatalf("expected tool_choice to be kept on images endpoint")
+		tools := gjson.GetBytes(out, "tools")
+		if !tools.Exists() || !tools.IsArray() {
+			t.Fatalf("%s: expected tools array, got %v", path, tools.Type)
+		}
+		arr := tools.Array()
+		if len(arr) != 2 {
+			t.Fatalf("%s: expected 2 tools (no removal), got %d", path, len(arr))
+		}
+		if !gjson.GetBytes(out, "tool_choice").Exists() {
+			t.Fatalf("%s: expected tool_choice to be kept on images endpoint", path)
+		}
 	}
 }
 

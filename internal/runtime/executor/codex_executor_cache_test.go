@@ -20,11 +20,19 @@ import (
 )
 
 func ctxWithAPIKey(t *testing.T, apiKey string) context.Context {
+	return ctxWithAPIKeyAndHeaders(t, apiKey, nil)
+}
+
+func ctxWithAPIKeyAndHeaders(t *testing.T, apiKey string, headers http.Header) context.Context {
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	if apiKey != "" {
 		ginCtx.Set("apiKey", apiKey)
+	}
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	if headers != nil {
+		ginCtx.Request.Header = headers.Clone()
 	}
 	return context.WithValue(context.Background(), "gin", ginCtx)
 }
@@ -160,6 +168,118 @@ func TestCodexExecutorCacheHelper_CallerProvidedKeyIsPassedThrough(t *testing.T)
 	}
 }
 
+func TestCodexExecutorCacheHelper_ConversationHeadersBecomePromptCacheKey(t *testing.T) {
+	executor := &CodexExecutor{}
+
+	tests := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{name: "conversation", header: "Conversation_id", value: "conv-header"},
+		{name: "thread", header: codexHeaderThreadID, value: "thread-header"},
+		{name: "session", header: "Session_id", value: "session-header"},
+		{name: "x-session", header: "X-Session-ID", value: "x-session-header"},
+	}
+
+	for _, tc := range tests {
+		headers := http.Header{}
+		headers.Set(tc.header, tc.value)
+		ctx := ctxWithAPIKeyAndHeaders(t, "api-key-header", headers)
+		payload := []byte(`{"model":"gpt-5","input":[{"role":"user","content":"hello"}]}`)
+		req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+		httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), "https://example.com/responses", req, payload)
+		if err != nil {
+			t.Fatalf("%s: cacheHelper error: %v", tc.name, err)
+		}
+		body, err := io.ReadAll(httpReq.Body)
+		if err != nil {
+			t.Fatalf("%s: read body: %v", tc.name, err)
+		}
+
+		if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != tc.value {
+			t.Fatalf("%s: prompt_cache_key = %q, want %q; body=%s", tc.name, got, tc.value, body)
+		}
+		if got := httpReq.Header.Get(codexHeaderSessionID); got != tc.value {
+			t.Fatalf("%s: Session_id = %q, want %q", tc.name, got, tc.value)
+		}
+	}
+}
+
+func TestCodexExecutorCacheHelper_BodyPromptCacheKeyBeatsConversationHeader(t *testing.T) {
+	executor := &CodexExecutor{}
+	headers := http.Header{}
+	headers.Set("Conversation_id", "conv-header")
+	ctx := ctxWithAPIKeyAndHeaders(t, "api-key-header", headers)
+
+	payload := []byte(`{"model":"gpt-5","prompt_cache_key":"body-cache","input":[{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+	httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), "https://example.com/responses", req, payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "body-cache" {
+		t.Fatalf("prompt_cache_key = %q, want body-cache; body=%s", got, body)
+	}
+	if got := httpReq.Header.Get(codexHeaderSessionID); got != "body-cache" {
+		t.Fatalf("Session_id = %q, want body-cache", got)
+	}
+	if got := httpReq.Header.Get(codexHeaderThreadID); got != "body-cache" {
+		t.Fatalf("Thread_id = %q, want body-cache", got)
+	}
+}
+
+func TestPrepareCodexHTTPCallPreservesOfficialCLIIdentityHeaders(t *testing.T) {
+	resetCodexWindowStateStore()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+	headers := http.Header{}
+	headers.Set(codexHeaderSessionID, "cli-session")
+	headers.Set(codexHeaderThreadID, "cli-thread")
+	ctx := ctxWithAPIKeyAndHeaders(t, "api-key-cli", headers)
+
+	payload := []byte(`{"model":"gpt-5","prompt_cache_key":"cli-thread","input":[{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+	call, err := executor.prepareCodexHTTPCall(
+		ctx,
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"",
+		"https://example.com/responses",
+		req,
+		payload,
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall error: %v", err)
+	}
+
+	if got := gjson.GetBytes(call.prepared.body, "prompt_cache_key").String(); got != "cli-thread" {
+		t.Fatalf("prompt_cache_key = %q, want cli-thread; body=%s", got, call.prepared.body)
+	}
+	if got := call.prepared.httpReq.Header.Get(codexHeaderSessionID); got != "cli-session" {
+		t.Fatalf("Session_id = %q, want cli-session", got)
+	}
+	if got := call.prepared.httpReq.Header.Get(codexHeaderThreadID); got != "cli-thread" {
+		t.Fatalf("Thread_id = %q, want cli-thread", got)
+	}
+	if got := call.prepared.httpReq.Header.Get("X-Client-Request-Id"); got != "cli-thread" {
+		t.Fatalf("X-Client-Request-Id = %q, want cli-thread", got)
+	}
+	if got := call.prepared.httpReq.Header.Get(codexHeaderWindowID); got != "cli-thread:0" {
+		t.Fatalf("%s = %q, want cli-thread:0", codexHeaderWindowID, got)
+	}
+}
+
 func TestCodexExecutorCacheHelper_DifferentConversationsGetDifferentKeys(t *testing.T) {
 	executor := &CodexExecutor{}
 	ctx := ctxWithAPIKey(t, "api-key-shared")
@@ -205,8 +325,8 @@ func TestCodexExecutorCacheHelper_ConversationIDFieldPreferredOverContent(t *tes
 
 	k1 := assertPromptCacheKey(t, executor, ctx, "openai", cliproxyexecutor.Request{Model: "gpt-5", Payload: p1}, p1)
 	k2 := assertPromptCacheKey(t, executor, ctx, "openai", cliproxyexecutor.Request{Model: "gpt-5", Payload: p2}, p2)
-	if k1 == "" || k1 != k2 {
-		t.Fatalf("explicit conversation_id must win: got %q vs %q", k1, k2)
+	if k1 != "conv-42" || k2 != "conv-42" {
+		t.Fatalf("explicit conversation_id must pass through as prompt_cache_key: got %q vs %q", k1, k2)
 	}
 }
 
@@ -450,10 +570,13 @@ func TestPrepareCodexHTTPCallNormalizesFinalUpstreamBody(t *testing.T) {
 	if got := gjson.GetBytes(body, "stream").Bool(); !got {
 		t.Fatalf("stream = false, want true; body=%s", body)
 	}
-	for _, field := range []string{"stream_options", "temperature", "context_management", "previous_response_id"} {
+	for _, field := range []string{"stream_options", "temperature", "context_management"} {
 		if gjson.GetBytes(body, field).Exists() {
 			t.Fatalf("%s should be removed from final upstream body: %s", field, body)
 		}
+	}
+	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_1" {
+		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, body)
 	}
 	if gjson.GetBytes(body, "instructions").Exists() {
 		t.Fatalf("instructions should be omitted when empty: %s", body)

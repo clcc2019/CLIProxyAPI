@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,16 @@ func codexCurrentWindowID(sessionID string) string {
 
 func codexAdvanceWindowGeneration(sessionID string) {
 	globalCodexWindowStateStore.advance(sessionID)
+}
+
+func codexWindowStateKey(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	if threadID := strings.TrimSpace(headers.Get(codexHeaderThreadID)); threadID != "" {
+		return threadID
+	}
+	return strings.TrimSpace(headers.Get(codexHeaderSessionID))
 }
 
 func (s *codexWindowStateStore) currentGeneration(sessionID string) uint64 {

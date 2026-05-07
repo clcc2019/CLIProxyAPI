@@ -974,10 +974,15 @@ func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Conte
 
 	if resolution.cache.ID != "" {
 		rawJSON = codexSetPromptCacheKey(rawJSON, resolution.cache.ID)
+		fallbackHeaderValue := resolution.cache.ID
 		if resolution.headerEligibleID != "" {
-			headers.Set(codexHeaderSessionID, resolution.headerEligibleID)
-		} else {
-			headers.Set("Conversation_id", resolution.cache.ID)
+			fallbackHeaderValue = resolution.headerEligibleID
+		}
+		if sessionHeaderValue := codexPromptCacheSessionHeaderValue(ctx, fallbackHeaderValue); sessionHeaderValue != "" {
+			headers.Set(codexHeaderSessionID, sessionHeaderValue)
+		}
+		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, req.Payload, fallbackHeaderValue); threadHeaderValue != "" {
+			headers.Set(codexHeaderThreadID, threadHeaderValue)
 		}
 	}
 
