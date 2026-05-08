@@ -62,6 +62,30 @@ func TestWithSkipPersist_DisablesRegisterPersistence(t *testing.T) {
 	}
 }
 
+func TestMarkResultWithoutPersistenceStoreSkipsPersistLoop(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	t.Cleanup(mgr.stopPersistLoop)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "gemini",
+		Status:   StatusActive,
+	}
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register(skipPersist) returned error: %v", err)
+	}
+
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-5",
+		Success:  true,
+	})
+
+	if mgr.persistWake != nil || mgr.persistCancel != nil {
+		t.Fatal("MarkResult started persistence loop without a persistence store")
+	}
+}
+
 func TestMarkResult_DefersAndBatchesPersistence(t *testing.T) {
 	store := &countingStore{}
 	mgr := NewManager(store, nil, nil)

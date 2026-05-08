@@ -35,6 +35,27 @@ func (schedulerTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 	return nil, nil
 }
 
+type schedulerCaptureExecutor struct {
+	schedulerTestExecutor
+	id     string
+	apiKey string
+	email  string
+}
+
+func (e *schedulerCaptureExecutor) Identifier() string { return e.id }
+
+func (e *schedulerCaptureExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if auth != nil && auth.Attributes != nil {
+		e.apiKey = auth.Attributes["api_key"]
+	}
+	if auth != nil && auth.Metadata != nil {
+		if email, ok := auth.Metadata["email"].(string); ok {
+			e.email = email
+		}
+	}
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
 type trackingSelector struct {
 	calls      int
 	lastAuthID []string
@@ -364,6 +385,66 @@ func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) 
 	}
 	if got.ID != "codex-b-plus" {
 		t.Fatalf("pickNextMixed() auth.ID = %q, want %q", got.ID, "codex-b-plus")
+	}
+}
+
+func TestManagerExecuteSchedulerFastPathUsesFullNonCodexAuth(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &schedulerCaptureExecutor{id: "gemini"}
+	manager.RegisterExecutor(executor)
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "gemini-full",
+		Provider: "gemini",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "secret-key",
+			"priority": "10",
+		},
+		Metadata: map[string]any{
+			"email": "user@example.com",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register(gemini-full) error = %v", errRegister)
+	}
+
+	if _, errExecute := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if executor.apiKey != "secret-key" {
+		t.Fatalf("executor api_key = %q, want %q", executor.apiKey, "secret-key")
+	}
+	if executor.email != "user@example.com" {
+		t.Fatalf("executor email = %q, want %q", executor.email, "user@example.com")
+	}
+}
+
+func TestManagerPickNextFastPathResyncsStaleDisabledAuth(t *testing.T) {
+	for _, provider := range []string{"gemini", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			manager.executors[provider] = schedulerTestExecutor{}
+			authID := provider + "-stale"
+			if _, errRegister := manager.Register(context.Background(), &Auth{
+				ID:       authID,
+				Provider: provider,
+				Status:   StatusActive,
+			}); errRegister != nil {
+				t.Fatalf("Register(%s) error = %v", authID, errRegister)
+			}
+
+			manager.mu.Lock()
+			manager.auths[authID].Disabled = true
+			manager.mu.Unlock()
+
+			got, _, errPick := manager.pickNext(context.Background(), provider, "", cliproxyexecutor.Options{}, map[string]struct{}{})
+			if errPick == nil {
+				t.Fatalf("pickNext() auth = %#v, want auth_not_found error", got)
+			}
+			authErr, ok := errPick.(*Error)
+			if !ok || authErr.Code != "auth_not_found" {
+				t.Fatalf("pickNext() error = %#v, want auth_not_found", errPick)
+			}
+		})
 	}
 }
 

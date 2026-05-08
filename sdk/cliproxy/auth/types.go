@@ -481,12 +481,7 @@ func (a *Auth) Clone() *Auth {
 	copyAuth.runtimeMu = nil
 	copyAuth.Attributes = cloneStringMap(a.Attributes)
 	copyAuth.Metadata = cloneAnyMap(a.Metadata)
-	if len(a.ModelStates) > 0 {
-		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
-		for key, state := range a.ModelStates {
-			copyAuth.ModelStates[key] = state.Clone()
-		}
-	}
+	copyAuth.ModelStates = cloneModelStates(a.ModelStates)
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
 }
@@ -507,6 +502,43 @@ func (a *Auth) CloneShallow() *Auth {
 	return &copyAuth
 }
 
+func (a *Auth) cloneSnapshotBase() Auth {
+	return Auth{
+		ID:               a.ID,
+		Index:            a.Index,
+		Provider:         a.Provider,
+		Prefix:           a.Prefix,
+		FileName:         a.FileName,
+		Label:            a.Label,
+		Status:           a.Status,
+		Disabled:         a.Disabled,
+		Unavailable:      a.Unavailable,
+		ProxyURL:         a.ProxyURL,
+		Quota:            a.Quota,
+		CreatedAt:        a.CreatedAt,
+		UpdatedAt:        a.UpdatedAt,
+		LastRefreshedAt:  a.LastRefreshedAt,
+		NextRefreshAfter: a.NextRefreshAfter,
+		NextRetryAfter:   a.NextRetryAfter,
+		indexAssigned:    a.indexAssigned,
+	}
+}
+
+func (a *Auth) cloneForExecution() *Auth {
+	if a == nil {
+		return nil
+	}
+	copyAuth := a.cloneSnapshotBase()
+	copyAuth.Storage = a.Storage
+	copyAuth.StatusMessage = a.StatusMessage
+	copyAuth.LastError = a.LastError
+	copyAuth.Runtime = a.Runtime
+	copyAuth.Attributes = cloneStringMap(a.Attributes)
+	copyAuth.Metadata = cloneAnyMap(a.Metadata)
+	copyAuth.ModelStates = cloneModelStates(a.ModelStates)
+	return &copyAuth
+}
+
 // CloneForScheduler copies only the fields the scheduler needs to retain.
 // Most providers keep a narrowed routing/cooldown snapshot, while codex keeps
 // full Attributes/Metadata because scheduler snapshots also back its execution
@@ -515,15 +547,7 @@ func (a *Auth) CloneForScheduler() *Auth {
 	if a == nil {
 		return nil
 	}
-	mu := a.ensureRuntimeMu()
-	mu.Lock()
-	defer mu.Unlock()
-	copyAuth := *a
-	copyAuth.recentRequests = nil
-	copyAuth.runtimeMu = nil
-	copyAuth.Runtime = nil
-	copyAuth.LastError = nil
-	copyAuth.StatusMessage = ""
+	copyAuth := a.cloneSnapshotBase()
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
 		copyAuth.Attributes = cloneStringMap(a.Attributes)
 		copyAuth.Metadata = cloneAnyMap(a.Metadata)
@@ -531,14 +555,7 @@ func (a *Auth) CloneForScheduler() *Auth {
 		copyAuth.Attributes = cloneAuthAttributesForScheduler(a.Attributes)
 		copyAuth.Metadata = cloneAuthMetadataForScheduler(a.Metadata)
 	}
-	if len(a.ModelStates) > 0 {
-		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
-		for key, state := range a.ModelStates {
-			copyAuth.ModelStates[key] = state.CloneForScheduler()
-		}
-	} else {
-		copyAuth.ModelStates = nil
-	}
+	copyAuth.ModelStates = cloneModelStatesForScheduler(a.ModelStates)
 	return &copyAuth
 }
 
@@ -575,19 +592,37 @@ func cloneModelStates(src map[string]*ModelState) map[string]*ModelState {
 	return dst
 }
 
+func cloneModelStatesForScheduler(src map[string]*ModelState) map[string]*ModelState {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]*ModelState, len(src))
+	for key, state := range src {
+		dst[key] = state.CloneForScheduler()
+	}
+	return dst
+}
+
 func cloneAuthAttributesForScheduler(src map[string]string) map[string]string {
 	if len(src) == 0 {
 		return nil
 	}
 	var dst map[string]string
-	for _, key := range []string{"priority", "websockets", "gemini_virtual_parent", "compat_name", "provider_key"} {
-		if value := src[key]; value != "" {
-			if dst == nil {
-				dst = make(map[string]string, 5)
-			}
-			dst[key] = value
+	add := func(key string) {
+		value := src[key]
+		if value == "" {
+			return
 		}
+		if dst == nil {
+			dst = make(map[string]string, 5)
+		}
+		dst[key] = value
 	}
+	add("priority")
+	add("websockets")
+	add("gemini_virtual_parent")
+	add("compat_name")
+	add("provider_key")
 	return dst
 }
 

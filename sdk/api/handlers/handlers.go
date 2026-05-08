@@ -262,7 +262,7 @@ func requestHeadersFromContext(ctx context.Context) http.Header {
 	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.Header == nil {
 		return nil
 	}
-	return ginCtx.Request.Header
+	return ginCtx.Request.Header.Clone()
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {

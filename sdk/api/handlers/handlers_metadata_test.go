@@ -146,6 +146,26 @@ func TestExecuteWithAuthManagerPassesHeadersToSessionAffinity(t *testing.T) {
 	}
 }
 
+func TestRequestHeadersFromContextReturnsClone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Request.Header.Set("Session_id", "codex-session-1")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	headers := requestHeadersFromContext(ctx)
+	headers.Set("Session_id", "mutated")
+	headers.Set("X-Injected", "yes")
+
+	if got := ginCtx.Request.Header.Get("Session_id"); got != "codex-session-1" {
+		t.Fatalf("original Session_id = %q, want codex-session-1", got)
+	}
+	if got := ginCtx.Request.Header.Get("X-Injected"); got != "" {
+		t.Fatalf("original X-Injected = %q, want empty", got)
+	}
+}
+
 func BenchmarkRequestHeadersFromContext(b *testing.B) {
 	gin.SetMode(gin.ReleaseMode)
 	recorder := httptest.NewRecorder()

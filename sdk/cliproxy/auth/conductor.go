@@ -202,11 +202,12 @@ type Manager struct {
 	refreshBatchCursor int
 
 	// Deferred persistence state
-	persistMu     sync.Mutex
-	persistWake   chan struct{}
-	persistCancel context.CancelFunc
-	persistWG     sync.WaitGroup
-	persistIDs    map[string]struct{}
+	persistEnabled atomic.Bool
+	persistMu      sync.Mutex
+	persistWake    chan struct{}
+	persistCancel  context.CancelFunc
+	persistWG      sync.WaitGroup
+	persistIDs     map[string]struct{}
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -230,6 +231,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.persistEnabled.Store(store != nil)
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
@@ -428,6 +430,7 @@ func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store = store
+	m.persistEnabled.Store(m.store != nil || m.runtimeStateStore != nil)
 }
 
 // SetRuntimeStateStore swaps the optional persistence store for mutable runtime
@@ -442,6 +445,7 @@ func (m *Manager) SetRuntimeStateStore(store RuntimeStateStore) {
 	if store == nil {
 		m.runtimeStates = nil
 	}
+	m.persistEnabled.Store(m.store != nil || m.runtimeStateStore != nil)
 }
 
 // LoadRuntimeStates reads persisted runtime state and applies it to already
@@ -775,8 +779,48 @@ func cloneAuthForExecution(provider string, auth *Auth) *Auth {
 	case "codex":
 		return auth.CloneShallow()
 	default:
-		return auth.Clone()
+		return auth.cloneForExecution()
 	}
+}
+
+func (m *Manager) clonePickedAuthForExecution(provider string, selected *Auth) (auth *Auth, stale bool) {
+	if selected == nil {
+		return nil, false
+	}
+	if m == nil || selected.ID == "" {
+		return cloneAuthForExecution(provider, selected), false
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	m.mu.RLock()
+	current := m.auths[selected.ID]
+	if current == nil || executionAuthIsStale(providerKey, current) {
+		m.mu.RUnlock()
+		return nil, true
+	}
+	if current.indexAssigned {
+		cloned := cloneAuthForExecution(provider, current)
+		m.mu.RUnlock()
+		return cloned, false
+	}
+	m.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current = m.auths[selected.ID]
+	if current == nil || executionAuthIsStale(providerKey, current) {
+		return nil, true
+	}
+	if !current.indexAssigned {
+		current.EnsureIndex()
+	}
+	return cloneAuthForExecution(provider, current), false
+}
+
+func executionAuthIsStale(providerKey string, auth *Auth) bool {
+	if auth == nil || providerKey == "" || auth.Disabled || auth.Status == StatusDisabled {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(auth.Provider), providerKey)
 }
 
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
@@ -3395,14 +3439,13 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			tried[selected.ID] = struct{}{}
 			continue
 		}
-		authCopy := cloneAuthForExecution(provider, selected)
-		if !selected.indexAssigned {
-			m.mu.Lock()
-			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-				current.EnsureIndex()
-				authCopy = current.Clone()
-			}
-			m.mu.Unlock()
+		authCopy, staleSelection := m.clonePickedAuthForExecution(provider, selected)
+		if staleSelection {
+			m.syncScheduler()
+			continue
+		}
+		if authCopy == nil {
+			return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		return authCopy, executor, nil
 	}
@@ -3538,14 +3581,13 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		if !okExecutor {
 			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
-		authCopy := cloneAuthForExecution(providerKey, selected)
-		if !selected.indexAssigned {
-			m.mu.Lock()
-			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-				current.EnsureIndex()
-				authCopy = current.Clone()
-			}
-			m.mu.Unlock()
+		authCopy, staleSelection := m.clonePickedAuthForExecution(providerKey, selected)
+		if staleSelection {
+			m.syncScheduler()
+			continue
+		}
+		if authCopy == nil {
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 		}
 		return authCopy, executor, providerKey, nil
 	}
@@ -3794,6 +3836,9 @@ func preserveRuntimeState(existing, auth *Auth) {
 
 func (m *Manager) enqueuePersistAuthID(ctx context.Context, authID string) {
 	if m == nil || shouldSkipPersist(ctx) {
+		return
+	}
+	if !m.persistEnabled.Load() {
 		return
 	}
 	authID = strings.TrimSpace(authID)
