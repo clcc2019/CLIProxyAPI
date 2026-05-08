@@ -145,3 +145,23 @@ func TestExecuteWithAuthManagerPassesHeadersToSessionAffinity(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkRequestHeadersFromContext(b *testing.B) {
+	gin.SetMode(gin.ReleaseMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Request.Header.Set("Session_id", "codex-session-1")
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+	ginCtx.Request.Header.Set("Idempotency-Key", "client-key")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		headers := requestHeadersFromContext(ctx)
+		if headers.Get("Session_id") == "" {
+			b.Fatal("missing Session_id")
+		}
+	}
+}

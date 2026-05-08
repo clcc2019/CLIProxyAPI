@@ -214,3 +214,27 @@ func BenchmarkManagerPickNextAndMarkResult1000(b *testing.B) {
 		manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "gemini", Model: model, Success: true})
 	}
 }
+
+func BenchmarkManagerMarkCleanModelSuccessParallel(b *testing.B) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	model := "bench-clean-success-model"
+	auth := &Auth{ID: "bench-clean-success-auth", Provider: "gemini", Status: StatusActive}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		b.Fatalf("Register error = %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	b.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+	ctx := WithSkipPersist(context.Background())
+	result := Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Success: true}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			manager.MarkResult(ctx, result)
+		}
+	})
+}

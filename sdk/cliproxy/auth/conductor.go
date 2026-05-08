@@ -2252,23 +2252,24 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	if m.markCleanModelSuccessResult(ctx, result) {
+		return
+	}
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
-	var authSnapshot *Auth
+	schedulerDirty := false
+	persistAuthID := ""
+	var schedulerSnapshot *Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
-		auth.recordRecentRequest(now, result.Success)
-		if result.Success {
-			auth.Success++
-		} else {
-			auth.Failed++
-		}
+		auth.recordRuntimeResult(now, result.Success)
+		persistAuthID = auth.ID
 
 		if result.Success {
 			if result.Model != "" {
@@ -2285,8 +2286,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.UpdatedAt = now
 					shouldResumeModel = true
 					clearModelQuota = true
+					schedulerDirty = true
 				}
 			} else {
+				if !authStateIsClean(auth) {
+					schedulerDirty = true
+				}
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
@@ -2380,20 +2385,24 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
+					schedulerDirty = true
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				schedulerDirty = true
 			}
 		}
 
-		authSnapshot = auth.CloneForScheduler()
+		if schedulerDirty {
+			schedulerSnapshot = auth.CloneForScheduler()
+		}
 	}
 	m.mu.Unlock()
-	if authSnapshot != nil {
-		m.enqueuePersistAuthID(ctx, authSnapshot.ID)
+	if persistAuthID != "" {
+		m.enqueuePersistAuthID(ctx, persistAuthID)
 	}
-	if m.scheduler != nil && authSnapshot != nil {
-		m.scheduler.upsertAuth(authSnapshot)
+	if m.scheduler != nil && schedulerSnapshot != nil {
+		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 
 	if clearModelQuota && result.Model != "" {
@@ -2409,6 +2418,30 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func (m *Manager) markCleanModelSuccessResult(ctx context.Context, result Result) bool {
+	if m == nil || !result.Success || result.AuthID == "" || result.Model == "" {
+		return false
+	}
+
+	now := time.Now()
+	persistAuthID := ""
+	m.mu.RLock()
+	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+		state := lookupModelState(auth, result.Model)
+		if authStateIsClean(auth) && (state == nil || modelStateIsClean(state)) {
+			auth.recordRuntimeResult(now, true)
+			persistAuthID = auth.ID
+		}
+	}
+	m.mu.RUnlock()
+	if persistAuthID == "" {
+		return false
+	}
+	m.enqueuePersistAuthID(ctx, persistAuthID)
+	m.hook.OnResult(ctx, result)
+	return true
 }
 
 func lookupModelState(auth *Auth, model string) *ModelState {
@@ -3751,9 +3784,12 @@ func preserveRuntimeState(existing, auth *Auth) {
 	if existing == nil || auth == nil {
 		return
 	}
+	mu := existing.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
-	auth.recentRequests = existing.recentRequests
+	auth.recentRequests = cloneRecentRequestRing(existing.recentRequests)
 }
 
 func (m *Manager) enqueuePersistAuthID(ctx context.Context, authID string) {

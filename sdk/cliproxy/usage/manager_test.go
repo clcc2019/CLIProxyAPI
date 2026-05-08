@@ -150,6 +150,18 @@ func TestManagerStartContextCancellationClosesManager(t *testing.T) {
 	}
 }
 
+func BenchmarkWithRequestedModelAliasSameValue(b *testing.B) {
+	ctx := WithRequestedModelAlias(context.Background(), "gpt-test")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := WithRequestedModelAlias(ctx, "gpt-test"); got != ctx {
+			b.Fatal("context was not reused")
+		}
+	}
+}
+
 func receiveUsageTestRecord(t *testing.T, ch <-chan string) string {
 	t.Helper()
 	select {

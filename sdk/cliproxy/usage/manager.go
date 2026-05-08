@@ -47,6 +47,9 @@ func WithRequestedModelAlias(ctx context.Context, alias string) context.Context 
 	if alias == "" {
 		return ctx
 	}
+	if current := RequestedModelAliasFromContext(ctx); current == alias {
+		return ctx
+	}
 	return context.WithValue(ctx, requestedModelAliasContextKey{}, alias)
 }
 

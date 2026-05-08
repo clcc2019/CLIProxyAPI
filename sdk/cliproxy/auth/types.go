@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
 )
@@ -95,8 +97,9 @@ type Auth struct {
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 
-	recentRequests recentRequestRing `json:"-"`
-	indexAssigned  bool              `json:"-"`
+	recentRequests *recentRequestRing `json:"-"`
+	indexAssigned  bool               `json:"-"`
+	runtimeMu      unsafe.Pointer     `json:"-"`
 }
 
 const (
@@ -199,6 +202,17 @@ func (a *Auth) recordRecentRequest(now time.Time, success bool) {
 	if a == nil {
 		return
 	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
+	a.recordRecentRequestLocked(now, success)
+}
+
+func (a *Auth) recordRecentRequestLocked(now time.Time, success bool) {
+	if a == nil {
+		return
+	}
+	a.ensureRecentRequests()
 	bucketID := recentRequestBucketID(now)
 	idx := recentRequestBucketIndex(bucketID)
 	bucket := &a.recentRequests.buckets[idx]
@@ -214,17 +228,38 @@ func (a *Auth) recordRecentRequest(now time.Time, success bool) {
 	bucket.failed++
 }
 
+func (a *Auth) recordRuntimeResult(now time.Time, success bool) {
+	if a == nil {
+		return
+	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
+	a.recordRecentRequestLocked(now, success)
+	if success {
+		a.Success++
+		return
+	}
+	a.Failed++
+}
+
 func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 	out := make([]RecentRequestBucket, 0, recentRequestBucketCount)
 	if a == nil {
 		return out
 	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
 
 	currentBucketID := recentRequestBucketID(now)
 	for i := recentRequestBucketCount - 1; i >= 0; i-- {
 		bucketID := currentBucketID - int64(i)
 		idx := recentRequestBucketIndex(bucketID)
-		bucket := a.recentRequests.buckets[idx]
+		var bucket recentRequestBucket
+		if a.recentRequests != nil {
+			bucket = a.recentRequests.buckets[idx]
+		}
 		entry := RecentRequestBucket{
 			Time: formatRecentRequestBucketLabel(bucketID),
 		}
@@ -242,6 +277,9 @@ func (a *Auth) RuntimeStateSnapshot() AuthRuntimeState {
 	if a == nil {
 		return AuthRuntimeState{}
 	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
 	return AuthRuntimeState{
 		Version:        1,
 		SavedAt:        time.Now().UTC(),
@@ -334,6 +372,9 @@ func (a *Auth) ApplyRuntimeState(state AuthRuntimeState) {
 	if a == nil {
 		return
 	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
 	a.Success = state.Success
 	a.Failed = state.Failed
 	a.applyRecentRequestState(state.RecentRequests)
@@ -360,7 +401,7 @@ func (a *Auth) ApplyRuntimeState(state AuthRuntimeState) {
 }
 
 func (a *Auth) recentRequestState() []RecentRequestState {
-	if a == nil {
+	if a == nil || a.recentRequests == nil {
 		return nil
 	}
 	out := make([]RecentRequestState, 0, recentRequestBucketCount)
@@ -381,7 +422,11 @@ func (a *Auth) applyRecentRequestState(items []RecentRequestState) {
 	if a == nil {
 		return
 	}
-	a.recentRequests = recentRequestRing{}
+	if len(items) == 0 {
+		a.recentRequests = nil
+		return
+	}
+	a.recentRequests = &recentRequestRing{}
 	for _, item := range items {
 		if item.BucketID == 0 && item.Success == 0 && item.Failed == 0 {
 			continue
@@ -395,12 +440,45 @@ func (a *Auth) applyRecentRequestState(items []RecentRequestState) {
 	}
 }
 
+func (a *Auth) ensureRecentRequests() {
+	if a != nil && a.recentRequests == nil {
+		a.recentRequests = &recentRequestRing{}
+	}
+}
+
+func (a *Auth) ensureRuntimeMu() *sync.Mutex {
+	if a == nil {
+		return nil
+	}
+	if ptr := atomic.LoadPointer(&a.runtimeMu); ptr != nil {
+		return (*sync.Mutex)(ptr)
+	}
+	mu := &sync.Mutex{}
+	if atomic.CompareAndSwapPointer(&a.runtimeMu, nil, unsafe.Pointer(mu)) {
+		return mu
+	}
+	return (*sync.Mutex)(atomic.LoadPointer(&a.runtimeMu))
+}
+
+func cloneRecentRequestRing(src *recentRequestRing) *recentRequestRing {
+	if src == nil {
+		return nil
+	}
+	copyRing := *src
+	return &copyRing
+}
+
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
 func (a *Auth) Clone() *Auth {
 	if a == nil {
 		return nil
 	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
 	copyAuth := *a
+	copyAuth.recentRequests = cloneRecentRequestRing(a.recentRequests)
+	copyAuth.runtimeMu = nil
 	copyAuth.Attributes = cloneStringMap(a.Attributes)
 	copyAuth.Metadata = cloneAnyMap(a.Metadata)
 	if len(a.ModelStates) > 0 {
@@ -419,7 +497,12 @@ func (a *Auth) CloneShallow() *Auth {
 	if a == nil {
 		return nil
 	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
 	copyAuth := *a
+	copyAuth.recentRequests = nil
+	copyAuth.runtimeMu = nil
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
 }
@@ -432,7 +515,12 @@ func (a *Auth) CloneForScheduler() *Auth {
 	if a == nil {
 		return nil
 	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
 	copyAuth := *a
+	copyAuth.recentRequests = nil
+	copyAuth.runtimeMu = nil
 	copyAuth.Runtime = nil
 	copyAuth.LastError = nil
 	copyAuth.StatusMessage = ""
