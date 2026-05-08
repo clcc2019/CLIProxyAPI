@@ -11,6 +11,10 @@ import (
 const (
 	codexWindowStateTTL             = 12 * time.Hour
 	codexWindowStateCleanupInterval = 64
+	// codexWindowStateShards controls fan-out of the session map. Using a
+	// power of two keeps the shard index computation to a single mask op.
+	codexWindowStateShards     = 16
+	codexWindowStateShardsMask = codexWindowStateShards - 1
 )
 
 type codexWindowStateEntry struct {
@@ -18,14 +22,27 @@ type codexWindowStateEntry struct {
 	lastSeen   time.Time
 }
 
-type codexWindowStateStore struct {
+type codexWindowStateShard struct {
 	mu       sync.Mutex
 	sessions map[string]codexWindowStateEntry
 	ops      uint64
 }
 
-var globalCodexWindowStateStore = &codexWindowStateStore{
-	sessions: make(map[string]codexWindowStateEntry),
+// codexWindowStateStore tracks the per-session generation counter used to mint
+// X-Codex-Window-Id values. It is sharded so that concurrent requests on
+// distinct sessions do not all serialize on the same mutex.
+type codexWindowStateStore struct {
+	shards [codexWindowStateShards]codexWindowStateShard
+}
+
+var globalCodexWindowStateStore = newCodexWindowStateStore()
+
+func newCodexWindowStateStore() *codexWindowStateStore {
+	s := &codexWindowStateStore{}
+	for i := range s.shards {
+		s.shards[i].sessions = make(map[string]codexWindowStateEntry)
+	}
+	return s
 }
 
 func codexCurrentWindowID(sessionID string) string {
@@ -51,6 +68,21 @@ func codexWindowStateKey(headers http.Header) string {
 	return strings.TrimSpace(headers.Get(codexHeaderSessionID))
 }
 
+// shardFor returns the shard that owns sessionID. The FNV-1a hash is cheap and
+// gives a uniform distribution across shards for typical UUID-shaped keys.
+func (s *codexWindowStateStore) shardFor(sessionID string) *codexWindowStateShard {
+	const (
+		fnvOffset = 14695981039346656037
+		fnvPrime  = 1099511628211
+	)
+	hash := uint64(fnvOffset)
+	for i := 0; i < len(sessionID); i++ {
+		hash ^= uint64(sessionID[i])
+		hash *= fnvPrime
+	}
+	return &s.shards[hash&codexWindowStateShardsMask]
+}
+
 func (s *codexWindowStateStore) currentGeneration(sessionID string) uint64 {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" || s == nil {
@@ -58,13 +90,14 @@ func (s *codexWindowStateStore) currentGeneration(sessionID string) uint64 {
 	}
 
 	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	shard := s.shardFor(sessionID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	s.cleanupLocked(now)
-	entry := s.sessions[sessionID]
+	shard.cleanupLocked(now)
+	entry := shard.sessions[sessionID]
 	entry.lastSeen = now
-	s.sessions[sessionID] = entry
+	shard.sessions[sessionID] = entry
 	return entry.generation
 }
 
@@ -75,17 +108,32 @@ func (s *codexWindowStateStore) advance(sessionID string) {
 	}
 
 	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	shard := s.shardFor(sessionID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	s.cleanupLocked(now)
-	entry := s.sessions[sessionID]
+	shard.cleanupLocked(now)
+	entry := shard.sessions[sessionID]
 	entry.generation++
 	entry.lastSeen = now
-	s.sessions[sessionID] = entry
+	shard.sessions[sessionID] = entry
 }
 
-func (s *codexWindowStateStore) cleanupLocked(now time.Time) {
+// reset clears every shard. Intended for tests that need a clean slate.
+func (s *codexWindowStateStore) reset() {
+	if s == nil {
+		return
+	}
+	for i := range s.shards {
+		shard := &s.shards[i]
+		shard.mu.Lock()
+		shard.sessions = make(map[string]codexWindowStateEntry)
+		shard.ops = 0
+		shard.mu.Unlock()
+	}
+}
+
+func (s *codexWindowStateShard) cleanupLocked(now time.Time) {
 	if s == nil {
 		return
 	}

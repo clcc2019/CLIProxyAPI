@@ -14,12 +14,13 @@ import (
 )
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+token)
-	r.Header.Set("Connection", "Keep-Alive")
+	headers := r.Header
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Authorization", "Bearer "+token)
+	headers.Set("Connection", "Keep-Alive")
 	apiKeyAuth := codexIsAPIKeyAuth(auth)
 	requestKind := codexFinalUpstreamResponses
-	if r != nil && r.URL != nil {
+	if r.URL != nil {
 		requestKind = codexFinalUpstreamRequestKindForURL(r.URL.String())
 	}
 
@@ -29,48 +30,50 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithPriority(r.Header, ginHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", codexDefaultVersionHeader())
-	misc.EnsureHeader(r.Header, ginHeaders, "X-OpenAI-Subagent", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "Traceparent", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "Tracestate", "")
-	identity := codexResolvedIdentity(r.Header, ginHeaders, auth, cfg)
-	r.Header.Set("User-Agent", identity.userAgent)
-	sessionID := codexEnsureSessionHeaders(r.Header, ginHeaders, auth, codexSessionHeaderOptions{
+	ensureHeaderWithPriority(headers, ginHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
+	misc.EnsureHeader(headers, ginHeaders, "Version", codexDefaultVersionHeader())
+	misc.EnsureHeader(headers, ginHeaders, "X-OpenAI-Subagent", "")
+	misc.EnsureHeader(headers, ginHeaders, "Traceparent", "")
+	misc.EnsureHeader(headers, ginHeaders, "Tracestate", "")
+	identity := codexResolvedIdentity(headers, ginHeaders, auth, cfg)
+	headers.Set("User-Agent", identity.userAgent)
+	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: requestKind != codexFinalUpstreamCompact,
 	})
 	if requestKind == codexFinalUpstreamCompact {
-		misc.EnsureHeader(r.Header, ginHeaders, codexHeaderTurnMetadata, "")
-		misc.EnsureHeader(r.Header, ginHeaders, codexHeaderTurnState, "")
+		misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnMetadata, "")
+		misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	} else {
-		codexEnsureTurnMetadataHeader(r.Header, ginHeaders, codexTurnMetadataDefaults{
+		codexEnsureTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
 			sessionID:    sessionID,
 			threadSource: codexDefaultThreadSource,
 			turnID:       uuid.NewString(),
 			sandbox:      codexDefaultSandboxTag,
 		})
-		misc.EnsureHeader(r.Header, ginHeaders, codexHeaderTurnState, "")
+		misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	}
-	codexEnsureResponsesIdentityHeaders(r.Header, ginHeaders)
+	codexEnsureResponsesIdentityHeaders(headers, ginHeaders)
 
 	if stream {
-		r.Header.Set("Accept", "text/event-stream")
+		headers.Set("Accept", "text/event-stream")
 	} else {
-		r.Header.Set("Accept", "application/json")
+		headers.Set("Accept", "application/json")
 	}
 
-	r.Header.Set("Originator", identity.originator)
-	if residency := strings.TrimSpace(ginHeaders.Get(misc.CodexResidencyHeader)); residency != "" {
-		r.Header.Set(misc.CodexResidencyHeader, residency)
-	} else if residency := codexResidencyFor(cfg); residency != "" && strings.TrimSpace(r.Header.Get(misc.CodexResidencyHeader)) == "" {
-		r.Header.Set(misc.CodexResidencyHeader, residency)
+	headers.Set("Originator", identity.originator)
+	// Residency precedence: inbound gin header > cfg default. Avoid the
+	// unnecessary target re-check from the previous implementation; we always
+	// enter this block with a freshly applied `Originator` and never set the
+	// residency header earlier, so target.Get is guaranteed empty here.
+	if residency := trimHeaderValue(ginHeaders, misc.CodexResidencyHeader); residency != "" {
+		headers.Set(misc.CodexResidencyHeader, residency)
+	} else if residency := codexResidencyFor(cfg); residency != "" {
+		headers.Set(misc.CodexResidencyHeader, residency)
 	}
-	if !apiKeyAuth {
-		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					r.Header.Set("Chatgpt-Account-Id", trimmed)
-				}
+	if !apiKeyAuth && auth != nil && auth.Metadata != nil {
+		if accountID, ok := auth.Metadata["account_id"].(string); ok {
+			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+				headers.Set("Chatgpt-Account-Id", trimmed)
 			}
 		}
 	}
@@ -80,8 +83,19 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
 	if cfgUserAgent != "" {
-		r.Header.Set("User-Agent", cfgUserAgent)
+		headers.Set("User-Agent", cfgUserAgent)
 	}
+}
+
+// trimHeaderValue returns the TrimSpace'd value for a header key without
+// panicking on a nil http.Header. Having this helper avoids the
+// `if h != nil { strings.TrimSpace(h.Get(k)) }` pattern repeated across the
+// Codex request preparation code.
+func trimHeaderValue(h http.Header, key string) string {
+	if h == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.Get(key))
 }
 
 func codexDefaultVersionHeader() string {

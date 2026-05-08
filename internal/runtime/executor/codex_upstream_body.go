@@ -2,7 +2,6 @@ package executor
 
 import (
 	"bytes"
-	"net/url"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
@@ -32,13 +31,20 @@ type codexFinalUpstreamBodyOptions struct {
 	preservePreviousResponseID bool
 }
 
+// codexFinalUpstreamRequestKindForURL classifies the request kind from the
+// target URL. It avoids url.Parse because we only need a cheap suffix match
+// on the path portion of the URL; parsing a full net/url is overkill in the
+// per-request hot path.
 func codexFinalUpstreamRequestKindForURL(rawURL string) codexFinalUpstreamRequestKind {
-	trimmed := strings.TrimSpace(rawURL)
-	path := trimmed
-	if parsed, err := url.Parse(trimmed); err == nil && strings.TrimSpace(parsed.Path) != "" {
-		path = parsed.Path
+	path := strings.TrimSpace(rawURL)
+	// Drop query/fragment without allocating a parsed URL.
+	if idx := strings.IndexAny(path, "?#"); idx >= 0 {
+		path = path[:idx]
 	}
-	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	// Trim any trailing slashes to make the suffix check robust.
+	for len(path) > 0 && path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
+	}
 	if strings.HasSuffix(path, "/responses/compact") {
 		return codexFinalUpstreamCompact
 	}

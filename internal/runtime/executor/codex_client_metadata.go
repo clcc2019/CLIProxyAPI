@@ -143,8 +143,20 @@ func codexSetClientMetadataStrings(body []byte, entries []codexClientMetadataEnt
 	}
 
 	metadataBody := []byte(`{}`)
+	// existingKeys captures the keys already present in the existing metadata
+	// object, so the loop below can skip them without parsing metadataBody
+	// once per entry. Only populated when we actually need to respect existing
+	// values (overwrite == false), otherwise existence checks are unnecessary.
+	var existingKeys map[string]struct{}
 	if metadata.Exists() && metadata.IsObject() {
 		metadataBody = []byte(metadata.Raw)
+		if !overwrite {
+			existingKeys = make(map[string]struct{}, len(entries))
+			metadata.ForEach(func(key, _ gjson.Result) bool {
+				existingKeys[key.String()] = struct{}{}
+				return true
+			})
+		}
 	}
 	changed := false
 	for _, entry := range entries {
@@ -153,14 +165,19 @@ func codexSetClientMetadataStrings(body []byte, entries []codexClientMetadataEnt
 		if value == "" || key == "" {
 			continue
 		}
-		if !overwrite && gjson.GetBytes(metadataBody, key).Exists() {
-			continue
+		if !overwrite && existingKeys != nil {
+			if _, ok := existingKeys[key]; ok {
+				continue
+			}
 		}
 		updated, errSet := sjson.SetBytes(metadataBody, key, value)
 		if errSet != nil {
 			continue
 		}
 		metadataBody = updated
+		if existingKeys != nil {
+			existingKeys[key] = struct{}{}
+		}
 		changed = true
 	}
 	if !changed {

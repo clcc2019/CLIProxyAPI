@@ -75,16 +75,19 @@ func (e *CodexExecutor) prepareCodexHTTPCall(
 		streamMode:                 streamMode,
 		preservePreviousResponseID: true,
 	})
+	// Resolve gin headers once and reuse across subsequent helpers to avoid
+	// repeated context value lookups in the per-request hot path.
+	ginHeaders := codexGinHeadersFromContext(ctx)
 	if requestKind != codexFinalUpstreamCompact {
-		body = codexApplyHTTPClientMetadataWithSource(body, nil, codexGinHeadersFromContext(ctx), auth, e.cfg)
+		body = codexApplyHTTPClientMetadataWithSource(body, nil, ginHeaders, auth, e.cfg)
 	}
-	prepared, err := e.prepareCodexRequest(ctx, from, executionSessionID, url, req, body)
+	prepared, err := e.prepareCodexRequestWithKind(ctx, from, executionSessionID, url, requestKind, req, body)
 	if err != nil {
 		return codexPreparedHTTPCall{}, err
 	}
 	applyCodexHeaders(prepared.httpReq, auth, token, stream, e.cfg)
 	if requestKind == codexFinalUpstreamCompact {
-		if installationID := codexResolvedInstallationID(prepared.httpReq.Header, codexGinHeadersFromContext(prepared.httpReq.Context()), auth, e.cfg); installationID != "" {
+		if installationID := codexResolvedInstallationID(prepared.httpReq.Header, ginHeaders, auth, e.cfg); installationID != "" {
 			prepared.httpReq.Header.Set(codexHeaderInstallationID, installationID)
 		}
 	}

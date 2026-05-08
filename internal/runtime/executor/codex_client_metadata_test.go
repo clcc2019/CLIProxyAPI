@@ -11,10 +11,7 @@ import (
 )
 
 func resetCodexWindowStateStore() {
-	globalCodexWindowStateStore.mu.Lock()
-	defer globalCodexWindowStateStore.mu.Unlock()
-	globalCodexWindowStateStore.sessions = make(map[string]codexWindowStateEntry)
-	globalCodexWindowStateStore.ops = 0
+	globalCodexWindowStateStore.reset()
 }
 
 func TestCodexApplyHTTPClientMetadataIncludesAPIKeyDefault(t *testing.T) {

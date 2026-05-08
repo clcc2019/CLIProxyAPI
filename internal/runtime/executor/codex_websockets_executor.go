@@ -59,7 +59,7 @@ type CodexWebsocketsExecutor struct {
 }
 
 type codexWebsocketSessionStore struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	sessions map[string]*codexWebsocketSession
 	parked   map[string]*codexWebsocketSession
 }
@@ -1315,6 +1315,20 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 	if store == nil {
 		store = globalCodexWebsocketSessionStore
 	}
+	reuseKey = strings.TrimSpace(reuseKey)
+
+	// Fast path: if the session already exists with a compatible reuseKey, a
+	// read lock is enough. This keeps concurrent request preparation on
+	// distinct sessions from serializing behind the store's single mutex.
+	store.mu.RLock()
+	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
+		if reuseKey == "" || sess.reuseKey == reuseKey {
+			store.mu.RUnlock()
+			return sess
+		}
+	}
+	store.mu.RUnlock()
+
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.sessions == nil {
@@ -1324,12 +1338,11 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 		store.parked = make(map[string]*codexWebsocketSession)
 	}
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
-		if resolvedReuseKey := strings.TrimSpace(reuseKey); resolvedReuseKey != "" {
-			sess.reuseKey = resolvedReuseKey
+		if reuseKey != "" {
+			sess.reuseKey = reuseKey
 		}
 		return sess
 	}
-	reuseKey = strings.TrimSpace(reuseKey)
 	if reuseKey != "" {
 		if sess, ok := store.parked[reuseKey]; ok && sess != nil {
 			delete(store.parked, reuseKey)

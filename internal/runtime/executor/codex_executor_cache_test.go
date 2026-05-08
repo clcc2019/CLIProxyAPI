@@ -109,7 +109,7 @@ func assertPreparedSessionID(t *testing.T, executor *CodexExecutor, ctx context.
 	return httpReq.Header.Get(codexHeaderSessionID)
 }
 
-func TestCodexFinalUpstreamBodyInflightKeyUsesDigest(t *testing.T) {
+func TestHashCodexFinalUpstreamBodyMemoKeyIsDeterministicAndDistinguishing(t *testing.T) {
 	payload := append([]byte(`{"model":"gpt-5","input":"`), bytes.Repeat([]byte("secret-prompt-"), 512)...)
 	payload = append(payload, []byte(`"}`)...)
 	opts := codexFinalUpstreamBodyOptions{
@@ -117,31 +117,25 @@ func TestCodexFinalUpstreamBodyInflightKeyUsesDigest(t *testing.T) {
 		streamMode:  codexStreamFieldTrue,
 	}
 
-	key := codexFinalUpstreamBodyInflightKey("gpt-5", opts, payload)
-	if bytes.Contains([]byte(key), []byte("secret-prompt")) {
-		t.Fatalf("inflight key contains raw payload content")
-	}
-	if len(key) >= len(payload) {
-		t.Fatalf("inflight key length = %d, want smaller than payload length %d", len(key), len(payload))
-	}
-	if keyAgain := codexFinalUpstreamBodyInflightKey("gpt-5", opts, payload); keyAgain != key {
-		t.Fatalf("same payload produced different inflight keys")
+	key := hashCodexFinalUpstreamBodyMemoKey("gpt-5", opts, payload)
+	if keyAgain := hashCodexFinalUpstreamBodyMemoKey("gpt-5", opts, payload); keyAgain != key {
+		t.Fatalf("same payload produced different memo keys")
 	}
 
 	otherPayload := bytes.Clone(payload)
 	otherPayload[len(otherPayload)-3] = 'x'
-	if otherKey := codexFinalUpstreamBodyInflightKey("gpt-5", opts, otherPayload); otherKey == key {
-		t.Fatalf("different payloads produced same inflight key")
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", opts, otherPayload); otherKey == key {
+		t.Fatalf("different payloads produced same memo key")
 	}
 
 	otherOpts := opts
 	otherOpts.streamMode = codexStreamFieldDelete
-	if otherKey := codexFinalUpstreamBodyInflightKey("gpt-5", otherOpts, payload); otherKey == key {
-		t.Fatalf("different options produced same inflight key")
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
+		t.Fatalf("different options produced same memo key")
 	}
 }
 
-func BenchmarkCodexFinalUpstreamBodyInflightKeyLargePayload(b *testing.B) {
+func BenchmarkHashCodexFinalUpstreamBodyMemoKeyLargePayload(b *testing.B) {
 	payload := append([]byte(`{"model":"gpt-5","input":"`), bytes.Repeat([]byte("large-prompt-"), 4096)...)
 	payload = append(payload, []byte(`"}`)...)
 	opts := codexFinalUpstreamBodyOptions{
@@ -151,7 +145,7 @@ func BenchmarkCodexFinalUpstreamBodyInflightKeyLargePayload(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = codexFinalUpstreamBodyInflightKey("gpt-5", opts, payload)
+		_ = hashCodexFinalUpstreamBodyMemoKey("gpt-5", opts, payload)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"strings"
@@ -66,10 +67,18 @@ type codexNonStreamHTTPResult struct {
 }
 
 func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktranslator.Format, executionSessionID string, url string, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
+	return e.prepareCodexRequestWithKind(ctx, from, executionSessionID, url, codexFinalUpstreamRequestKindForURL(url), req, rawJSON)
+}
+
+// prepareCodexRequestWithKind builds the upstream *http.Request while reusing a
+// pre-classified request kind supplied by the caller. Avoids re-running the
+// URL classification when the caller already knows whether the target is the
+// /responses or /responses/compact endpoint.
+func (e *CodexExecutor) prepareCodexRequestWithKind(ctx context.Context, from sdktranslator.Format, executionSessionID string, url string, requestKind codexFinalUpstreamRequestKind, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
 	resolution := e.resolvePromptCacheResolution(ctx, from, executionSessionID, req)
 	cache := resolution.cache
 	body := rawJSON
-	isCompact := strings.HasSuffix(strings.TrimSuffix(url, "/"), "/responses/compact")
+	isCompact := requestKind == codexFinalUpstreamCompact
 	if cache.ID != "" {
 		body = codexSetPromptCacheKey(body, cache.ID)
 	}
@@ -169,93 +178,96 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 		return cached
 	}
 
-	flightKey := promptResolutionMemoInflightKey(from, req.Model, scope, executionSessionID, req.Payload)
-	resolution, _, _, err := globalCodexPromptResolutionGroup.Do(context.Background(), flightKey, func() (codexPromptCacheResolution, error) {
-		if cached, ok := globalCodexPromptResolutionMemo.get(from, req.Model, scope, executionSessionID, req.Payload); ok {
-			return cached, nil
+	resolution := codexPromptCacheResolution{}
+	// Path 5: derive a conversation fingerprint from whatever
+	// conversation-scoped fields the caller happened to include. The
+	// fingerprint goes through codexCacheStore, so repeated requests with
+	// the same fingerprint map to the same stable UUID even after the
+	// translator re-renders the payload.
+	if fp := conversationIdentifierFingerprint(req); fp != "" {
+		key := "fp:" + scope + ":" + req.Model + ":" + fp
+		cache := loadOrCreateCodexCache(key)
+		resolution = codexPromptCacheResolution{
+			cache:            cache,
+			headerEligibleID: cache.ID,
 		}
-		resolution := codexPromptCacheResolution{}
-		// Path 5: derive a conversation fingerprint from whatever
-		// conversation-scoped fields the caller happened to include. The
-		// fingerprint goes through codexCacheStore, so repeated requests with the
-		// same fingerprint map to the same stable UUID even after translator
-		// re-renders the payload.
-		if fp := conversationIdentifierFingerprint(req); fp != "" {
-			key := "fp:" + scope + ":" + req.Model + ":" + fp
-			cache := loadOrCreateCodexCache(key)
-			resolution = codexPromptCacheResolution{
-				cache:            cache,
-				headerEligibleID: cache.ID,
-			}
-			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-			return resolution, nil
-		}
-		// Path 6: downstream websocket sessions already have a proxy-owned
-		// execution session ID. Reuse it as the header value while keeping the
-		// upstream prompt_cache_key scoped through codexCacheStore.
-		if executionSessionID = strings.TrimSpace(executionSessionID); executionSessionID != "" {
-			cache := loadOrCreateCodexCache("exec:" + scope + ":" + req.Model + ":" + executionSessionID)
-			resolution = codexPromptCacheResolution{
-				cache:            cache,
-				headerEligibleID: executionSessionID,
-			}
-			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-			return resolution, nil
-		}
-		// Path 7: final structured fallback for clients without explicit
-		// session signals. This preserves the existing content-based reuse.
-		if fp := conversationContentFingerprint(req); fp != "" {
-			key := "fp:" + scope + ":" + req.Model + ":" + fp
-			resolution = codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
-			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-			return resolution, nil
-		}
-
-		// Path 8 (fallback): api_key-level stable UUID. This is strictly less
-		// precise than a real conversation id but preserves backwards-compatible
-		// behaviour for callers that send neither prompt_cache_key nor any
-		// identifiable content (e.g. the upstream smoke tests that post just
-		// {"model": "..."}).
-		if from == "openai" {
-			if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
-				resolution = codexPromptCacheResolution{
-					cache: helps.CodexCache{
-						ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
-					},
-				}
-				globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-				return resolution, nil
-			}
-		}
-
 		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-		return resolution, nil
-	})
-	if err != nil {
-		return codexPromptCacheResolution{}
+		return resolution
 	}
+	// Path 6: downstream websocket sessions already have a proxy-owned
+	// execution session ID. Reuse it as the header value while keeping the
+	// upstream prompt_cache_key scoped through codexCacheStore.
+	if executionSessionID = strings.TrimSpace(executionSessionID); executionSessionID != "" {
+		cache := loadOrCreateCodexCache("exec:" + scope + ":" + req.Model + ":" + executionSessionID)
+		resolution = codexPromptCacheResolution{
+			cache:            cache,
+			headerEligibleID: executionSessionID,
+		}
+		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+		return resolution
+	}
+	// Path 7: final structured fallback for clients without explicit
+	// session signals. This preserves the existing content-based reuse.
+	if fp := conversationContentFingerprint(req); fp != "" {
+		key := "fp:" + scope + ":" + req.Model + ":" + fp
+		resolution = codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
+		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+		return resolution
+	}
+
+	// Path 8 (fallback): api_key-level stable UUID. This is strictly less
+	// precise than a real conversation id but preserves backwards-compatible
+	// behaviour for callers that send neither prompt_cache_key nor any
+	// identifiable content (e.g. the upstream smoke tests that post just
+	// {"model": "..."}).
+	if from == "openai" {
+		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+			resolution = codexPromptCacheResolution{
+				cache: helps.CodexCache{
+					ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
+				},
+			}
+			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+			return resolution
+		}
+	}
+
+	globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
 	return resolution
+}
+
+// codexPromptCacheConversationHintFields lists the JSON paths inspected for a
+// caller-owned conversation identifier, in precedence order. Declared as a
+// package-level variable so it is constructed once rather than on every
+// request.
+var codexPromptCacheConversationHintFields = []string{
+	"conversation_id",
+	"conversationId",
+	"thread_id",
+	"threadId",
+	"session_id",
+	"sessionId",
+	"metadata.conversation_id",
+	"metadata.conversationId",
+	"metadata.thread_id",
+	"metadata.threadId",
+	"metadata.session_id",
+	"metadata.sessionId",
 }
 
 func codexPromptCachePayloadConversationHint(payload []byte) string {
 	if len(payload) == 0 {
 		return ""
 	}
-	for _, field := range []string{
-		"conversation_id",
-		"conversationId",
-		"thread_id",
-		"threadId",
-		"session_id",
-		"sessionId",
-		"metadata.conversation_id",
-		"metadata.conversationId",
-		"metadata.thread_id",
-		"metadata.threadId",
-		"metadata.session_id",
-		"metadata.sessionId",
-	} {
-		if value := strings.TrimSpace(gjson.GetBytes(payload, field).String()); value != "" {
+	// gjson.GetManyBytes parses the payload once and resolves all paths in a
+	// single traversal, avoiding the N re-parses that the old
+	// `for path := range paths { gjson.GetBytes(...) }` loop incurred.
+	results := gjson.GetManyBytes(payload, codexPromptCacheConversationHintFields...)
+	for _, result := range results {
+		if !result.Exists() {
+			continue
+		}
+		if value := strings.TrimSpace(result.String()); value != "" {
 			return value
 		}
 	}
@@ -708,36 +720,62 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 	hasher := sha256.New()
 	wrote := false
 	for _, key := range codexDedupeRelevantHeaders {
-		if values := headers[key]; len(values) > 0 {
-			hashCodexHeaderValues(hasher, key, values)
-			wrote = true
+		values := headers[key]
+		if len(values) == 0 {
+			continue
 		}
+		hashCodexHeaderValues(hasher, key, values)
+		wrote = true
 	}
 	if !wrote {
 		return "none"
 	}
-	return hex.EncodeToString(hasher.Sum(nil))[:codexResponseDedupeHashLen]
+	var sum [sha256.Size]byte
+	hasher.Sum(sum[:0])
+	var encoded [sha256.Size * 2]byte
+	hex.Encode(encoded[:], sum[:])
+	return string(encoded[:codexResponseDedupeHashLen])
 }
 
-func hashCodexHeaderValues(hasher io.Writer, key string, values []string) {
+// hashCodexHeaderValues streams a canonical "Key=Value\n" (or
+// "Key=V1\x00V2\n" for multi-valued headers) fragment through the hasher
+// without allocating a fresh []byte per string. This runs on the hot path of
+// the non-stream response dedupe key, so avoiding per-header allocations is
+// measurable under load.
+func hashCodexHeaderValues(hasher hash.Hash, key string, values []string) {
 	if hasher == nil || key == "" || len(values) == 0 {
 		return
 	}
 
-	_, _ = hasher.Write([]byte(key))
-	_, _ = hasher.Write([]byte{'='})
+	var sep [1]byte
+	_, _ = writeStringToHasher(hasher, key)
+	sep[0] = '='
+	_, _ = hasher.Write(sep[:])
 	if len(values) == 1 {
-		_, _ = hasher.Write([]byte(values[0]))
-		_, _ = hasher.Write([]byte{'\n'})
+		_, _ = writeStringToHasher(hasher, values[0])
+		sep[0] = '\n'
+		_, _ = hasher.Write(sep[:])
 		return
 	}
 	for i := range values {
 		if i > 0 {
-			_, _ = hasher.Write([]byte{0})
+			sep[0] = 0
+			_, _ = hasher.Write(sep[:])
 		}
-		_, _ = hasher.Write([]byte(values[i]))
+		_, _ = writeStringToHasher(hasher, values[i])
 	}
-	_, _ = hasher.Write([]byte{'\n'})
+	sep[0] = '\n'
+	_, _ = hasher.Write(sep[:])
+}
+
+// writeStringToHasher writes s through the io.Writer interface without the
+// []byte conversion, relying on hash.Hash implementations exposing a faster
+// WriteString when available.
+func writeStringToHasher(h hash.Hash, s string) (int, error) {
+	if sw, ok := h.(io.StringWriter); ok {
+		return sw.WriteString(s)
+	}
+	return h.Write([]byte(s))
 }
 
 func shortHashString(value string) string {

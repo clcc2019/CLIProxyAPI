@@ -2,15 +2,9 @@ package executor
 
 import (
 	"bytes"
-	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"hash/maphash"
-	"strconv"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
@@ -25,11 +19,9 @@ const (
 )
 
 var (
-	codexMemoHashSeed                 = maphash.MakeSeed()
-	globalCodexFinalUpstreamBodyMemo  codexFinalUpstreamBodyMemo
-	globalCodexFinalUpstreamBodyGroup helps.InFlightGroup[[]byte]
-	globalCodexPromptResolutionMemo   codexPromptResolutionMemo
-	globalCodexPromptResolutionGroup  helps.InFlightGroup[codexPromptCacheResolution]
+	codexMemoHashSeed                = maphash.MakeSeed()
+	globalCodexFinalUpstreamBodyMemo codexFinalUpstreamBodyMemo
+	globalCodexPromptResolutionMemo  codexPromptResolutionMemo
 )
 
 type codexFinalUpstreamBodyMemoEntry struct {
@@ -237,39 +229,14 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 		return cached
 	}
 
-	key := codexFinalUpstreamBodyInflightKey(baseModel, opts, body)
-	normalized, _, _, err := globalCodexFinalUpstreamBodyGroup.Do(context.Background(), key, func() ([]byte, error) {
-		if cached := globalCodexFinalUpstreamBodyMemo.get(baseModel, opts, body); cached != nil {
-			return cached, nil
-		}
-		out := normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
-		globalCodexFinalUpstreamBodyMemo.set(baseModel, opts, body, out)
-		return bytes.Clone(out), nil
-	})
-	if err != nil {
-		return normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
-	}
-	return normalized
-}
-
-func codexFinalUpstreamBodyInflightKey(baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) string {
-	sum := sha256.Sum256(input)
-	var encoded [sha256.Size * 2]byte
-	hex.Encode(encoded[:], sum[:])
-
-	buf := make([]byte, 0, len(baseModel)+96)
-	buf = append(buf, baseModel...)
-	buf = append(buf, '|')
-	buf = strconv.AppendUint(buf, uint64(opts.requestKind), 10)
-	buf = append(buf, '|')
-	buf = strconv.AppendUint(buf, uint64(opts.streamMode), 10)
-	buf = append(buf, '|')
-	buf = strconv.AppendBool(buf, opts.preservePreviousResponseID)
-	buf = append(buf, '|')
-	buf = strconv.AppendInt(buf, int64(len(input)), 10)
-	buf = append(buf, '|')
-	buf = append(buf, encoded[:]...)
-	return string(buf)
+	// The memo cache on its own is sufficient: each caller gets an independent
+	// clone (see memo.get) so concurrent callers with the same input may
+	// redundantly recompute once before the memo warms up, but avoiding the
+	// singleflight channel/goroutine hop keeps per-request latency lower for
+	// the common case where each request's body is unique.
+	out := normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
+	globalCodexFinalUpstreamBodyMemo.set(baseModel, opts, body, out)
+	return out
 }
 
 func hashCodexFinalUpstreamBodyMemoKey(baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) uint64 {
@@ -299,11 +266,4 @@ func boolToByte(v bool) byte {
 		return 1
 	}
 	return 0
-}
-
-func promptResolutionMemoInflightKey(from sdktranslator.Format, model string, scope string, executionSessionID string, payload []byte) string {
-	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, hash)
-	return string(from) + "|" + model + "|" + scope + "|" + executionSessionID + "|" + string(buf)
 }
