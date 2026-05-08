@@ -225,6 +225,9 @@ type RemoteManagement struct {
 	// When no explicit tag is provided, the latest release tag is used by default.
 	// Accepts either a repository URL, a GitHub releases page URL, or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+	// PanelGitHubTag forces the management panel download to use a specific GitHub release tag.
+	// When empty, the updater falls back to the tag embedded in PanelGitHubRepository, or the latest release.
+	PanelGitHubTag string `yaml:"panel-github-tag"`
 }
 
 // RedisConfig controls optional Redis-backed runtime state persistence.
@@ -701,6 +704,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
+	cfg.RemoteManagement.PanelGitHubTag = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubTag)
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {

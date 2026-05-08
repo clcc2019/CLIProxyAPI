@@ -25,6 +25,7 @@ import (
 )
 
 const (
+	defaultManagementReleaseBase = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases"
 	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
 	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
 	managementAssetName          = "management.html"
@@ -96,7 +97,7 @@ func runAutoUpdater(ctx context.Context) {
 
 		configPath, _ := schedulerConfigPath.Load().(string)
 		staticDir := StaticDir(configPath)
-		EnsureLatestManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
+		EnsureLatestManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository, cfg.RemoteManagement.PanelGitHubTag)
 	}
 
 	runOnce()
@@ -179,7 +180,7 @@ func FilePath(configFilePath string) string {
 
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
-func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string, panelTag string) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -221,7 +222,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			return nil, nil
 		}
 
-		releaseURL := resolveReleaseURL(panelRepository)
+		releaseURL := resolveReleaseURL(panelRepository, panelTag)
 		client := newHTTPClient(proxyURL)
 
 		localHash, err := fileSHA256(localPath)
@@ -300,61 +301,120 @@ func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, loca
 	return true
 }
 
-func resolveReleaseURL(repo string) string {
+func resolveReleaseURL(repo string, tag string) string {
+	base := resolveReleaseAPIBase(repo)
+	effectiveTag := strings.TrimSpace(tag)
+	if effectiveTag == "" {
+		effectiveTag = resolveReleaseTag(repo)
+	}
+	if effectiveTag != "" {
+		return base + "/tags/" + url.PathEscape(effectiveTag)
+	}
+	return base + "/latest"
+}
+
+func resolveReleaseAPIBase(repo string) string {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
-		return defaultManagementReleaseURL
+		return defaultManagementReleaseBase
 	}
 
 	parsed, err := url.Parse(repo)
 	if err != nil || parsed.Host == "" {
-		return defaultManagementReleaseURL
+		return defaultManagementReleaseBase
 	}
 
 	host := strings.ToLower(parsed.Host)
-	pathParts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	pathParts := splitEscapedPath(parsed.EscapedPath())
 
 	if host == "api.github.com" {
-		return resolveGitHubAPIReleaseURL(pathParts)
+		return resolveGitHubAPIReleaseBase(pathParts)
 	}
 
 	if host == "github.com" {
-		return resolveGitHubReleasePageURL(pathParts)
+		return resolveGitHubReleasePageBase(pathParts)
 	}
 
-	return defaultManagementReleaseURL
+	return defaultManagementReleaseBase
 }
 
-func resolveGitHubAPIReleaseURL(parts []string) string {
+func resolveReleaseTag(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(repo)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+
+	host := strings.ToLower(parsed.Host)
+	pathParts := splitEscapedPath(parsed.EscapedPath())
+	if host == "api.github.com" {
+		return resolveGitHubAPIReleaseTag(pathParts)
+	}
+	if host == "github.com" {
+		return resolveGitHubReleasePageTag(pathParts)
+	}
+	return ""
+}
+
+func resolveGitHubAPIReleaseBase(parts []string) string {
 	if len(parts) < 3 || !strings.EqualFold(parts[0], "repos") || parts[1] == "" || parts[2] == "" {
-		return defaultManagementReleaseURL
+		return defaultManagementReleaseBase
 	}
 
 	repoName := strings.TrimSuffix(parts[2], ".git")
-	base := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", parts[1], repoName)
-	if len(parts) < 4 {
-		return base + "/latest"
-	}
-	if !strings.EqualFold(parts[3], "releases") {
-		return defaultManagementReleaseURL
-	}
-	if len(parts) >= 6 && strings.EqualFold(parts[4], "tags") && strings.TrimSpace(parts[5]) != "" {
-		return base + "/tags/" + parts[5]
-	}
-	return base + "/latest"
+	return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", parts[1], repoName)
 }
 
-func resolveGitHubReleasePageURL(parts []string) string {
+func resolveGitHubAPIReleaseTag(parts []string) string {
+	if len(parts) < 6 || !strings.EqualFold(parts[0], "repos") || !strings.EqualFold(parts[3], "releases") || !strings.EqualFold(parts[4], "tags") {
+		return ""
+	}
+	return decodeTagPath(parts[5:])
+}
+
+func resolveGitHubReleasePageBase(parts []string) string {
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return defaultManagementReleaseURL
+		return defaultManagementReleaseBase
 	}
 
 	repoName := strings.TrimSuffix(parts[1], ".git")
-	base := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", parts[0], repoName)
-	if len(parts) >= 5 && strings.EqualFold(parts[2], "releases") && strings.EqualFold(parts[3], "tag") && strings.TrimSpace(parts[4]) != "" {
-		return base + "/tags/" + parts[4]
+	return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", parts[0], repoName)
+}
+
+func resolveGitHubReleasePageTag(parts []string) string {
+	if len(parts) >= 5 && strings.EqualFold(parts[2], "releases") && strings.EqualFold(parts[3], "tag") {
+		return decodeTagPath(parts[4:])
 	}
-	return base + "/latest"
+	return ""
+}
+
+func splitEscapedPath(path string) []string {
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return nil
+	}
+	return strings.Split(path, "/")
+}
+
+func decodeTagPath(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+
+	raw := strings.TrimSpace(strings.Join(parts, "/"))
+	if raw == "" {
+		return ""
+	}
+
+	decoded, err := url.PathUnescape(raw)
+	if err != nil {
+		return raw
+	}
+	return decoded
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
