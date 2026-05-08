@@ -101,8 +101,8 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
-# Maximum detailed usage records retained per API/model in memory. Set to 0 to keep all details.
-usage-detail-retention-limit: 0
+# Maximum detailed usage records retained per API/model in memory. Default is 100. Set to 0 to keep all details.
+usage-detail-retention-limit: 100
 
 # How long (in seconds) Redis usage queue items are retained in memory for the RESP interface (LPOP/RPOP).
 # Default: 60. Max: 3600.

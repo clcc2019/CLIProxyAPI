@@ -258,28 +258,32 @@ func TestConvertOpenAIResponsesRequestToCodex_IncludeOnlyWithReasoning(t *testin
 }
 
 func TestConvertOpenAIResponsesRequestToCodex_ServiceTierKeepsOnlyPriority(t *testing.T) {
-	cases := map[string]bool{
-		"auto":     false,
-		"default":  false,
-		"flex":     false,
-		"priority": true,
-		"scale":    false,
+	cases := []struct {
+		tier       string
+		wantExists bool
+	}{
+		{tier: "auto"},
+		{tier: "default"},
+		{tier: "flex"},
+		{tier: "priority", wantExists: true},
+		{tier: "scale"},
 	}
-	for tier, wantExists := range cases {
-		inputJSON := []byte(`{
-			"model": "gpt-5.2",
-			"service_tier": "` + tier + `",
-			"input": [{"role":"user","content":"hi"}]
-		}`)
-		out := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
-		got := gjson.GetBytes(out, "service_tier")
-		if got.Exists() != wantExists {
-			t.Errorf("service_tier=%q exists=%v, want %v; output=%s", tier, got.Exists(), wantExists, string(out))
-			continue
-		}
-		if wantExists && got.String() != tier {
-			t.Errorf("service_tier=%q was changed to %q", tier, got.String())
-		}
+	for _, tt := range cases {
+		t.Run(tt.tier, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"model": "gpt-5.2",
+				"service_tier": "` + tt.tier + `",
+				"input": [{"role":"user","content":"hi"}]
+			}`)
+			out := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+			got := gjson.GetBytes(out, "service_tier")
+			if got.Exists() != tt.wantExists {
+				t.Fatalf("service_tier exists=%v, want %v; output=%s", got.Exists(), tt.wantExists, string(out))
+			}
+			if tt.wantExists && got.String() != tt.tier {
+				t.Fatalf("service_tier was changed to %q", got.String())
+			}
+		})
 	}
 }
 

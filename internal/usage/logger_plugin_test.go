@@ -170,6 +170,10 @@ func TestRequestStatisticsMergeSnapshotDedupIncludesDetailAPIKey(t *testing.T) {
 }
 
 func TestRequestStatisticsRetainsAllDetails(t *testing.T) {
+	previousLimit := DetailRetentionLimit()
+	SetDetailRetentionLimit(0)
+	t.Cleanup(func() { SetDetailRetentionLimit(previousLimit) })
+
 	stats := NewRequestStatistics()
 	start := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
 
@@ -241,6 +245,87 @@ func TestRequestStatisticsLimitsRetainedDetails(t *testing.T) {
 	}
 	if !model.Details[2].Timestamp.Equal(start.Add(5 * time.Second)) {
 		t.Fatalf("last retained timestamp = %s, want %s", model.Details[2].Timestamp, start.Add(5*time.Second))
+	}
+}
+
+func TestRequestStatisticsApplyDetailRetentionLimitTrimsExistingDetails(t *testing.T) {
+	stats := NewRequestStatistics()
+	start := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+
+	const count = 6
+	for i := 0; i < count; i++ {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      "test-key",
+			Model:       "gpt-5.4",
+			RequestedAt: start.Add(time.Duration(i) * time.Second),
+			Detail: coreusage.Detail{
+				InputTokens:  1,
+				OutputTokens: 1,
+				TotalTokens:  2,
+			},
+		})
+	}
+
+	stats.ApplyDetailRetentionLimit(3)
+
+	snapshot := stats.Snapshot()
+	model := snapshot.APIs["test-key"].Models["gpt-5.4"]
+	if model.TotalRequests != count {
+		t.Fatalf("total requests = %d, want %d", model.TotalRequests, count)
+	}
+	if len(model.Details) != 3 {
+		t.Fatalf("details len = %d, want 3", len(model.Details))
+	}
+	if !model.Details[0].Timestamp.Equal(start.Add(3 * time.Second)) {
+		t.Fatalf("first retained timestamp = %s, want %s", model.Details[0].Timestamp, start.Add(3*time.Second))
+	}
+	if !model.Details[2].Timestamp.Equal(start.Add(5 * time.Second)) {
+		t.Fatalf("last retained timestamp = %s, want %s", model.Details[2].Timestamp, start.Add(5*time.Second))
+	}
+}
+
+func TestRequestStatisticsApplyDetailRetentionLimitTrimsImportedDetailedSources(t *testing.T) {
+	stats := NewRequestStatistics()
+	start := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+
+	result := stats.UpsertImportedDetailedSnapshot("source-a", StatisticsSnapshot{
+		TotalRequests: 4,
+		APIs: map[string]APISnapshot{
+			"imported-api": {
+				TotalRequests: 4,
+				Models: map[string]ModelSnapshot{
+					"gpt-5.4": {
+						TotalRequests: 4,
+						Details: []RequestDetail{
+							{Timestamp: start, Tokens: TokenStats{TotalTokens: 1}},
+							{Timestamp: start.Add(1 * time.Second), Tokens: TokenStats{TotalTokens: 2}},
+							{Timestamp: start.Add(2 * time.Second), Tokens: TokenStats{TotalTokens: 3}},
+							{Timestamp: start.Add(3 * time.Second), Tokens: TokenStats{TotalTokens: 4}},
+						},
+					},
+				},
+			},
+		},
+	})
+	if result.Added != 4 {
+		t.Fatalf("import result added = %d, want 4", result.Added)
+	}
+
+	stats.ApplyDetailRetentionLimit(2)
+
+	snapshot := stats.Snapshot()
+	model := snapshot.APIs["imported-api"].Models["gpt-5.4"]
+	if len(model.Details) != 2 {
+		t.Fatalf("details len = %d, want 2", len(model.Details))
+	}
+	if !model.Details[0].Timestamp.Equal(start.Add(2 * time.Second)) {
+		t.Fatalf("first retained timestamp = %s, want %s", model.Details[0].Timestamp, start.Add(2*time.Second))
+	}
+	if !model.Details[1].Timestamp.Equal(start.Add(3 * time.Second)) {
+		t.Fatalf("last retained timestamp = %s, want %s", model.Details[1].Timestamp, start.Add(3*time.Second))
+	}
+	if snapshot.TotalRequests != 4 {
+		t.Fatalf("total requests = %d, want 4", snapshot.TotalRequests)
 	}
 }
 

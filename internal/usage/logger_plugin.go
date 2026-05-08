@@ -23,7 +23,7 @@ const aggregateRecordRetentionWindow = 7 * 24 * time.Hour
 
 func init() {
 	statisticsEnabled.Store(true)
-	detailRetentionLimit.Store(0)
+	detailRetentionLimit.Store(100)
 	coreusage.RegisterPlugin(NewLoggerPlugin())
 }
 
@@ -66,9 +66,10 @@ func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 func SetDetailRetentionLimit(limit int) {
 	if limit <= 0 {
 		detailRetentionLimit.Store(0)
-		return
+	} else {
+		detailRetentionLimit.Store(int64(limit))
 	}
-	detailRetentionLimit.Store(int64(limit))
+	defaultRequestStatistics.ApplyDetailRetentionLimit(limit)
 }
 
 // DetailRetentionLimit reports the configured per-model detailed record limit.
@@ -377,6 +378,53 @@ func trimRequestDetails(details *[]RequestDetail, limit int) {
 	copy((*details)[0:], (*details)[excess:])
 	clear((*details)[limit:])
 	*details = (*details)[:limit]
+}
+
+// ApplyDetailRetentionLimit trims retained request details in-place for existing snapshots.
+func (s *RequestStatistics) ApplyDetailRetentionLimit(limit int) {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for _, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			trimRequestDetails(&modelStatsValue.Details, limit)
+		}
+	}
+
+	for sourceID, snapshot := range s.importedDetailedSources {
+		s.importedDetailedSources[sourceID] = trimDetailedSnapshot(snapshot, limit)
+	}
+}
+
+func trimDetailedSnapshot(snapshot StatisticsSnapshot, limit int) StatisticsSnapshot {
+	if limit <= 0 {
+		return snapshot
+	}
+
+	for apiName, apiSnapshot := range snapshot.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			if len(modelSnapshot.Details) <= limit {
+				continue
+			}
+			details := append([]RequestDetail(nil), modelSnapshot.Details...)
+			trimRequestDetails(&details, limit)
+			modelSnapshot.Details = details
+			apiSnapshot.Models[modelName] = modelSnapshot
+		}
+		snapshot.APIs[apiName] = apiSnapshot
+	}
+
+	return snapshot
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.

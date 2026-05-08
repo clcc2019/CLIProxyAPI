@@ -47,26 +47,34 @@ func TestForEachSSEDataLineStopsWhenCallbackReturnsFalse(t *testing.T) {
 }
 
 func TestPassthroughStreamPayload(t *testing.T) {
-	t.Run("trims data prefix", func(t *testing.T) {
-		got := PassthroughStreamPayload(context.Background(), "", nil, nil, []byte("data: {\"ok\":true}\n"), nil)
-		if len(got) != 1 || string(got[0]) != `{"ok":true}` {
-			t.Fatalf("unexpected payload: %#v", got)
-		}
-	})
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{
+			name: "trims data prefix",
+			raw:  "data: {\"ok\":true}\n",
+			want: []string{`{"ok":true}`},
+		},
+		{
+			name: "drops done marker",
+			raw:  "data: [DONE]",
+			want: nil,
+		},
+		{
+			name: "passes raw payload",
+			raw:  `{"ok":true}`,
+			want: []string{`{"ok":true}`},
+		},
+	}
 
-	t.Run("drops done marker", func(t *testing.T) {
-		got := PassthroughStreamPayload(context.Background(), "", nil, nil, []byte("data: [DONE]"), nil)
-		if len(got) != 0 {
-			t.Fatalf("expected done marker to be dropped, got %#v", got)
-		}
-	})
-
-	t.Run("passes raw payload", func(t *testing.T) {
-		got := PassthroughStreamPayload(context.Background(), "", nil, nil, []byte(`{"ok":true}`), nil)
-		if len(got) != 1 || string(got[0]) != `{"ok":true}` {
-			t.Fatalf("unexpected payload: %#v", got)
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PassthroughStreamPayload(context.Background(), "", nil, nil, []byte(tt.raw), nil)
+			assertByteSlices(t, got, tt.want)
+		})
+	}
 }
 
 func TestPassthroughNonStreamPayload(t *testing.T) {
@@ -74,5 +82,17 @@ func TestPassthroughNonStreamPayload(t *testing.T) {
 	got := PassthroughNonStreamPayload(context.Background(), "", nil, nil, raw, nil)
 	if string(got) != string(raw) {
 		t.Fatalf("unexpected payload: %s", got)
+	}
+}
+
+func assertByteSlices(t *testing.T, got [][]byte, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d payloads, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if string(got[i]) != want[i] {
+			t.Fatalf("payload %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

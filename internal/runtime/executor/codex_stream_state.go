@@ -13,6 +13,14 @@ import (
 
 var dataTag = []byte("data:")
 
+const (
+	codexEventOutputItemDone             = "response.output_item.done"
+	codexEventOutputItemAdded            = "response.output_item.added"
+	codexEventFunctionCallArgumentsDelta = "response.function_call_arguments.delta"
+	codexEventFunctionCallArgumentsDone  = "response.function_call_arguments.done"
+	codexEventCompleted                  = "response.completed"
+)
+
 type codexStreamFunctionCallState struct {
 	ItemID           string
 	CallID           string
@@ -78,7 +86,6 @@ func (s *codexStreamCompletionState) functionCallByItem(itemID string, outputInd
 	if s == nil {
 		return nil
 	}
-	itemID = strings.TrimSpace(itemID)
 	if itemID != "" {
 		if state, ok := s.functionCallsByItem[itemID]; ok && state != nil {
 			return state
@@ -93,6 +100,12 @@ func (s *codexStreamCompletionState) functionCallByItem(itemID string, outputInd
 		}
 	}
 	return nil
+}
+
+func (s *codexStreamCompletionState) functionCallForEvent(eventData []byte) *codexStreamFunctionCallState {
+	itemID := strings.TrimSpace(gjson.GetBytes(eventData, "item_id").String())
+	outputIndex := gjson.GetBytes(eventData, "output_index").Int()
+	return s.functionCallByItem(itemID, outputIndex)
 }
 
 func codexEventData(line []byte) ([]byte, bool) {
@@ -127,7 +140,7 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 	}
 
 	switch eventType {
-	case "response.output_item.done":
+	case codexEventOutputItemDone:
 		itemResult := gjson.GetBytes(eventData, "item")
 		if !itemResult.Exists() || itemResult.Type != gjson.JSON {
 			return
@@ -139,20 +152,21 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 			return
 		}
 		s.outputItemsFallback = append(s.outputItemsFallback, itemBytes)
-	case "response.output_item.added":
+	case codexEventOutputItemAdded:
 		item := gjson.GetBytes(eventData, "item")
 		if !item.Exists() || item.Get("type").String() != "function_call" {
 			return
 		}
+		outputIndex := gjson.GetBytes(eventData, "output_index").Int()
 		itemID := strings.TrimSpace(item.Get("id").String())
 		if itemID == "" {
 			return
 		}
-		state := s.functionCallByItem(itemID, gjson.GetBytes(eventData, "output_index").Int())
+		state := s.functionCallByItem(itemID, outputIndex)
 		if state == nil {
 			state = &codexStreamFunctionCallState{
 				ItemID:      itemID,
-				OutputIndex: gjson.GetBytes(eventData, "output_index").Int(),
+				OutputIndex: outputIndex,
 			}
 			s.functionCallsByItem[itemID] = state
 		}
@@ -162,18 +176,14 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 		if name := strings.TrimSpace(item.Get("name").String()); name != "" {
 			state.Name = name
 		}
-	case "response.function_call_arguments.delta":
-		itemID := strings.TrimSpace(gjson.GetBytes(eventData, "item_id").String())
-		outputIndex := gjson.GetBytes(eventData, "output_index").Int()
-		state := s.functionCallByItem(itemID, outputIndex)
+	case codexEventFunctionCallArgumentsDelta:
+		state := s.functionCallForEvent(eventData)
 		if state == nil {
 			return
 		}
 		state.appendArgumentsDelta(gjson.GetBytes(eventData, "delta").String())
-	case "response.function_call_arguments.done":
-		itemID := strings.TrimSpace(gjson.GetBytes(eventData, "item_id").String())
-		outputIndex := gjson.GetBytes(eventData, "output_index").Int()
-		state := s.functionCallByItem(itemID, outputIndex)
+	case codexEventFunctionCallArgumentsDone:
+		state := s.functionCallForEvent(eventData)
 		if state == nil {
 			return
 		}
@@ -193,7 +203,7 @@ func (s *codexStreamCompletionState) processEventDataWithType(eventType string, 
 	}
 
 	s.recordEventWithType(eventType, eventData)
-	if eventType != "response.completed" {
+	if eventType != codexEventCompleted {
 		return codexCompletedStreamEvent{}, false
 	}
 

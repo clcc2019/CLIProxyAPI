@@ -139,20 +139,25 @@ func TestBuildCodexTokenCountTextCollectsRelevantSegments(t *testing.T) {
 }
 
 func TestCodexTokenizerKeyNormalizesModelFamilies(t *testing.T) {
-	cases := map[string]string{
-		"":                        "cl100k_base",
-		"gpt-5.4-mini":            "gpt-5",
-		"GPT-5.3-CODEX":           "gpt-5",
-		"gpt-4.1-mini":            "gpt-4.1",
-		"gpt-4o-mini":             "gpt-4o",
-		"gpt-4-turbo":             "gpt-4",
-		"gpt-3.5-turbo":           "gpt-3.5",
-		"unknown-model-for-codex": "cl100k_base",
+	cases := []struct {
+		model string
+		want  string
+	}{
+		{model: "", want: "cl100k_base"},
+		{model: "gpt-5.4-mini", want: "gpt-5"},
+		{model: "GPT-5.3-CODEX", want: "gpt-5"},
+		{model: "gpt-4.1-mini", want: "gpt-4.1"},
+		{model: "gpt-4o-mini", want: "gpt-4o"},
+		{model: "gpt-4-turbo", want: "gpt-4"},
+		{model: "gpt-3.5-turbo", want: "gpt-3.5"},
+		{model: "unknown-model-for-codex", want: "cl100k_base"},
 	}
 
-	for model, want := range cases {
-		if got := codexTokenizerKey(model); got != want {
-			t.Fatalf("codexTokenizerKey(%q) = %q, want %q", model, got, want)
-		}
+	for _, tt := range cases {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := codexTokenizerKey(tt.model); got != tt.want {
+				t.Fatalf("codexTokenizerKey(%q) = %q, want %q", tt.model, got, tt.want)
+			}
+		})
 	}
 }

@@ -66,7 +66,7 @@ type Config struct {
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
 	// UsageDetailRetentionLimit limits per-model detailed usage records kept in memory.
-	// <= 0 keeps all detailed records for backward compatibility.
+	// Default is 100. <= 0 keeps all detailed records for backward compatibility.
 	UsageDetailRetentionLimit int `yaml:"usage-detail-retention-limit" json:"usage-detail-retention-limit"`
 
 	// ModelPrices configures USD-per-1M-token prices used for server-side spend calculations.
@@ -653,7 +653,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
-	cfg.UsageDetailRetentionLimit = 0
+	cfg.UsageDetailRetentionLimit = 100
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.Redis.Addr = "127.0.0.1:6379"
 	cfg.Redis.KeyPrefix = "cliproxyapi"
