@@ -2,12 +2,14 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"strconv"
 
 	"github.com/tidwall/sjson"
 )
 
 var sseDataPrefix = []byte("data:")
+var sseDonePayload = []byte("[DONE]")
 
 func WrapGeminiCLIResponse(response []byte) []byte {
 	out, err := sjson.SetRawBytes([]byte(`{"response":{}}`), "response", response)
@@ -33,6 +35,25 @@ func ClaudeInputTokensJSON(count int64) []byte {
 	out = strconv.AppendInt(out, count, 10)
 	out = append(out, '}')
 	return out
+}
+
+func PassthroughStreamPayload(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
+	rawJSON = TrimSSEDataPrefix(rawJSON)
+	if bytes.Equal(rawJSON, sseDonePayload) {
+		return [][]byte{}
+	}
+	return [][]byte{rawJSON}
+}
+
+func PassthroughNonStreamPayload(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+	return rawJSON
+}
+
+func TrimSSEDataPrefix(rawJSON []byte) []byte {
+	if bytes.HasPrefix(rawJSON, sseDataPrefix) {
+		return bytes.TrimSpace(rawJSON[len(sseDataPrefix):])
+	}
+	return rawJSON
 }
 
 func SSEEventData(event string, payload []byte) []byte {

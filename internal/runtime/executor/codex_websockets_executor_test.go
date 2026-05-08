@@ -767,8 +767,8 @@ func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 	if got := req.Header.Get("Version"); got != buildinfo.Version {
 		t.Fatalf("Version = %q, want %q", got, buildinfo.Version)
 	}
-	if got := req.Header.Get("Connection"); got != "" {
-		t.Fatalf("Connection = %q, want empty", got)
+	if got := req.Header.Get("Connection"); got != "Keep-Alive" {
+		t.Fatalf("Connection = %q, want Keep-Alive", got)
 	}
 }
 

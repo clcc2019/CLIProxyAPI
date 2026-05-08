@@ -257,22 +257,28 @@ func TestConvertOpenAIResponsesRequestToCodex_IncludeOnlyWithReasoning(t *testin
 	}
 }
 
-// TestConvertOpenAIResponsesRequestToCodex_ServiceTierPassthrough verifies that
-// we no longer drop non-"priority" service_tier values. codex-rs accepts the
-// full ServiceTier enum, so the proxy must pass through whatever the caller
-// sent.
-func TestConvertOpenAIResponsesRequestToCodex_ServiceTierPassthrough(t *testing.T) {
-	cases := []string{"auto", "default", "flex", "priority", "scale"}
-	for _, tier := range cases {
+func TestConvertOpenAIResponsesRequestToCodex_ServiceTierKeepsOnlyPriority(t *testing.T) {
+	cases := map[string]bool{
+		"auto":     false,
+		"default":  false,
+		"flex":     false,
+		"priority": true,
+		"scale":    false,
+	}
+	for tier, wantExists := range cases {
 		inputJSON := []byte(`{
 			"model": "gpt-5.2",
 			"service_tier": "` + tier + `",
 			"input": [{"role":"user","content":"hi"}]
 		}`)
 		out := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
-		got := gjson.GetBytes(out, "service_tier").String()
-		if got != tier {
-			t.Errorf("service_tier=%q was changed to %q (want passthrough)", tier, got)
+		got := gjson.GetBytes(out, "service_tier")
+		if got.Exists() != wantExists {
+			t.Errorf("service_tier=%q exists=%v, want %v; output=%s", tier, got.Exists(), wantExists, string(out))
+			continue
+		}
+		if wantExists && got.String() != tier {
+			t.Errorf("service_tier=%q was changed to %q", tier, got.String())
 		}
 	}
 }

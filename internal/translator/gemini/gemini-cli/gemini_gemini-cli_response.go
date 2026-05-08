@@ -9,7 +9,6 @@ import (
 	"context"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
-	"github.com/tidwall/sjson"
 )
 
 var dataTag = []byte("data:")
@@ -36,8 +35,7 @@ func ConvertGeminiResponseToGeminiCLI(_ context.Context, _ string, originalReque
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		return [][]byte{}
 	}
-	rawJSON, _ = sjson.SetRawBytes([]byte(`{"response":{}}`), "response", rawJSON)
-	return [][]byte{rawJSON}
+	return [][]byte{translatorcommon.WrapGeminiCLIResponse(rawJSON)}
 }
 
 // ConvertGeminiResponseToGeminiCLINonStream converts a non-streaming Gemini response to a non-streaming Gemini CLI response.
@@ -51,8 +49,7 @@ func ConvertGeminiResponseToGeminiCLI(_ context.Context, _ string, originalReque
 // Returns:
 //   - []byte: A Gemini CLI-compatible JSON response.
 func ConvertGeminiResponseToGeminiCLINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	rawJSON, _ = sjson.SetRawBytes([]byte(`{"response":{}}`), "response", rawJSON)
-	return rawJSON
+	return translatorcommon.WrapGeminiCLIResponse(rawJSON)
 }
 
 func GeminiCLITokenCount(ctx context.Context, count int64) []byte {

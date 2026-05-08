@@ -2,6 +2,7 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"testing"
 )
 
@@ -42,5 +43,36 @@ func TestForEachSSEDataLineStopsWhenCallbackReturnsFalse(t *testing.T) {
 
 	if count != 1 {
 		t.Fatalf("callback count = %d, want 1", count)
+	}
+}
+
+func TestPassthroughStreamPayload(t *testing.T) {
+	t.Run("trims data prefix", func(t *testing.T) {
+		got := PassthroughStreamPayload(context.Background(), "", nil, nil, []byte("data: {\"ok\":true}\n"), nil)
+		if len(got) != 1 || string(got[0]) != `{"ok":true}` {
+			t.Fatalf("unexpected payload: %#v", got)
+		}
+	})
+
+	t.Run("drops done marker", func(t *testing.T) {
+		got := PassthroughStreamPayload(context.Background(), "", nil, nil, []byte("data: [DONE]"), nil)
+		if len(got) != 0 {
+			t.Fatalf("expected done marker to be dropped, got %#v", got)
+		}
+	})
+
+	t.Run("passes raw payload", func(t *testing.T) {
+		got := PassthroughStreamPayload(context.Background(), "", nil, nil, []byte(`{"ok":true}`), nil)
+		if len(got) != 1 || string(got[0]) != `{"ok":true}` {
+			t.Fatalf("unexpected payload: %#v", got)
+		}
+	})
+}
+
+func TestPassthroughNonStreamPayload(t *testing.T) {
+	raw := []byte(`{"ok":true}`)
+	got := PassthroughNonStreamPayload(context.Background(), "", nil, nil, raw, nil)
+	if string(got) != string(raw) {
+		t.Fatalf("unexpected payload: %s", got)
 	}
 }

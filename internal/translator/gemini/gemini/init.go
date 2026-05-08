@@ -3,6 +3,7 @@ package gemini
 import (
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/translator"
 )
 
@@ -14,8 +15,8 @@ func init() {
 		Gemini,
 		ConvertGeminiRequestToGemini,
 		interfaces.TranslateResponse{
-			Stream:     PassthroughGeminiResponseStream,
-			NonStream:  PassthroughGeminiResponseNonStream,
+			Stream:     translatorcommon.PassthroughStreamPayload,
+			NonStream:  translatorcommon.PassthroughNonStreamPayload,
 			TokenCount: GeminiTokenCount,
 		},
 	)

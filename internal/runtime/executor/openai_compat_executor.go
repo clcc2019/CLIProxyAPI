@@ -630,6 +630,7 @@ func (e *OpenAICompatExecutor) prepareUpstreamRequest(req *http.Request, auth *c
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(apiKey))
 	}
+	req.Header.Set("Connection", "Keep-Alive")
 	req.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	var attrs map[string]string
 	if auth != nil {

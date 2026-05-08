@@ -16,6 +16,7 @@ import (
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Connection", "Keep-Alive")
 	apiKeyAuth := codexIsAPIKeyAuth(auth)
 	requestKind := codexFinalUpstreamResponses
 	if r != nil && r.URL != nil {
