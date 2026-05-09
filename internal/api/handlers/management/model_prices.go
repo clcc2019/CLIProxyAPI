@@ -11,10 +11,10 @@ import (
 
 func (h *Handler) GetModelPrices(c *gin.Context) {
 	if h == nil || h.cfg == nil {
-		c.JSON(http.StatusOK, gin.H{"model-prices": config.ModelPrices{}})
+		c.JSON(http.StatusOK, gin.H{"model-prices": config.DefaultModelPrices()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"model-prices": config.CloneModelPrices(h.cfg.ModelPrices)})
+	c.JSON(http.StatusOK, gin.H{"model-prices": config.EffectiveModelPrices(h.cfg.ModelPrices)})
 }
 
 func (h *Handler) PutModelPrices(c *gin.Context) {

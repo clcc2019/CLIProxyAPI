@@ -178,61 +178,71 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 		return cached
 	}
 
-	resolution := codexPromptCacheResolution{}
-	// Path 5: derive a conversation fingerprint from whatever
-	// conversation-scoped fields the caller happened to include. The
-	// fingerprint goes through codexCacheStore, so repeated requests with
-	// the same fingerprint map to the same stable UUID even after the
-	// translator re-renders the payload.
-	if fp := conversationIdentifierFingerprint(req); fp != "" {
-		key := "fp:" + scope + ":" + req.Model + ":" + fp
-		cache := loadOrCreateCodexCache(key)
-		resolution = codexPromptCacheResolution{
-			cache:            cache,
-			headerEligibleID: cache.ID,
+	flightKey := promptResolutionMemoInflightKey(from, req.Model, scope, executionSessionID, req.Payload)
+	resolution, _, _, err := globalCodexPromptResolutionGroup.Do(context.Background(), flightKey, func() (codexPromptCacheResolution, error) {
+		if cached, ok := globalCodexPromptResolutionMemo.get(from, req.Model, scope, executionSessionID, req.Payload); ok {
+			return cached, nil
 		}
-		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-		return resolution
-	}
-	// Path 6: downstream websocket sessions already have a proxy-owned
-	// execution session ID. Reuse it as the header value while keeping the
-	// upstream prompt_cache_key scoped through codexCacheStore.
-	if executionSessionID = strings.TrimSpace(executionSessionID); executionSessionID != "" {
-		cache := loadOrCreateCodexCache("exec:" + scope + ":" + req.Model + ":" + executionSessionID)
-		resolution = codexPromptCacheResolution{
-			cache:            cache,
-			headerEligibleID: executionSessionID,
-		}
-		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-		return resolution
-	}
-	// Path 7: final structured fallback for clients without explicit
-	// session signals. This preserves the existing content-based reuse.
-	if fp := conversationContentFingerprint(req); fp != "" {
-		key := "fp:" + scope + ":" + req.Model + ":" + fp
-		resolution = codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
-		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-		return resolution
-	}
-
-	// Path 8 (fallback): api_key-level stable UUID. This is strictly less
-	// precise than a real conversation id but preserves backwards-compatible
-	// behaviour for callers that send neither prompt_cache_key nor any
-	// identifiable content (e.g. the upstream smoke tests that post just
-	// {"model": "..."}).
-	if from == "openai" {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+		resolution := codexPromptCacheResolution{}
+		// Path 5: derive a conversation fingerprint from whatever
+		// conversation-scoped fields the caller happened to include. The
+		// fingerprint goes through codexCacheStore, so repeated requests with
+		// the same fingerprint map to the same stable UUID even after the
+		// translator re-renders the payload.
+		if fp := conversationIdentifierFingerprint(req); fp != "" {
+			key := "fp:" + scope + ":" + req.Model + ":" + fp
+			cache := loadOrCreateCodexCache(key)
 			resolution = codexPromptCacheResolution{
-				cache: helps.CodexCache{
-					ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
-				},
+				cache:            cache,
+				headerEligibleID: cache.ID,
 			}
 			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-			return resolution
+			return resolution, nil
 		}
-	}
+		// Path 6: downstream websocket sessions already have a proxy-owned
+		// execution session ID. Reuse it as the header value while keeping the
+		// upstream prompt_cache_key scoped through codexCacheStore.
+		if executionSessionID = strings.TrimSpace(executionSessionID); executionSessionID != "" {
+			cache := loadOrCreateCodexCache("exec:" + scope + ":" + req.Model + ":" + executionSessionID)
+			resolution = codexPromptCacheResolution{
+				cache:            cache,
+				headerEligibleID: executionSessionID,
+			}
+			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+			return resolution, nil
+		}
+		// Path 7: final structured fallback for clients without explicit
+		// session signals. This preserves the existing content-based reuse.
+		if fp := conversationContentFingerprint(req); fp != "" {
+			key := "fp:" + scope + ":" + req.Model + ":" + fp
+			resolution = codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
+			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+			return resolution, nil
+		}
 
-	globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+		// Path 8 (fallback): api_key-level stable UUID. This is strictly less
+		// precise than a real conversation id but preserves backwards-compatible
+		// behaviour for callers that send neither prompt_cache_key nor any
+		// identifiable content (e.g. the upstream smoke tests that post just
+		// {"model": "..."}).
+		if from == "openai" {
+			if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+				resolution = codexPromptCacheResolution{
+					cache: helps.CodexCache{
+						ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
+					},
+				}
+				globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+				return resolution, nil
+			}
+		}
+
+		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+		return resolution, nil
+	})
+	if err != nil {
+		return codexPromptCacheResolution{}
+	}
 	return resolution
 }
 
@@ -720,7 +730,7 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 	hasher := sha256.New()
 	wrote := false
 	for _, key := range codexDedupeRelevantHeaders {
-		values := headers[key]
+		values := codexDedupeHeaderValues(headers, key)
 		if len(values) == 0 {
 			continue
 		}
@@ -735,6 +745,16 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 	var encoded [sha256.Size * 2]byte
 	hex.Encode(encoded[:], sum[:])
 	return string(encoded[:codexResponseDedupeHashLen])
+}
+
+func codexDedupeHeaderValues(headers http.Header, key string) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	if values := headers.Values(key); len(values) > 0 {
+		return values
+	}
+	return headers[key]
 }
 
 // hashCodexHeaderValues streams a canonical "Key=Value\n" (or

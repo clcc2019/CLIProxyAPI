@@ -32,6 +32,33 @@ func setRefreshLeadFactory(t *testing.T, provider string, factory func() *time.D
 	})
 }
 
+func setDefaultAutoRefreshProvider(t *testing.T, provider string, enabled bool) {
+	t.Helper()
+	setDefaultAutoRefreshProviderWithInterval(t, provider, enabled, nil)
+}
+
+func setDefaultAutoRefreshProviderWithInterval(t *testing.T, provider string, enabled bool, intervalFactory func() time.Duration) {
+	t.Helper()
+	key := strings.ToLower(strings.TrimSpace(provider))
+	defaultAutoRefreshMu.Lock()
+	prev, hadPrev := defaultAutoRefreshProviders[key]
+	if enabled {
+		defaultAutoRefreshProviders[key] = defaultAutoRefreshConfig{intervalFactory: intervalFactory}
+	} else {
+		delete(defaultAutoRefreshProviders, key)
+	}
+	defaultAutoRefreshMu.Unlock()
+	t.Cleanup(func() {
+		defaultAutoRefreshMu.Lock()
+		if hadPrev {
+			defaultAutoRefreshProviders[key] = prev
+		} else {
+			delete(defaultAutoRefreshProviders, key)
+		}
+		defaultAutoRefreshMu.Unlock()
+	})
+}
+
 func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	auth := &Auth{ID: "a1", Provider: "test", Disabled: true}

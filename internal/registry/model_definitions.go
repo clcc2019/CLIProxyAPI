@@ -93,6 +93,19 @@ func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
 }
 
+// GetKiroModels was a hard-coded Kiro/Amazon Q model list used as a fallback
+// for the dynamic model catalog pulled via listAvailableModels. The dynamic
+// catalog is now the only source of truth: if no token is available or the
+// upstream call fails the auth simply registers no models, which is the same
+// behaviour as any other provider with missing credentials.
+//
+// The function is kept as a no-op stub so external callers (and the
+// management UI that iterates over channels) still link; it returns an empty
+// slice rather than nil so "unknown channel" checks continue to behave.
+func GetKiroModels() []*ModelInfo {
+	return []*ModelInfo{}
+}
+
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
@@ -191,6 +204,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - codex
 //   - kimi
 //   - antigravity
+//   - kiro
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -210,6 +224,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "kiro", "amazonq":
+		return GetKiroModels()
 	default:
 		return nil
 	}
@@ -268,6 +284,7 @@ func buildStaticModelLookup(data *staticModelsJSON) map[string]*ModelInfo {
 		data.CodexPro,
 		data.Kimi,
 		data.Antigravity,
+		GetKiroModels(),
 	}
 	total := 0
 	for _, models := range allModels {

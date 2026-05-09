@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisstate"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -117,6 +119,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
+		sdkAuth.NewKiroAuthenticator(),
 	)
 }
 
@@ -469,6 +472,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	case "kiro":
+		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -998,6 +1003,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "kiro":
+		models = s.fetchKiroModels(a)
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -1321,6 +1329,282 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		}
 	}
 	return filtered
+}
+
+// fetchKiroModels returns the dynamic kiro model catalog pulled from the
+// upstream listAvailableModels API using the auth's access token.
+//
+// When the token is missing or the API call fails this returns nil, which
+// causes registerResolvedModelsForAuth to unregister the auth from the model
+// registry rather than serving stale hard-coded entries. Previous behaviour
+// merged the dynamic list with a hard-coded static fallback; that fallback
+// was removed so the advertised catalog always matches what the upstream
+// will actually accept for this account.
+func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
+	if s != nil && s.coreManager != nil && a != nil && a.ID != "" {
+		if current, ok := s.coreManager.GetByID(a.ID); ok && current != nil {
+			a = current
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if refreshed, err := s.refreshKiroAuthForModelFetch(ctx, a, false); err != nil {
+		log.Warnf("kiro: failed to refresh auth before fetching model list: %v", err)
+	} else if refreshed != nil {
+		a = refreshed
+	}
+
+	tokenData := extractKiroTokenData(a)
+	if tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" {
+		log.Debug("kiro: no access token available; no models will be registered for this auth")
+		return nil
+	}
+
+	apiModels, err := kiroauth.NewKiroAuth(s.cfg).ListAvailableModels(ctx, tokenData)
+	if err != nil && kiroauth.IsUnauthorizedStatusError(err) {
+		if refreshed, refreshErr := s.refreshKiroAuthForModelFetch(ctx, a, true); refreshErr != nil {
+			log.Warnf("kiro: model list auth failed and token refresh failed: %v", refreshErr)
+		} else if refreshed != nil {
+			a = refreshed
+			tokenData = extractKiroTokenData(a)
+			if tokenData != nil && strings.TrimSpace(tokenData.AccessToken) != "" {
+				apiModels, err = kiroauth.NewKiroAuth(s.cfg).ListAvailableModels(ctx, tokenData)
+			}
+		}
+	}
+	if err != nil {
+		log.Warnf("kiro: failed to fetch dynamic model list: %v; no models will be registered for this auth", err)
+		return nil
+	}
+	if len(apiModels) == 0 {
+		log.Debug("kiro: dynamic model list was empty; no models will be registered for this auth")
+		return nil
+	}
+
+	dynamicModels := convertKiroAPIModels(apiModels)
+	if len(dynamicModels) == 0 {
+		return nil
+	}
+	s.persistKiroResolvedProfileArn(ctx, a, tokenData.ProfileArn)
+	log.Infof("kiro: fetched %d dynamic models from API", len(dynamicModels))
+	return dynamicModels
+}
+
+func (s *Service) refreshKiroAuthForModelFetch(ctx context.Context, auth *coreauth.Auth, force bool) (*coreauth.Auth, error) {
+	if s == nil || s.coreManager == nil || auth == nil {
+		return auth, nil
+	}
+	if force {
+		return s.coreManager.RefreshAuth(ctx, auth)
+	}
+	return s.coreManager.RefreshAuthIfNeeded(ctx, auth)
+}
+
+func (s *Service) persistKiroResolvedProfileArn(ctx context.Context, auth *coreauth.Auth, profileArn string) {
+	profileArn = strings.TrimSpace(profileArn)
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || profileArn == "" {
+		return
+	}
+	current, ok := s.coreManager.GetByID(auth.ID)
+	if ok && current != nil {
+		auth = current
+	}
+	if existing := kiroAuthMetadataString(auth.Metadata, "profile_arn", "profileArn"); existing == profileArn {
+		if auth.Attributes == nil || strings.TrimSpace(auth.Attributes["profile_arn"]) == profileArn {
+			return
+		}
+	}
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = map[string]any{}
+	}
+	updated.Metadata["profile_arn"] = profileArn
+	if updated.Attributes == nil {
+		updated.Attributes = map[string]string{}
+	}
+	updated.Attributes["profile_arn"] = profileArn
+	if _, err := s.coreManager.Update(ctx, updated); err != nil {
+		log.Warnf("kiro: failed to persist resolved profile arn for model list: %v", err)
+	}
+}
+
+func extractKiroTokenData(a *coreauth.Auth) *kiroauth.TokenData {
+	if a == nil {
+		return nil
+	}
+
+	tokenData := &kiroauth.TokenData{}
+	if a.Metadata != nil {
+		tokenData.AccessToken = kiroAuthMetadataString(a.Metadata, "access_token", "accessToken")
+		tokenData.RefreshToken = kiroAuthMetadataString(a.Metadata, "refresh_token", "refreshToken")
+		tokenData.ProfileArn = kiroAuthMetadataString(a.Metadata, "profile_arn", "profileArn")
+		tokenData.ClientID = kiroAuthMetadataString(a.Metadata, "client_id", "clientId")
+		tokenData.ClientSecret = kiroAuthMetadataString(a.Metadata, "client_secret", "clientSecret")
+		tokenData.Region = kiroAuthMetadataString(a.Metadata, "region")
+	}
+	if a.Attributes != nil {
+		if tokenData.AccessToken == "" {
+			tokenData.AccessToken = strings.TrimSpace(a.Attributes["access_token"])
+		}
+		if tokenData.RefreshToken == "" {
+			tokenData.RefreshToken = strings.TrimSpace(a.Attributes["refresh_token"])
+		}
+		if tokenData.ProfileArn == "" {
+			tokenData.ProfileArn = strings.TrimSpace(a.Attributes["profile_arn"])
+		}
+	}
+	if tokenData.AccessToken == "" {
+		return nil
+	}
+	return tokenData
+}
+
+func convertKiroAPIModels(apiModels []*kiroauth.KiroModel) []*ModelInfo {
+	if len(apiModels) == 0 {
+		return nil
+	}
+
+	now := time.Now().Unix()
+	models := make([]*ModelInfo, 0, len(apiModels)*2)
+	seen := make(map[string]struct{}, len(apiModels)*2)
+	for _, apiModel := range apiModels {
+		if apiModel == nil || strings.TrimSpace(apiModel.ModelID) == "" {
+			continue
+		}
+
+		contextLength := apiModel.MaxInputTokens
+		if contextLength <= 0 {
+			contextLength = 200000
+		}
+		model := &ModelInfo{
+			ID:                  normalizeKiroModelID(apiModel.ModelID),
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         formatKiroDisplayName(apiModel.ModelName, apiModel.RateMultiplier),
+			Description:         apiModel.Description,
+			ContextLength:       contextLength,
+			MaxCompletionTokens: 64000,
+			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		}
+		models = appendKiroModelWithAliases(models, seen, model)
+	}
+	return models
+}
+
+func appendKiroModelWithAliases(models []*ModelInfo, seen map[string]struct{}, model *ModelInfo) []*ModelInfo {
+	if model == nil || strings.TrimSpace(model.ID) == "" {
+		return models
+	}
+	models = appendKiroModelIfNew(models, seen, model)
+	aliasID := kiroHyphenModelAlias(model.ID)
+	if aliasID == model.ID {
+		return models
+	}
+	alias := cloneKiroModelInfo(model)
+	alias.ID = aliasID
+	return appendKiroModelIfNew(models, seen, alias)
+}
+
+func appendKiroModelIfNew(models []*ModelInfo, seen map[string]struct{}, model *ModelInfo) []*ModelInfo {
+	key := strings.ToLower(strings.TrimSpace(model.ID))
+	if key == "" {
+		return models
+	}
+	if _, ok := seen[key]; ok {
+		return models
+	}
+	seen[key] = struct{}{}
+	return append(models, model)
+}
+
+func kiroHyphenModelAlias(id string) string {
+	return strings.ReplaceAll(strings.TrimSpace(id), ".", "-")
+}
+
+func normalizeKiroModelID(modelID string) string {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	modelID = strings.TrimPrefix(modelID, "kiro-")
+	modelID = strings.TrimPrefix(modelID, "anthropic.")
+	modelID = strings.TrimPrefix(modelID, "amazon.")
+	modelID = strings.ReplaceAll(modelID, "_", "-")
+	return modelID
+}
+
+func formatKiroDisplayName(modelName string, rateMultiplier float64) string {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return ""
+	}
+	displayName := "Kiro " + modelName
+	if rateMultiplier > 0 && rateMultiplier != 1 {
+		displayName += fmt.Sprintf(" (%sx credit)", strconv.FormatFloat(rateMultiplier, 'f', -1, 64))
+	}
+	return displayName
+}
+
+func generateKiroAgenticVariants(models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+
+	out := make([]*ModelInfo, 0, len(models)*2)
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		out = append(out, model)
+		if strings.HasSuffix(model.ID, "-agentic") || model.ID == "auto" || strings.HasSuffix(model.ID, "-auto") {
+			continue
+		}
+		agentic := cloneKiroModelInfo(model)
+		agentic.ID = model.ID + "-agentic"
+		if model.DisplayName != "" {
+			agentic.DisplayName = model.DisplayName + " (Agentic)"
+		}
+		if model.Description != "" {
+			agentic.Description = model.Description + " - Optimized for coding agents"
+		} else {
+			agentic.Description = "Optimized for coding agents"
+		}
+		out = append(out, agentic)
+	}
+	return out
+}
+
+func cloneKiroModelInfo(model *ModelInfo) *ModelInfo {
+	if model == nil {
+		return nil
+	}
+	cloned := *model
+	if model.Thinking != nil {
+		thinking := *model.Thinking
+		if len(model.Thinking.Levels) > 0 {
+			thinking.Levels = append([]string(nil), model.Thinking.Levels...)
+		}
+		cloned.Thinking = &thinking
+	}
+	if len(model.SupportedParameters) > 0 {
+		cloned.SupportedParameters = append([]string(nil), model.SupportedParameters...)
+	}
+	if len(model.SupportedInputModalities) > 0 {
+		cloned.SupportedInputModalities = append([]string(nil), model.SupportedInputModalities...)
+	}
+	if len(model.SupportedOutputModalities) > 0 {
+		cloned.SupportedOutputModalities = append([]string(nil), model.SupportedOutputModalities...)
+	}
+	return &cloned
+}
+
+func kiroAuthMetadataString(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -84,6 +85,68 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String()
 	if gotKey2 != expectedKey {
 		t.Fatalf("prompt_cache_key (second call) = %q, want %q", gotKey2, expectedKey)
+	}
+}
+
+func TestCodexExecutorCacheHelper_ConcurrentSyntheticPromptCacheColdStartUsesOneID(t *testing.T) {
+	executor := &CodexExecutor{}
+	apiKey := "api-" + uuid.NewString()
+	user := "user-" + uuid.NewString()
+	payload := []byte(`{"model":"gpt-5","user":"` + user + `","input":[{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+	type result struct {
+		key string
+		err error
+	}
+	const workers = 32
+	contexts := make([]context.Context, workers)
+	for i := range contexts {
+		contexts[i] = ctxWithAPIKey(t, apiKey)
+	}
+	start := make(chan struct{})
+	results := make(chan result, workers)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		ctx := contexts[i]
+		go func() {
+			defer wg.Done()
+			<-start
+			httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), "https://example.com/responses", req, payload)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			body, err := io.ReadAll(httpReq.Body)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			results <- result{key: gjson.GetBytes(body, "prompt_cache_key").String()}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var first string
+	for res := range results {
+		if res.err != nil {
+			t.Fatalf("cacheHelper error: %v", res.err)
+		}
+		if res.key == "" {
+			t.Fatal("prompt_cache_key is empty")
+		}
+		if first == "" {
+			first = res.key
+			continue
+		}
+		if res.key != first {
+			t.Fatalf("concurrent cold start produced multiple prompt_cache_key values: first=%q got=%q", first, res.key)
+		}
 	}
 }
 
@@ -458,6 +521,25 @@ func TestHashCodexDedupeHeaders_DistinguishesRelevantHeaders(t *testing.T) {
 
 	if leftHash, rightHash := hashCodexDedupeHeaders(left), hashCodexDedupeHeaders(right); leftHash == rightHash {
 		t.Fatalf("hashCodexDedupeHeaders() should differ for relevant headers: left=%q right=%q", leftHash, rightHash)
+	}
+}
+
+func TestHashCodexDedupeHeadersReadsCanonicalizedHeaders(t *testing.T) {
+	left := http.Header{}
+	left.Set("OpenAI-Beta", "responses=v1")
+	left.Set(misc.CodexResidencyHeader, "us")
+
+	right := http.Header{}
+	right.Set("OpenAI-Beta", "responses=v1")
+	right.Set(misc.CodexResidencyHeader, "eu")
+
+	leftHash := hashCodexDedupeHeaders(left)
+	rightHash := hashCodexDedupeHeaders(right)
+	if leftHash == "none" {
+		t.Fatal("hashCodexDedupeHeaders() ignored canonicalized relevant headers")
+	}
+	if leftHash == rightHash {
+		t.Fatalf("hashCodexDedupeHeaders() should distinguish canonicalized residency header: left=%q right=%q", leftHash, rightHash)
 	}
 }
 

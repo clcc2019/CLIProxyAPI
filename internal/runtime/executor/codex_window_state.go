@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,14 +26,14 @@ type codexWindowStateEntry struct {
 type codexWindowStateShard struct {
 	mu       sync.Mutex
 	sessions map[string]codexWindowStateEntry
-	ops      uint64
 }
 
 // codexWindowStateStore tracks the per-session generation counter used to mint
 // X-Codex-Window-Id values. It is sharded so that concurrent requests on
 // distinct sessions do not all serialize on the same mutex.
 type codexWindowStateStore struct {
-	shards [codexWindowStateShards]codexWindowStateShard
+	shards     [codexWindowStateShards]codexWindowStateShard
+	cleanupOps atomic.Uint64
 }
 
 var globalCodexWindowStateStore = newCodexWindowStateStore()
@@ -90,11 +91,11 @@ func (s *codexWindowStateStore) currentGeneration(sessionID string) uint64 {
 	}
 
 	now := time.Now()
+	s.maybeCleanup(now)
 	shard := s.shardFor(sessionID)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	shard.cleanupLocked(now)
 	entry := shard.sessions[sessionID]
 	entry.lastSeen = now
 	shard.sessions[sessionID] = entry
@@ -108,11 +109,11 @@ func (s *codexWindowStateStore) advance(sessionID string) {
 	}
 
 	now := time.Now()
+	s.maybeCleanup(now)
 	shard := s.shardFor(sessionID)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	shard.cleanupLocked(now)
 	entry := shard.sessions[sessionID]
 	entry.generation++
 	entry.lastSeen = now
@@ -128,17 +129,28 @@ func (s *codexWindowStateStore) reset() {
 		shard := &s.shards[i]
 		shard.mu.Lock()
 		shard.sessions = make(map[string]codexWindowStateEntry)
-		shard.ops = 0
 		shard.mu.Unlock()
 	}
+	s.cleanupOps.Store(0)
+}
+
+func (s *codexWindowStateStore) maybeCleanup(now time.Time) {
+	if s == nil {
+		return
+	}
+	op := s.cleanupOps.Add(1)
+	if op%codexWindowStateCleanupInterval != 0 {
+		return
+	}
+	shardIndex := int((op/codexWindowStateCleanupInterval - 1) & codexWindowStateShardsMask)
+	shard := &s.shards[shardIndex]
+	shard.mu.Lock()
+	shard.cleanupLocked(now)
+	shard.mu.Unlock()
 }
 
 func (s *codexWindowStateShard) cleanupLocked(now time.Time) {
 	if s == nil {
-		return
-	}
-	s.ops++
-	if s.ops%codexWindowStateCleanupInterval != 0 {
 		return
 	}
 	for sessionID, entry := range s.sessions {

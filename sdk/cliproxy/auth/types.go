@@ -157,6 +157,13 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// AuthScope is set on the auth-level QuotaState (not per-model) when the
+	// failure that tripped the quota was auth-scoped — e.g. Kiro's shared
+	// AGENTIC_REQUEST bucket. It tells the selector that every model on this
+	// credential is exhausted, not just the model that triggered the 429,
+	// so session affinity can move to the next auth instead of scattering
+	// across the depleted one by model.
+	AuthScope bool `json:"auth_scope,omitempty"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
@@ -938,7 +945,14 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 var (
 	refreshLeadMu        sync.RWMutex
 	refreshLeadFactories = make(map[string]func() *time.Duration)
+
+	defaultAutoRefreshMu        sync.RWMutex
+	defaultAutoRefreshProviders = make(map[string]defaultAutoRefreshConfig)
 )
+
+type defaultAutoRefreshConfig struct {
+	intervalFactory func() time.Duration
+}
 
 func RegisterRefreshLeadProvider(provider string, factory func() *time.Duration) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -948,6 +962,20 @@ func RegisterRefreshLeadProvider(provider string, factory func() *time.Duration)
 	refreshLeadMu.Lock()
 	refreshLeadFactories[provider] = factory
 	refreshLeadMu.Unlock()
+}
+
+func RegisterDefaultAutoRefreshProvider(provider string) {
+	RegisterDefaultAutoRefreshProviderWithInterval(provider, nil)
+}
+
+func RegisterDefaultAutoRefreshProviderWithInterval(provider string, intervalFactory func() time.Duration) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return
+	}
+	defaultAutoRefreshMu.Lock()
+	defaultAutoRefreshProviders[provider] = defaultAutoRefreshConfig{intervalFactory: intervalFactory}
+	defaultAutoRefreshMu.Unlock()
 }
 
 var expireKeys = [...]string{"expired", "expire", "expires_at", "expiresAt", "expiry", "expires"}
@@ -1003,6 +1031,42 @@ func ProviderRefreshLead(provider string, runtime any) *time.Duration {
 		return lead
 	}
 	return nil
+}
+
+func ProviderDefaultRefreshInterval(provider string) time.Duration {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return 0
+	}
+	defaultAutoRefreshMu.RLock()
+	cfg, ok := defaultAutoRefreshProviders[provider]
+	defaultAutoRefreshMu.RUnlock()
+	if !ok || cfg.intervalFactory == nil {
+		return 0
+	}
+	interval := cfg.intervalFactory()
+	if interval <= 0 {
+		return 0
+	}
+	return interval
+}
+
+func ProviderDefaultAutoRefresh(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return false
+	}
+	defaultAutoRefreshMu.RLock()
+	_, ok := defaultAutoRefreshProviders[provider]
+	defaultAutoRefreshMu.RUnlock()
+	return ok
+}
+
+func HasDefaultAutoRefreshProviders() bool {
+	defaultAutoRefreshMu.RLock()
+	ok := len(defaultAutoRefreshProviders) > 0
+	defaultAutoRefreshMu.RUnlock()
+	return ok
 }
 
 func parseTimeValue(v any) (time.Time, bool) {

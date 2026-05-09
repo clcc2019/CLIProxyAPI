@@ -100,6 +100,9 @@ func (l *authAutoRefreshLoop) rebuild(now time.Time) {
 
 	l.manager.mu.RLock()
 	for id, auth := range l.manager.auths {
+		if !l.manager.authAutoRefreshEnabled(auth) {
+			continue
+		}
 		next, ok := nextRefreshCheckAt(now, auth, l.interval)
 		if !ok {
 			continue
@@ -231,6 +234,11 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		manager.mu.RUnlock()
 		return
 	}
+	if !manager.authAutoRefreshEnabled(auth) {
+		manager.mu.RUnlock()
+		l.remove(authID)
+		return
+	}
 	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval)
 	shouldRefresh := manager.shouldRefresh(auth, now)
 	exec := manager.executors[auth.Provider]
@@ -280,10 +288,11 @@ func (l *authAutoRefreshLoop) applyDirty(now time.Time) {
 	for _, authID := range dirty {
 		l.manager.mu.RLock()
 		auth := l.manager.auths[authID]
+		enabled := l.manager.authAutoRefreshEnabled(auth)
 		next, ok := nextRefreshCheckAt(now, auth, l.interval)
 		l.manager.mu.RUnlock()
 
-		if !ok {
+		if !enabled || !ok {
 			l.remove(authID)
 			continue
 		}

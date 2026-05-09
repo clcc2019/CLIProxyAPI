@@ -9,10 +9,13 @@ import (
 func TestCodexWebsocketsExecutor_SessionStoreSurvivesExecutorReplacement(t *testing.T) {
 	sessionID := "test-session-store-survives-replace"
 
-	globalCodexWebsocketSessionStore.mu.Lock()
+	globalCodexWebsocketSessionStore.sessionsMu.Lock()
 	delete(globalCodexWebsocketSessionStore.sessions, sessionID)
+	globalCodexWebsocketSessionStore.sessionsMu.Unlock()
+
+	globalCodexWebsocketSessionStore.parkedMu.Lock()
 	delete(globalCodexWebsocketSessionStore.parked, sessionID)
-	globalCodexWebsocketSessionStore.mu.Unlock()
+	globalCodexWebsocketSessionStore.parkedMu.Unlock()
 
 	exec1 := NewCodexWebsocketsExecutor(nil)
 	sess1 := exec1.getOrCreateSession(sessionID, "")
@@ -31,18 +34,18 @@ func TestCodexWebsocketsExecutor_SessionStoreSurvivesExecutorReplacement(t *test
 
 	exec1.CloseExecutionSession(cliproxyauth.CloseAllExecutionSessionsID)
 
-	globalCodexWebsocketSessionStore.mu.Lock()
+	globalCodexWebsocketSessionStore.sessionsMu.Lock()
 	_, stillPresent := globalCodexWebsocketSessionStore.sessions[sessionID]
-	globalCodexWebsocketSessionStore.mu.Unlock()
+	globalCodexWebsocketSessionStore.sessionsMu.Unlock()
 	if !stillPresent {
 		t.Fatalf("expected session to remain after executor replacement close marker")
 	}
 
 	exec2.CloseExecutionSession(sessionID)
 
-	globalCodexWebsocketSessionStore.mu.Lock()
+	globalCodexWebsocketSessionStore.sessionsMu.Lock()
 	_, presentAfterClose := globalCodexWebsocketSessionStore.sessions[sessionID]
-	globalCodexWebsocketSessionStore.mu.Unlock()
+	globalCodexWebsocketSessionStore.sessionsMu.Unlock()
 	if presentAfterClose {
 		t.Fatalf("expected session to be removed after explicit close")
 	}
@@ -69,9 +72,9 @@ func TestCloseCodexWebsocketSessionsForAuthIDClosesParkedSession(t *testing.T) {
 
 	CloseCodexWebsocketSessionsForAuthID("auth-parked", "test_cleanup")
 
-	store.mu.Lock()
+	store.parkedMu.Lock()
 	_, stillParked := store.parked[reuseKey]
-	store.mu.Unlock()
+	store.parkedMu.Unlock()
 	if stillParked {
 		t.Fatalf("expected parked session to be removed for auth")
 	}

@@ -162,6 +162,44 @@ func TestNormalizeImportedAuthMetadata_IgnoresLookalikeWithoutOpenAIProvider(t *
 	}
 }
 
+func TestNormalizeImportedAuthMetadata_ConvertsKiroCLIToken(t *testing.T) {
+	metadata := map[string]any{
+		"accessToken":  "access-token",
+		"refreshToken": "refresh-token",
+		"provider":     "google",
+		"profileArn":   "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		"clientId":     "client-id",
+		"clientSecret": "client-secret",
+		"expiresAt":    "2026-05-09T00:00:00Z",
+	}
+
+	normalized, changed := NormalizeImportedAuthMetadata(metadata)
+	if !changed {
+		t.Fatal("expected Kiro token to be normalized")
+	}
+	if got := normalized["type"]; got != "kiro" {
+		t.Fatalf("type = %#v, want %q", got, "kiro")
+	}
+	if got := normalized["provider"]; got != "google" {
+		t.Fatalf("provider = %#v, want google", got)
+	}
+	if got := normalized["auth_method"]; got != "kiro-cli-social" {
+		t.Fatalf("auth_method = %#v, want kiro-cli-social", got)
+	}
+	for key, want := range map[string]string{
+		"access_token":  "access-token",
+		"refresh_token": "refresh-token",
+		"profile_arn":   "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		"client_id":     "client-id",
+		"client_secret": "client-secret",
+		"expires_at":    "2026-05-09T00:00:00Z",
+	} {
+		if got := normalized[key]; got != want {
+			t.Fatalf("%s = %#v, want %q", key, got, want)
+		}
+	}
+}
+
 func fakeJWT(t *testing.T, payload map[string]any) string {
 	t.Helper()
 

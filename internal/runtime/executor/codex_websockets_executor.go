@@ -58,9 +58,21 @@ type CodexWebsocketsExecutor struct {
 	store *codexWebsocketSessionStore
 }
 
+// codexWebsocketSessionStore is a two-lock session table.
+//
+// sessionsMu protects the sessions map (keyed by execution sessionID).
+// parkedMu protects the parked map (keyed by reuseKey).
+//
+// Splitting what used to be a single RWMutex lets "get active session" on the
+// hot path contend only with other active-session mutations, not with the
+// park/unpark bookkeeping that a long-lived TTL timer triggers. When an
+// operation must touch both maps it acquires sessionsMu first, then parkedMu,
+// to avoid deadlocks.
 type codexWebsocketSessionStore struct {
-	mu       sync.RWMutex
-	sessions map[string]*codexWebsocketSession
+	sessionsMu sync.RWMutex
+	sessions   map[string]*codexWebsocketSession
+
+	parkedMu sync.Mutex
 	parked   map[string]*codexWebsocketSession
 }
 
@@ -1318,46 +1330,55 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 	reuseKey = strings.TrimSpace(reuseKey)
 
 	// Fast path: if the session already exists with a compatible reuseKey, a
-	// read lock is enough. This keeps concurrent request preparation on
-	// distinct sessions from serializing behind the store's single mutex.
-	store.mu.RLock()
+	// read lock on sessionsMu is enough. This keeps concurrent request preparation
+	// on distinct sessions from serializing behind other store mutations, and is
+	// orthogonal to park/unpark traffic which now has its own lock.
+	store.sessionsMu.RLock()
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
 		if reuseKey == "" || sess.reuseKey == reuseKey {
-			store.mu.RUnlock()
+			store.sessionsMu.RUnlock()
 			return sess
 		}
 	}
-	store.mu.RUnlock()
+	store.sessionsMu.RUnlock()
 
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.sessionsMu.Lock()
 	if store.sessions == nil {
 		store.sessions = make(map[string]*codexWebsocketSession)
-	}
-	if store.parked == nil {
-		store.parked = make(map[string]*codexWebsocketSession)
 	}
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
 		if reuseKey != "" {
 			sess.reuseKey = reuseKey
 		}
+		store.sessionsMu.Unlock()
 		return sess
 	}
+	// Lock ordering: sessionsMu before parkedMu. Holding sessionsMu keeps other
+	// acquirers from inserting the same sessionID while we rehome a parked
+	// session.
 	if reuseKey != "" {
+		store.parkedMu.Lock()
+		if store.parked == nil {
+			store.parked = make(map[string]*codexWebsocketSession)
+		}
 		if sess, ok := store.parked[reuseKey]; ok && sess != nil {
 			delete(store.parked, reuseKey)
 			if sess.parkTimer != nil {
 				sess.parkTimer.Stop()
 				sess.parkTimer = nil
 			}
+			store.parkedMu.Unlock()
 			sess.sessionID = sessionID
 			sess.reuseKey = reuseKey
 			store.sessions[sessionID] = sess
+			store.sessionsMu.Unlock()
 			return sess
 		}
+		store.parkedMu.Unlock()
 	}
 	sess := &codexWebsocketSession{sessionID: sessionID, reuseKey: reuseKey}
 	store.sessions[sessionID] = sess
+	store.sessionsMu.Unlock()
 	return sess
 }
 
@@ -1527,10 +1548,10 @@ func (e *CodexWebsocketsExecutor) CloseExecutionSession(sessionID string) {
 	if store == nil {
 		store = globalCodexWebsocketSessionStore
 	}
-	store.mu.Lock()
+	store.sessionsMu.Lock()
 	sess := store.sessions[sessionID]
 	delete(store.sessions, sessionID)
-	store.mu.Unlock()
+	store.sessionsMu.Unlock()
 
 	if !e.parkExecutionSession(sess) {
 		e.closeExecutionSession(sess, "session_closed")
@@ -1553,11 +1574,14 @@ func (e *CodexWebsocketsExecutor) ResetExecutionSession(sessionID string) {
 	}
 
 	toClose := make([]*codexWebsocketSession, 0, 2)
-	store.mu.Lock()
+	store.sessionsMu.Lock()
 	if sess := store.sessions[sessionID]; sess != nil {
 		delete(store.sessions, sessionID)
 		toClose = append(toClose, sess)
 	}
+	store.sessionsMu.Unlock()
+
+	store.parkedMu.Lock()
 	for reuseKey, sess := range store.parked {
 		if sess == nil || strings.TrimSpace(sess.sessionID) != sessionID {
 			continue
@@ -1578,7 +1602,7 @@ func (e *CodexWebsocketsExecutor) ResetExecutionSession(sessionID string) {
 			toClose = append(toClose, sess)
 		}
 	}
-	store.mu.Unlock()
+	store.parkedMu.Unlock()
 
 	for i := range toClose {
 		e.closeExecutionSession(toClose[i], "session_reset")
@@ -1594,7 +1618,7 @@ func (e *CodexWebsocketsExecutor) closeAllExecutionSessions(reason string) {
 	if store == nil {
 		store = globalCodexWebsocketSessionStore
 	}
-	store.mu.Lock()
+	store.sessionsMu.Lock()
 	sessions := make([]*codexWebsocketSession, 0, len(store.sessions))
 	for sessionID, sess := range store.sessions {
 		delete(store.sessions, sessionID)
@@ -1602,6 +1626,9 @@ func (e *CodexWebsocketsExecutor) closeAllExecutionSessions(reason string) {
 			sessions = append(sessions, sess)
 		}
 	}
+	store.sessionsMu.Unlock()
+
+	store.parkedMu.Lock()
 	for reuseKey, sess := range store.parked {
 		delete(store.parked, reuseKey)
 		if sess != nil {
@@ -1612,7 +1639,7 @@ func (e *CodexWebsocketsExecutor) closeAllExecutionSessions(reason string) {
 			sessions = append(sessions, sess)
 		}
 	}
-	store.mu.Unlock()
+	store.parkedMu.Unlock()
 
 	for i := range sessions {
 		e.closeExecutionSession(sessions[i], reason)
@@ -1640,8 +1667,8 @@ func (e *CodexWebsocketsExecutor) parkExecutionSession(sess *codexWebsocketSessi
 		return false
 	}
 
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.parkedMu.Lock()
+	defer store.parkedMu.Unlock()
 	if store.parked == nil {
 		store.parked = make(map[string]*codexWebsocketSession)
 	}
@@ -1663,13 +1690,13 @@ func (e *CodexWebsocketsExecutor) parkExecutionSession(sess *codexWebsocketSessi
 	}
 	store.parked[reuseKey] = sess
 	sess.parkTimer = time.AfterFunc(codexResponsesWebsocketParkTTL, func() {
-		store.mu.Lock()
+		store.parkedMu.Lock()
 		current := store.parked[reuseKey]
 		if current == sess {
 			delete(store.parked, reuseKey)
 			sess.parkTimer = nil
 		}
-		store.mu.Unlock()
+		store.parkedMu.Unlock()
 		if current == sess {
 			closeCodexWebsocketSession(sess, "parked_ttl_expired")
 		}
@@ -1774,15 +1801,18 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 		sess      *codexWebsocketSession
 	}
 
-	store.mu.Lock()
+	store.sessionsMu.RLock()
 	items := make([]sessionItem, 0, len(store.sessions))
 	for sessionID, sess := range store.sessions {
 		items = append(items, sessionItem{sessionID: sessionID, sess: sess})
 	}
+	store.sessionsMu.RUnlock()
+
+	store.parkedMu.Lock()
 	for sessionID, sess := range store.parked {
 		items = append(items, sessionItem{sessionID: sessionID, sess: sess})
 	}
-	store.mu.Unlock()
+	store.parkedMu.Unlock()
 
 	matches := make([]sessionItem, 0)
 	for i := range items {
@@ -1802,15 +1832,22 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 	}
 
 	toClose := make([]*codexWebsocketSession, 0, len(matches))
-	store.mu.Lock()
+	store.sessionsMu.Lock()
 	for i := range matches {
 		current, ok := store.sessions[matches[i].sessionID]
 		if ok && current != nil && current == matches[i].sess {
 			delete(store.sessions, matches[i].sessionID)
 			toClose = append(toClose, current)
-			continue
 		}
-		current, ok = store.parked[matches[i].sessionID]
+	}
+	store.sessionsMu.Unlock()
+
+	store.parkedMu.Lock()
+	for i := range matches {
+		// The sessionsMu pass above already handled matches living in the
+		// active map, so those will no longer be in store.parked. Skip quickly
+		// when the lookup there finds a different session or none at all.
+		current, ok := store.parked[matches[i].sessionID]
 		if !ok || current == nil || current != matches[i].sess {
 			continue
 		}
@@ -1821,7 +1858,7 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 		}
 		toClose = append(toClose, current)
 	}
-	store.mu.Unlock()
+	store.parkedMu.Unlock()
 
 	for i := range toClose {
 		closeCodexWebsocketSession(toClose[i], reason)

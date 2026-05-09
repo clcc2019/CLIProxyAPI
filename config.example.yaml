@@ -168,7 +168,14 @@ routing:
   # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
   # X-Client-Request-Id (PI), prompt_cache_key, conversation_id, or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
-  session-affinity: false # default: false
+  #
+  # RECOMMENDED: set to true when using Kiro with multiple auth files. Kiro's
+  # AGENTIC_REQUEST quota is a single bucket shared across all models, so a
+  # 429 on any model now marks the entire credential as exhausted and
+  # session affinity moves the binding to the next available auth. Without
+  # session affinity, Claude Code's concurrent multi-model requests spread
+  # across credentials and drain every account in parallel.
+  session-affinity: true # recommended for Kiro / Claude Code; default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
 

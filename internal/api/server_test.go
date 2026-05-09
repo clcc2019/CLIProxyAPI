@@ -152,6 +152,19 @@ func TestPublicCORSOptions_UsesExplicitHeaders(t *testing.T) {
 	}
 }
 
+func TestClaudeMessagesBetaQueryIsAllowed(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", strings.NewReader(`{"model":"claude-opus-4.7","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusNotFound {
+		t.Fatalf("beta=true request was blocked with 404; body=%s", rr.Body.String())
+	}
+}
+
 func TestManagementCORSOptions_Denied(t *testing.T) {
 	server := newManagementTestServer(t)
 

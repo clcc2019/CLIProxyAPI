@@ -540,6 +540,21 @@ func TestExtractSessionID(t *testing.T) {
 			want:    "conv:conv-12345",
 		},
 		{
+			name:    "camel_conversation_id",
+			payload: `{"conversationId":"conv-camel"}`,
+			want:    "conv:conv-camel",
+		},
+		{
+			name:    "kiro_conversation_state_conversation_id",
+			payload: `{"conversationState":{"conversationId":"kiro-conv-123","agentContinuationId":"kiro-cont-456","currentMessage":{"userInputMessage":{"content":"hello"}}}}`,
+			want:    "conv:kiro-conv-123",
+		},
+		{
+			name:    "kiro_conversation_state_continuation_id",
+			payload: `{"conversationState":{"agentContinuationId":"kiro-cont-456","currentMessage":{"userInputMessage":{"content":"hello"}}}}`,
+			want:    "kiro-cont:kiro-cont-456",
+		},
+		{
 			name:    "no_metadata",
 			payload: `{"model":"claude-3"}`,
 			want:    "",
@@ -1293,6 +1308,47 @@ func TestExtractSessionID_MultimodalContent(t *testing.T) {
 	differentHash := ExtractSessionID(nil, differentPayload, nil)
 	if fullHash == differentHash {
 		t.Errorf("ExtractSessionID() should produce different hash for different content")
+	}
+}
+
+func TestSessionAffinitySelector_CrossModelSameSessionSameAuth(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	// Warm only model-b's fallback cursor with other sessions. If affinity were
+	// keyed by model, the same client below would split across auth-a/auth-c.
+	_, _ = selector.Pick(context.Background(), "claude", "model-b", cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_other-one"}}`),
+	}, auths)
+	_, _ = selector.Pick(context.Background(), "claude", "model-b", cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_other-two"}}`),
+	}, auths)
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_same-client-cross-model"}}`),
+	}
+	first, err := selector.Pick(context.Background(), "claude", "model-a", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() model-a error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "claude", "model-b", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() model-b error = %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("same session split across models: model-a=%s model-b=%s", first.ID, second.ID)
 	}
 }
 

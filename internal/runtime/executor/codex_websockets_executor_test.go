@@ -1006,9 +1006,9 @@ func TestCloseExecutionSessionParksReusableSessionAndReattaches(t *testing.T) {
 
 	executor.CloseExecutionSession("exec-1")
 
-	store.mu.Lock()
+	store.parkedMu.Lock()
 	parked := store.parked[reuseKey]
-	store.mu.Unlock()
+	store.parkedMu.Unlock()
 	if parked != sess1 {
 		t.Fatal("expected session to be parked for reuse")
 	}
@@ -1097,10 +1097,12 @@ func TestResetExecutionSessionClosesReusableSessionWithoutParking(t *testing.T) 
 
 	executor.ResetExecutionSession("exec-1")
 
-	store.mu.Lock()
+	store.sessionsMu.Lock()
 	_, active := store.sessions["exec-1"]
+	store.sessionsMu.Unlock()
+	store.parkedMu.Lock()
 	parked := store.parked[reuseKey]
-	store.mu.Unlock()
+	store.parkedMu.Unlock()
 	if active {
 		t.Fatal("expected active session to be removed after reset")
 	}
@@ -1346,8 +1348,8 @@ func TestCodexWebsocketParkExecutionSessionCapsParkedSessions(t *testing.T) {
 		}
 	}
 
-	executor.store.mu.Lock()
-	defer executor.store.mu.Unlock()
+	executor.store.parkedMu.Lock()
+	defer executor.store.parkedMu.Unlock()
 	if got := len(executor.store.parked); got != codexResponsesWebsocketMaxParked {
 		t.Fatalf("parked sessions = %d, want %d", got, codexResponsesWebsocketMaxParked)
 	}

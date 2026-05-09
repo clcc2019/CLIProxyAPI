@@ -2,9 +2,12 @@ package executor
 
 import (
 	"bytes"
+	"container/list"
+	"encoding/binary"
 	"hash/maphash"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
@@ -22,7 +25,40 @@ var (
 	codexMemoHashSeed                = maphash.MakeSeed()
 	globalCodexFinalUpstreamBodyMemo codexFinalUpstreamBodyMemo
 	globalCodexPromptResolutionMemo  codexPromptResolutionMemo
+	globalCodexPromptResolutionGroup helps.InFlightGroup[codexPromptCacheResolution]
 )
+
+// memoList is a FIFO-ordered doubly-linked list of hash keys.
+// It lets the memo evict oldest entries one at a time instead of clearing the
+// entire cache when a byte budget is exceeded, which avoids cache thrashing
+// under concurrent load with distinct-but-similar-sized inputs.
+type memoList = list.List
+
+// pushBackHash adds hash to the tail of l. Exposed as a helper so the generic
+// code path can read consistently across the two memo types.
+func pushBackHash(l *list.List, hash uint64) *list.Element {
+	return l.PushBack(hash)
+}
+
+// removeElem removes e from l and returns its hash value.
+func removeElem(l *list.List, e *list.Element) uint64 {
+	if e == nil {
+		return 0
+	}
+	hash, _ := l.Remove(e).(uint64)
+	return hash
+}
+
+// popFrontHash removes the front element of l and returns its hash and true,
+// or (0, false) if l is empty.
+func popFrontHash(l *list.List) (uint64, bool) {
+	front := l.Front()
+	if front == nil {
+		return 0, false
+	}
+	hash, _ := l.Remove(front).(uint64)
+	return hash, true
+}
 
 type codexFinalUpstreamBodyMemoEntry struct {
 	baseModel string
@@ -30,13 +66,13 @@ type codexFinalUpstreamBodyMemoEntry struct {
 	input     []byte
 	output    []byte
 	size      int
+	elem      *list.Element
 }
 
 type codexFinalUpstreamBodyMemo struct {
 	mu      sync.RWMutex
-	entries map[uint64]codexFinalUpstreamBodyMemoEntry
-	order   []uint64
-	next    int
+	entries map[uint64]*codexFinalUpstreamBodyMemoEntry
+	order   *memoList
 	bytes   int
 }
 
@@ -64,31 +100,46 @@ func (m *codexFinalUpstreamBodyMemo) set(baseModel string, opts codexFinalUpstre
 		return
 	}
 	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, input)
-	entry := codexFinalUpstreamBodyMemoEntry{
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.entries == nil {
+		m.entries = make(map[uint64]*codexFinalUpstreamBodyMemoEntry, codexFinalUpstreamBodyMemoMaxEntries)
+		m.order = list.New()
+	}
+	if prev, ok := m.entries[hash]; ok {
+		m.bytes -= prev.size
+		removeElem(m.order, prev.elem)
+		delete(m.entries, hash)
+	}
+
+	// Evict oldest entries incrementally until the new item fits both budgets.
+	for (m.bytes+size > codexFinalUpstreamBodyMemoMaxBytes ||
+		m.order.Len() >= codexFinalUpstreamBodyMemoMaxEntries) && m.order.Len() > 0 {
+		oldHash, ok := popFrontHash(m.order)
+		if !ok {
+			break
+		}
+		if old, ok := m.entries[oldHash]; ok {
+			m.bytes -= old.size
+			delete(m.entries, oldHash)
+		}
+	}
+
+	// If a single entry is smaller than the max but still cannot fit (pathological
+	// case where bookkeeping diverged), drop it rather than inserting over-budget.
+	if m.bytes+size > codexFinalUpstreamBodyMemoMaxBytes {
+		return
+	}
+
+	entry := &codexFinalUpstreamBodyMemoEntry{
 		baseModel: baseModel,
 		opts:      opts,
 		input:     bytes.Clone(input),
 		output:    bytes.Clone(output),
 		size:      size,
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.entries == nil {
-		m.entries = make(map[uint64]codexFinalUpstreamBodyMemoEntry, codexFinalUpstreamBodyMemoMaxEntries)
-	}
-	_, exists := m.entries[hash]
-	if exists {
-		previous := m.entries[hash]
-		m.bytes -= previous.size
-	}
-	if m.bytes+size > codexFinalUpstreamBodyMemoMaxBytes {
-		m.clearLocked()
-		exists = false
-	}
-	if !exists {
-		m.record(hash, codexFinalUpstreamBodyMemoMaxEntries)
-	}
+	entry.elem = pushBackHash(m.order, hash)
 	m.entries[hash] = entry
 	m.bytes += size
 }
@@ -101,13 +152,13 @@ type codexPromptResolutionMemoEntry struct {
 	executionSessionID string
 	resolution         codexPromptCacheResolution
 	size               int
+	elem               *list.Element
 }
 
 type codexPromptResolutionMemo struct {
 	mu      sync.RWMutex
-	entries map[uint64]codexPromptResolutionMemoEntry
-	order   []uint64
-	next    int
+	entries map[uint64]*codexPromptResolutionMemoEntry
+	order   *memoList
 	bytes   int
 }
 
@@ -140,7 +191,36 @@ func (m *codexPromptResolutionMemo) set(from sdktranslator.Format, model string,
 		return
 	}
 	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
-	entry := codexPromptResolutionMemoEntry{
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.entries == nil {
+		m.entries = make(map[uint64]*codexPromptResolutionMemoEntry, codexPromptResolutionMemoMaxEntries)
+		m.order = list.New()
+	}
+	if prev, ok := m.entries[hash]; ok {
+		m.bytes -= prev.size
+		removeElem(m.order, prev.elem)
+		delete(m.entries, hash)
+	}
+
+	for (m.bytes+size > codexPromptResolutionMemoMaxBytes ||
+		m.order.Len() >= codexPromptResolutionMemoMaxEntries) && m.order.Len() > 0 {
+		oldHash, ok := popFrontHash(m.order)
+		if !ok {
+			break
+		}
+		if old, ok := m.entries[oldHash]; ok {
+			m.bytes -= old.size
+			delete(m.entries, oldHash)
+		}
+	}
+
+	if m.bytes+size > codexPromptResolutionMemoMaxBytes {
+		return
+	}
+
+	entry := &codexPromptResolutionMemoEntry{
 		from:               from,
 		model:              model,
 		scope:              scope,
@@ -149,76 +229,26 @@ func (m *codexPromptResolutionMemo) set(from sdktranslator.Format, model string,
 		resolution:         resolution,
 		size:               size,
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.entries == nil {
-		m.entries = make(map[uint64]codexPromptResolutionMemoEntry, codexPromptResolutionMemoMaxEntries)
-	}
-	_, exists := m.entries[hash]
-	if exists {
-		previous := m.entries[hash]
-		m.bytes -= previous.size
-	}
-	if m.bytes+size > codexPromptResolutionMemoMaxBytes {
-		m.clearLocked()
-		exists = false
-	}
-	if !exists {
-		m.record(hash, codexPromptResolutionMemoMaxEntries)
-	}
+	entry.elem = pushBackHash(m.order, hash)
 	m.entries[hash] = entry
 	m.bytes += size
 }
 
-func (m *codexFinalUpstreamBodyMemo) record(hash uint64, maxEntries int) {
-	recordCodexMemoHash(&m.order, &m.next, m.entries, hash, maxEntries, func(entry codexFinalUpstreamBodyMemoEntry) {
-		m.bytes -= entry.size
-	})
+// orderLen returns the current number of tracked insertion-order elements.
+// Exported for tests to assert post-condition invariants without exposing the
+// underlying list implementation.
+func (m *codexFinalUpstreamBodyMemo) orderLen() int {
+	if m == nil || m.order == nil {
+		return 0
+	}
+	return m.order.Len()
 }
 
-func (m *codexPromptResolutionMemo) record(hash uint64, maxEntries int) {
-	recordCodexMemoHash(&m.order, &m.next, m.entries, hash, maxEntries, func(entry codexPromptResolutionMemoEntry) {
-		m.bytes -= entry.size
-	})
-}
-
-func (m *codexFinalUpstreamBodyMemo) clearLocked() {
-	clear(m.entries)
-	clear(m.order)
-	m.order = m.order[:0]
-	m.next = 0
-	m.bytes = 0
-}
-
-func (m *codexPromptResolutionMemo) clearLocked() {
-	clear(m.entries)
-	clear(m.order)
-	m.order = m.order[:0]
-	m.next = 0
-	m.bytes = 0
-}
-
-func recordCodexMemoHash[T any](order *[]uint64, next *int, entries map[uint64]T, hash uint64, maxEntries int, onEvict func(T)) {
-	if maxEntries <= 0 {
-		return
+func (m *codexPromptResolutionMemo) orderLen() int {
+	if m == nil || m.order == nil {
+		return 0
 	}
-	if len(*order) < maxEntries {
-		*order = append(*order, hash)
-		return
-	}
-	if len(*order) == 0 {
-		return
-	}
-	old := (*order)[*next]
-	if onEvict != nil {
-		if entry, ok := entries[old]; ok {
-			onEvict(entry)
-		}
-	}
-	delete(entries, old)
-	(*order)[*next] = hash
-	*next = (*next + 1) % len(*order)
+	return m.order.Len()
 }
 
 func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *cliproxyauth.Auth, opts codexFinalUpstreamBodyOptions) []byte {
@@ -266,4 +296,11 @@ func boolToByte(v bool) byte {
 		return 1
 	}
 	return 0
+}
+
+func promptResolutionMemoInflightKey(from sdktranslator.Format, model string, scope string, executionSessionID string, payload []byte) string {
+	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, hash)
+	return string(from) + "|" + model + "|" + scope + "|" + executionSessionID + "|" + string(buf)
 }

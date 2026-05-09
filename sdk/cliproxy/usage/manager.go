@@ -28,12 +28,36 @@ type Record struct {
 }
 
 // Detail holds the token usage breakdown.
+//
+// Field mapping across upstream providers:
+//
+//   - InputTokens         = total non-cached prompt tokens billed as input.
+//     For providers that split input into uncached + cache-read + cache-write
+//     (Kiro, Claude, Gemini), this aggregates all three so downstream cost
+//     calculators can still derive a total. Set individual buckets below.
+//   - OutputTokens        = assistant response tokens (excluding reasoning).
+//   - ReasoningTokens     = extended-thinking / chain-of-thought tokens that
+//     upstream bills separately from OutputTokens (Claude thinking, o-series
+//     reasoning, Gemini thoughts). Clients that display "thinking" counts
+//     read this field.
+//   - CachedTokens        = tokens served from a cache HIT (cheap). Maps to
+//     Claude's cache_read_input_tokens and OpenAI's cached_tokens. This is
+//     a subset of InputTokens; do not double-count when summing.
+//   - CacheCreationTokens = tokens billed for cache CREATION / write on a
+//     prompt that populates a new cache entry (Claude prompt caching,
+//     AWS CodeWhisperer / Kiro cacheWriteInputTokens). Also a subset of
+//     InputTokens. Set this so downstream translators can emit the
+//     cache_creation_input_tokens field Claude clients rely on to display
+//     prompt-cache effectiveness.
+//   - TotalTokens         = upstream-reported total when provided, otherwise
+//     computed by the sink as InputTokens + OutputTokens + ReasoningTokens.
 type Detail struct {
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	InputTokens         int64
+	OutputTokens        int64
+	ReasoningTokens     int64
+	CachedTokens        int64
+	CacheCreationTokens int64
+	TotalTokens         int64
 }
 
 type requestedModelAliasContextKey struct{}

@@ -89,7 +89,7 @@ func (t *clientAPIKeyQuotaTracker) setModelPrices(prices config.ModelPrices) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.modelPrices = config.NormalizeModelPrices(config.CloneModelPrices(prices))
+	t.modelPrices = config.EffectiveModelPrices(prices)
 }
 
 func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) {
@@ -202,7 +202,7 @@ func (t *clientAPIKeyQuotaTracker) costForRecordLocked(record coreusage.Record) 
 	if t == nil || len(t.modelPrices) == 0 {
 		return 0
 	}
-	price, ok := lookupClientAPIKeyQuotaModelPrice(t.modelPrices, record.Model, record.Alias)
+	price, ok := config.LookupModelPrice(t.modelPrices, record.Model, record.Alias)
 	if !ok {
 		return 0
 	}
@@ -222,19 +222,6 @@ func (t *clientAPIKeyQuotaTracker) costForRecordLocked(record coreusage.Record) 
 		return 0
 	}
 	return cost
-}
-
-func lookupClientAPIKeyQuotaModelPrice(prices config.ModelPrices, names ...string) (config.ModelPrice, bool) {
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if price, ok := prices[name]; ok {
-			return price, true
-		}
-	}
-	return config.ModelPrice{}, false
 }
 
 func maxInt64(value, minimum int64) int64 {

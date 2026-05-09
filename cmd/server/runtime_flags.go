@@ -14,6 +14,9 @@ type runtimeFlags struct {
 	noBrowser          bool
 	antigravityLogin   bool
 	kimiLogin          bool
+	kiroLogin          bool
+	kiroImport         bool
+	kiroRefresh        bool
 	tuiMode            bool
 	standalone         bool
 	localModel         bool
@@ -36,6 +39,9 @@ func parseRuntimeFlags() runtimeFlags {
 	flag.IntVar(&flags.oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&flags.antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&flags.kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&flags.kiroLogin, "kiro-login", false, "Generate a local Kiro auth file using AWS Builder ID device flow")
+	flag.BoolVar(&flags.kiroImport, "kiro-import", false, "Import Kiro IDE authentication")
+	flag.BoolVar(&flags.kiroRefresh, "kiro-refresh", false, "Refresh local Kiro auth files using stored refresh tokens")
 	flag.StringVar(&flags.projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&flags.configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&flags.vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")

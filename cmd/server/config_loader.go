@@ -25,6 +25,7 @@ type configLoadResult struct {
 }
 
 func loadConfigResult(flags runtimeFlags, ctx startupContext, settings storeSettings) (configLoadResult, error) {
+	authFileOnly := isLocalAuthFileCommand(flags)
 	switch {
 	case settings.usePostgresStore:
 		return loadPostgresConfig(ctx, settings)
@@ -35,8 +36,12 @@ func loadConfigResult(flags runtimeFlags, ctx startupContext, settings storeSett
 	case flags.configPath != "":
 		return loadFileConfig(flags.configPath, ctx.cloudDeploy)
 	default:
-		return loadFileConfig(filepath.Join(ctx.workdir, "config.yaml"), ctx.cloudDeploy)
+		return loadFileConfig(filepath.Join(ctx.workdir, "config.yaml"), ctx.cloudDeploy || authFileOnly)
 	}
+}
+
+func isLocalAuthFileCommand(flags runtimeFlags) bool {
+	return flags.kiroLogin || flags.kiroImport || flags.kiroRefresh
 }
 
 func loadPostgresConfig(ctx startupContext, settings storeSettings) (configLoadResult, error) {

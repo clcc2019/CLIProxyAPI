@@ -256,6 +256,53 @@ func TestFileSynthesizer_Synthesize_OpenAISessionExportAsCodexAuth(t *testing.T)
 	}
 }
 
+func TestFileSynthesizer_Synthesize_KiroCLITokenAsKiroAuth(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"provider":     "google",
+		"accessToken":  "access-token",
+		"refreshToken": "refresh-token",
+		"profileArn":   "arn:aws:codewhisperer:us-east-1:123:profile/social",
+		"expiresAt":    "2026-05-09T06:54:01Z",
+		"clientId":     "client-id",
+		"clientSecret": "client-secret",
+		"email":        "kiro@example.com",
+	}
+	data, _ := json.Marshal(authData)
+	fullPath := filepath.Join(tempDir, "kiro-google.json")
+	if err := os.WriteFile(fullPath, data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2026, 5, 9, 6, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	auths := SynthesizeAuthFile(ctx, fullPath, data)
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if got := auth.Provider; got != "kiro" {
+		t.Fatalf("provider = %q, want kiro", got)
+	}
+	if got := auth.ID; got != "kiro-google.json" {
+		t.Fatalf("id = %q, want relative filename", got)
+	}
+	if got := auth.Metadata["auth_method"]; got != "kiro-cli-social" {
+		t.Fatalf("auth_method = %#v, want kiro-cli-social", got)
+	}
+	if got := auth.Metadata["profile_arn"]; got != "arn:aws:codewhisperer:us-east-1:123:profile/social" {
+		t.Fatalf("profile_arn = %#v", got)
+	}
+	if got := auth.Attributes["path"]; got != fullPath {
+		t.Fatalf("path attribute = %q, want %q", got, fullPath)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_IgnoresLookalikeWithoutOpenAIProvider(t *testing.T) {
 	tempDir := t.TempDir()
 

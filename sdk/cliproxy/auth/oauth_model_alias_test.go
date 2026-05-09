@@ -159,16 +159,24 @@ func createAuthForChannel(channel string) *Auth {
 		return &Auth{Provider: "antigravity"}
 	case "kimi":
 		return &Auth{Provider: "kimi"}
+	case "kiro":
+		return &Auth{Provider: "kiro"}
 	default:
 		return &Auth{Provider: channel}
 	}
 }
 
-func TestOAuthModelAliasChannel_Kimi(t *testing.T) {
+func TestOAuthModelAliasChannel_FileBackedProviders(t *testing.T) {
 	t.Parallel()
 
-	if got := OAuthModelAliasChannel("kimi", "oauth"); got != "kimi" {
-		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "kimi")
+	for _, provider := range []string{"kimi", "kiro"} {
+		provider := provider
+		t.Run(provider, func(t *testing.T) {
+			t.Parallel()
+			if got := OAuthModelAliasChannel(provider, "oauth"); got != provider {
+				t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, provider)
+			}
+		})
 	}
 }
 

@@ -24,4 +24,7 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
+
+	// Kiro represents the AWS Kiro/Amazon Q provider identifier.
+	Kiro = "kiro"
 )

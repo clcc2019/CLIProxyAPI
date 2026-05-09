@@ -118,6 +118,12 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
+	// AuthScoped indicates the failure applies to the entire auth (all models),
+	// not only the model that triggered it. Set when the originating error
+	// implements AuthScopedFailure — canonical case is Kiro's AGENTIC_REQUEST
+	// 429 where the quota is a single bucket shared across models. When true,
+	// MarkResult suspends the auth as a whole instead of only Model.
+	AuthScoped bool
 }
 
 // Selector chooses an auth candidate for execution.
@@ -522,11 +528,28 @@ func (m *Manager) oauthRefreshConfig() internalconfig.OAuthRefreshConfig {
 }
 
 func (m *Manager) autoRefreshEnabled() bool {
+	if m.globalAutoRefreshEnabled() {
+		return true
+	}
+	return HasDefaultAutoRefreshProviders()
+}
+
+func (m *Manager) globalAutoRefreshEnabled() bool {
 	cfg := m.oauthRefreshConfig()
 	if cfg.Enabled == nil {
 		return false
 	}
 	return *cfg.Enabled
+}
+
+func (m *Manager) authAutoRefreshEnabled(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if m.globalAutoRefreshEnabled() {
+		return true
+	}
+	return ProviderDefaultAutoRefresh(auth.Provider)
 }
 
 func (m *Manager) refreshOnStartupEnabled() bool {
@@ -1009,8 +1032,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
 				failed = true
-				rerr := resultErrorFromError(chunk.Err)
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				streamResult := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
+				applyResultError(&streamResult, chunk.Err)
+				m.MarkResult(ctx, streamResult)
 			}
 			if !forward {
 				return false
@@ -1051,6 +1075,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+	ctx = WithRefreshUpdateCallback(ctx, m.handleExecutionRefreshUpdate)
+	ctx = WithRefreshCoordinator(ctx, m.coordinatedRefreshForRequest)
 	var lastErr error
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
@@ -1061,8 +1087,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			rerr := resultErrorFromError(errStream)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
+			applyResultError(&result, errStream)
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
 			if isRequestInvalidError(errStream) {
@@ -1312,6 +1338,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	applyDefaultRefreshInterval(auth)
 	auth.EnsureIndex()
 	auth.ApplyRuntimeStateFromMetadata()
 	m.mu.Lock()
@@ -1338,6 +1365,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	applyDefaultRefreshInterval(auth)
 	m.mu.Lock()
 	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
 		if !auth.indexAssigned && auth.Index == "" {
@@ -1364,11 +1392,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(authClone.CloneForScheduler())
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
+	persistErr := m.persist(ctx, auth)
 	if errRuntime := m.persistRuntimeState(ctx, auth); errRuntime != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth runtime state: %v", errRuntime)
 	}
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	if persistErr != nil {
+		return auth.Clone(), persistErr
+	}
 	return auth.Clone(), nil
 }
 
@@ -1390,6 +1421,7 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
+		applyDefaultRefreshInterval(auth)
 		auth.ApplyRuntimeStateFromMetadata()
 		m.applyPersistedRuntimeStateLocked(auth)
 		m.auths[auth.ID] = auth.Clone()
@@ -1548,6 +1580,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = WithRefreshUpdateCallback(execCtx, m.handleExecutionRefreshUpdate)
+		execCtx = WithRefreshCoordinator(execCtx, m.coordinatedRefreshForRequest)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -1565,7 +1599,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = resultErrorFromError(errExec)
+				applyResultError(&result, errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -1644,7 +1678,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = resultErrorFromError(errExec)
+				applyResultError(&result, errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -2339,7 +2373,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			if result.Model != "" {
+			if result.Model != "" && !result.AuthScoped {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
@@ -2432,7 +2466,35 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					schedulerDirty = true
 				}
 			} else {
+				// result.AuthScoped elevates a model-specific failure (Kiro 429
+				// on a shared AGENTIC_REQUEST bucket) to an auth-wide suspend so
+				// session-affinity binds move to the next credential instead of
+				// staying on a depleted one for unrelated models.
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				// Mark the auth-level quota as auth-scoped so isAuthBlockedForModel
+				// treats every model as exhausted, even ones with no per-model
+				// state recorded yet.
+				auth.Quota.AuthScope = true
+				if result.Model != "" {
+					state := ensureModelState(auth, result.Model)
+					state.Unavailable = true
+					state.Status = StatusError
+					state.UpdatedAt = now
+					if result.Error != nil {
+						state.LastError = cloneError(result.Error)
+						state.StatusMessage = result.Error.Message
+					}
+					if !auth.NextRetryAfter.IsZero() {
+						state.NextRetryAfter = auth.NextRetryAfter
+					}
+					if auth.Quota.Exceeded {
+						state.Quota = auth.Quota
+						state.Quota.AuthScope = false
+						setModelQuota = true
+					}
+					suspendReason = "auth_scope_quota"
+					shouldSuspendModel = true
+				}
 				schedulerDirty = true
 			}
 		}
@@ -2673,6 +2735,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.Reason = ""
 	auth.Quota.NextRecoverAt = time.Time{}
 	auth.Quota.BackoffLevel = 0
+	auth.Quota.AuthScope = false
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
@@ -2703,6 +2766,22 @@ func resultErrorFromError(err error) *Error {
 		resultErr.HTTPStatus = se.StatusCode()
 	}
 	return resultErr
+}
+
+// applyResultError populates both Error and AuthScoped on a Result from the
+// underlying executor error. It preserves existing type information (status
+// codes, retry hints) that would otherwise be lost when resultErrorFromError
+// flattens the error, and it propagates the AuthScopedFailure marker so
+// Kiro-style shared-bucket quota errors suspend the auth globally instead of
+// only the triggering model.
+func applyResultError(result *Result, err error) {
+	if result == nil {
+		return
+	}
+	result.Error = resultErrorFromError(err)
+	if isAuthScopedFailure(err) {
+		result.AuthScoped = true
+	}
 }
 
 func errorString(err error) string {
@@ -3253,7 +3332,7 @@ func (m *Manager) oauthModelAliasChannelForAuth(auth *Auth) string {
 			}
 		}
 		return provider
-	case "gemini-cli", "aistudio", "antigravity", "kimi":
+	case "gemini-cli", "aistudio", "antigravity", "kimi", "kiro":
 		return provider
 	default:
 		return ""
@@ -3724,7 +3803,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
-				result.Error = resultErrorFromError(errExec)
+				applyResultError(&result, errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -3785,6 +3864,19 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	persistAuth.SetRuntimeStateMetadata()
 	_, err := m.store.Save(ctx, persistAuth)
 	return err
+}
+
+func (m *Manager) handleExecutionRefreshUpdate(ctx context.Context, updated *Auth) {
+	if m == nil || updated == nil || updated.ID == "" {
+		return
+	}
+	updateCtx := context.Background()
+	if ctx != nil {
+		updateCtx = context.WithoutCancel(ctx)
+	}
+	if _, err := m.Update(updateCtx, updated); err != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", updated.ID).Warnf("failed to persist refreshed auth: %v", err)
+	}
 }
 
 func (m *Manager) persistRuntimeState(ctx context.Context, auth *Auth) error {
@@ -3992,7 +4084,8 @@ func (m *Manager) flushPersistQueue() {
 // StartAutoRefresh launches a background loop that evaluates auth freshness
 // every few seconds and triggers refresh operations when required.
 // Only one loop is kept alive; starting a new one cancels the previous run.
-// When oauth-refresh.enabled is false or unset, any existing loop is stopped and no new loop is started.
+// When oauth-refresh.enabled is false or unset, provider-level default
+// auto-refresh registrations can still start the loop for those providers.
 func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duration) bool {
 	if interval <= 0 {
 		interval = refreshCheckInterval
@@ -4061,6 +4154,9 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 	for _, a := range snapshot {
 		typ, _ := a.AccountInfo()
 		if typ != "api_key" {
+			if !m.authAutoRefreshEnabled(a) {
+				continue
+			}
 			if !m.shouldRefresh(a, now) {
 				continue
 			}
@@ -4184,6 +4280,16 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 }
 
 func authPreferredInterval(a *Auth) time.Duration {
+	if d := authConfiguredInterval(a); d > 0 {
+		return d
+	}
+	if a == nil {
+		return 0
+	}
+	return ProviderDefaultRefreshInterval(a.Provider)
+}
+
+func authConfiguredInterval(a *Auth) time.Duration {
 	if a == nil {
 		return 0
 	}
@@ -4194,6 +4300,24 @@ func authPreferredInterval(a *Auth) time.Duration {
 		return d
 	}
 	return 0
+}
+
+func applyDefaultRefreshInterval(auth *Auth) {
+	if auth == nil || !ProviderDefaultAutoRefresh(auth.Provider) || authConfiguredInterval(auth) > 0 {
+		return
+	}
+	interval := ProviderDefaultRefreshInterval(auth.Provider)
+	if interval <= 0 {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = map[string]any{}
+	}
+	seconds := int(interval / time.Second)
+	if seconds <= 0 {
+		return
+	}
+	auth.Metadata["refresh_interval_seconds"] = seconds
 }
 
 func durationFromMetadata(meta map[string]any, keys ...string) time.Duration {
@@ -4353,24 +4477,164 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
-	m.refreshAuthShared(ctx, id, false)
+	if _, err := m.refreshAuthShared(ctx, id, false); err != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", id).Warnf("auth refresh failed: %v", err)
+	}
 }
 
-func (m *Manager) refreshAuthShared(ctx context.Context, id string, useLimit bool) {
+type managerRefreshOutcome struct {
+	auth *Auth
+	err  error
+}
+
+func (m *Manager) refreshAuthShared(ctx context.Context, id string, useLimit bool) (*Auth, error) {
 	if id == "" {
-		return
+		return nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_, _, _ = m.refreshGroup.Do(id, func() (any, error) {
+	result, err, _ := m.refreshGroup.Do(id, func() (any, error) {
 		if !m.acquireRefreshSlot(ctx, useLimit) {
-			return nil, ctx.Err()
+			return managerRefreshOutcome{err: ctx.Err()}, nil
 		}
 		defer m.releaseRefreshSlot(useLimit)
-		m.refreshAuthOnce(ctx, id)
-		return nil, nil
+		updated, refreshErr := m.refreshAuthOnce(ctx, id)
+		return managerRefreshOutcome{auth: updated, err: refreshErr}, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	outcome, ok := result.(managerRefreshOutcome)
+	if !ok {
+		return m.authCloneByID(id), nil
+	}
+	if outcome.auth == nil && outcome.err == nil {
+		outcome.auth = m.authCloneByID(id)
+	}
+	return outcome.auth, outcome.err
+}
+
+func (m *Manager) RefreshAuth(ctx context.Context, auth *Auth) (*Auth, error) {
+	return m.coordinatedRefreshForRequest(ctx, auth)
+}
+
+func (m *Manager) RefreshAuthIfNeeded(ctx context.Context, auth *Auth) (*Auth, error) {
+	if m == nil || auth == nil {
+		return auth, nil
+	}
+	current := auth
+	if auth.ID != "" {
+		if snapshot := m.authCloneByID(auth.ID); snapshot != nil {
+			current = snapshot
+		}
+	}
+	if !m.authAutoRefreshEnabled(current) || !m.shouldRefresh(current, time.Now()) {
+		return current.Clone(), nil
+	}
+	return m.coordinatedRefreshForRequest(ctx, current)
+}
+
+// coordinatedRefreshForRequest serializes request-time refreshes through the
+// same singleflight group used by the auto-refresh loop. Without this, the
+// executor's own Refresh call could race the background loop on the same
+// auth, using the rotating refresh token twice and bricking credentials
+// with invalid_grant on the second attempt.
+//
+// Returns the freshly refreshed auth after the Manager has persisted it,
+// or the error the executor's Refresh produced. On permanent failure
+// (invalid_grant / revoked token), the error implements PermanentAuthError
+// so callers can stop retrying with the same credentials.
+func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) (*Auth, error) {
+	if m == nil || auth == nil || auth.ID == "" {
+		return auth, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id := auth.ID
+	result, err, _ := m.refreshGroup.Do(id, func() (any, error) {
+		m.mu.RLock()
+		current := m.auths[id]
+		exec := (ProviderExecutor)(nil)
+		if current != nil {
+			exec = m.executors[current.Provider]
+		}
+		var cloned *Auth
+		if current != nil {
+			cloned = current.Clone()
+		}
+		m.mu.RUnlock()
+		if cloned == nil {
+			cloned = auth.Clone()
+		}
+		if exec == nil {
+			return managerRefreshOutcome{auth: cloned}, nil
+		}
+		updated, refreshErr := exec.Refresh(ctx, cloned)
+		if refreshErr != nil {
+			// Bubble up permanent failures so the conductor can park the
+			// auth; the auto-refresh loop will also see the error on its
+			// next tick and apply the same treatment.
+			if isPermanentRefreshError(refreshErr) {
+				m.mu.Lock()
+				if cur := m.auths[id]; cur != nil {
+					now := time.Now()
+					cur.NextRefreshAfter = now.Add(refreshPermanentBackoff)
+					cur.LastError = resultErrorFromError(refreshErr)
+					cur.Status = StatusError
+					cur.Unavailable = true
+					cur.StatusMessage = "refresh token invalid — re-login required"
+					m.auths[id] = cur
+					if m.scheduler != nil {
+						m.scheduler.upsertAuth(cur.CloneForScheduler())
+					}
+				}
+				m.mu.Unlock()
+				m.queueRefreshReschedule(id)
+			}
+			return managerRefreshOutcome{err: refreshErr}, nil
+		}
+		if updated == nil {
+			return managerRefreshOutcome{auth: cloned}, nil
+		}
+		// Persist the rotated credentials through Manager.Update so the new
+		// refresh token lands on disk synchronously before the caller uses
+		// the returned auth. Update also resets NextRefreshAfter using the
+		// executor's intended interval, and rebroadcasts to the scheduler.
+		persisted, updateErr := m.Update(ctx, updated)
+		if updateErr != nil {
+			logEntryWithRequestID(ctx).WithField("auth_id", id).Warnf("coordinated refresh: persist failed: %v", updateErr)
+			return managerRefreshOutcome{auth: updated, err: updateErr}, nil
+		}
+		if persisted != nil {
+			return managerRefreshOutcome{auth: persisted}, nil
+		}
+		return managerRefreshOutcome{auth: updated}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	outcome, ok := result.(managerRefreshOutcome)
+	if !ok {
+		return m.authCloneByID(id), nil
+	}
+	if outcome.auth == nil && outcome.err == nil {
+		outcome.auth = m.authCloneByID(id)
+	}
+	return outcome.auth, outcome.err
+}
+
+func (m *Manager) authCloneByID(id string) *Auth {
+	if m == nil || id == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if auth := m.auths[id]; auth != nil {
+		return auth.Clone()
+	}
+	return nil
 }
 
 func (m *Manager) acquireRefreshSlot(ctx context.Context, useLimit bool) bool {
@@ -4392,7 +4656,7 @@ func (m *Manager) releaseRefreshSlot(useLimit bool) {
 	<-m.refreshSemaphore
 }
 
-func (m *Manager) refreshAuthOnce(ctx context.Context, id string) {
+func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error) {
 	m.mu.RLock()
 	auth := m.auths[id]
 	var exec ProviderExecutor
@@ -4403,20 +4667,32 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) {
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
-		return
+		return nil, nil
 	}
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
-		return
+		return cloned, err
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		// Permanent auth errors (invalid_grant / invalid_client / revoked
+		// refresh token) must not be retried on the background cadence —
+		// doing so burns upstream quota and keeps the auth permanently in a
+		// failing state. Park it until an operator re-logs in.
+		permanent := isPermanentRefreshError(err)
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			if permanent {
+				current.NextRefreshAfter = now.Add(refreshPermanentBackoff)
+				current.Status = StatusError
+				current.Unavailable = true
+				current.StatusMessage = "refresh token invalid — re-login required"
+			} else {
+				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			}
 			current.LastError = resultErrorFromError(err)
 			m.auths[id] = current
 			shouldReschedule = true
@@ -4425,14 +4701,19 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) {
 			}
 		}
 		m.mu.Unlock()
+		if permanent {
+			log.Warnf("auth %s (%s) parked for re-login: %v", auth.ID, auth.Provider, err)
+		}
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
 		}
-		return
+		return m.authCloneByID(id), err
 	}
 	if updated == nil {
 		updated = cloned
 	}
+	executorNextRefreshAfter := updated.NextRefreshAfter
+	inheritedNextRefreshAfter := cloned.NextRefreshAfter
 	// Preserve runtime created by the executor during Refresh.
 	// If executor didn't set one, fall back to the previous runtime.
 	if updated.Runtime == nil {
@@ -4442,10 +4723,21 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) {
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
 	updated.UpdatedAt = now
-	if m.shouldRefresh(updated, now) {
+	if !executorNextRefreshAfter.IsZero() &&
+		executorNextRefreshAfter.After(now) &&
+		!executorNextRefreshAfter.Equal(inheritedNextRefreshAfter) {
+		updated.NextRefreshAfter = executorNextRefreshAfter
+	} else if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	_, _ = m.Update(ctx, updated)
+	persisted, updateErr := m.Update(ctx, updated)
+	if updateErr != nil {
+		return updated, updateErr
+	}
+	if persisted != nil {
+		return persisted, nil
+	}
+	return updated, nil
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

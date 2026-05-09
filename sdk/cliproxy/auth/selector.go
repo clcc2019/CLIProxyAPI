@@ -423,6 +423,22 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				return false, blockReasonNone, time.Time{}
 			}
 		}
+		// Fall through to auth-level check ONLY when this credential carries
+		// the auth-scope quota flag — i.e. an AuthScopedFailure like Kiro's
+		// shared AGENTIC_REQUEST 429 marked every model on this auth as
+		// exhausted. Without this narrow scope, ordinary per-model 429s
+		// would accidentally block unrelated models through the aggregate
+		// Unavailable flag, breaking multi-model routing on other providers.
+		if auth.Quota.AuthScope && auth.Unavailable && auth.NextRetryAfter.After(now) {
+			next := auth.NextRetryAfter
+			if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+				next = auth.Quota.NextRecoverAt
+			}
+			if next.Before(now) {
+				next = now
+			}
+			return true, blockReasonCooldown, next
+		}
 		return false, blockReasonNone, time.Time{}
 	}
 	if auth.Unavailable && auth.NextRetryAfter.After(now) {
@@ -457,6 +473,7 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
+	mu       sync.Mutex
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -494,11 +511,13 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 //  3. metadata.user_id (non-Claude Code format)
 //  4. prompt_cache_key / metadata.prompt_cache_key
 //  5. conversation_id field
-//  6. Hash-based fallback from messages
+//  6. Kiro native conversationState identifiers
+//  7. Hash-based fallback from messages
 //
-// Note: The cache key includes provider, session ID, and model to handle cases where
-// a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
-// that may be supported by different auth credentials, and to avoid cross-provider conflicts.
+// Note: The cache key includes provider and session ID, but intentionally does
+// not include model. Claude Code and similar clients can issue multiple model
+// requests concurrently for one session; binding by model would split one
+// client across multiple credentials.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	var entry *log.Entry
 	debugLog := func(format string, args ...any) {
@@ -526,13 +545,16 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
 
-	cacheKey := provider + "::" + primaryID + "::" + model
+	cacheKey := sessionAffinityCacheKey(provider, primaryID)
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
@@ -552,7 +574,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey := provider + "::" + fallbackID + "::" + model
+		fallbackKey := sessionAffinityCacheKey(provider, fallbackID)
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
@@ -571,6 +593,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	s.cache.Set(cacheKey, auth.ID)
 	infoLog("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
+}
+
+func sessionAffinityCacheKey(provider, sessionID string) string {
+	return strings.TrimSpace(strings.ToLower(provider)) + "::" + sessionID
 }
 
 func selectorLogEntry(ctx context.Context) *log.Entry {
@@ -616,7 +642,8 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 //  6. metadata.user_id (non-Claude Code format)
 //  7. prompt_cache_key / metadata.prompt_cache_key in request body
 //  8. conversation_id field in request body
-//  9. Stable hash from first few messages content (fallback)
+//  9. Kiro native conversationState identifiers
+//  10. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -701,8 +728,26 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
 		return "conv:" + convID, ""
 	}
+	if convID := gjson.GetBytes(payload, "conversationId").String(); convID != "" {
+		return "conv:" + convID, ""
+	}
 
-	// 9. Hash-based fallback from message content
+	// 9. Kiro native conversationState identifiers
+	if convID := gjson.GetBytes(payload, "conversationState.conversationId").String(); convID != "" {
+		fallbackID := ""
+		if continuationID := gjson.GetBytes(payload, "conversationState.agentContinuationId").String(); continuationID != "" && continuationID != convID {
+			fallbackID = "kiro-cont:" + continuationID
+		}
+		return "conv:" + convID, fallbackID
+	}
+	if convID := gjson.GetBytes(payload, "conversationState.currentMessage.userInputMessage.userInputMessageContext.conversationId").String(); convID != "" {
+		return "conv:" + convID, ""
+	}
+	if continuationID := gjson.GetBytes(payload, "conversationState.agentContinuationId").String(); continuationID != "" {
+		return "kiro-cont:" + continuationID, ""
+	}
+
+	// 10. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
 }
 

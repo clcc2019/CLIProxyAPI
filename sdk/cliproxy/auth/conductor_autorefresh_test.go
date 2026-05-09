@@ -13,9 +13,10 @@ import (
 )
 
 type autoRefreshTestExecutor struct {
-	provider string
-	mu       sync.Mutex
-	ids      []string
+	provider    string
+	refreshFunc func(*Auth) (*Auth, error)
+	mu          sync.Mutex
+	ids         []string
 }
 
 func (e *autoRefreshTestExecutor) Identifier() string { return e.provider }
@@ -32,6 +33,9 @@ func (e *autoRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Aut
 	e.mu.Lock()
 	e.ids = append(e.ids, auth.ID)
 	e.mu.Unlock()
+	if e.refreshFunc != nil {
+		return e.refreshFunc(auth)
+	}
 	return auth, nil
 }
 
@@ -76,6 +80,225 @@ func TestManager_StartAutoRefresh_DisabledByDefault(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := len(executor.refreshedIDs()); got != 0 {
 		t.Fatalf("startup refresh calls = %d, want 0", got)
+	}
+}
+
+func TestManager_StartAutoRefresh_DefaultProviderStartsWithoutGlobalConfig(t *testing.T) {
+	setDefaultAutoRefreshProvider(t, "default-on", true)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &autoRefreshTestExecutor{provider: "default-on"}
+	manager.RegisterExecutor(executor)
+	manager.SetConfig(&internalconfig.Config{})
+
+	auth := &Auth{
+		ID:       "startup-provider-default",
+		Provider: "default-on",
+		Metadata: map[string]any{"refresh_interval_seconds": 3600},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if started := manager.StartAutoRefresh(ctx, time.Hour); !started {
+		t.Fatal("expected provider default auto refresh to start without global config")
+	}
+	t.Cleanup(manager.StopAutoRefresh)
+
+	waitForRefreshCalls(t, executor, 1, time.Second)
+}
+
+func TestManager_StartAutoRefresh_DefaultProviderIgnoresGlobalDisabled(t *testing.T) {
+	setDefaultAutoRefreshProvider(t, "default-on", true)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &autoRefreshTestExecutor{provider: "default-on"}
+	manager.RegisterExecutor(executor)
+	disabled := false
+	manager.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			OAuthRefresh: internalconfig.OAuthRefreshConfig{Enabled: &disabled},
+		},
+	})
+
+	auth := &Auth{
+		ID:       "startup-provider-default-disabled-global",
+		Provider: "default-on",
+		Metadata: map[string]any{"refresh_interval_seconds": 3600},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if started := manager.StartAutoRefresh(ctx, time.Hour); !started {
+		t.Fatal("expected provider default auto refresh to ignore global disabled switch")
+	}
+	t.Cleanup(manager.StopAutoRefresh)
+
+	waitForRefreshCalls(t, executor, 1, time.Second)
+}
+
+func TestManager_StartAutoRefresh_DefaultProviderDoesNotRefreshOtherProviders(t *testing.T) {
+	setDefaultAutoRefreshProvider(t, "default-on", true)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	defaultExecutor := &autoRefreshTestExecutor{provider: "default-on"}
+	otherExecutor := &autoRefreshTestExecutor{provider: "other"}
+	manager.RegisterExecutor(defaultExecutor)
+	manager.RegisterExecutor(otherExecutor)
+	manager.SetConfig(&internalconfig.Config{})
+
+	for _, auth := range []*Auth{
+		{ID: "default-auth", Provider: "default-on", Metadata: map[string]any{"refresh_interval_seconds": 3600}},
+		{ID: "other-auth", Provider: "other", Metadata: map[string]any{"refresh_interval_seconds": 3600}},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if started := manager.StartAutoRefresh(ctx, time.Hour); !started {
+		t.Fatal("expected provider default auto refresh to start without global config")
+	}
+	t.Cleanup(manager.StopAutoRefresh)
+
+	waitForRefreshCalls(t, defaultExecutor, 1, time.Second)
+	time.Sleep(100 * time.Millisecond)
+	if got := len(otherExecutor.refreshedIDs()); got != 0 {
+		t.Fatalf("other provider refresh calls = %d, want 0", got)
+	}
+}
+
+func TestManager_Register_DefaultProviderAppliesMissingRefreshIntervalWithoutDelay(t *testing.T) {
+	interval := 7 * time.Minute
+	setDefaultAutoRefreshProviderWithInterval(t, "default-on", true, func() time.Duration {
+		return interval
+	})
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{})
+
+	auth, err := manager.Register(context.Background(), &Auth{
+		ID:       "missing-provider-default-interval",
+		Provider: "default-on",
+		Metadata: map[string]any{"email": "x@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	if auth == nil {
+		t.Fatal("register auth returned nil")
+	}
+	gotSeconds, ok := parseIntAny(auth.Metadata["refresh_interval_seconds"])
+	if !ok {
+		t.Fatalf("refresh_interval_seconds missing or invalid: %#v", auth.Metadata["refresh_interval_seconds"])
+	}
+	if wantSeconds := int(interval / time.Second); gotSeconds != wantSeconds {
+		t.Fatalf("refresh_interval_seconds = %d, want %d", gotSeconds, wantSeconds)
+	}
+	if _, ok := authLastRefreshTimestamp(auth); ok {
+		t.Fatal("last_refresh should not be synthesized for an old auth")
+	}
+	if !auth.NextRefreshAfter.IsZero() {
+		t.Fatalf("NextRefreshAfter = %s, want zero so due tokens are not delayed", auth.NextRefreshAfter)
+	}
+	if !manager.shouldRefresh(auth, time.Now()) {
+		t.Fatal("expected auth missing last_refresh to be due immediately after default interval is applied")
+	}
+}
+
+func TestManager_RefreshAuth_PreservesExecutorNextRefreshAfter(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	next := time.Now().UTC().Add(7 * time.Minute).Truncate(time.Second)
+	executor := &autoRefreshTestExecutor{
+		provider: "test",
+		refreshFunc: func(auth *Auth) (*Auth, error) {
+			updated := auth.Clone()
+			updated.NextRefreshAfter = next
+			return updated, nil
+		},
+	}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{
+		ID:       "preserve-executor-next-refresh",
+		Provider: "test",
+		Metadata: map[string]any{
+			"last_refresh":             time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
+			"refresh_interval_seconds": 1,
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	manager.markRefreshPending(auth.ID, time.Now())
+
+	manager.refreshAuth(context.Background(), auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	if !updated.NextRefreshAfter.Equal(next) {
+		t.Fatalf("NextRefreshAfter = %s, want executor value %s", updated.NextRefreshAfter, next)
+	}
+}
+
+func TestManager_RefreshAuthIfNeededUsesCurrentSnapshot(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	now := time.Now().UTC()
+	executor := &autoRefreshTestExecutor{
+		provider: "test",
+		refreshFunc: func(auth *Auth) (*Auth, error) {
+			updated := auth.Clone()
+			if updated.Metadata == nil {
+				updated.Metadata = map[string]any{}
+			}
+			refreshedAt := time.Now().UTC()
+			updated.Metadata["access_token"] = "new-token"
+			updated.Metadata["last_refresh"] = refreshedAt.Format(time.RFC3339)
+			updated.Metadata["refresh_interval_seconds"] = 60
+			updated.NextRefreshAfter = refreshedAt.Add(time.Minute)
+			return updated, nil
+		},
+	}
+	manager.RegisterExecutor(executor)
+	enabled := true
+	manager.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			OAuthRefresh: internalconfig.OAuthRefreshConfig{Enabled: &enabled},
+		},
+	})
+
+	current := &Auth{
+		ID:       "refresh-if-needed-current-snapshot",
+		Provider: "test",
+		Metadata: map[string]any{
+			"last_refresh":             now.Add(-time.Hour).Format(time.RFC3339),
+			"refresh_interval_seconds": 1,
+		},
+	}
+	if _, err := manager.Register(context.Background(), current); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	staleCallerSnapshot := current.Clone()
+	staleCallerSnapshot.Metadata["last_refresh"] = now.Format(time.RFC3339)
+	staleCallerSnapshot.NextRefreshAfter = now.Add(time.Hour)
+
+	updated, err := manager.RefreshAuthIfNeeded(context.Background(), staleCallerSnapshot)
+	if err != nil {
+		t.Fatalf("RefreshAuthIfNeeded() error = %v", err)
+	}
+	if updated == nil {
+		t.Fatal("RefreshAuthIfNeeded() returned nil auth")
+	}
+	if got := updated.Metadata["access_token"]; got != "new-token" {
+		t.Fatalf("access_token = %#v, want new-token", got)
+	}
+	if got := len(executor.refreshedIDs()); got != 1 {
+		t.Fatalf("refresh calls = %d, want 1", got)
 	}
 }
 
@@ -154,9 +377,11 @@ func TestManager_CheckRefreshes_HonorsBatchSize(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	executor := &autoRefreshTestExecutor{provider: "test"}
 	manager.RegisterExecutor(executor)
+	enabled := true
 	manager.SetConfig(&internalconfig.Config{
 		SDKConfig: internalconfig.SDKConfig{
 			OAuthRefresh: internalconfig.OAuthRefreshConfig{
+				Enabled:   &enabled,
 				BatchSize: 2,
 			},
 		},
