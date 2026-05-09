@@ -341,6 +341,19 @@ func TestGetKiroUsageRefreshesAndRetriesAfterUnauthorized(t *testing.T) {
 	}
 }
 
+func TestKiroUsageRefreshRegistersKiroExecutorOnDemand(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	exec, ok := h.kiroUsageRefreshExecutor("kiro")
+	if !ok || exec == nil {
+		t.Fatal("expected Kiro refresh executor to be registered on demand")
+	}
+	if got, ok := manager.Executor("kiro"); !ok || got == nil {
+		t.Fatal("expected Kiro executor to be stored on manager")
+	}
+}
+
 func TestGetKiroUsageUnauthorizedRefreshWritesAuthFile(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

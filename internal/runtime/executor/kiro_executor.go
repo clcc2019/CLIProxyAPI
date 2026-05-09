@@ -393,22 +393,11 @@ func shouldRefreshKiroWithSSO(authMethod, provider, clientID, clientSecret strin
 	if isKiroSSOAuth(authMethod, provider) {
 		return true
 	}
-	// Unknown classification: default to the social path rather than SSO.
-	//
-	// Rationale: the SSO OIDC endpoint is strict — a social token posted to
-	// oidc.<region>.amazonaws.com/token returns `invalid_client`, which our
-	// permanent-error classifier then converts into a 24h park. That means a
-	// single metadata quirk (stray clientId on a social auth) silently
-	// bricks the credential for a day. The social endpoint is more
-	// forgiving: an SSO-shaped token posted to kiro.dev/refreshToken
-	// returns a generic 400 that our retry/backoff can recover from once
-	// the metadata is corrected. Default-to-social is therefore the safer
-	// misclassification direction.
-	//
-	// Operators should set `auth_method` / `provider` explicitly; the Warn
-	// below surfaces the ambiguity so misconfigurations are visible.
-	log.Warnf("kiro: refresh path classification ambiguous for auth (auth_method=%q provider=%q) — defaulting to social endpoint; set auth_method explicitly to silence this warning", authMethod, provider)
-	return false
+	// Unknown classification with AWS client credentials should use the AWS
+	// SSO-OIDC token endpoint. Some imported Builder ID / IDC credentials do
+	// not carry a reliable auth_method/provider marker, but the presence of
+	// clientId/clientSecret is enough to construct the refresh_token grant.
+	return true
 }
 
 func isKiroSocialAuth(authMethod, provider string) bool {

@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -190,7 +191,7 @@ func (h *Handler) refreshKiroUsageAuth(ctx context.Context, auth *coreauth.Auth,
 			return refreshAuth, http.StatusOK, nil
 		}
 	}
-	exec, ok := h.authManager.Executor(refreshAuth.Provider)
+	exec, ok := h.kiroUsageRefreshExecutor(refreshAuth.Provider)
 	if !ok || exec == nil {
 		if force {
 			return nil, http.StatusBadGateway, fmt.Errorf("kiro auth refresh executor is unavailable")
@@ -223,6 +224,22 @@ func (h *Handler) refreshKiroUsageAuth(ctx context.Context, auth *coreauth.Auth,
 		return latest, http.StatusOK, nil
 	}
 	return updated, http.StatusOK, nil
+}
+
+func (h *Handler) kiroUsageRefreshExecutor(provider string) (coreauth.ProviderExecutor, bool) {
+	if h == nil || h.authManager == nil {
+		return nil, false
+	}
+	exec, ok := h.authManager.Executor(provider)
+	if ok && exec != nil {
+		return exec, true
+	}
+	if !strings.EqualFold(strings.TrimSpace(provider), "kiro") {
+		return nil, false
+	}
+	exec = runtimeexecutor.NewKiroExecutor(h.cfg)
+	h.authManager.RegisterExecutor(exec)
+	return exec, true
 }
 
 func shouldRefreshKiroUsageAuth(auth *coreauth.Auth, now time.Time) (bool, bool) {

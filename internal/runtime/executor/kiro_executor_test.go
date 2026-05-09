@@ -1044,7 +1044,7 @@ func TestShouldRefreshKiroWithSSO_Classification(t *testing.T) {
 		{"explicit social provider -> social", "", "google", "cid", "secret", false},
 		{"kiro-ide-import with AWS provider -> sso", "kiro-ide-import", "aws", "cid", "secret", true},
 		{"unknown method, known social provider -> social", "mystery", "github", "cid", "secret", false},
-		{"unknown method, unknown provider -> social (defensive default)", "mystery", "mystery", "cid", "secret", false},
+		{"unknown method, unknown provider with credentials -> sso", "mystery", "mystery", "cid", "secret", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

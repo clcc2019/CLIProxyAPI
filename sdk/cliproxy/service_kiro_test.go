@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -26,6 +27,31 @@ func TestEnsureExecutorsForAuth_Kiro(t *testing.T) {
 	got, ok := service.coreManager.Executor("kiro")
 	if !ok || got == nil {
 		t.Fatal("expected kiro executor to be registered")
+	}
+	if _, ok := got.(*executor.KiroExecutor); !ok {
+		t.Fatalf("expected *executor.KiroExecutor, got %T", got)
+	}
+}
+
+func TestRebindExecutorsRegistersLoadedKiroAuth(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "kiro-loaded-auth",
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+
+	service.rebindExecutors()
+
+	got, ok := service.coreManager.Executor("kiro")
+	if !ok || got == nil {
+		t.Fatal("expected loaded Kiro auth to bind executor")
 	}
 	if _, ok := got.(*executor.KiroExecutor); !ok {
 		t.Fatalf("expected *executor.KiroExecutor, got %T", got)
