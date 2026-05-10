@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 	"time"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -37,10 +40,20 @@ func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	if opts.Metadata != nil && strings.EqualFold(opts.Metadata["mode"], "import") {
 		return a.ImportFromKiroIDE(ctx, cfg)
 	}
+	if opts.Metadata != nil && strings.EqualFold(opts.Metadata["mode"], "builder-id") {
+		return a.loginWithBuilderID(ctx, cfg, opts)
+	}
 	if tokenData, err := kiroauth.LoadKiroCLIToken(); err == nil {
 		return a.createAuthRecord(tokenData, "kiro-cli"), nil
 	} else if !errors.Is(err, kiroauth.ErrKiroCLITokenNotFound) {
 		return nil, err
+	}
+	if record, err := a.loginWithSocialOAuth(ctx, cfg, opts); err == nil {
+		return record, nil
+	} else if opts.Metadata != nil && (strings.EqualFold(opts.Metadata["mode"], "oauth") || strings.EqualFold(opts.Metadata["mode"], "social")) {
+		return nil, err
+	} else {
+		log.Warnf("kiro OAuth login failed, falling back to AWS Builder ID device flow: %v", err)
 	}
 	return a.loginWithBuilderID(ctx, cfg, opts)
 }
@@ -55,6 +68,88 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 	}
 	a.populateProfileArn(ctx, cfg, tokenData)
 	return a.createAuthRecord(tokenData, "kiro-ide-import"), nil
+}
+
+func (a *KiroAuthenticator) loginWithSocialOAuth(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	if opts == nil {
+		opts = &LoginOptions{}
+	}
+	provider := "google"
+	prompt := ""
+	forceReauth := false
+	if opts.Metadata != nil {
+		if p := strings.TrimSpace(opts.Metadata["provider"]); p != "" {
+			provider = p
+		}
+		prompt = strings.TrimSpace(opts.Metadata["prompt"])
+		forceReauth = parseBoolMetadata(opts.Metadata["force_reauth"])
+	}
+	callbackPort := opts.CallbackPort
+	if callbackPort <= 0 {
+		callbackPort = kiroauth.DefaultOAuthCallbackPort
+	}
+	srv, port, resultCh, errCh, errServer := startKiroOAuthCallbackServer(callbackPort)
+	if errServer != nil {
+		return nil, fmt.Errorf("kiro oauth: failed to start callback server: %w", errServer)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	redirectURI := kiroauth.OAuthRedirectURI(port)
+	pkce, err := kiroauth.GeneratePKCECodes()
+	if err != nil {
+		return nil, err
+	}
+	state, err := kiroauth.GenerateOAuthState()
+	if err != nil {
+		return nil, err
+	}
+	client := kiroauth.NewSocialOAuthClient(cfg)
+	loginURL, err := client.BuildLoginURLWithOptions(provider, redirectURI, state, pkce.CodeChallenge, kiroauth.SocialLoginURLOptions{
+		Prompt:      prompt,
+		ForceReauth: forceReauth,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println("Starting Kiro OAuth login...")
+	fmt.Printf("\nTo authenticate Kiro, visit:\n%s\n\n", loginURL)
+	fmt.Printf("Waiting for OAuth callback on %s\n", redirectURI)
+	if !opts.NoBrowser {
+		if errOpen := browser.OpenURL(loginURL); errOpen != nil {
+			log.Warnf("Failed to open browser automatically: %v", errOpen)
+		} else {
+			fmt.Println("Browser opened automatically.")
+		}
+	}
+
+	cb, err := waitForKiroOAuthCallback(ctx, opts.Prompt, state, resultCh, errCh)
+	if err != nil {
+		return nil, err
+	}
+	token, err := client.ExchangeCode(ctx, cb.Code, redirectURI, pkce.CodeVerifier)
+	if err != nil {
+		return nil, err
+	}
+	tokenData := kiroauth.TokenDataFromSocialResponse(provider, token)
+	if tokenData == nil {
+		return nil, fmt.Errorf("kiro oauth: token response is empty")
+	}
+	if tokenData.Email == "" {
+		tokenData.Email = kiroauth.ExtractEmailFromJWT(tokenData.AccessToken)
+	}
+	if tokenData.ProfileArn == "" {
+		a.populateProfileArn(ctx, cfg, tokenData)
+	}
+	if tokenData.Email != "" {
+		fmt.Printf("\nLogged in as: %s\n", tokenData.Email)
+	}
+	fmt.Println("Kiro OAuth login successful!")
+	return a.createAuthRecord(tokenData, "kiro-oauth"), nil
 }
 
 func (a *KiroAuthenticator) loginWithBuilderID(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
@@ -142,6 +237,11 @@ func (a *KiroAuthenticator) populateProfileArn(ctx context.Context, cfg *config.
 	tokenData.ProfileArn = profileArn
 }
 
+// CreateAuthRecord converts Kiro token data into a persisted auth record.
+func (a *KiroAuthenticator) CreateAuthRecord(tokenData *kiroauth.TokenData, source string) *coreauth.Auth {
+	return a.createAuthRecord(tokenData, source)
+}
+
 func waitForKiroBuilderIDToken(ctx context.Context, ssoClient *kiroauth.SSOOIDCClient, regResp *kiroauth.RegisterClientResponse, authResp *kiroauth.StartDeviceAuthResponse) (*kiroauth.CreateTokenResponse, error) {
 	interval := time.Duration(authResp.Interval) * time.Second
 	if interval <= 0 {
@@ -193,32 +293,36 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.TokenData, sour
 
 	metadata := map[string]any{
 		"type":                     "kiro",
-		"access_token":             tokenData.AccessToken,
-		"refresh_token":            tokenData.RefreshToken,
-		"profile_arn":              tokenData.ProfileArn,
-		"expires_at":               tokenData.ExpiresAt,
-		"auth_method":              tokenData.AuthMethod,
-		"provider":                 tokenData.Provider,
-		"client_id":                tokenData.ClientID,
-		"client_secret":            tokenData.ClientSecret,
-		"client_id_hash":           tokenData.ClientIDHash,
-		"email":                    tokenData.Email,
-		"region":                   tokenData.Region,
-		"start_url":                tokenData.StartURL,
 		"last_refresh":             now.UTC().Format(time.RFC3339),
 		"refresh_interval_seconds": kiroauth.RandomRefreshIntervalSeconds(),
 	}
+	setNonEmptyKiroMetadata(metadata,
+		"access_token", tokenData.AccessToken,
+		"refresh_token", tokenData.RefreshToken,
+		"profile_arn", tokenData.ProfileArn,
+		"expires_at", tokenData.ExpiresAt,
+		"auth_method", tokenData.AuthMethod,
+		"provider", tokenData.Provider,
+		"client_id", tokenData.ClientID,
+		"client_secret", tokenData.ClientSecret,
+		"client_id_hash", tokenData.ClientIDHash,
+		"email", tokenData.Email,
+		"region", tokenData.Region,
+		"start_url", tokenData.StartURL,
+	)
 
-	attributes := map[string]string{
-		"profile_arn": tokenData.ProfileArn,
-		"source":      source,
-		"email":       tokenData.Email,
+	attributes := map[string]string{"source": source}
+	if profileArn := strings.TrimSpace(tokenData.ProfileArn); profileArn != "" {
+		attributes["profile_arn"] = profileArn
 	}
-	if tokenData.AuthMethod != "" {
-		attributes["auth_method"] = tokenData.AuthMethod
+	if email := strings.TrimSpace(tokenData.Email); email != "" {
+		attributes["email"] = email
 	}
-	if tokenData.Region != "" {
-		attributes["region"] = tokenData.Region
+	if authMethod := strings.TrimSpace(tokenData.AuthMethod); authMethod != "" {
+		attributes["auth_method"] = authMethod
+	}
+	if region := strings.TrimSpace(tokenData.Region); region != "" {
+		attributes["region"] = region
 	}
 
 	refreshInterval := time.Duration(metadata["refresh_interval_seconds"].(int)) * time.Second
@@ -232,7 +336,60 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.TokenData, sour
 		UpdatedAt:        now,
 		Metadata:         metadata,
 		Attributes:       attributes,
+		LastRefreshedAt:  now.UTC(),
 		NextRefreshAfter: now.UTC().Add(refreshInterval),
+	}
+}
+
+func setNonEmptyKiroMetadata(metadata map[string]any, keyValues ...string) {
+	if metadata == nil {
+		return
+	}
+	for i := 0; i+1 < len(keyValues); i += 2 {
+		key := strings.TrimSpace(keyValues[i])
+		value := strings.TrimSpace(keyValues[i+1])
+		if key == "" || value == "" {
+			continue
+		}
+		metadata[key] = value
+	}
+}
+
+func RemoveEmptyKiroMetadataFields(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	for _, key := range []string{
+		"client_id",
+		"clientId",
+		"client_secret",
+		"clientSecret",
+		"client_id_hash",
+		"clientIdHash",
+		"email",
+		"region",
+		"start_url",
+		"startUrl",
+		"profile_arn",
+		"profileArn",
+		"auth_method",
+		"authMethod",
+		"provider",
+	} {
+		if value, ok := metadata[key]; ok && kiroMetadataValueEmpty(value) {
+			delete(metadata, key)
+		}
+	}
+}
+
+func kiroMetadataValueEmpty(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(v) == ""
+	default:
+		return false
 	}
 }
 
@@ -253,4 +410,176 @@ func kiroAuthIdentifier(tokenData *kiroauth.TokenData) string {
 		return kiroauth.SanitizeEmailForFilename(tokenData.ClientID)
 	}
 	return fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+}
+
+type kiroOAuthCallbackResult struct {
+	Code             string
+	State            string
+	Error            string
+	ErrorDescription string
+}
+
+func startKiroOAuthCallbackServer(port int) (*http.Server, int, <-chan kiroOAuthCallbackResult, <-chan error, error) {
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	actualPort := listener.Addr().(*net.TCPAddr).Port
+	resultCh := make(chan kiroOAuthCallbackResult, 1)
+	errCh := make(chan error, 1)
+
+	mux := http.NewServeMux()
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		errCode := strings.TrimSpace(q.Get("error"))
+		errDesc := strings.TrimSpace(q.Get("error_description"))
+		if errCode == "" {
+			errCode = errDesc
+			errDesc = ""
+		}
+		res := kiroOAuthCallbackResult{
+			Code:             strings.TrimSpace(q.Get("code")),
+			State:            strings.TrimSpace(q.Get("state")),
+			Error:            errCode,
+			ErrorDescription: errDesc,
+		}
+		if res.Code == "" && res.Error == "" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte("<h1>Kiro login waiting</h1><p>Complete the browser login flow, then keep this window open.</p>"))
+			return
+		}
+		select {
+		case resultCh <- res:
+		default:
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if res.Code != "" && res.Error == "" {
+			_, _ = w.Write([]byte("<h1>Kiro login successful</h1><p>You can close this window.</p>"))
+			return
+		}
+		_, _ = w.Write([]byte("<h1>Kiro login failed</h1><p>Please check the CLI output.</p>"))
+	}
+	mux.HandleFunc(kiroauth.OAuthCallbackPath, handler)
+	mux.HandleFunc("/callback", handler)
+
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		if errServe := srv.Serve(listener); errServe != nil && !errors.Is(errServe, http.ErrServerClosed) {
+			select {
+			case errCh <- errServe:
+			default:
+			}
+		}
+	}()
+	return srv, actualPort, resultCh, errCh, nil
+}
+
+func waitForKiroOAuthCallback(ctx context.Context, prompt func(string) (string, error), state string, resultCh <-chan kiroOAuthCallbackResult, errCh <-chan error) (kiroOAuthCallbackResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := time.NewTimer(10 * time.Minute)
+	defer timeout.Stop()
+
+	var manualInputCh <-chan string
+	var manualInputErrCh <-chan error
+	var manualPromptC <-chan time.Time
+	var manualPromptTimer *time.Timer
+	if prompt != nil {
+		manualPromptTimer = time.NewTimer(15 * time.Second)
+		defer manualPromptTimer.Stop()
+		manualPromptC = manualPromptTimer.C
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return kiroOAuthCallbackResult{}, fmt.Errorf("kiro oauth: login cancelled: %w", ctx.Err())
+		case err := <-errCh:
+			return kiroOAuthCallbackResult{}, fmt.Errorf("kiro oauth: callback server failed: %w", err)
+		case res := <-resultCh:
+			if err := validateKiroOAuthCallback(res, state); err != nil {
+				return kiroOAuthCallbackResult{}, err
+			}
+			return res, nil
+		case <-manualPromptC:
+			manualPromptC = nil
+			select {
+			case res := <-resultCh:
+				if err := validateKiroOAuthCallback(res, state); err != nil {
+					return kiroOAuthCallbackResult{}, err
+				}
+				return res, nil
+			default:
+			}
+			manualInputCh, manualInputErrCh = misc.AsyncPrompt(prompt, "Paste the Kiro callback URL (or press Enter to keep waiting): ")
+		case input := <-manualInputCh:
+			manualInputCh = nil
+			manualInputErrCh = nil
+			parsed, err := misc.ParseOAuthCallback(input)
+			if err != nil {
+				return kiroOAuthCallbackResult{}, err
+			}
+			if parsed == nil {
+				if manualPromptTimer != nil {
+					manualPromptTimer.Reset(15 * time.Second)
+					manualPromptC = manualPromptTimer.C
+				}
+				continue
+			}
+			res := kiroOAuthCallbackResult{
+				Code:             parsed.Code,
+				State:            parsed.State,
+				Error:            parsed.Error,
+				ErrorDescription: parsed.ErrorDescription,
+			}
+			if err := validateKiroOAuthCallback(res, state); err != nil {
+				return kiroOAuthCallbackResult{}, err
+			}
+			return res, nil
+		case err := <-manualInputErrCh:
+			return kiroOAuthCallbackResult{}, err
+		case <-timeout.C:
+			return kiroOAuthCallbackResult{}, fmt.Errorf("kiro oauth: timeout waiting for callback")
+		}
+	}
+}
+
+func validateKiroOAuthCallback(res kiroOAuthCallbackResult, state string) error {
+	if strings.TrimSpace(res.Error) != "" {
+		if res.ErrorDescription != "" {
+			return fmt.Errorf("kiro oauth: callback error: %s (%s)", res.Error, res.ErrorDescription)
+		}
+		return fmt.Errorf("kiro oauth: callback error: %s", res.Error)
+	}
+	if strings.TrimSpace(res.Code) == "" {
+		return fmt.Errorf("kiro oauth: callback missing code")
+	}
+	if strings.TrimSpace(res.State) == "" {
+		return fmt.Errorf("kiro oauth: callback missing state")
+	}
+	if subtleConstantTimeCompare(res.State, state) {
+		return nil
+	}
+	return fmt.Errorf("kiro oauth: callback state mismatch")
+}
+
+func subtleConstantTimeCompare(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var diff byte
+	for i := 0; i < len(a); i++ {
+		diff |= a[i] ^ b[i]
+	}
+	return diff == 0
+}
+
+func parseBoolMetadata(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

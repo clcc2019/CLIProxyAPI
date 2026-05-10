@@ -82,4 +82,3 @@ func TestCodexFinalUpstreamBodyMemoIncrementalEviction(t *testing.T) {
 		t.Fatalf("memo bytes=%d exceeded budget=%d", memo.bytes, codexFinalUpstreamBodyMemoMaxBytes)
 	}
 }
-

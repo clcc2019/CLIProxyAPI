@@ -62,8 +62,8 @@ func TestCodexExecutorCompactAddsDefaultInstructions(t *testing.T) {
 			if gotPath != "/responses/compact" {
 				t.Fatalf("path = %q, want %q", gotPath, "/responses/compact")
 			}
-			if gjson.GetBytes(gotBody, "instructions").Exists() {
-				t.Fatalf("instructions should be omitted when empty, got %s", string(gotBody))
+			if got := gjson.GetBytes(gotBody, "instructions").String(); got != "You are a helpful assistant." {
+				t.Fatalf("instructions = %q, want default instructions; body=%s", got, string(gotBody))
 			}
 			if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 				t.Fatalf("payload = %s", string(resp.Payload))

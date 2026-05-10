@@ -1,5 +1,7 @@
 # Binaries
 cli-proxy-api
+CLIProxyAPI
+CLIProxyAPI-*
 *.exe
 
 # Configuration
@@ -24,6 +26,13 @@ static/*
 # Authentication data
 auths/*
 !auths/.gitkeep
+/*@*.json
+/kiro-*.json
+/claude-*.json
+/codex-*.json
+/gemini-*.json
+/anthropic-*.json
+/openai-*.json
 
 # Documentation
 docs/*

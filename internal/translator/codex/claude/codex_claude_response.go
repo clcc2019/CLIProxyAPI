@@ -32,6 +32,26 @@ type ConvertCodexResponseToClaudeParams struct {
 	ThinkingStopPending       bool
 	ThinkingSignature         string
 	ThinkingSummarySeen       bool
+	// reverseNameMap caches the short→original tool name mapping derived from
+	// the original Claude request. It is lazily built once per stream and
+	// reused across every tool-call event so the tools array is only parsed
+	// once per conversation instead of once per event.
+	reverseNameMap    map[string]string
+	reverseNameMapSet bool
+}
+
+// reverseToolNameMap returns the short→original tool name mapping for the
+// current stream, building it lazily from originalRequestRawJSON on first use.
+func (p *ConvertCodexResponseToClaudeParams) reverseToolNameMap(originalRequestRawJSON []byte) map[string]string {
+	if p == nil {
+		return nil
+	}
+	if p.reverseNameMapSet {
+		return p.reverseNameMap
+	}
+	p.reverseNameMap = buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
+	p.reverseNameMapSet = true
+	return p.reverseNameMap
 }
 
 // ConvertCodexResponseToClaude performs sophisticated streaming response format conversion.
@@ -130,7 +150,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.HasReceivedArgumentsDelta = false
 			name := itemResult.Get("name").String()
 			{
-				rev := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
+				rev := params.reverseToolNameMap(originalRequestRawJSON)
 				if orig, ok := rev[name]; ok {
 					name = orig
 				}

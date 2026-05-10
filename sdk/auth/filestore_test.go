@@ -122,3 +122,44 @@ func TestFileTokenStoreListNormalizesKiroCLIToken(t *testing.T) {
 		t.Fatalf("profile_arn = %#v", got)
 	}
 }
+
+func TestFileTokenStoreListAppliesKiroAuthFileOptions(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte(`{
+		"type": "kiro",
+		"access_token": "access-token",
+		"refresh_token": "refresh-token",
+		"expires_at": "2026-05-09T06:54:01Z",
+		"provider": "google",
+		"email": "user@example.com",
+		"priority": 7,
+		"proxy_url": "http://127.0.0.1:7890",
+		"prefix": "kiro-main"
+	}`)
+	if err := os.WriteFile(filepath.Join(dir, "kiro-user.json"), raw, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	auths, err := store.List(nil)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auths = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if got := auth.Provider; got != "kiro" {
+		t.Fatalf("Provider = %q, want kiro", got)
+	}
+	if got := auth.ProxyURL; got != "http://127.0.0.1:7890" {
+		t.Fatalf("ProxyURL = %q, want per-auth proxy", got)
+	}
+	if got := auth.Prefix; got != "kiro-main" {
+		t.Fatalf("Prefix = %q, want kiro-main", got)
+	}
+	if got := auth.Attributes["priority"]; got != "7" {
+		t.Fatalf("Attributes[priority] = %q, want 7", got)
+	}
+}

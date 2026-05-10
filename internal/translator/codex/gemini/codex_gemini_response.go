@@ -28,6 +28,25 @@ type ConvertCodexResponseToGeminiParams struct {
 	LastStorageOutput  []byte
 	HasOutputTextDelta bool
 	LastImageHashByID  map[string][32]byte
+	// reverseNameMap caches the short→original tool name mapping derived from
+	// the original Gemini request. See the Claude translator for the same
+	// rationale; the tools array is otherwise parsed on every tool-call event.
+	reverseNameMap    map[string]string
+	reverseNameMapSet bool
+}
+
+// reverseToolNameMap returns the short→original tool name mapping for the
+// current stream, building it lazily from originalRequestRawJSON on first use.
+func (p *ConvertCodexResponseToGeminiParams) reverseToolNameMap(originalRequestRawJSON []byte) map[string]string {
+	if p == nil {
+		return nil
+	}
+	if p.reverseNameMapSet {
+		return p.reverseNameMap
+	}
+	p.reverseNameMap = buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
+	p.reverseNameMapSet = true
+	return p.reverseNameMap
 }
 
 // ConvertCodexResponseToGemini converts Codex streaming response format to Gemini format.
@@ -141,7 +160,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 			{
 				// Restore original tool name if shortened
 				n := itemResult.Get("name").String()
-				rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
+				rev := params.reverseToolNameMap(originalRequestRawJSON)
 				if orig, ok := rev[n]; ok {
 					n = orig
 				}

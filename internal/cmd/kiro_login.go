@@ -49,18 +49,23 @@ func DoKiroLogin(cfg *config.Config, options *LoginOptions) {
 	if options == nil {
 		options = &LoginOptions{}
 	}
+	promptFn := options.Prompt
+	if promptFn == nil {
+		promptFn = defaultProjectPrompt()
+	}
 
 	manager := newAuthManager()
 	authOpts := &sdkAuth.LoginOptions{
-		NoBrowser: options.NoBrowser,
-		Metadata:  map[string]string{},
-		Prompt:    options.Prompt,
+		NoBrowser:    options.NoBrowser,
+		CallbackPort: options.CallbackPort,
+		Metadata:     map[string]string{},
+		Prompt:       promptFn,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), "kiro", cfg, authOpts)
 	if err != nil {
 		log.Errorf("Kiro login failed: %v", err)
-		fmt.Println("Run `kiro-cli login` first, or complete the AWS Builder ID login flow when prompted.")
+		fmt.Println("Run `kiro-cli login` first, or complete the Kiro OAuth login flow when prompted.")
 		fmt.Println("Use -kiro-import only when importing an existing Kiro IDE login.")
 		return
 	}

@@ -60,6 +60,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cleanupAuthMetadataBeforeSave(auth.Metadata)
 
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
@@ -120,6 +121,28 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	}
 
 	return path, nil
+}
+
+func cleanupAuthMetadataBeforeSave(metadata map[string]any) {
+	if strings.EqualFold(authMetadataString(metadata, "type"), "kiro") {
+		RemoveEmptyKiroMetadataFields(metadata)
+	}
+}
+
+func authMetadataString(metadata map[string]any, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
 }
 
 // List enumerates all auth JSON files under the configured directory.
@@ -257,6 +280,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	cliproxyauth.ApplyAuthFileOptionsFromMetadata(auth)
 	cliproxyauth.ApplyCodexMetadataFromMetadata(auth)
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil

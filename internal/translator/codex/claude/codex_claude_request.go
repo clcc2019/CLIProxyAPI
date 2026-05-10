@@ -7,11 +7,11 @@ package claude
 
 import (
 	"encoding/base64"
-	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	codexcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -20,8 +20,8 @@ import (
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the internal client.
 // The function performs the following transformations:
-// 1. Sets up a template with the model name and empty instructions field
-// 2. Processes system messages and converts them to developer input content
+// 1. Sets up a template with the model name and instructions field
+// 2. Processes system messages and converts them to Codex instructions
 // 3. Transforms message contents (text, image, tool_use, tool_result) to appropriate formats
 // 4. Converts tools declarations to the expected format
 // 5. Adds additional configuration parameters for the Codex API
@@ -43,38 +43,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
 
-	// Process system messages and convert them to input content format.
-	systemsResult := rootResult.Get("system")
-	if systemsResult.Exists() {
-		message := []byte(`{"type":"message","role":"developer","content":[]}`)
-		contentIndex := 0
-
-		appendSystemText := func(text string) {
-			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header: ") {
-				return
-			}
-
-			message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.type", contentIndex), "input_text")
-			message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.text", contentIndex), text)
-			contentIndex++
-		}
-
-		if systemsResult.Type == gjson.String {
-			appendSystemText(systemsResult.String())
-		} else if systemsResult.IsArray() {
-			systemResults := systemsResult.Array()
-			for i := 0; i < len(systemResults); i++ {
-				systemResult := systemResults[i]
-				if systemResult.Get("type").String() == "text" {
-					appendSystemText(systemResult.Get("text").String())
-				}
-			}
-		}
-
-		if contentIndex > 0 {
-			template, _ = sjson.SetRawBytes(template, "input.-1", message)
-		}
+	instructions := collectClaudeSystemInstructions(rootResult.Get("system"))
+	if instructions == "" {
+		instructions = "You are a helpful assistant."
 	}
+	template, _ = sjson.SetBytes(template, "instructions", instructions)
 
 	// Process messages and transform their contents to appropriate formats.
 	messagesResult := rootResult.Get("messages")
@@ -109,15 +82,15 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				if messageRole == "assistant" {
 					partType = "output_text"
 				}
-				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.type", contentIndex), partType)
-				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.text", contentIndex), text)
+				message, _ = sjson.SetBytes(message, codexIndexedPath("content", contentIndex, "type"), partType)
+				message, _ = sjson.SetBytes(message, codexIndexedPath("content", contentIndex, "text"), text)
 				contentIndex++
 				hasContent = true
 			}
 
 			appendImageContent := func(dataURL string) {
-				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.type", contentIndex), "input_image")
-				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.image_url", contentIndex), dataURL)
+				message, _ = sjson.SetBytes(message, codexIndexedPath("content", contentIndex, "type"), "input_image")
+				message, _ = sjson.SetBytes(message, codexIndexedPath("content", contentIndex, "image_url"), dataURL)
 				contentIndex++
 				hasContent = true
 			}
@@ -165,7 +138,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 								if mediaType == "" {
 									mediaType = "application/octet-stream"
 								}
-								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
+								dataURL := codexDataURL(mediaType, data)
 								appendImageContent(dataURL)
 							}
 						}
@@ -211,16 +184,16 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 											if mediaType == "" {
 												mediaType = "application/octet-stream"
 											}
-											dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
+											dataURL := codexDataURL(mediaType, data)
 
-											toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_image")
-											toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.image_url", toolResultContentIndex), dataURL)
+											toolResultContent, _ = sjson.SetBytes(toolResultContent, codexIndexedPath("", toolResultContentIndex, "type"), "input_image")
+											toolResultContent, _ = sjson.SetBytes(toolResultContent, codexIndexedPath("", toolResultContentIndex, "image_url"), dataURL)
 											toolResultContentIndex++
 										}
 									}
 								} else if toolResultContentType == "text" {
-									toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_text")
-									toolResultContent, _ = sjson.SetBytes(toolResultContent, fmt.Sprintf("%d.text", toolResultContentIndex), contentResults[k].Get("text").String())
+									toolResultContent, _ = sjson.SetBytes(toolResultContent, codexIndexedPath("", toolResultContentIndex, "type"), "input_text")
+									toolResultContent, _ = sjson.SetBytes(toolResultContent, codexIndexedPath("", toolResultContentIndex, "text"), contentResults[k].Get("text").String())
 									toolResultContentIndex++
 								}
 							}
@@ -326,6 +299,35 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
 
 	return template
+}
+
+func collectClaudeSystemInstructions(systemsResult gjson.Result) string {
+	if !systemsResult.Exists() {
+		return ""
+	}
+
+	var parts []string
+	appendSystemText := func(text string) {
+		text = strings.TrimSpace(text)
+		if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header: ") {
+			return
+		}
+		parts = append(parts, text)
+	}
+
+	if systemsResult.Type == gjson.String {
+		appendSystemText(systemsResult.String())
+	} else if systemsResult.IsArray() {
+		systemResults := systemsResult.Array()
+		for i := 0; i < len(systemResults); i++ {
+			systemResult := systemResults[i]
+			if systemResult.Get("type").String() == "text" {
+				appendSystemText(systemResult.Get("text").String())
+			}
+		}
+	}
+
+	return strings.Join(parts, "\n\n")
 }
 
 // isFernetLikeReasoningSignature checks only the encrypted_content envelope shape
@@ -436,77 +438,45 @@ func convertClaudeWebSearchToolToCodex(tool gjson.Result) []byte {
 	return out
 }
 
+// codexIndexedPath composes an sjson path of the form "<prefix>.<idx>.<suffix>"
+// without the allocation overhead of fmt.Sprintf. Hot translator paths invoke
+// sjson.SetBytes repeatedly per content part; building the path with
+// strconv.AppendInt/append keeps the allocations predictable.
+func codexIndexedPath(prefix string, idx int, suffix string) string {
+	// Capacity: prefix + '.' + up to 20 digits + '.' + suffix.
+	buf := make([]byte, 0, len(prefix)+len(suffix)+22)
+	if prefix != "" {
+		buf = append(buf, prefix...)
+		buf = append(buf, '.')
+	}
+	buf = strconv.AppendInt(buf, int64(idx), 10)
+	if suffix != "" {
+		buf = append(buf, '.')
+		buf = append(buf, suffix...)
+	}
+	return string(buf)
+}
+
+// codexDataURL builds a "data:<mime>;base64,<data>" URL without fmt.Sprintf.
+func codexDataURL(mediaType, data string) string {
+	buf := make([]byte, 0, 13+len(mediaType)+len(data))
+	buf = append(buf, "data:"...)
+	buf = append(buf, mediaType...)
+	buf = append(buf, ";base64,"...)
+	buf = append(buf, data...)
+	return string(buf)
+}
+
 // shortenNameIfNeeded applies a simple shortening rule for a single name.
+// Delegates to the shared codex translator helper so all four translators
+// stay in sync.
 func shortenNameIfNeeded(name string) string {
-	const limit = 64
-	if len(name) <= limit {
-		return name
-	}
-	if strings.HasPrefix(name, "mcp__") {
-		idx := strings.LastIndex(name, "__")
-		if idx > 0 {
-			cand := "mcp__" + name[idx+2:]
-			if len(cand) > limit {
-				return cand[:limit]
-			}
-			return cand
-		}
-	}
-	return name[:limit]
+	return codexcommon.ShortenNameIfNeeded(name)
 }
 
 // buildShortNameMap ensures uniqueness of shortened names within a request.
 func buildShortNameMap(names []string) map[string]string {
-	const limit = 64
-	used := map[string]struct{}{}
-	m := map[string]string{}
-
-	baseCandidate := func(n string) string {
-		if len(n) <= limit {
-			return n
-		}
-		if strings.HasPrefix(n, "mcp__") {
-			idx := strings.LastIndex(n, "__")
-			if idx > 0 {
-				cand := "mcp__" + n[idx+2:]
-				if len(cand) > limit {
-					cand = cand[:limit]
-				}
-				return cand
-			}
-		}
-		return n[:limit]
-	}
-
-	makeUnique := func(cand string) string {
-		if _, ok := used[cand]; !ok {
-			return cand
-		}
-		base := cand
-		for i := 1; ; i++ {
-			suffix := "_" + strconv.Itoa(i)
-			allowed := limit - len(suffix)
-			if allowed < 0 {
-				allowed = 0
-			}
-			tmp := base
-			if len(tmp) > allowed {
-				tmp = tmp[:allowed]
-			}
-			tmp = tmp + suffix
-			if _, ok := used[tmp]; !ok {
-				return tmp
-			}
-		}
-	}
-
-	for _, n := range names {
-		cand := baseCandidate(n)
-		uniq := makeUnique(cand)
-		used[uniq] = struct{}{}
-		m[n] = uniq
-	}
-	return m
+	return codexcommon.BuildShortNameMap(names)
 }
 
 // buildReverseMapFromClaudeOriginalToShort builds original->short map, used to map tool_use names to short.

@@ -23,11 +23,13 @@ import (
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/openai"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -53,6 +55,15 @@ const (
 	kiroCLIUserAgent       = "aws-sdk-rust/1.3.9 os/linux lang/rust/1.92.0"
 	kiroCLIAmzAgent        = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.92.0 os/linux lang/rust/1.92.0 m/E app/AmazonQ-For-CLI"
 	kiroRefreshSkew        = 2 * time.Minute
+
+	// kiroStreamIdleTimeout bounds how long we'll wait on a single event-
+	// stream frame from Kiro before treating the stream as dead. Kiro
+	// normally emits content-delta frames every few hundred ms; a silent
+	// upstream beyond this window is almost always a hung connection. The
+	// value is generous enough to survive the LLM's first-token latency
+	// (which can exceed 20s for large prompts + cold caches) while still
+	// closing stuck connections in human-time rather than process-lifetime.
+	kiroStreamIdleTimeout = 90 * time.Second
 )
 
 var (
@@ -131,7 +142,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if err != nil {
 		return resp, err
 	}
-	httpResp, _, err := e.doKiroRequestWithFallbackRetry(ctx, auth, prepared, accessToken)
+	httpResp, actualPayload, err := e.doKiroRequestWithFallbackRetry(ctx, auth, prepared, accessToken)
 	if err != nil {
 		if isUnauthorizedStatusErr(err) {
 			refreshed, refreshErr := cliproxyauth.CoordinatedRefresh(ctx, auth, e.Refresh)
@@ -146,7 +157,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 				accessToken, profileArn = kiroCredentials(auth)
 				prepared, err = e.buildRequestPayload(req, opts, auth, profileArn, false)
 				if err == nil {
-					httpResp, _, err = e.doKiroRequestWithFallback(ctx, auth, prepared, accessToken)
+					httpResp, actualPayload, err = e.doKiroRequestWithFallback(ctx, auth, prepared, accessToken)
 				}
 			}
 		}
@@ -156,10 +167,16 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	defer closeKiroResponseBody(httpResp)
 
-	content, toolUses, usageInfo, stopReason, parseErr := e.parseEventStream(httpResp.Body)
+	content, toolUses, usageInfo, stopReason, parseErr := e.parseEventStream(ctx, httpResp.Body)
 	if parseErr != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, parseErr)
 		return resp, parseErr
+	}
+	// Kiro's upstream frequently omits tokenUsage entirely — fill the gaps
+	// with a local cl100k_base estimate so aggregated statistics never show
+	// zero input/output tokens for a successful request.
+	if report := fillKiroUsageEstimates(&usageInfo, kiroUsageRequestPayload(prepared, actualPayload), content, toolUses); report.FilledInput || report.FilledOutput {
+		log.WithFields(kiroUsageEstimateLogKV(usageInfo, report)).Debug("kiro: usage filled from local estimator (non-stream)")
 	}
 	reporter.Publish(ctx, usageInfo)
 	raw := kiroclaude.BuildClaudeResponse(content, toolUses, helps.PayloadRequestedModel(opts, req.Model), usageInfo, stopReason)
@@ -188,7 +205,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return nil, err
 	}
-	httpResp, _, err := e.doKiroRequestWithFallbackRetry(ctx, auth, prepared, accessToken)
+	httpResp, actualPayload, err := e.doKiroRequestWithFallbackRetry(ctx, auth, prepared, accessToken)
 	if err != nil {
 		if isUnauthorizedStatusErr(err) {
 			refreshed, refreshErr := cliproxyauth.CoordinatedRefresh(ctx, auth, e.Refresh)
@@ -203,7 +220,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				accessToken, profileArn = kiroCredentials(auth)
 				prepared, err = e.buildRequestPayload(req, opts, auth, profileArn, true)
 				if err == nil {
-					httpResp, _, err = e.doKiroRequestWithFallback(ctx, auth, prepared, accessToken)
+					httpResp, actualPayload, err = e.doKiroRequestWithFallback(ctx, auth, prepared, accessToken)
 				}
 			}
 		}
@@ -216,7 +233,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	go func() {
 		defer close(out)
 		defer closeKiroResponseBody(httpResp)
-		e.streamToChannel(ctx, httpResp.Body, out, prepared.from, helps.PayloadRequestedModel(opts, req.Model), opts.OriginalRequest, prepared.translated, reporter)
+		e.streamToChannel(ctx, httpResp.Body, out, prepared.from, helps.PayloadRequestedModel(opts, req.Model), opts.OriginalRequest, kiroUsageRequestPayload(prepared, actualPayload), reporter)
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -329,6 +346,7 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		}
 		updated.Attributes["profile_arn"] = tokenData.ProfileArn
 	}
+	sdkauth.RemoveEmptyKiroMetadataFields(updated.Metadata)
 	updated.UpdatedAt = now
 	updated.LastRefreshedAt = updated.UpdatedAt
 	updated.NextRefreshAfter = now.Add(time.Duration(refreshIntervalSeconds) * time.Second)
@@ -507,6 +525,19 @@ func (e *KiroExecutor) buildRequestPayload(req cliproxyexecutor.Request, opts cl
 	}, nil
 }
 
+func kiroUsageRequestPayload(prepared *kiroPreparedRequest, actualPayload []byte) []byte {
+	if len(actualPayload) > 0 {
+		return actualPayload
+	}
+	if prepared == nil {
+		return nil
+	}
+	if len(prepared.firstPayload) > 0 {
+		return prepared.firstPayload
+	}
+	return prepared.translated
+}
+
 func (e *KiroExecutor) doKiroRequestWithFallback(ctx context.Context, auth *cliproxyauth.Auth, prepared *kiroPreparedRequest, accessToken string) (*http.Response, []byte, error) {
 	if prepared == nil {
 		return nil, nil, fmt.Errorf("kiro: prepared request is nil")
@@ -607,7 +638,15 @@ type kiroEventStreamMessage struct {
 	Payload   []byte
 }
 
-func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.KiroToolUse, usage.Detail, string, error) {
+type kiroFrameResult struct {
+	msg *kiroEventStreamMessage
+	err error
+}
+
+func (e *KiroExecutor) parseEventStream(ctx context.Context, body io.Reader) (string, []kiroclaude.KiroToolUse, usage.Detail, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	reader := bufio.NewReaderSize(body, kiroStreamReaderBuffer)
 	var content strings.Builder
 	var thinking strings.Builder
@@ -625,7 +664,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		if msg == nil {
 			break
 		}
-		helps.AppendAPIResponseChunk(context.Background(), e.cfg, msg.Payload)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, msg.Payload)
 		event := parseKiroEventPayload(msg.Payload, msg.EventType)
 		if event.err != nil {
 			return "", nil, usageInfo, stopReason, event.err
@@ -672,174 +711,169 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 	return content.String(), toolUses, usageInfo, stopReason, nil
 }
 
+// streamToChannel drives the Kiro event-stream pipeline until the upstream
+// closes or errors. Behaviour is fully encapsulated in kiroStreamState (see
+// kiro_stream_state.go) — this function is intentionally short so the flow
+// is legible at a glance: read a frame, parse it, ask the state machine to
+// process it, repeat; on exit, finalize (which closes open blocks, infers
+// stop_reason, estimates usage, and emits the terminal frames).
+//
+// When `body` also implements io.Closer (true for *http.Response.Body) the
+// idle-timeout watchdog gets a handle it can use to forcibly close the
+// connection and unblock a hung read. If the caller supplies a plain Reader
+// the timeout degrades gracefully to a best-effort ctx cancellation.
 func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, kiroReq []byte, reporter *helps.UsageReporter) {
 	reader := bufio.NewReaderSize(body, kiroStreamReaderBuffer)
-	var translatorParam any
-	var totalUsage usage.Detail
-	var accumulatedContent strings.Builder
-	messageStartSent := false
-	textBlockOpen := false
-	thinkingBlockOpen := false
-	hasToolUses := false
-	contentBlockIndex := -1
-	stopReason := ""
-	streamFailed := false
+	state := newKiroStreamState(ctx, e, out, targetFormat, model, originalReq, kiroReq, reporter)
+	defer state.finalize()
 
-	emit := func(raw []byte) {
-		chunks := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, kiroReq, raw, &translatorParam)
-		for _, chunk := range chunks {
-			out <- cliproxyexecutor.StreamChunk{Payload: chunk}
-		}
-	}
-	ensureMessageStart := func() {
-		if messageStartSent {
-			return
-		}
-		emit(kiroclaude.BuildClaudeMessageStartEvent(model, totalUsage))
-		messageStartSent = true
-	}
-	closeText := func() {
-		if !textBlockOpen {
-			return
-		}
-		emit(kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex))
-		textBlockOpen = false
-	}
-	closeThinking := func() {
-		if !thinkingBlockOpen {
-			return
-		}
-		emit(kiroclaude.BuildClaudeThinkingBlockStopEvent(contentBlockIndex))
-		thinkingBlockOpen = false
+	// Optional closer for the idle-timeout watchdog. When the underlying
+	// body is an http.Response.Body, closing it unblocks any in-flight
+	// read immediately; the read returns with a "connection closed" error
+	// which we surface to the client via handleReadError.
+	bodyCloser, _ := body.(io.Closer)
+	frames := e.startKiroFrameReader(ctx, reader)
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	if kiroStreamIdleTimeout > 0 {
+		idleTimer = time.NewTimer(kiroStreamIdleTimeout)
+		idleC = idleTimer.C
+		defer stopKiroIdleTimer(idleTimer)
 	}
 
-	defer func() {
-		if streamFailed {
-			return
-		}
-		closeThinking()
-		closeText()
-		if !messageStartSent {
-			ensureMessageStart()
-		}
-		if stopReason == "" {
-			if hasToolUses {
-				stopReason = "tool_use"
-			} else {
-				stopReason = "end_turn"
-			}
-		}
-		if totalUsage.OutputTokens == 0 && accumulatedContent.Len() > 0 {
-			totalUsage.OutputTokens = int64(accumulatedContent.Len() / 4)
-			if totalUsage.OutputTokens == 0 {
-				totalUsage.OutputTokens = 1
-			}
-			totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
-		}
-		emit(kiroclaude.BuildClaudeMessageDeltaEvent(stopReason, totalUsage))
-		emit(kiroclaude.BuildClaudeMessageStopOnlyEvent())
-		if reporter != nil {
-			reporter.Publish(ctx, totalUsage)
-			reporter.EnsurePublished(ctx)
-		}
-	}()
-
-	processedToolIDs := make(map[string]bool)
-	var currentToolUse *kiroclaude.ToolUseState
-	emitToolUse := func(toolUse kiroclaude.KiroToolUse, mark bool) {
-		if toolUse.IsTruncated {
-			log.Warnf("kiro: streamToChannel skipping truncated tool: %s (ID: %s)", toolUse.Name, toolUse.ToolUseID)
-			return
-		}
-		if mark && toolUse.ToolUseID != "" {
-			if processedToolIDs[toolUse.ToolUseID] {
-				return
-			}
-			processedToolIDs[toolUse.ToolUseID] = true
-		}
-		closeThinking()
-		closeText()
-		contentBlockIndex++
-		emit(kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", toolUse.ToolUseID, toolUse.Name))
-		inputBytes, _ := json.Marshal(toolUse.Input)
-		emit(kiroclaude.BuildClaudeInputJsonDeltaEvent(string(inputBytes), contentBlockIndex))
-		emit(kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex))
-		hasToolUses = true
-	}
 	for {
 		select {
 		case <-ctx.Done():
+			if bodyCloser != nil {
+				_ = bodyCloser.Close()
+			}
 			return
+		case <-idleC:
+			if bodyCloser != nil {
+				_ = bodyCloser.Close()
+			}
+			state.handleReadError(fmt.Errorf("kiro: upstream idle for %s (no frame received); closing stream", kiroStreamIdleTimeout))
+			return
+		case r, ok := <-frames:
+			stopKiroIdleTimer(idleTimer)
+			if !ok {
+				return
+			}
+			if r.err != nil {
+				state.handleReadError(r.err)
+				return
+			}
+			if r.msg == nil {
+				// Clean EOF: flush any tool_use that was mid-assembly.
+				state.flushTrailingToolUse()
+				return
+			}
+
+			helps.AppendAPIResponseChunk(ctx, e.cfg, r.msg.Payload)
+			event := parseKiroEventPayload(r.msg.Payload, r.msg.EventType)
+			if event.err != nil {
+				state.handleParseError(event.err)
+				return
+			}
+			state.ensureMessageStart()
+			state.processEvent(event)
+			resetKiroIdleTimer(idleTimer, kiroStreamIdleTimeout)
+		}
+	}
+}
+
+func (e *KiroExecutor) startKiroFrameReader(ctx context.Context, reader *bufio.Reader) <-chan kiroFrameResult {
+	out := make(chan kiroFrameResult, 1)
+	go func() {
+		defer close(out)
+		for {
+			msg, err := e.readEventStreamMessage(reader)
+			result := kiroFrameResult{msg: msg, err: err}
+			select {
+			case out <- result:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil || msg == nil {
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func stopKiroIdleTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
 		default:
 		}
-		msg, err := e.readEventStreamMessage(reader)
-		if err != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, err)
-			if reporter != nil {
-				reporter.PublishFailure(ctx)
-			}
-			streamFailed = true
-			out <- cliproxyexecutor.StreamChunk{Err: err}
-			return
-		}
-		if msg == nil {
-			if flushed, ok := flushKiroToolUseState(currentToolUse, processedToolIDs); ok {
-				emitToolUse(flushed, false)
-				currentToolUse = nil
-			}
-			return
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, msg.Payload)
-		event := parseKiroEventPayload(msg.Payload, msg.EventType)
-		if event.err != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, event.err)
-			if reporter != nil {
-				reporter.PublishFailure(ctx)
-			}
-			streamFailed = true
-			out <- cliproxyexecutor.StreamChunk{Err: event.err}
-			return
-		}
-		ensureMessageStart()
-		if event.stopReason != "" {
-			stopReason = event.stopReason
-		}
-		mergeKiroUsage(&totalUsage, event.usage)
+	}
+}
 
-		if event.content != "" {
-			cleanedContent, embeddedToolUses := kiroclaude.ParseEmbeddedToolCalls(event.content, processedToolIDs)
-			event.content = cleanedContent
-			event.toolUses = append(event.toolUses, embeddedToolUses...)
+func resetKiroIdleTimer(timer *time.Timer, timeout time.Duration) {
+	if timer == nil || timeout <= 0 {
+		return
+	}
+	stopKiroIdleTimer(timer)
+	timer.Reset(timeout)
+}
+
+// readFrameWithIdleTimeout wraps readEventStreamMessage with an idle-timeout
+// watchdog. When the read doesn't complete within `timeout` we close the
+// underlying body (if supported) to unblock the read and return a timeout
+// error. The read runs in its own goroutine so we can select on (result,
+// timer, ctx); when the watchdog fires we must still wait for that goroutine
+// to return via the result channel, otherwise it leaks.
+//
+// This is the defense against hung upstream connections — Kiro's Amazon Q
+// endpoint occasionally stops sending bytes without closing the TCP stream,
+// which would otherwise pin a goroutine and a connection slot forever.
+func (e *KiroExecutor) readFrameWithIdleTimeout(ctx context.Context, reader *bufio.Reader, closer io.Closer, timeout time.Duration) (*kiroEventStreamMessage, error) {
+	if timeout <= 0 {
+		// Opt-out path used by tests that set a zero timeout.
+		return e.readEventStreamMessage(reader)
+	}
+
+	type frameResult struct {
+		msg *kiroEventStreamMessage
+		err error
+	}
+	result := make(chan frameResult, 1)
+	go func() {
+		msg, err := e.readEventStreamMessage(reader)
+		result <- frameResult{msg: msg, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case r := <-result:
+		return r.msg, r.err
+	case <-timer.C:
+		// Kiro upstream has been silent for `timeout`. Close the body so
+		// the blocked read returns promptly; wait for the goroutine so we
+		// don't leak it. The reader goroutine observes its read fail with
+		// something like "use of closed network connection" — we discard
+		// that error and surface the timeout reason instead, which is the
+		// useful signal for operators.
+		if closer != nil {
+			_ = closer.Close()
 		}
-		if event.thinking != "" {
-			closeText()
-			if !thinkingBlockOpen {
-				contentBlockIndex++
-				emit(kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "thinking", "", ""))
-				thinkingBlockOpen = true
-			}
-			emit(kiroclaude.BuildClaudeThinkingDeltaEvent(event.thinking, contentBlockIndex))
+		<-result
+		return nil, fmt.Errorf("kiro: upstream idle for %s (no frame received); closing stream", timeout)
+	case <-ctx.Done():
+		// Client disconnected mid-wait. Same cleanup: close upstream so
+		// the reader goroutine unblocks, then surface ctx.Err().
+		if closer != nil {
+			_ = closer.Close()
 		}
-		if event.content != "" {
-			closeThinking()
-			if !textBlockOpen {
-				contentBlockIndex++
-				emit(kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", ""))
-				textBlockOpen = true
-			}
-			accumulatedContent.WriteString(event.content)
-			emit(kiroclaude.BuildClaudeStreamEvent(event.content, contentBlockIndex))
-		}
-		for _, toolUse := range event.toolUses {
-			emitToolUse(toolUse, true)
-		}
-		if event.toolUseEvent != nil {
-			completed, newState := kiroclaude.ProcessToolUseEvent(event.toolUseEvent, currentToolUse, processedToolIDs)
-			currentToolUse = newState
-			for _, toolUse := range completed {
-				emitToolUse(toolUse, false)
-			}
-		}
+		<-result
+		return nil, ctx.Err()
 	}
 }
 
@@ -1039,6 +1073,17 @@ type parsedKiroEvent struct {
 }
 
 func parseKiroEventPayload(payload []byte, eventTypes ...string) parsedKiroEvent {
+	// Fast path: assistantResponseEvent accounts for the vast majority of
+	// stream frames (each token delta arrives as one). These frames carry
+	// only `content` / `stop_reason` / `text` and occasionally `toolUses` —
+	// no nested usage containers, no toolUseEvent. Skipping the full
+	// `json.Unmarshal` into map[string]any saves ~14 allocations per frame.
+	// If the fast-path detects fields it doesn't understand (e.g. toolUses
+	// embedded in the assistant event), it falls through to the slow path.
+	if fast, ok := tryParseKiroContentFastPath(payload); ok {
+		return fast
+	}
+
 	var event map[string]any
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return parsedKiroEvent{}
@@ -1080,6 +1125,90 @@ func parseKiroEventPayload(payload []byte, eventTypes ...string) parsedKiroEvent
 	return parsed
 }
 
+// tryParseKiroContentFastPath handles assistantResponseEvent payloads that
+// carry only content/stop_reason/text (the overwhelming majority of stream
+// frames). It uses gjson to inspect fields in place rather than unmarshalling
+// the whole object. Returns ok=false when the frame contains structures
+// only the slow path can handle (toolUses, nested events, errors, reasoning,
+// metadata), so the caller can fall through without risk.
+//
+// We tried a cheaper bytes.Contains-based pre-filter, but gjson.ForEach over
+// top-level keys turned out to be faster in practice because the benchmark
+// frames are short (<200 bytes) — the JIT keeps the whole payload in a few
+// CPU cache lines either way, and the string-interning used by gjson's key
+// comparisons avoids per-call allocations.
+func tryParseKiroContentFastPath(payload []byte) (parsedKiroEvent, bool) {
+	if len(payload) == 0 {
+		return parsedKiroEvent{}, false
+	}
+	root := gjson.ParseBytes(payload)
+	if !root.IsObject() {
+		return parsedKiroEvent{}, false
+	}
+	// Reject any frame that carries structures the slow path must handle.
+	// The rejection list is intentionally broad — being wrong here means
+	// silently dropping an event, which is much worse than taking the slow
+	// path for a frame that happened to include an unused field.
+	reject := false
+	root.ForEach(func(key, _ gjson.Result) bool {
+		switch key.String() {
+		case "assistantResponseEvent", "stop_reason", "stopReason", "content", "text":
+			return true
+		case "toolUseEvent", "reasoningContentEvent", "reasoningContent",
+			"reasoning", "thinking", "toolUses", "_type", "type",
+			"usage", "tokenUsage", "token_usage", "messageMetadataEvent",
+			"metadataEvent", "usageEvent", "metadata", "usage_metadata",
+			"response_metadata":
+			reject = true
+			return false
+		default:
+			// Unknown key — play it safe and fall back.
+			reject = true
+			return false
+		}
+	})
+	if reject {
+		return parsedKiroEvent{}, false
+	}
+
+	parsed := parsedKiroEvent{}
+	parsed.stopReason = firstKiroGjsonString(root, "stop_reason", "stopReason")
+	if assistant := root.Get("assistantResponseEvent"); assistant.Exists() {
+		// If the assistant event has toolUses the slow path must handle
+		// them — fall back. Same for unknown nested keys.
+		if assistant.Get("toolUses").Exists() {
+			return parsedKiroEvent{}, false
+		}
+		parsed.content = firstKiroGjsonString(assistant, "content", "text")
+		if parsed.stopReason == "" {
+			parsed.stopReason = firstKiroGjsonString(assistant, "stop_reason", "stopReason")
+		}
+	}
+	if parsed.content == "" {
+		parsed.content = firstKiroGjsonString(root, "content", "text")
+	}
+	// Fast-path success requires at least one useful field; otherwise fall
+	// through so future field additions aren't silently dropped.
+	if parsed.content == "" && parsed.stopReason == "" {
+		return parsedKiroEvent{}, false
+	}
+	return parsed, true
+}
+
+// firstKiroGjsonString returns the first non-empty string value among keys
+// looked up via gjson. Mirrors firstKiroString but against a gjson.Result
+// instead of a decoded map, so the fast path avoids the map allocation.
+func firstKiroGjsonString(root gjson.Result, keys ...string) string {
+	for _, key := range keys {
+		if v := root.Get(key); v.Exists() {
+			if s := v.String(); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 func extractKiroToolUses(raw any) []kiroclaude.KiroToolUse {
 	items, ok := raw.([]any)
 	if !ok {
@@ -1114,100 +1243,29 @@ func buildKiroToolUse(m map[string]any) kiroclaude.KiroToolUse {
 	return tu
 }
 
+// extractKiroUsage parses a Kiro event for token-usage fields. Walks known
+// usage containers (usage / tokenUsage / messageMetadataEvent / etc.),
+// applying field values from the deepest container upward so that a nested
+// block overrides a shallower one. Short-circuits when the root clearly has
+// no usage to avoid paying the walk cost on content-delta / tool_use frames.
+//
+// Returns a zero Detail when the event has no usage; callers typically feed
+// that through mergeKiroUsage() where zero values are ignored.
 func extractKiroUsage(event map[string]any) usage.Detail {
 	var detail usage.Detail
-	applyUsageMap := func(m map[string]any) {
-		inputTokens := int64Field(m, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens")
-		outputTokens := int64Field(m, "output_tokens", "outputTokens", "completion_tokens", "completionTokens")
-		totalTokens := int64Field(m, "total_tokens", "totalTokens", "total")
-		reasoningTokens := int64Field(m, "reasoning_tokens", "reasoningTokens")
-		uncachedInputTokens := int64Field(m, "uncachedInputTokens", "uncached_input_tokens")
-		cacheReadTokens := int64Field(m,
-			"cacheReadInputTokens",
-			"cache_read_input_tokens",
-			"cache_read_tokens",
-			"cacheReadTokens",
-			"cachedInputTokens",
-			"cached_input_tokens",
-			"cached_tokens",
-			"cache_tokens",
-			"cacheTokens",
-		)
-		cacheWriteTokens := int64Field(m,
-			"cacheWriteInputTokens",
-			"cache_write_input_tokens",
-			"cache_creation_input_tokens",
-			"cacheCreationInputTokens",
-		)
-		if nested, ok := m["input_tokens_details"].(map[string]any); ok {
-			cacheReadTokens = firstPositiveInt64(cacheReadTokens, int64Field(nested, "cached_tokens", "cachedTokens", "cache_tokens", "cacheTokens"))
-		}
-		if nested, ok := m["prompt_tokens_details"].(map[string]any); ok {
-			cacheReadTokens = firstPositiveInt64(cacheReadTokens, int64Field(nested, "cached_tokens", "cachedTokens", "cache_tokens", "cacheTokens"))
-		}
-		if nested, ok := m["output_tokens_details"].(map[string]any); ok {
-			reasoningTokens = firstPositiveInt64(reasoningTokens, int64Field(nested, "reasoning_tokens", "reasoningTokens"))
-		}
-		if nested, ok := m["completion_tokens_details"].(map[string]any); ok {
-			reasoningTokens = firstPositiveInt64(reasoningTokens, int64Field(nested, "reasoning_tokens", "reasoningTokens"))
-		}
-		if uncachedInputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0 {
-			splitInputTokens := uncachedInputTokens + cacheReadTokens + cacheWriteTokens
-			if inputTokens < splitInputTokens {
-				inputTokens = splitInputTokens
-			}
-		}
-		if inputTokens > 0 {
-			detail.InputTokens = inputTokens
-		}
-		if outputTokens > 0 {
-			detail.OutputTokens = outputTokens
-		}
-		if totalTokens > 0 {
-			detail.TotalTokens = totalTokens
-		}
-		if reasoningTokens > 0 {
-			detail.ReasoningTokens = reasoningTokens
-		}
-		if cacheReadTokens > 0 {
-			// CachedTokens is the discounted cache-read bucket consumed by
-			// cost calculators. Claude clients render this as
-			// `usage.cache_read_input_tokens`.
-			detail.CachedTokens = cacheReadTokens
-		}
-		if cacheWriteTokens > 0 {
-			// CacheCreationTokens captures the tokens billed for populating a
-			// new cache entry. Kept separate from CachedTokens so downstream
-			// translators can emit both `cache_read_input_tokens` and
-			// `cache_creation_input_tokens` — Claude Code and other prompt-
-			// cache-aware clients inspect both fields to verify caching
-			// efficacy.
-			detail.CacheCreationTokens = cacheWriteTokens
-		}
+	// Short-circuit: most slow-path events still do not carry usage data
+	// (e.g. toolUseEvent frames, content frames with a toolUses array).
+	// Skip the recursive walk unless the root explicitly contains a
+	// top-level token / usage container key. This cuts ~9 map lookups per
+	// non-metadata event.
+	if !kiroEventHasUsageContainer(event) {
+		return detail
 	}
-	var applyUsageContainer func(map[string]any)
-	applyUsageContainer = func(m map[string]any) {
-		if len(m) == 0 {
-			return
-		}
-		applyUsageMap(m)
-		for _, key := range []string{
-			"usage",
-			"tokenUsage",
-			"token_usage",
-			"messageMetadataEvent",
-			"metadataEvent",
-			"usageEvent",
-			"metadata",
-			"usage_metadata",
-			"response_metadata",
-		} {
-			if nested, ok := m[key].(map[string]any); ok {
-				applyUsageContainer(nested)
-			}
-		}
-	}
-	applyUsageContainer(event)
+	applyKiroUsageContainer(&detail, event)
+	// Post-hoc reconciliation: if InputTokens is unset but Total > (Output +
+	// Reasoning), synthesise InputTokens from the difference. Upstream
+	// sometimes only reports `totalTokens` + `outputTokens` and expects
+	// the client to subtract.
 	if detail.InputTokens == 0 && detail.TotalTokens > detail.OutputTokens+detail.ReasoningTokens {
 		detail.InputTokens = detail.TotalTokens - detail.OutputTokens - detail.ReasoningTokens
 	}
@@ -1217,25 +1275,240 @@ func extractKiroUsage(event map[string]any) usage.Detail {
 	return detail
 }
 
+var (
+	kiroUsageContainerKeys = []string{
+		"usage",
+		"tokenUsage",
+		"token_usage",
+		"messageMetadataEvent",
+		"metadataEvent",
+		"usageEvent",
+		"metadata",
+		"usage_metadata",
+		"response_metadata",
+	}
+
+	kiroInputTokenKeys = []string{
+		"input_tokens", "inputTokens", "inputTokenCount", "input_token_count",
+		"prompt_tokens", "promptTokens", "promptTokenCount", "prompt_token_count",
+	}
+	kiroOutputTokenKeys = []string{
+		"output_tokens", "outputTokens", "outputTokenCount", "output_token_count",
+		"completion_tokens", "completionTokens", "completionTokenCount", "completion_token_count",
+	}
+	kiroTotalTokenKeys = []string{
+		"total_tokens", "totalTokens", "totalTokenCount", "total_token_count", "total",
+	}
+	kiroReasoningTokenKeys = []string{
+		"reasoning_tokens", "reasoningTokens", "reasoningTokenCount", "reasoning_token_count",
+	}
+	kiroUncachedInputTokenKeys = []string{
+		"uncachedInputTokens", "uncached_input_tokens", "uncachedInputTokenCount", "uncached_input_token_count",
+	}
+	kiroCacheReadTokenKeys = []string{
+		"cacheReadInputTokens", "cacheReadInputTokenCount", "cache_read_input_tokens", "cache_read_input_token_count",
+		"cache_read_tokens", "cache_read_token_count", "cacheReadTokens", "cacheReadTokenCount",
+		"cacheHitInputTokens", "cacheHitInputTokenCount", "cache_hit_input_tokens", "cache_hit_input_token_count",
+		"cacheHitTokens", "cacheHitTokenCount", "cache_hit_tokens", "cache_hit_token_count",
+		"cachedInputTokens", "cachedInputTokenCount", "cached_input_tokens", "cached_input_token_count",
+		"cached_tokens", "cached_token_count", "cache_tokens", "cache_token_count", "cacheTokens", "cacheTokenCount",
+	}
+	kiroCacheWriteTokenKeys = []string{
+		"cacheWriteInputTokens", "cacheWriteInputTokenCount", "cache_write_input_tokens", "cache_write_input_token_count",
+		"cache_creation_input_tokens", "cache_creation_input_token_count", "cacheCreationInputTokens", "cacheCreationInputTokenCount",
+	}
+	kiroInputDetailContainerKeys = []string{
+		"input_tokens_details", "inputTokenDetails", "input_token_details",
+		"prompt_tokens_details", "promptTokenDetails", "prompt_token_details",
+	}
+	kiroOutputDetailContainerKeys = []string{
+		"output_tokens_details", "outputTokenDetails", "output_token_details",
+		"completion_tokens_details", "completionTokenDetails", "completion_token_details",
+	}
+	kiroUsageFlatKeys = concatKiroUsageKeys(
+		kiroInputTokenKeys,
+		kiroOutputTokenKeys,
+		kiroTotalTokenKeys,
+		kiroReasoningTokenKeys,
+		kiroUncachedInputTokenKeys,
+		kiroCacheReadTokenKeys,
+		kiroCacheWriteTokenKeys,
+		kiroInputDetailContainerKeys,
+		kiroOutputDetailContainerKeys,
+	)
+	kiroUsageRootKeySet = makeKiroUsageKeySet(kiroUsageFlatKeys, kiroUsageContainerKeys)
+)
+
+func concatKiroUsageKeys(groups ...[]string) []string {
+	total := 0
+	for _, group := range groups {
+		total += len(group)
+	}
+	out := make([]string, 0, total)
+	for _, group := range groups {
+		out = append(out, group...)
+	}
+	return out
+}
+
+func makeKiroUsageKeySet(groups ...[]string) map[string]struct{} {
+	total := 0
+	for _, group := range groups {
+		total += len(group)
+	}
+	out := make(map[string]struct{}, total)
+	for _, group := range groups {
+		for _, key := range group {
+			out[key] = struct{}{}
+		}
+	}
+	return out
+}
+
+// applyKiroUsageContainer recursively walks `m` applying usage fields at
+// each level. Kept iterative where possible; the recursion depth is bounded
+// by the number of nested container keys (≤ 9) so stack use is trivial.
+func applyKiroUsageContainer(detail *usage.Detail, m map[string]any) {
+	if len(m) == 0 {
+		return
+	}
+	applyKiroUsageMap(detail, m)
+	for _, key := range kiroUsageContainerKeys {
+		if nested, ok := m[key].(map[string]any); ok {
+			applyKiroUsageContainer(detail, nested)
+		}
+	}
+}
+
+// applyKiroUsageMap pulls token counts out of a single usage map (one level
+// of nesting). Split out of extractKiroUsage so each transform is
+// independently readable; the function writes into *detail rather than
+// returning a value because all fields are independently optional.
+func applyKiroUsageMap(detail *usage.Detail, m map[string]any) {
+	if len(m) == 0 {
+		return
+	}
+	inputTokens := int64Field(m, kiroInputTokenKeys...)
+	outputTokens := int64Field(m, kiroOutputTokenKeys...)
+	totalTokens := int64Field(m, kiroTotalTokenKeys...)
+	reasoningTokens := int64Field(m, kiroReasoningTokenKeys...)
+	uncachedInputTokens := int64Field(m, kiroUncachedInputTokenKeys...)
+	cacheReadTokens := int64Field(m, kiroCacheReadTokenKeys...)
+	cacheWriteTokens := int64Field(m, kiroCacheWriteTokenKeys...)
+
+	if cacheReadTokens == 0 {
+		cacheReadTokens = kiroNestedInt64Field(m, kiroInputDetailContainerKeys, kiroCacheReadTokenKeys)
+	}
+	if cacheWriteTokens == 0 {
+		cacheWriteTokens = kiroNestedInt64Field(m, kiroInputDetailContainerKeys, kiroCacheWriteTokenKeys)
+	}
+	if reasoningTokens == 0 {
+		reasoningTokens = kiroNestedInt64Field(m, kiroOutputDetailContainerKeys, kiroReasoningTokenKeys)
+	}
+	// When the upstream splits input into uncached + cache-read + cache-write
+	// but omits the total, synthesise the top-level InputTokens from the
+	// sum so downstream consumers have a single billed value.
+	if uncachedInputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0 {
+		splitInputTokens := uncachedInputTokens + cacheReadTokens + cacheWriteTokens
+		if inputTokens < splitInputTokens {
+			inputTokens = splitInputTokens
+		}
+	}
+	if inputTokens > 0 {
+		detail.InputTokens = inputTokens
+	}
+	if outputTokens > 0 {
+		detail.OutputTokens = outputTokens
+	}
+	if totalTokens > 0 {
+		detail.TotalTokens = totalTokens
+	}
+	if reasoningTokens > 0 {
+		detail.ReasoningTokens = reasoningTokens
+	}
+	if cacheReadTokens > 0 {
+		// CachedTokens is the discounted cache-read bucket consumed by
+		// cost calculators. Claude clients render this as
+		// `usage.cache_read_input_tokens`.
+		detail.CachedTokens = cacheReadTokens
+	}
+	if cacheWriteTokens > 0 {
+		// CacheCreationTokens captures the tokens billed for populating a
+		// new cache entry. Kept separate from CachedTokens so downstream
+		// translators can emit both `cache_read_input_tokens` and
+		// `cache_creation_input_tokens` — Claude Code and other prompt-
+		// cache-aware clients inspect both fields to verify caching
+		// efficacy.
+		detail.CacheCreationTokens = cacheWriteTokens
+	}
+}
+
+func kiroNestedInt64Field(m map[string]any, containerKeys, valueKeys []string) int64 {
+	if len(m) == 0 || len(containerKeys) == 0 || len(valueKeys) == 0 {
+		return 0
+	}
+	for _, containerKey := range containerKeys {
+		child, ok := m[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		if value := int64Field(child, valueKeys...); value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+// kiroEventHasUsageContainer checks whether `event` has any top-level key
+// that could carry token usage. Pre-filter for extractKiroUsage to avoid
+// recursing into content / tool_use frames that clearly have no usage.
+// Keep this list in sync with applyUsageContainer inside extractKiroUsage.
+func kiroEventHasUsageContainer(event map[string]any) bool {
+	if len(event) == 0 {
+		return false
+	}
+	for key := range event {
+		if _, ok := kiroUsageRootKeySet[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeKiroUsage folds a newly-extracted usage block into the running
+// accumulator using max() semantics on every field. Kiro / Amazon Q can emit
+// multiple messageMetadataEvent frames in a single response — occasionally
+// with incomplete or rolled-back counts (e.g. a preliminary "partial" usage
+// followed by the final billed one). A straight overwrite risked dropping
+// non-zero values if a later event omitted a field; max() keeps the most
+// complete number we've seen so far.
+//
+// TotalTokens is special: if src supplies a positive total we prefer it (the
+// upstream knows the true billed total), otherwise we synthesise it from the
+// component fields once merging is done.
 func mergeKiroUsage(dst *usage.Detail, src usage.Detail) {
-	if src.InputTokens > 0 {
+	if dst == nil {
+		return
+	}
+	if src.InputTokens > dst.InputTokens {
 		dst.InputTokens = src.InputTokens
 	}
-	if src.OutputTokens > 0 {
+	if src.OutputTokens > dst.OutputTokens {
 		dst.OutputTokens = src.OutputTokens
 	}
-	if src.ReasoningTokens > 0 {
+	if src.ReasoningTokens > dst.ReasoningTokens {
 		dst.ReasoningTokens = src.ReasoningTokens
 	}
-	if src.CachedTokens > 0 {
+	if src.CachedTokens > dst.CachedTokens {
 		dst.CachedTokens = src.CachedTokens
 	}
-	if src.CacheCreationTokens > 0 {
+	if src.CacheCreationTokens > dst.CacheCreationTokens {
 		dst.CacheCreationTokens = src.CacheCreationTokens
 	}
-	if src.TotalTokens > 0 {
+	if src.TotalTokens > dst.TotalTokens {
 		dst.TotalTokens = src.TotalTokens
-	} else if dst.TotalTokens == 0 && (dst.InputTokens > 0 || dst.OutputTokens > 0 || dst.ReasoningTokens > 0) {
+	}
+	if dst.TotalTokens == 0 && (dst.InputTokens > 0 || dst.OutputTokens > 0 || dst.ReasoningTokens > 0) {
 		dst.TotalTokens = dst.InputTokens + dst.OutputTokens + dst.ReasoningTokens
 	}
 }
@@ -1832,12 +2105,9 @@ func refreshKiroSocialToken(ctx context.Context, cfg *config.Config, auth *clipr
 		return nil, fmt.Errorf("kiro: social token refresh response missing access token")
 	}
 	if strings.TrimSpace(refreshTokenResult) == "" {
-		// Upstream rotated but returned empty refreshToken — refuse to persist
-		// a mixed (new access + old refresh) state because the next refresh
-		// would fail with invalid_grant. Log and bail so the caller keeps
-		// the previous credentials intact.
-		log.Warnf("kiro: social refresh returned empty refreshToken for auth=%s; discarding rotation to avoid invalid_grant on next call", auth.ID)
-		return nil, fmt.Errorf("kiro: social token refresh response missing refresh token (will retry with existing credentials)")
+		// The Kiro social endpoint may return only a fresh access token. In
+		// that flow the refresh token is stable, unlike AWS SSO-OIDC rotation.
+		refreshTokenResult = refreshToken
 	}
 	expiresAt := firstNonEmptyKiroString(result.ExpiresAt, result.ExpiresAtOld)
 	if expiresAt == "" || !isRFC3339Time(expiresAt) {

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -69,6 +70,36 @@ func TestKiroCreateAuthRecordBuilderIDMetadata(t *testing.T) {
 	}
 }
 
+func TestKiroCreateAuthRecordSocialMetadataOmitsEmptyOptionalFields(t *testing.T) {
+	expiresAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	authenticator := NewKiroAuthenticator()
+	record := authenticator.createAuthRecord(&kiroauth.TokenData{
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    expiresAt,
+		AuthMethod:   "kiro-cli-social",
+		Provider:     "google",
+	}, "kiro-oauth")
+
+	assertMetadataString(t, record.Metadata, "type", "kiro")
+	assertMetadataString(t, record.Metadata, "access_token", "access-token")
+	assertMetadataString(t, record.Metadata, "refresh_token", "refresh-token")
+	assertMetadataString(t, record.Metadata, "auth_method", "kiro-cli-social")
+	assertMetadataString(t, record.Metadata, "provider", "google")
+	for _, key := range []string{"client_id", "client_secret", "client_id_hash", "email", "region", "start_url", "profile_arn"} {
+		assertMetadataAbsent(t, record.Metadata, key)
+	}
+	if record.Attributes["source"] != "kiro-oauth" || record.Attributes["auth_method"] != "kiro-cli-social" {
+		t.Fatalf("unexpected attributes: %+v", record.Attributes)
+	}
+	if _, ok := record.Attributes["email"]; ok {
+		t.Fatalf("email attribute should be omitted for empty email: %+v", record.Attributes)
+	}
+	if record.LastRefreshedAt.IsZero() {
+		t.Fatal("LastRefreshedAt should be set for social auth")
+	}
+}
+
 func TestKiroRegistersDefaultAutoRefresh(t *testing.T) {
 	if !coreauth.ProviderDefaultAutoRefresh("kiro") {
 		t.Fatal("expected Kiro to enable provider-level auto refresh")
@@ -87,6 +118,13 @@ func TestKiroAutoRefreshWritesBackAuthFile(t *testing.T) {
 		"type":                     "kiro",
 		"auth_method":              "kiro-cli-social",
 		"provider":                 "google",
+		"client_id":                "",
+		"client_secret":            "",
+		"client_id_hash":           "",
+		"email":                    "",
+		"region":                   "",
+		"start_url":                "",
+		"profile_arn":              "",
 		"access_token":             "old-access-token",
 		"refresh_token":            "old-refresh-token",
 		"expires_at":               now.Add(time.Hour).Format(time.RFC3339),
@@ -133,6 +171,11 @@ func TestKiroAutoRefreshWritesBackAuthFile(t *testing.T) {
 			if got, ok := updated["refresh_interval_seconds"].(float64); !ok || got != 60 {
 				t.Fatalf("refresh_interval_seconds = %#v, want 60", updated["refresh_interval_seconds"])
 			}
+			for _, key := range []string{"client_id", "client_secret", "client_id_hash", "email", "region", "start_url", "profile_arn"} {
+				if _, exists := updated[key]; exists {
+					t.Fatalf("empty metadata key %q should not be persisted: %#v", key, updated[key])
+				}
+			}
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -146,6 +189,13 @@ func assertMetadataString(t *testing.T, metadata map[string]any, key, want strin
 	t.Helper()
 	if got, _ := metadata[key].(string); got != want {
 		t.Fatalf("metadata[%q] = %q, want %q", key, got, want)
+	}
+}
+
+func assertMetadataAbsent(t *testing.T, metadata map[string]any, key string) {
+	t.Helper()
+	if _, ok := metadata[key]; ok {
+		t.Fatalf("metadata[%q] should be omitted, got %#v", key, metadata[key])
 	}
 }
 
@@ -182,4 +232,71 @@ func (e *kiroAutoRefreshFileExecutor) CountTokens(context.Context, *coreauth.Aut
 
 func (e *kiroAutoRefreshFileExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+func TestKiroOAuthCallbackServerReceivesCode(t *testing.T) {
+	srv, port, resultCh, _, err := startKiroOAuthCallbackServer(0)
+	if err != nil {
+		t.Fatalf("startKiroOAuthCallbackServer() error = %v", err)
+	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d?code=auth-code&state=state-123", port))
+	if err != nil {
+		t.Fatalf("callback GET: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case result := <-resultCh:
+		if result.Code != "auth-code" || result.State != "state-123" || result.Error != "" {
+			t.Fatalf("unexpected callback result: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for callback result")
+	}
+}
+
+func TestKiroOAuthCallbackServerIgnoresNonCallbackRequest(t *testing.T) {
+	srv, port, resultCh, _, err := startKiroOAuthCallbackServer(0)
+	if err != nil {
+		t.Fatalf("startKiroOAuthCallbackServer() error = %v", err)
+	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/favicon.ico", port))
+	if err != nil {
+		t.Fatalf("empty callback GET: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case result := <-resultCh:
+		t.Fatalf("empty request should not complete callback, got %+v", result)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d?code=auth-code&state=state-123", port))
+	if err != nil {
+		t.Fatalf("callback GET: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case result := <-resultCh:
+		if result.Code != "auth-code" || result.State != "state-123" || result.Error != "" {
+			t.Fatalf("unexpected callback result: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for callback result")
+	}
+}
+
+func TestKiroOAuthCallbackValidation(t *testing.T) {
+	if err := validateKiroOAuthCallback(kiroOAuthCallbackResult{Code: "code", State: "state"}, "state"); err != nil {
+		t.Fatalf("validateKiroOAuthCallback() error = %v", err)
+	}
+	if err := validateKiroOAuthCallback(kiroOAuthCallbackResult{Code: "code", State: "other"}, "state"); err == nil {
+		t.Fatal("expected state mismatch error")
+	}
 }

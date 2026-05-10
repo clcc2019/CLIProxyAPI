@@ -340,6 +340,80 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 	}
 }
 
+func TestManager_KiroFailureDoesNotCrossCredentialRetryByDefault(t *testing.T) {
+	request := cliproxyexecutor.Request{Model: "test-model"}
+	testCases := []struct {
+		name   string
+		invoke func(*Manager) error
+	}{
+		{
+			name: "execute",
+			invoke: func(m *Manager) error {
+				_, errExecute := m.Execute(context.Background(), []string{"kiro"}, request, cliproxyexecutor.Options{})
+				return errExecute
+			},
+		},
+		{
+			name: "execute_count",
+			invoke: func(m *Manager) error {
+				_, errExecute := m.ExecuteCount(context.Background(), []string{"kiro"}, request, cliproxyexecutor.Options{})
+				return errExecute
+			},
+		},
+		{
+			name: "execute_stream",
+			invoke: func(m *Manager) error {
+				_, errExecute := m.ExecuteStream(context.Background(), []string{"kiro"}, request, cliproxyexecutor.Options{})
+				return errExecute
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, executor := newKiroCredentialStabilityTestManager(t)
+			if errInvoke := tc.invoke(m); errInvoke == nil {
+				t.Fatalf("expected error for failing kiro execution")
+			}
+			if calls := executor.Calls(); calls != 1 {
+				t.Fatalf("expected Kiro failure to stay on one credential, got %d upstream calls", calls)
+			}
+		})
+	}
+}
+
+func newKiroCredentialStabilityTestManager(t *testing.T) (*Manager, *credentialRetryLimitExecutor) {
+	t.Helper()
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0)
+
+	executor := &credentialRetryLimitExecutor{id: "kiro"}
+	m.RegisterExecutor(executor)
+
+	baseID := uuid.NewString()
+	auth1 := &Auth{ID: baseID + "-kiro-auth-1", Provider: "kiro", Metadata: map[string]any{"type": "kiro"}}
+	auth2 := &Auth{ID: baseID + "-kiro-auth-2", Provider: "kiro", Metadata: map[string]any{"type": "kiro"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "kiro", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "kiro", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	return m, executor
+}
+
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{

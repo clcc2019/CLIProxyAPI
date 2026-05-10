@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -79,6 +80,57 @@ func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+func authFileLastRefresh(auth *coreauth.Auth) (time.Time, bool) {
+	if auth == nil {
+		return time.Time{}, false
+	}
+	if !auth.LastRefreshedAt.IsZero() {
+		return auth.LastRefreshedAt.UTC(), true
+	}
+	if ts, ok := extractLastRefreshTimestamp(auth.Metadata); ok {
+		return ts, true
+	}
+	for _, key := range lastRefreshKeys {
+		if val := strings.TrimSpace(authAttribute(auth, key)); val != "" {
+			if ts, ok := parseLastRefreshValue(val); ok {
+				return ts, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func authFileRuntimeStateTimes(meta map[string]any) (time.Time, bool, time.Time, bool) {
+	if len(meta) == 0 {
+		return time.Time{}, false, time.Time{}, false
+	}
+	raw, ok := meta["cliproxy_runtime_state"]
+	if !ok || raw == nil {
+		return time.Time{}, false, time.Time{}, false
+	}
+	var state coreauth.AuthRuntimeState
+	switch v := raw.(type) {
+	case coreauth.AuthRuntimeState:
+		state = v
+	case *coreauth.AuthRuntimeState:
+		if v == nil {
+			return time.Time{}, false, time.Time{}, false
+		}
+		state = *v
+	default:
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return time.Time{}, false, time.Time{}, false
+		}
+		if err := json.Unmarshal(data, &state); err != nil {
+			return time.Time{}, false, time.Time{}, false
+		}
+	}
+	updatedOK := !state.UpdatedAt.IsZero()
+	savedOK := !state.SavedAt.IsZero()
+	return state.UpdatedAt.UTC(), updatedOK, state.SavedAt.UTC(), savedOK
+}
+
 func parseLastRefreshValue(v any) (time.Time, bool) {
 	switch val := v.(type) {
 	case string:
@@ -119,7 +171,11 @@ func parseLastRefreshValue(v any) (time.Time, bool) {
 }
 
 func isWebUIRequest(c *gin.Context) bool {
-	raw := strings.TrimSpace(c.Query("is_webui"))
+	return isTruthyQueryValue(c.Query("is_webui"))
+}
+
+func isTruthyQueryValue(raw string) bool {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return false
 	}
@@ -129,6 +185,18 @@ func isWebUIRequest(c *gin.Context) bool {
 	default:
 		return false
 	}
+}
+
+func firstNonEmptyQueryValue(c *gin.Context, keys ...string) string {
+	if c == nil {
+		return ""
+	}
+	for _, key := range keys {
+		if value := strings.TrimSpace(c.Query(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func codexLoginRequestUserAgent(c *gin.Context) string {
@@ -343,6 +411,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				if prefix := strings.TrimSpace(gjson.GetBytes(data, "prefix").String()); prefix != "" {
+					fileData["prefix"] = prefix
+				}
+				if proxyURL := strings.TrimSpace(gjson.GetBytes(data, "proxy_url").String()); proxyURL != "" {
+					fileData["proxy_url"] = proxyURL
+				}
 				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
 					switch pv.Type {
 					case gjson.Number:
@@ -437,8 +511,16 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		entry["modtime"] = auth.UpdatedAt
 		entry["updated_at"] = auth.UpdatedAt
 	}
-	if !auth.LastRefreshedAt.IsZero() {
-		entry["last_refresh"] = auth.LastRefreshedAt
+	if lastRefresh, ok := authFileLastRefresh(auth); ok {
+		entry["last_refresh"] = lastRefresh
+	}
+	if runtimeUpdatedAt, updatedOK, runtimeSavedAt, savedOK := authFileRuntimeStateTimes(auth.Metadata); updatedOK || savedOK {
+		if updatedOK {
+			entry["runtime_updated_at"] = runtimeUpdatedAt
+		}
+		if savedOK {
+			entry["runtime_saved_at"] = runtimeSavedAt
+		}
 	}
 	if !auth.NextRetryAfter.IsZero() {
 		entry["next_retry_after"] = auth.NextRetryAfter
@@ -461,6 +543,24 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
+	}
+	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
+		entry["prefix"] = prefix
+	} else if auth.Metadata != nil {
+		if rawPrefix, ok := auth.Metadata["prefix"].(string); ok {
+			if trimmed := strings.TrimSpace(rawPrefix); trimmed != "" {
+				entry["prefix"] = trimmed
+			}
+		}
+	}
+	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+		entry["proxy_url"] = proxyURL
+	} else if auth.Metadata != nil {
+		if rawProxyURL, ok := auth.Metadata["proxy_url"].(string); ok {
+			if trimmed := strings.TrimSpace(rawProxyURL); trimmed != "" {
+				entry["proxy_url"] = trimmed
+			}
+		}
 	}
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
@@ -735,6 +835,20 @@ func isUnsafeAuthFileName(name string) bool {
 		return true
 	}
 	return false
+}
+
+func normalizeOptionalAuthFileName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", nil
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		name += ".json"
+	}
+	if isUnsafeAuthFileName(name) {
+		return "", fmt.Errorf("invalid auth file name")
+	}
+	return name, nil
 }
 
 // Download single auth file by name
@@ -1241,6 +1355,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 			auth.Runtime = existing.Runtime
 		}
 	}
+	coreauth.ApplyAuthFileOptionsFromMetadata(auth)
 	coreauth.ApplyCodexMetadataFromMetadata(auth)
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
@@ -2777,6 +2892,170 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			fmt.Printf("Using GCP project: %s\n", projectID)
 		}
 		fmt.Println("You can now use Antigravity services through this CLI")
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+func (h *Handler) RequestKiroToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Kiro authentication...")
+
+	pkceCodes, errPKCE := kiroauth.GeneratePKCECodes()
+	if errPKCE != nil {
+		log.Errorf("Failed to generate Kiro PKCE codes: %v", errPKCE)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		return
+	}
+
+	state, errState := kiroauth.GenerateOAuthState()
+	if errState != nil {
+		log.Errorf("Failed to generate Kiro state parameter: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	socialProvider := strings.TrimSpace(c.Query("provider"))
+	if socialProvider == "" {
+		socialProvider = strings.TrimSpace(c.Query("idp"))
+	}
+	if socialProvider == "" {
+		socialProvider = "google"
+	}
+	requestedFileName := strings.TrimSpace(c.Query("auth_file_name"))
+	if requestedFileName == "" {
+		requestedFileName = strings.TrimSpace(c.Query("file_name"))
+	}
+	if requestedFileName == "" {
+		requestedFileName = strings.TrimSpace(c.Query("name"))
+	}
+	customFileName, errFileName := normalizeOptionalAuthFileName(requestedFileName)
+	if errFileName != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid auth file name"})
+		return
+	}
+	prompt := strings.TrimSpace(c.Query("prompt"))
+	forceReauth := isTruthyQueryValue(firstNonEmptyQueryValue(c, "force_reauth", "force_login", "switch_account"))
+
+	redirectURI := kiroauth.OAuthRedirectURI(kiroauth.DefaultOAuthCallbackPort)
+	authSvc := kiroauth.NewSocialOAuthClient(h.cfg)
+	authURL, errURL := authSvc.BuildLoginURLWithOptions(socialProvider, redirectURI, state, pkceCodes.CodeChallenge, kiroauth.SocialLoginURLOptions{
+		Prompt:      prompt,
+		ForceReauth: forceReauth,
+	})
+	if errURL != nil {
+		log.Errorf("Failed to generate Kiro authorization URL: %v", errURL)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+
+	RegisterOAuthSession(state, "kiro")
+
+	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
+	if isWebUI {
+		targetURL, errTarget := h.managementCallbackURL("/kiro/callback")
+		if errTarget != nil {
+			log.WithError(errTarget).Error("failed to compute kiro callback target")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		}
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(kiroauth.DefaultOAuthCallbackPort, "kiro", targetURL); errStart != nil {
+			log.WithError(errStart).Error("failed to start kiro callback forwarder")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+			return
+		}
+	}
+
+	go func() {
+		if isWebUI {
+			defer stopCallbackForwarderInstance(kiroauth.DefaultOAuthCallbackPort, forwarder)
+		}
+
+		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state))
+		deadline := time.Now().Add(5 * time.Minute)
+		var authCode string
+		for {
+			if !IsOAuthSessionPending(state, "kiro") {
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Error("kiro oauth flow timed out")
+				SetOAuthSessionError(state, "OAuth flow timed out")
+				return
+			}
+			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+				var payload map[string]string
+				_ = json.Unmarshal(data, &payload)
+				_ = os.Remove(waitFile)
+				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
+					log.Errorf("Kiro authentication failed: %s", errStr)
+					SetOAuthSessionError(state, "Authentication failed")
+					return
+				}
+				if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
+					log.Error("Kiro authentication failed: state mismatch")
+					SetOAuthSessionError(state, "Authentication failed: state mismatch")
+					return
+				}
+				authCode = strings.TrimSpace(payload["code"])
+				if authCode == "" {
+					log.Error("Kiro authentication failed: code not found")
+					SetOAuthSessionError(state, "Authentication failed: code not found")
+					return
+				}
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		tokenResp, errToken := authSvc.ExchangeCode(ctx, authCode, redirectURI, pkceCodes.CodeVerifier)
+		if errToken != nil {
+			log.Errorf("Failed to exchange Kiro token: %v", errToken)
+			SetOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+
+		tokenData := kiroauth.TokenDataFromSocialResponse(socialProvider, tokenResp)
+		if tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" {
+			log.Error("kiro oauth: token response is empty")
+			SetOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+		if strings.TrimSpace(tokenData.ProfileArn) == "" {
+			profileArn, errProfile := kiroauth.NewKiroAuth(h.cfg).ResolveProfileArn(ctx, tokenData)
+			if errProfile != nil {
+				log.Warnf("kiro: failed to resolve profile arn: %v", errProfile)
+			} else {
+				tokenData.ProfileArn = profileArn
+			}
+		}
+
+		record := sdkAuth.NewKiroAuthenticator().CreateAuthRecord(tokenData, "kiro-oauth")
+		if customFileName != "" {
+			record.ID = customFileName
+			record.FileName = customFileName
+			if record.Metadata != nil {
+				record.Metadata["custom_file_name"] = customFileName
+			}
+			if strings.TrimSpace(record.Label) == "" || strings.HasPrefix(record.Label, "kiro-") {
+				record.Label = strings.TrimSuffix(customFileName, ".json")
+			}
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Kiro token to file: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token to file")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("kiro")
+		fmt.Printf("Kiro authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Kiro services through this CLI")
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})

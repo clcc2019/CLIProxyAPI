@@ -287,8 +287,8 @@ func TestPrepareCodexWebsocketRequestNormalizesFinalUpstreamBody(t *testing.T) {
 			t.Fatalf("%s should be removed from final websocket body: %s", field, body)
 		}
 	}
-	if gjson.GetBytes(body, "instructions").Exists() {
-		t.Fatalf("instructions should be omitted when empty: %s", body)
+	if got := gjson.GetBytes(body, "instructions").String(); got != "You are a helpful assistant." {
+		t.Fatalf("instructions = %q, want default instructions; body=%s", got, body)
 	}
 	if got := gjson.GetBytes(body, "tools").IsArray(); !got {
 		t.Fatalf("tools should default to an empty array: %s", body)

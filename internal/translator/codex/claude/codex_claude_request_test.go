@@ -12,8 +12,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 	tests := []struct {
 		name             string
 		inputJSON        string
-		wantHasDeveloper bool
-		wantTexts        []string
+		wantInstructions string
 	}{
 		{
 			name: "No system field",
@@ -21,7 +20,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 				"model": "claude-3-opus",
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasDeveloper: false,
+			wantInstructions: "You are a helpful assistant.",
 		},
 		{
 			name: "Empty string system field",
@@ -30,7 +29,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 				"system": "",
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasDeveloper: false,
+			wantInstructions: "You are a helpful assistant.",
 		},
 		{
 			name: "String system field",
@@ -39,8 +38,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 				"system": "Be helpful",
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasDeveloper: true,
-			wantTexts:        []string{"Be helpful"},
+			wantInstructions: "Be helpful",
 		},
 		{
 			name: "Array system field with filtered billing header",
@@ -53,8 +51,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 				],
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasDeveloper: true,
-			wantTexts:        []string{"Block 1", "Block 2"},
+			wantInstructions: "Block 1\n\nBlock 2",
 		},
 	}
 
@@ -62,29 +59,13 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ConvertClaudeRequestToCodex("test-model", []byte(tt.inputJSON), false)
 			resultJSON := gjson.ParseBytes(result)
+
+			if got := resultJSON.Get("instructions").String(); got != tt.wantInstructions {
+				t.Fatalf("instructions = %q, want %q. Output: %s", got, tt.wantInstructions, string(result))
+			}
 			inputs := resultJSON.Get("input").Array()
-
-			hasDeveloper := len(inputs) > 0 && inputs[0].Get("role").String() == "developer"
-			if hasDeveloper != tt.wantHasDeveloper {
-				t.Fatalf("got hasDeveloper = %v, want %v. Output: %s", hasDeveloper, tt.wantHasDeveloper, resultJSON.Get("input").Raw)
-			}
-
-			if !tt.wantHasDeveloper {
-				return
-			}
-
-			content := inputs[0].Get("content").Array()
-			if len(content) != len(tt.wantTexts) {
-				t.Fatalf("got %d system content items, want %d. Content: %s", len(content), len(tt.wantTexts), inputs[0].Get("content").Raw)
-			}
-
-			for i, wantText := range tt.wantTexts {
-				if gotType := content[i].Get("type").String(); gotType != "input_text" {
-					t.Fatalf("content[%d] type = %q, want %q", i, gotType, "input_text")
-				}
-				if gotText := content[i].Get("text").String(); gotText != wantText {
-					t.Fatalf("content[%d] text = %q, want %q", i, gotText, wantText)
-				}
+			if len(inputs) > 0 && inputs[0].Get("role").String() == "developer" {
+				t.Fatalf("system instructions should not be duplicated as a developer input. Output: %s", resultJSON.Get("input").Raw)
 			}
 		})
 	}

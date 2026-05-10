@@ -1,3 +1,9 @@
+//go:build has_redis
+
+// Package redisstate provides a Redis-backed state store. Excluded from
+// the default binary via the `has_redis` build tag. The companion
+// store_stub.go provides a no-op implementation of the public surface when
+// the tag is absent so the rest of the codebase stays compilable.
 package redisstate
 
 import (

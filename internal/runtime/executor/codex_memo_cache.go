@@ -18,7 +18,12 @@ const (
 	codexFinalUpstreamBodyMemoMaxItem    = 1 << 20
 	codexPromptResolutionMemoMaxEntries  = 512
 	codexPromptResolutionMemoMaxBytes    = 8 << 20
-	codexPromptResolutionMemoMaxPayload  = 256 << 10
+	// codexPromptResolutionMemoMaxPayload caps the per-payload size considered
+	// for memoisation. Hashing and byte-comparing large payloads on every turn
+	// outweighs the hit rate because each turn typically carries fresh content.
+	// 32KB is the empirical sweet spot: small enough that hashing is cheap,
+	// large enough to catch the short-prompt fast-path cache used by the SDK.
+	codexPromptResolutionMemoMaxPayload = 32 << 10
 )
 
 var (
@@ -78,6 +83,12 @@ type codexFinalUpstreamBodyMemo struct {
 
 func (m *codexFinalUpstreamBodyMemo) get(baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
 	if m == nil || len(input) == 0 {
+		return nil
+	}
+	// Skip oversize inputs early; set() would reject them anyway (size check
+	// includes input+output but input alone exceeding the item cap is a
+	// dead-certain miss).
+	if len(input) > codexFinalUpstreamBodyMemoMaxItem {
 		return nil
 	}
 	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, input)
@@ -164,6 +175,11 @@ type codexPromptResolutionMemo struct {
 
 func (m *codexPromptResolutionMemo) get(from sdktranslator.Format, model string, scope string, executionSessionID string, payload []byte) (codexPromptCacheResolution, bool) {
 	if m == nil {
+		return codexPromptCacheResolution{}, false
+	}
+	// Skip oversize payloads early so we don't pay for hashing + map lookup on
+	// items that set() would have rejected anyway.
+	if len(payload) > codexPromptResolutionMemoMaxPayload {
 		return codexPromptCacheResolution{}, false
 	}
 	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)

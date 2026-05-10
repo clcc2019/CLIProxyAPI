@@ -1,3 +1,5 @@
+//go:build has_tui
+
 // Package tui provides a terminal-based management interface for CLIProxyAPI.
 package tui
 

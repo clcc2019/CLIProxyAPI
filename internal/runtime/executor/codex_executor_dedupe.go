@@ -179,7 +179,16 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 	}
 
 	flightKey := promptResolutionMemoInflightKey(from, req.Model, scope, executionSessionID, req.Payload)
-	resolution, _, _, err := globalCodexPromptResolutionGroup.Do(context.Background(), flightKey, func() (codexPromptCacheResolution, error) {
+	// Use WithoutCancel so the singleflight work keeps its tracing/request-id
+	// context (used inside the callback for logging) but is not cancelled when
+	// one particular caller's ctx is cancelled. Several callers may share this
+	// flight; honouring any single caller's Done() would needlessly abort
+	// useful work for the others.
+	flightCtx := context.WithoutCancel(ctx)
+	resolution, _, _, err := globalCodexPromptResolutionGroup.Do(flightCtx, flightKey, func() (codexPromptCacheResolution, error) {
+		if err := flightCtx.Err(); err != nil {
+			return codexPromptCacheResolution{}, err
+		}
 		if cached, ok := globalCodexPromptResolutionMemo.get(from, req.Model, scope, executionSessionID, req.Payload); ok {
 			return cached, nil
 		}
@@ -595,6 +604,12 @@ func (e *CodexExecutor) codexResponseDedupeScope(auth *cliproxyauth.Auth) string
 	return strings.Join(parts, ",")
 }
 
+// clone produces a defensive copy suitable for the request-specific caller.
+// The large payload fields (body, completedData) are treated as read-only and
+// shared across shared callers: downstream translators invoke sjson/gjson which
+// never mutate the input buffer in place, so cloning MBs per shared caller is
+// pure overhead. errorBody and headers are still defensive-copied because
+// errorBody is small and response headers are mutable by design.
 func (result codexNonStreamHTTPResult) clone(needResponseHeaders bool) codexNonStreamHTTPResult {
 	cloned := codexNonStreamHTTPResult{
 		statusCode:  result.statusCode,
@@ -605,12 +620,12 @@ func (result codexNonStreamHTTPResult) clone(needResponseHeaders bool) codexNonS
 	} else {
 		cloned.headers = result.headers
 	}
-	if len(result.body) > 0 {
-		cloned.body = bytes.Clone(result.body)
-	}
-	if len(result.completedData) > 0 {
-		cloned.completedData = bytes.Clone(result.completedData)
-	}
+	// body and completedData can be large (up to MBs for streamed aggregates).
+	// Callers must not write through these slices; doing so would corrupt the
+	// shared memo entry. Go's typical json/gjson/sjson code paths already
+	// allocate new buffers on modification, so this assumption is safe here.
+	cloned.body = result.body
+	cloned.completedData = result.completedData
 	if len(result.errorBody) > 0 {
 		cloned.errorBody = bytes.Clone(result.errorBody)
 	}

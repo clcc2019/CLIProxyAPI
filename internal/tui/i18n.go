@@ -1,3 +1,5 @@
+//go:build has_tui
+
 package tui
 
 // i18n provides a simple internationalization system for the TUI.

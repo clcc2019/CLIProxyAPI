@@ -29,6 +29,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const kiroModelCacheTTL = 6 * time.Hour
+
+type kiroModelCacheEntry struct {
+	models    []*ModelInfo
+	fetchedAt time.Time
+}
+
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
 // and integration with various AI service providers.
@@ -101,6 +108,11 @@ type Service struct {
 
 	// redisState owns the optional Redis client used for durable runtime state.
 	redisState *redisstate.Store
+
+	// kiroModelCache keeps the last successful dynamic catalog per auth so a
+	// transient listAvailableModels failure does not unregister a working auth.
+	kiroModelCacheMu sync.RWMutex
+	kiroModelCache   map[string]kiroModelCacheEntry
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -1375,21 +1387,78 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 		}
 	}
 	if err != nil {
+		if cached, ok := s.cachedKiroModels(a); ok {
+			log.Warnf("kiro: failed to fetch dynamic model list: %v; using cached catalog with %d models", err, len(cached))
+			return cached
+		}
 		log.Warnf("kiro: failed to fetch dynamic model list: %v; no models will be registered for this auth", err)
 		return nil
 	}
 	if len(apiModels) == 0 {
+		if cached, ok := s.cachedKiroModels(a); ok {
+			log.Warnf("kiro: dynamic model list was empty; using cached catalog with %d models", len(cached))
+			return cached
+		}
 		log.Debug("kiro: dynamic model list was empty; no models will be registered for this auth")
 		return nil
 	}
 
 	dynamicModels := convertKiroAPIModels(apiModels)
 	if len(dynamicModels) == 0 {
+		if cached, ok := s.cachedKiroModels(a); ok {
+			log.Warnf("kiro: dynamic model list converted to zero models; using cached catalog with %d models", len(cached))
+			return cached
+		}
 		return nil
 	}
+	s.storeKiroModelCache(a, dynamicModels)
 	s.persistKiroResolvedProfileArn(ctx, a, tokenData.ProfileArn)
 	log.Infof("kiro: fetched %d dynamic models from API", len(dynamicModels))
 	return dynamicModels
+}
+
+func (s *Service) cachedKiroModels(a *coreauth.Auth) ([]*ModelInfo, bool) {
+	if s == nil || a == nil || strings.TrimSpace(a.ID) == "" {
+		return nil, false
+	}
+	s.kiroModelCacheMu.RLock()
+	entry, ok := s.kiroModelCache[a.ID]
+	s.kiroModelCacheMu.RUnlock()
+	if !ok || len(entry.models) == 0 {
+		return nil, false
+	}
+	if time.Since(entry.fetchedAt) > kiroModelCacheTTL {
+		return nil, false
+	}
+	return cloneKiroModelInfos(entry.models), true
+}
+
+func (s *Service) storeKiroModelCache(a *coreauth.Auth, models []*ModelInfo) {
+	if s == nil || a == nil || strings.TrimSpace(a.ID) == "" || len(models) == 0 {
+		return
+	}
+	s.kiroModelCacheMu.Lock()
+	if s.kiroModelCache == nil {
+		s.kiroModelCache = make(map[string]kiroModelCacheEntry)
+	}
+	s.kiroModelCache[a.ID] = kiroModelCacheEntry{
+		models:    cloneKiroModelInfos(models),
+		fetchedAt: time.Now(),
+	}
+	s.kiroModelCacheMu.Unlock()
+}
+
+func cloneKiroModelInfos(models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if cloned := cloneKiroModelInfo(model); cloned != nil {
+			out = append(out, cloned)
+		}
+	}
+	return out
 }
 
 func (s *Service) refreshKiroAuthForModelFetch(ctx context.Context, auth *coreauth.Auth, force bool) (*coreauth.Auth, error) {

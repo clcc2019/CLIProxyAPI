@@ -69,7 +69,7 @@ func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses
 		if len(toolUses) > 0 {
 			finishReason = "tool_calls"
 		}
-		log.Debugf("kiro-openai: buildOpenAIResponse using fallback finish_reason: %s", finishReason)
+		log.Debugf("kiro: buildOpenAIResponse using fallback finish_reason: %s", finishReason)
 	}
 
 	total := usageInfo.TotalTokens

@@ -12,7 +12,20 @@ ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
+# Include all optional backends (Postgres / Minio / Git / Redis / TUI) in
+# Docker images by default. Operators who want smaller images can override
+# BUILD_TAGS at build time, e.g.:
+#   docker build --build-arg BUILD_TAGS=has_postgres
+#   docker build --build-arg BUILD_TAGS=             # truly minimal
+# -trimpath strips the absolute build path for reproducibility; -s -w drop
+# the DWARF + symbol table (pclntab for stack traces is kept).
+ARG BUILD_TAGS=has_postgres,has_minio,has_git,has_redis,has_tui
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -tags="${BUILD_TAGS}" \
+    -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" \
+    -o ./CLIProxyAPI ./cmd/server/
 
 FROM bitnami/minideb:latest
 

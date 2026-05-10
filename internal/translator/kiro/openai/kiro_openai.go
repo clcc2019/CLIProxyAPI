@@ -383,5 +383,5 @@ func ConvertClaudeToolUseToOpenAI(toolUseID, toolName string, input map[string]i
 
 // LogStreamEvent logs a streaming event for debugging
 func LogStreamEvent(eventType, data string) {
-	log.Debugf("kiro-openai: stream event type=%s, data_len=%d", eventType, len(data))
+	log.Debugf("kiro: stream event type=%s, data_len=%d", eventType, len(data))
 }

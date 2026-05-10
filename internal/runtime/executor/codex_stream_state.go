@@ -34,6 +34,10 @@ type codexStreamCompletionState struct {
 	outputItemsByIndex  map[int64][]byte
 	outputItemsFallback [][]byte
 	functionCallsByItem map[string]*codexStreamFunctionCallState
+	// functionCallsByIndex indexes the same states by OutputIndex so that
+	// events missing item_id can be resolved in O(1) instead of scanning
+	// the entire map. Only populated when OutputIndex >= 0.
+	functionCallsByIndex map[int64]*codexStreamFunctionCallState
 }
 
 type codexCompletedStreamEvent struct {
@@ -43,8 +47,9 @@ type codexCompletedStreamEvent struct {
 
 func newCodexStreamCompletionState() *codexStreamCompletionState {
 	return &codexStreamCompletionState{
-		outputItemsByIndex:  make(map[int64][]byte),
-		functionCallsByItem: make(map[string]*codexStreamFunctionCallState),
+		outputItemsByIndex:   make(map[int64][]byte),
+		functionCallsByItem:  make(map[string]*codexStreamFunctionCallState),
+		functionCallsByIndex: make(map[int64]*codexStreamFunctionCallState),
 	}
 }
 
@@ -94,6 +99,14 @@ func (s *codexStreamCompletionState) functionCallByItem(itemID string, outputInd
 	if outputIndex < 0 {
 		return nil
 	}
+	if s.functionCallsByIndex != nil {
+		if state, ok := s.functionCallsByIndex[outputIndex]; ok && state != nil {
+			return state
+		}
+	}
+	// Defensive fallback: the index map should be authoritative, but if it
+	// was somehow not populated (e.g. older instances before this field
+	// existed) fall back to a linear scan so correctness is preserved.
 	for _, state := range s.functionCallsByItem {
 		if state != nil && state.OutputIndex == outputIndex {
 			return state
@@ -169,6 +182,12 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 				OutputIndex: outputIndex,
 			}
 			s.functionCallsByItem[itemID] = state
+			if outputIndex >= 0 {
+				if s.functionCallsByIndex == nil {
+					s.functionCallsByIndex = make(map[int64]*codexStreamFunctionCallState)
+				}
+				s.functionCallsByIndex[outputIndex] = state
+			}
 		}
 		if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
 			state.CallID = callID

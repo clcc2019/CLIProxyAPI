@@ -667,8 +667,8 @@ func TestPrepareCodexHTTPCallNormalizesFinalUpstreamBody(t *testing.T) {
 	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_1" {
 		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, body)
 	}
-	if gjson.GetBytes(body, "instructions").Exists() {
-		t.Fatalf("instructions should be omitted when empty: %s", body)
+	if got := gjson.GetBytes(body, "instructions").String(); got != "You are a helpful assistant." {
+		t.Fatalf("instructions = %q, want default instructions; body=%s", got, body)
 	}
 	if got := gjson.GetBytes(body, "tools").IsArray(); !got {
 		t.Fatalf("tools should default to an empty array: %s", body)

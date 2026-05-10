@@ -1,3 +1,5 @@
+//go:build has_tui
+
 package tui
 
 import (
@@ -23,6 +25,7 @@ var oauthProviders = []oauthProvider{
 	{"Claude (Anthropic)", "anthropic-auth-url", "🟧"},
 	{"Codex (OpenAI)", "codex-auth-url", "🟩"},
 	{"Antigravity", "antigravity-auth-url", "🟪"},
+	{"Kiro", "kiro-auth-url", "⬡"},
 	{"Kimi", "kimi-auth-url", "🟫"},
 }
 
@@ -278,6 +281,8 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "codex"
 				case "antigravity-auth-url":
 					providerKey = "antigravity"
+				case "kiro-auth-url":
+					providerKey = "kiro"
 				case "kimi-auth-url":
 					providerKey = "kimi"
 				}

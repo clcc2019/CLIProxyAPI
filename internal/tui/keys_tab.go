@@ -1,3 +1,5 @@
+//go:build has_tui
+
 package tui
 
 import (

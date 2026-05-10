@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,11 @@ type CodexExecutor struct {
 	cfg            *config.Config
 	codexAuthCache sync.Map
 	responseDedupe helps.InFlightGroup[codexNonStreamHTTPResult]
+	// refreshDedupe serialises concurrent token refreshes per auth.ID. Without
+	// it multiple in-flight requests sharing an expired access_token would each
+	// call RefreshTokensWithRetry with the same refresh_token; OpenAI treats
+	// that as refresh_token reuse and invalidates the credential.
+	refreshDedupe helps.InFlightGroup[*codexauth.CodexTokenData]
 }
 
 func NewCodexExecutor(cfg *config.Config) *CodexExecutor { return &CodexExecutor{cfg: cfg} }
@@ -168,6 +174,9 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 }
 
 func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
@@ -241,11 +250,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		streamState := newCodexStreamCompletionState()
 		terminalFailure := false
 		emittedPayload := false
+		// pendingTerminalErr captures the terminal upstream error observed
+		// mid-stream (e.g. usage_limit_reached) so the downstream client is
+		// informed even when we had to stop reading after already sending
+		// partial payload chunks. Without this the client would treat a
+		// partially-delivered response as a successful completion.
+		var pendingTerminalErr error
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
-			if ctx == nil {
-				out <- chunk
-				return true
-			}
 			select {
 			case out <- chunk:
 				return true
@@ -254,8 +265,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
-			if ctx != nil && ctx.Err() != nil {
-				return ctx.Err()
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
@@ -267,6 +278,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if !emittedPayload {
 						return terminalErr
 					}
+					pendingTerminalErr = terminalErr
 					return errCodexStopStream
 				}
 				switch eventType {
@@ -325,6 +337,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			reporter.PublishFailure(ctx)
 			_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
+		} else if pendingTerminalErr != nil {
+			// The stream ended gracefully after we detected a terminal upstream
+			// event post-partial-payload. Surface the error to the downstream
+			// client so it can render a failure instead of treating the partial
+			// payload as a complete response.
+			helps.RecordAPIResponseError(ctx, e.cfg, pendingTerminalErr)
+			reporter.PublishFailure(ctx)
+			_ = send(cliproxyexecutor.StreamChunk{Err: pendingTerminalErr})
 		} else if terminalFailure {
 			reporter.PublishFailure(ctx)
 		}
@@ -352,9 +372,24 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		return auth, nil
 	}
 	svc := e.codexAuthService(auth)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	// Deduplicate concurrent refreshes for the same auth. OpenAI returns
+	// refresh_token_reused once a refresh_token has been exchanged, which
+	// invalidates the entire credential — a race between two requests racing
+	// through Refresh would otherwise kill the auth.
+	flightKey := "codex-refresh|" + strings.TrimSpace(auth.ID)
+	if flightKey == "codex-refresh|" {
+		// Fall back to payload-derived key when the auth carries no ID so
+		// per-credential deduplication still applies.
+		flightKey = "codex-refresh|" + refreshToken
+	}
+	td, _, _, err := e.refreshDedupe.Do(ctx, flightKey, func() (*codexauth.CodexTokenData, error) {
+		return svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	})
 	if err != nil {
 		return nil, err
+	}
+	if td == nil {
+		return nil, statusErr{code: 500, msg: "codex executor: refresh returned nil token data"}
 	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
@@ -378,18 +413,40 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 
 func (e *CodexExecutor) codexAuthService(auth *cliproxyauth.Auth) *codexauth.CodexAuth {
 	proxyURL := e.codexAuthProxyURL(auth)
-	if cached, ok := e.codexAuthCache.Load(proxyURL); ok {
+	// Composite key: proxyURL plus a fingerprint of env-driven CA configuration.
+	// If CODEX_CA_CERTIFICATE or SSL_CERT_FILE changes at runtime, cached
+	// transports would otherwise silently keep the stale root pool. The env
+	// is read lazily so the overhead is a single hash of a usually-empty value.
+	cacheKey := proxyURL + "\x00" + os.Getenv("CODEX_CA_CERTIFICATE") + "\x00" + os.Getenv("SSL_CERT_FILE")
+	if cached, ok := e.codexAuthCache.Load(cacheKey); ok {
 		if svc, okSvc := cached.(*codexauth.CodexAuth); okSvc {
 			return svc
 		}
 	}
 
 	svc := codexauth.NewCodexAuthWithProxyURL(e.cfg, proxyURL)
-	actual, _ := e.codexAuthCache.LoadOrStore(proxyURL, svc)
+	actual, _ := e.codexAuthCache.LoadOrStore(cacheKey, svc)
 	if cached, ok := actual.(*codexauth.CodexAuth); ok {
 		return cached
 	}
 	return svc
+}
+
+// ResetCodexAuthCache clears the internal CodexAuth cache. Call this when the
+// runtime configuration (proxy settings, SDK headers) is hot-reloaded so the
+// next request reconstructs transports against the new configuration. It is
+// safe to call concurrently with in-flight requests; the old transports remain
+// valid until their referenced goroutines complete.
+func (e *CodexExecutor) ResetCodexAuthCache() {
+	if e == nil {
+		return
+	}
+	// sync.Map has no Clear() pre-Go 1.23; range+delete preserves zero-value
+	// semantics for readers racing against the reset.
+	e.codexAuthCache.Range(func(k, _ any) bool {
+		e.codexAuthCache.Delete(k)
+		return true
+	})
 }
 
 func (e *CodexExecutor) codexAuthProxyURL(auth *cliproxyauth.Auth) string {

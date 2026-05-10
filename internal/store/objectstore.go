@@ -1,3 +1,5 @@
+//go:build has_minio
+
 package store
 
 import (

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,10 +94,13 @@ type codexWebsocketSession struct {
 
 	writeMu sync.Mutex
 
-	activeMu     sync.Mutex
-	activeCh     chan codexWebsocketRead
-	activeDone   <-chan struct{}
-	activeCancel context.CancelFunc
+	activeMu   sync.Mutex
+	activeCh   chan codexWebsocketRead
+	activeDone <-chan struct{}
+	// activeClose closes the current activeDone channel exactly once. It is
+	// replaced on every setActive so callers holding a pre-activation copy of
+	// activeDone still observe cancellation of the old generation.
+	activeClose func()
 
 	readerConn *websocket.Conn
 
@@ -147,16 +151,18 @@ func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 		return
 	}
 	s.activeMu.Lock()
-	if s.activeCancel != nil {
-		s.activeCancel()
-		s.activeCancel = nil
+	if s.activeClose != nil {
+		s.activeClose()
+		s.activeClose = nil
 		s.activeDone = nil
 	}
 	s.activeCh = ch
 	if ch != nil {
-		activeCtx, activeCancel := context.WithCancel(context.Background())
-		s.activeDone = activeCtx.Done()
-		s.activeCancel = activeCancel
+		done := make(chan struct{})
+		s.activeDone = done
+		var closeOnce sync.Once
+		doneSlot := done
+		s.activeClose = func() { closeOnce.Do(func() { close(doneSlot) }) }
 	}
 	s.activeMu.Unlock()
 }
@@ -168,10 +174,10 @@ func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 	s.activeMu.Lock()
 	if s.activeCh == ch {
 		s.activeCh = nil
-		if s.activeCancel != nil {
-			s.activeCancel()
+		if s.activeClose != nil {
+			s.activeClose()
 		}
-		s.activeCancel = nil
+		s.activeClose = nil
 		s.activeDone = nil
 	}
 	s.activeMu.Unlock()
@@ -888,7 +894,37 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	}
 }
 
+// codexWebsocketDialerCache memoises constructed websocket.Dialer instances by
+// (proxyURL, envCAFingerprint) so that hot paths do not re-parse the proxy URL
+// and re-read the CA pool on every dial. The Dialer itself is immutable after
+// construction apart from its Proxy/NetDialContext funcs, both of which are
+// goroutine-safe to call concurrently.
+var codexWebsocketDialerCache sync.Map
+
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
+	proxyURL := ""
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	cacheKey := proxyURL + "\x00" + os.Getenv("CODEX_CA_CERTIFICATE") + "\x00" + os.Getenv("SSL_CERT_FILE")
+	if cached, ok := codexWebsocketDialerCache.Load(cacheKey); ok {
+		if dialer, okDialer := cached.(*websocket.Dialer); okDialer {
+			return dialer
+		}
+	}
+
+	dialer := buildCodexWebsocketDialer(proxyURL)
+	actual, _ := codexWebsocketDialerCache.LoadOrStore(cacheKey, dialer)
+	if cached, ok := actual.(*websocket.Dialer); ok {
+		return cached
+	}
+	return dialer
+}
+
+func buildCodexWebsocketDialer(proxyURL string) *websocket.Dialer {
 	dialer := &websocket.Dialer{
 		ReadBufferSize:    1024,
 		WriteBufferSize:   1024,
@@ -907,13 +943,6 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 		dialer.TLSClientConfig = tlsConfig
 	}
 
-	proxyURL := ""
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
 	if proxyURL == "" {
 		return dialer
 	}
@@ -1768,15 +1797,16 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 }
 
 func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
-	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL))
+	log.Debugf("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL))
 }
 
 func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
 	if err != nil {
+		// Errors remain at Info since they surface actionable failures.
 		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL), strings.TrimSpace(reason), err)
 		return
 	}
-	log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL), strings.TrimSpace(reason))
+	log.Debugf("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL), strings.TrimSpace(reason))
 }
 
 // CloseCodexWebsocketSessionsForAuthID closes all active Codex upstream websocket sessions

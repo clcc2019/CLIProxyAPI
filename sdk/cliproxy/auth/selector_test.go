@@ -545,6 +545,16 @@ func TestExtractSessionID(t *testing.T) {
 			want:    "conv:conv-camel",
 		},
 		{
+			name:    "top_level_session_id",
+			payload: `{"session_id":"sess-123"}`,
+			want:    "session:sess-123",
+		},
+		{
+			name:    "metadata_session_id",
+			payload: `{"metadata":{"session_id":"sess-meta-123"}}`,
+			want:    "session:sess-meta-123",
+		},
+		{
 			name:    "kiro_conversation_state_conversation_id",
 			payload: `{"conversationState":{"conversationId":"kiro-conv-123","agentContinuationId":"kiro-cont-456","currentMessage":{"userInputMessage":{"content":"hello"}}}}`,
 			want:    "conv:kiro-conv-123",
@@ -573,6 +583,17 @@ func TestExtractSessionID(t *testing.T) {
 				t.Errorf("extractSessionID() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExtractSessionID_ExecutionSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := ExtractSessionID(nil, nil, map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "exec-session-1",
+	})
+	if got != "exec:exec-session-1" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "exec:exec-session-1")
 	}
 }
 

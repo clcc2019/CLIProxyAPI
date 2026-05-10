@@ -166,6 +166,7 @@ type Manager struct {
 	runtimeStateStore RuntimeStateStore
 	executors         map[string]ProviderExecutor
 	selector          Selector
+	kiroSelector      Selector
 	hook              Hook
 	mu                sync.RWMutex
 	auths             map[string]*Auth
@@ -228,6 +229,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		store:            store,
 		executors:        make(map[string]ProviderExecutor),
 		selector:         selector,
+		kiroSelector:     newKiroSelector(time.Hour),
 		hook:             hook,
 		auths:            make(map[string]*Auth),
 		providerOffsets:  make(map[string]int),
@@ -240,6 +242,44 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.persistEnabled.Store(store != nil)
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+func newKiroSelector(ttl time.Duration) Selector {
+	return NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &FillFirstSelector{},
+		TTL:      ttl,
+	})
+}
+
+func sessionAffinityTTLFromConfig(cfg *internalconfig.Config) time.Duration {
+	ttl := time.Hour
+	if cfg == nil {
+		return ttl
+	}
+	if ttlStr := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttlStr != "" {
+		if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return ttl
+}
+
+func (m *Manager) refreshKiroSelector(cfg *internalconfig.Config) {
+	if m == nil {
+		return
+	}
+	next := newKiroSelector(sessionAffinityTTLFromConfig(cfg))
+	var previous Selector
+	m.mu.Lock()
+	previous = m.kiroSelector
+	m.kiroSelector = next
+	m.mu.Unlock()
+	if previous == nil || previous == next {
+		return
+	}
+	if stoppable, ok := previous.(StoppableSelector); ok {
+		stoppable.Stop()
+	}
 }
 
 func isBuiltInSelector(selector Selector) bool {
@@ -513,6 +553,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	m.refreshKiroSelector(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
@@ -911,6 +952,24 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 		return ""
 	}
 	return routeModel
+}
+
+func (m *Manager) selectorForProvider(provider string) Selector {
+	if m == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "kiro") {
+		m.mu.RLock()
+		selector := m.kiroSelector
+		m.mu.RUnlock()
+		if selector != nil {
+			return selector
+		}
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	return selector
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -1844,6 +1903,55 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 	default:
 		return ""
 	}
+}
+
+func selectedAuthIDFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.SelectedAuthMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch val := raw.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case []byte:
+		return strings.TrimSpace(string(val))
+	default:
+		return ""
+	}
+}
+
+func pinSelectedKiroAuthForProvider(provider string, opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	if !strings.EqualFold(strings.TrimSpace(provider), "kiro") {
+		return opts
+	}
+	return pinSelectedKiroAuth(opts)
+}
+
+func pinSelectedKiroAuthForProviders(providers []string, opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	if len(providers) != 1 || !strings.EqualFold(strings.TrimSpace(providers[0]), "kiro") {
+		return opts
+	}
+	return pinSelectedKiroAuth(opts)
+}
+
+func pinSelectedKiroAuth(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	if pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+		return opts
+	}
+	selected := selectedAuthIDFromMetadata(opts.Metadata)
+	if selected == "" {
+		return opts
+	}
+	metadata := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		metadata[key] = value
+	}
+	metadata[cliproxyexecutor.PinnedAuthMetadataKey] = selected
+	opts.Metadata = metadata
+	return opts
 }
 
 func disallowFreeAuthFromMetadata(meta map[string]any) bool {
@@ -3166,6 +3274,26 @@ func (m *Manager) useSchedulerFastPath() bool {
 	return isBuiltInSelector(m.selector)
 }
 
+func (m *Manager) useSchedulerFastPathForProvider(provider string) bool {
+	if m == nil || m.scheduler == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "kiro") {
+		return false
+	}
+	return isBuiltInSelector(m.selector)
+}
+
+func useSchedulerFastPathForProviders(m *Manager, providers []string) bool {
+	if m == nil || m.scheduler == nil {
+		return false
+	}
+	if len(providers) == 1 && strings.EqualFold(strings.TrimSpace(providers[0]), "kiro") {
+		return false
+	}
+	return isBuiltInSelector(m.selector)
+}
+
 func shouldRetrySchedulerPick(err error) bool {
 	if err == nil {
 		return false
@@ -3418,6 +3546,8 @@ func (m *Manager) singleLegacySelectionRequired(provider, routeModel string, tri
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	opts = pinSelectedKiroAuthForProvider(provider, opts)
+	selector := m.selectorForProvider(provider)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 
@@ -3464,7 +3594,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, provider, selectionArgForSelector(m.selector, model), opts, available)
+	selected, errPick := selector.Pick(ctx, provider, selectionArgForSelector(selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, errPick
@@ -3487,7 +3617,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
-	if !m.useSchedulerFastPath() {
+	opts = pinSelectedKiroAuthForProvider(provider, opts)
+	if !m.useSchedulerFastPathForProvider(provider) {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	model = strings.TrimSpace(model)
@@ -3531,6 +3662,11 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	opts = pinSelectedKiroAuthForProviders(providers, opts)
+	selector := m.selector
+	if len(providers) == 1 && strings.EqualFold(strings.TrimSpace(providers[0]), "kiro") {
+		selector = m.selectorForProvider("kiro")
+	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 
@@ -3594,7 +3730,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
+	selected, errPick := selector.Pick(ctx, "mixed", selectionArgForSelector(selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errPick
@@ -3623,7 +3759,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	if !m.useSchedulerFastPath() {
+	if !useSchedulerFastPathForProviders(m, providers) {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
@@ -3631,6 +3767,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	opts = pinSelectedKiroAuthForProviders(eligibleProviders, opts)
 	model = strings.TrimSpace(model)
 	if model != "" && m.mixedLegacySelectionRequired(eligibleProviders, model, tried) {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
@@ -4133,6 +4270,8 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 func (m *Manager) StopAutoRefresh() {
 	m.mu.Lock()
 	cancel := m.refreshCancel
+	mainSelector := m.selector
+	kiroSelector := m.kiroSelector
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
@@ -4141,8 +4280,13 @@ func (m *Manager) StopAutoRefresh() {
 	}
 	m.stopPersistLoop()
 	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
-	if stoppable, ok := m.selector.(StoppableSelector); ok {
+	if stoppable, ok := mainSelector.(StoppableSelector); ok {
 		stoppable.Stop()
+	}
+	if kiroSelector != nil && kiroSelector != mainSelector {
+		if stoppable, ok := kiroSelector.(StoppableSelector); ok {
+			stoppable.Stop()
+		}
 	}
 }
 

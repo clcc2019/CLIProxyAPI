@@ -123,6 +123,61 @@ func TestBuildAuthFileEntryExposesWebsockets(t *testing.T) {
 	}
 }
 
+func TestBuildAuthFileEntryExposesLastRefreshFromMetadata(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	lastRefresh := time.Date(2026, 5, 9, 13, 6, 47, 0, time.UTC)
+	auth := &coreauth.Auth{
+		ID:       "kiro-google.json",
+		FileName: "kiro-google.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"type":         "kiro",
+			"last_refresh": lastRefresh.Format(time.RFC3339),
+		},
+		Attributes: map[string]string{
+			"path": "/tmp/kiro-google.json",
+		},
+	}
+
+	entry := h.buildAuthFileEntry(auth)
+	got, ok := entry["last_refresh"].(time.Time)
+	if !ok || !got.Equal(lastRefresh) {
+		t.Fatalf("entry[last_refresh] = %#v, want %s", entry["last_refresh"], lastRefresh)
+	}
+}
+
+func TestBuildAuthFileEntryExposesRuntimeStateTimes(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	runtimeUpdatedAt := time.Date(2026, 5, 9, 13, 27, 26, 0, time.UTC)
+	runtimeSavedAt := time.Date(2026, 5, 9, 13, 27, 48, 0, time.UTC)
+	auth := &coreauth.Auth{
+		ID:       "kiro-google.json",
+		FileName: "kiro-google.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"type": "kiro",
+			"cliproxy_runtime_state": map[string]any{
+				"version":    1,
+				"updated_at": runtimeUpdatedAt.Format(time.RFC3339),
+				"saved_at":   runtimeSavedAt.Format(time.RFC3339),
+			},
+		},
+		Attributes: map[string]string{
+			"path": "/tmp/kiro-google.json",
+		},
+	}
+
+	entry := h.buildAuthFileEntry(auth)
+	gotUpdated, okUpdated := entry["runtime_updated_at"].(time.Time)
+	if !okUpdated || !gotUpdated.Equal(runtimeUpdatedAt) {
+		t.Fatalf("entry[runtime_updated_at] = %#v, want %s", entry["runtime_updated_at"], runtimeUpdatedAt)
+	}
+	gotSaved, okSaved := entry["runtime_saved_at"].(time.Time)
+	if !okSaved || !gotSaved.Equal(runtimeSavedAt) {
+		t.Fatalf("entry[runtime_saved_at] = %#v, want %s", entry["runtime_saved_at"], runtimeSavedAt)
+	}
+}
+
 func TestBuildAuthFileEntryExposesLastErrorAndModelStates(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	auth := &coreauth.Auth{

@@ -508,9 +508,9 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format) - highest priority
 //  2. X-Session-ID / Session_id / Conversation_id header
-//  3. metadata.user_id (non-Claude Code format)
-//  4. prompt_cache_key / metadata.prompt_cache_key
-//  5. conversation_id field
+//  3. execution session metadata / explicit body session identifiers
+//  4. metadata.user_id (non-Claude Code format)
+//  5. prompt_cache_key / metadata.prompt_cache_key
 //  6. Kiro native conversationState identifiers
 //  7. Hash-based fallback from messages
 //
@@ -639,11 +639,13 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 //  3. Session_id header (Codex)
 //  4. X-Amp-Thread-Id header (Amp CLI thread ID)
 //  5. X-Client-Request-Id header (PI)
-//  6. metadata.user_id (non-Claude Code format)
-//  7. prompt_cache_key / metadata.prompt_cache_key in request body
-//  8. conversation_id field in request body
-//  9. Kiro native conversationState identifiers
-//  10. Stable hash from first few messages content (fallback)
+//  6. Conversation_id header / execution session metadata
+//  7. explicit body session_id / thread_id fields
+//  8. metadata.user_id (non-Claude Code format)
+//  9. prompt_cache_key / metadata.prompt_cache_key in request body
+//  10. explicit conversation_id fields
+//  11. Kiro native conversationState identifiers
+//  12. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -706,17 +708,41 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
+	// 6. explicit execution session metadata (Responses websocket/session handlers)
+	if sessionID := metadataStringValue(metadata, cliproxyexecutor.ExecutionSessionMetadataKey); sessionID != "" {
+		return "exec:" + sessionID, ""
+	}
+
 	if len(payload) == 0 {
 		return "", ""
 	}
 
-	// 6. metadata.user_id (non-Claude Code format)
+	// 7. explicit body session/thread identifiers
+	for _, candidate := range []struct {
+		path   string
+		prefix string
+	}{
+		{path: "metadata.session_id", prefix: "session:"},
+		{path: "metadata.sessionId", prefix: "session:"},
+		{path: "session_id", prefix: "session:"},
+		{path: "sessionId", prefix: "session:"},
+		{path: "metadata.thread_id", prefix: "thread:"},
+		{path: "metadata.threadId", prefix: "thread:"},
+		{path: "thread_id", prefix: "thread:"},
+		{path: "threadId", prefix: "thread:"},
+	} {
+		if sessionID := strings.TrimSpace(gjson.GetBytes(payload, candidate.path).String()); sessionID != "" {
+			return candidate.prefix + sessionID, ""
+		}
+	}
+
+	// 8. metadata.user_id (non-Claude Code format)
 	userID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if userID != "" {
 		return "user:" + userID, ""
 	}
 
-	// 7. prompt_cache_key / metadata.prompt_cache_key
+	// 9. prompt_cache_key / metadata.prompt_cache_key
 	if promptCacheKey := gjson.GetBytes(payload, "prompt_cache_key").String(); promptCacheKey != "" {
 		return "cache:" + promptCacheKey, ""
 	}
@@ -724,15 +750,19 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "cache:" + promptCacheKey, ""
 	}
 
-	// 8. conversation_id field
-	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
-		return "conv:" + convID, ""
-	}
-	if convID := gjson.GetBytes(payload, "conversationId").String(); convID != "" {
-		return "conv:" + convID, ""
+	// 10. explicit conversation identifiers
+	for _, path := range []string{
+		"metadata.conversation_id",
+		"metadata.conversationId",
+		"conversation_id",
+		"conversationId",
+	} {
+		if convID := strings.TrimSpace(gjson.GetBytes(payload, path).String()); convID != "" {
+			return "conv:" + convID, ""
+		}
 	}
 
-	// 9. Kiro native conversationState identifiers
+	// 11. Kiro native conversationState identifiers
 	if convID := gjson.GetBytes(payload, "conversationState.conversationId").String(); convID != "" {
 		fallbackID := ""
 		if continuationID := gjson.GetBytes(payload, "conversationState.agentContinuationId").String(); continuationID != "" && continuationID != convID {
@@ -747,8 +777,26 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "kiro-cont:" + continuationID, ""
 	}
 
-	// 10. Hash-based fallback from message content
+	// 12. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
+}
+
+func metadataStringValue(metadata map[string]any, key string) string {
+	if len(metadata) == 0 || key == "" {
+		return ""
+	}
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
 }
 
 func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {

@@ -146,38 +146,11 @@ func ConvertClaudeRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // Supports thinking mode - when enabled, injects thinking tags into system prompt.
 // Returns the payload and a boolean indicating whether thinking mode was injected.
 func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, headers http.Header, metadata map[string]any) ([]byte, bool) {
-	// Extract max_tokens for potential use in inferenceConfig
-	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
-	const kiroMaxOutputTokens = 32000
-	var maxTokens int64
-	if mt := gjson.GetBytes(claudeBody, "max_tokens"); mt.Exists() {
-		maxTokens = mt.Int()
-		if maxTokens == -1 {
-			maxTokens = kiroMaxOutputTokens
-			log.Debugf("kiro: max_tokens=-1 converted to %d", kiroMaxOutputTokens)
-		}
-	}
+	// Inference knobs — `-1` is normalised to the Kiro hard cap by the helper.
+	params := kirocommon.ExtractInferenceParams(claudeBody)
 
-	// Extract temperature if specified
-	var temperature float64
-	var hasTemperature bool
-	if temp := gjson.GetBytes(claudeBody, "temperature"); temp.Exists() {
-		temperature = temp.Float()
-		hasTemperature = true
-	}
-
-	// Extract top_p if specified
-	var topP float64
-	var hasTopP bool
-	if tp := gjson.GetBytes(claudeBody, "top_p"); tp.Exists() {
-		topP = tp.Float()
-		hasTopP = true
-		log.Debugf("kiro: extracted top_p: %.2f", topP)
-	}
-
-	// Normalize origin value for Kiro API compatibility
-	origin = normalizeOrigin(origin)
-	log.Debugf("kiro: normalized origin value: %s", origin)
+	// Normalize origin value for Kiro API compatibility (quota routing).
+	origin = kirocommon.NormalizeOrigin(origin)
 
 	messages := gjson.GetBytes(claudeBody, "messages")
 
@@ -187,58 +160,36 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		tools = gjson.GetBytes(claudeBody, "tools")
 	}
 
-	// Extract system prompt
+	// Extract system prompt from Claude-style top-level `system` field.
 	systemPrompt := extractSystemPrompt(claudeBody)
 
 	// Check for thinking mode using the comprehensive IsThinkingEnabledWithHeaders function
 	// This supports Claude API format, OpenAI reasoning_effort, AMP/Cursor format, and Anthropic-Beta header
 	thinkingEnabled := IsThinkingEnabledWithHeaders(claudeBody, headers)
 
-	// Inject timestamp context
-	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
-	timestampContext := fmt.Sprintf("[Context: Current time is %s]", timestamp)
-	if systemPrompt != "" {
-		systemPrompt = timestampContext + "\n\n" + systemPrompt
-	} else {
-		systemPrompt = timestampContext
-	}
-	log.Debugf("kiro: injected timestamp context: %s", timestamp)
+	// Stage 1: wall-clock context — must come before any other injections
+	// so agentic loops consistently see the same timestamp format.
+	systemPrompt = kirocommon.InjectTimestampContext(systemPrompt, time.Now())
 
-	// Inject agentic optimization prompt for -agentic model variants
+	// Stage 2: agentic optimisation hint (model-variant-specific).
 	if isAgentic {
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		systemPrompt += kirocommon.KiroAgenticSystemPrompt
+		systemPrompt = kirocommon.AppendSystemHint(systemPrompt, kirocommon.KiroAgenticSystemPrompt)
 	}
 
-	// Handle tool_choice parameter - Kiro doesn't support it natively, so we inject system prompt hints
+	// Stage 3: tool_choice hint — Kiro doesn't accept tool_choice natively.
 	// Claude tool_choice values: {"type": "auto/any/tool", "name": "..."}
-	toolChoiceHint := extractClaudeToolChoiceHint(claudeBody)
-	if toolChoiceHint != "" {
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		systemPrompt += toolChoiceHint
-		log.Debugf("kiro: injected tool_choice hint into system prompt")
+	if hint := extractClaudeToolChoiceHint(claudeBody); hint != "" {
+		systemPrompt = kirocommon.AppendSystemHint(systemPrompt, hint)
 	}
 
-	// Convert Claude tools to Kiro format
+	// Convert Claude tools to Kiro format (needed before thinking hint so we
+	// can report has_tools in the log line).
 	kiroTools := convertClaudeToolsToKiro(tools)
 
-	// Thinking mode implementation:
-	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
-	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
-	// rather than inline <thinking> tags in assistantResponseEvent.
-	// We cap max_thinking_length to reserve space for tool outputs and prevent truncation.
+	// Stage 4: thinking mode — Kiro's official reasoning hint goes to the
+	// front so the model sees it before the user prompt.
 	if thinkingEnabled {
-		thinkingHint := `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>16000</max_thinking_length>`
-		if systemPrompt != "" {
-			systemPrompt = thinkingHint + "\n\n" + systemPrompt
-		} else {
-			systemPrompt = thinkingHint
-		}
+		systemPrompt = kirocommon.PrependThinkingHint(systemPrompt)
 		log.Infof("kiro: injected thinking prompt (official mode), has_tools: %v", len(kiroTools) > 0)
 	}
 
@@ -270,12 +221,8 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	if currentUserMsg != nil {
 		currentMessage = KiroCurrentMessage{UserInputMessage: *currentUserMsg}
 	} else {
-		fallbackContent := ""
-		if systemPrompt != "" {
-			fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
-		}
 		currentMessage = KiroCurrentMessage{UserInputMessage: KiroUserInputMessage{
-			Content: fallbackContent,
+			Content: kirocommon.BuildFallbackSystemPromptContent(systemPrompt),
 			ModelID: modelID,
 			Origin:  origin,
 		}}
@@ -284,16 +231,16 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Build inferenceConfig if we have any inference parameters
 	// Note: Kiro API doesn't actually use max_tokens for thinking budget
 	var inferenceConfig *KiroInferenceConfig
-	if maxTokens > 0 || hasTemperature || hasTopP {
+	if params.HasAnyInferenceConfig() {
 		inferenceConfig = &KiroInferenceConfig{}
-		if maxTokens > 0 {
-			inferenceConfig.MaxTokens = int(maxTokens)
+		if params.MaxTokens > 0 {
+			inferenceConfig.MaxTokens = int(params.MaxTokens)
 		}
-		if hasTemperature {
-			inferenceConfig.Temperature = temperature
+		if params.HasTemperature {
+			inferenceConfig.Temperature = params.Temperature
 		}
-		if hasTopP {
-			inferenceConfig.TopP = topP
+		if params.HasTopP {
+			inferenceConfig.TopP = params.TopP
 		}
 	}
 
@@ -330,20 +277,11 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	return result, thinkingEnabled
 }
 
-// normalizeOrigin normalizes origin value for Kiro API compatibility
+// normalizeOrigin was inlined into kirocommon.NormalizeOrigin. The wrapper is
+// kept as a thin alias so downstream callers (tests, other packages) that
+// reach into this package still compile.
 func normalizeOrigin(origin string) string {
-	switch origin {
-	case "KIRO_CLI":
-		return "CLI"
-	case "KIRO_AI_EDITOR":
-		return "AI_EDITOR"
-	case "AMAZON_Q":
-		return "CLI"
-	case "KIRO_IDE":
-		return "AI_EDITOR"
-	default:
-		return origin
-	}
+	return kirocommon.NormalizeOrigin(origin)
 }
 
 // extractMetadataFromMessages extracts metadata from messages[].additional_kwargs (LangChain format).

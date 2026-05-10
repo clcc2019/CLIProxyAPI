@@ -29,6 +29,25 @@ type ConvertCliToOpenAIParams struct {
 	HasReceivedArgumentsDelta bool
 	HasToolCallAnnounced      bool
 	LastImageHashByItemID     map[string][32]byte
+	// reverseNameMap caches the short→original tool name mapping derived from
+	// the original OpenAI request. See the Claude translator for the same
+	// rationale; the tools array is otherwise parsed on every tool-call event.
+	reverseNameMap    map[string]string
+	reverseNameMapSet bool
+}
+
+// reverseToolNameMap returns the short→original tool name mapping for the
+// current stream, building it lazily from originalRequestRawJSON on first use.
+func (p *ConvertCliToOpenAIParams) reverseToolNameMap(originalRequestRawJSON []byte) map[string]string {
+	if p == nil {
+		return nil
+	}
+	if p.reverseNameMapSet {
+		return p.reverseNameMap
+	}
+	p.reverseNameMap = buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
+	p.reverseNameMapSet = true
+	return p.reverseNameMap
 }
 
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
@@ -184,7 +203,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 		// Restore original tool name if it was shortened.
 		name := itemResult.Get("name").String()
-		rev := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
+		rev := (*param).(*ConvertCliToOpenAIParams).reverseToolNameMap(originalRequestRawJSON)
 		if orig, ok := rev[name]; ok {
 			name = orig
 		}
@@ -283,7 +302,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 		// Restore original tool name if it was shortened.
 		name := itemResult.Get("name").String()
-		rev := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
+		rev := (*param).(*ConvertCliToOpenAIParams).reverseToolNameMap(originalRequestRawJSON)
 		if orig, ok := rev[name]; ok {
 			name = orig
 		}

@@ -10,11 +10,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -43,6 +46,21 @@ func TestBuildKiroPayloadForOpenAI(t *testing.T) {
 	}
 	if content, _ := userInput["content"].(string); content == "" {
 		t.Fatal("expected non-empty current message content")
+	}
+}
+
+func TestKiroUsageRequestPayloadPrefersActualGeneratePayload(t *testing.T) {
+	prepared := &kiroPreparedRequest{
+		translated:   []byte(`{"messages":[{"role":"user","content":"intermediate"}]}`),
+		firstPayload: []byte(`{"conversationState":{"currentMessage":{"userInputMessage":{"content":"first"}}}}`),
+	}
+	actual := []byte(`{"conversationState":{"currentMessage":{"userInputMessage":{"content":"actual"}}}}`)
+
+	if got := string(kiroUsageRequestPayload(prepared, actual)); got != string(actual) {
+		t.Fatalf("payload = %s, want actual generate payload", got)
+	}
+	if got := string(kiroUsageRequestPayload(prepared, nil)); got != string(prepared.firstPayload) {
+		t.Fatalf("fallback payload = %s, want firstPayload", got)
 	}
 }
 
@@ -582,7 +600,14 @@ func bufioNewReader(data []byte) *bufio.Reader {
 }
 
 func TestKiroRefreshUsesSocialEndpointWithoutClientCredentials(t *testing.T) {
-	testKiroRefreshUsesSocialEndpoint(t, map[string]any{})
+	testKiroRefreshUsesSocialEndpoint(t, map[string]any{
+		"client_id":      "",
+		"client_secret":  "",
+		"client_id_hash": "",
+		"email":          "",
+		"region":         "",
+		"start_url":      "",
+	})
 }
 
 func TestKiroRefreshUsesSocialEndpointForGoogleTokenWithClientCredentials(t *testing.T) {
@@ -692,6 +717,13 @@ func testKiroRefreshUsesSocialEndpoint(t *testing.T, extraMetadata map[string]an
 		updated.NextRefreshAfter.After(time.Now().Add(time.Minute+time.Second)) {
 		t.Fatalf("NextRefreshAfter = %s, want 1 minute from now", updated.NextRefreshAfter)
 	}
+	for key, value := range extraMetadata {
+		if raw, ok := value.(string); ok && strings.TrimSpace(raw) == "" {
+			if _, exists := updated.Metadata[key]; exists {
+				t.Fatalf("empty metadata key %q should be removed after refresh: %#v", key, updated.Metadata[key])
+			}
+		}
+	}
 }
 
 func TestKiroRefreshUsesSSOGrantTypeForBuilderID(t *testing.T) {
@@ -747,6 +779,41 @@ func TestKiroRefreshUsesSSOGrantTypeForBuilderID(t *testing.T) {
 	}
 	if got := updated.Metadata["refresh_token"]; got != "new-sso-refresh" {
 		t.Fatalf("refresh_token = %v, want new-sso-refresh", got)
+	}
+}
+
+func TestKiroSSORefreshRejectsMissingRefreshToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accessToken":"new-sso-access","expiresIn":3600}`))
+	}))
+	defer server.Close()
+
+	oldEndpoint := kiroSSOTokenEndpoint
+	kiroSSOTokenEndpoint = func(string) string { return server.URL }
+	defer func() { kiroSSOTokenEndpoint = oldEndpoint }()
+
+	auth := &cliproxyauth.Auth{
+		ID:       "kiro-builder-empty-refresh",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"type":          "kiro",
+			"auth_method":   "builder-id",
+			"provider":      "AWS",
+			"access_token":  "old-access",
+			"refresh_token": "old-refresh",
+			"client_id":     "client-id",
+			"client_secret": "client-secret",
+			"region":        "us-east-1",
+		},
+	}
+
+	_, err := NewKiroExecutor(nil).Refresh(context.Background(), auth)
+	if err == nil {
+		t.Fatal("Refresh() expected error when SSO refreshToken is missing, got nil")
+	}
+	if got, _ := auth.Metadata["refresh_token"].(string); got != "old-refresh" {
+		t.Fatalf("original refresh_token = %q, want old-refresh", got)
 	}
 }
 
@@ -981,11 +1048,10 @@ func TestClassifyKiroOAuthErrorClassification(t *testing.T) {
 	}
 }
 
-// TestKiroRefreshEmptyRefreshTokenNotSilentlyPreserved ensures that an
-// upstream 200 with a missing refreshToken no longer results in the old
-// refresh token being persisted alongside a new access token — a mixed
-// state that would fail on the next refresh.
-func TestKiroRefreshEmptyRefreshTokenNotSilentlyPreserved(t *testing.T) {
+// TestKiroSocialRefreshPreservesRefreshTokenWhenOmitted ensures the Kiro
+// social refresh endpoint can update access_token even when it does not
+// return a rotated refreshToken.
+func TestKiroSocialRefreshPreservesRefreshTokenWhenOmitted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"accessToken":"new-access","refreshToken":"","expiresIn":3600}`))
@@ -1007,18 +1073,109 @@ func TestKiroRefreshEmptyRefreshTokenNotSilentlyPreserved(t *testing.T) {
 		},
 	}
 
-	_, err := NewKiroExecutor(nil).Refresh(context.Background(), auth)
-	if err == nil {
-		t.Fatal("Refresh() expected error when refreshToken is missing, got nil")
+	updated, err := NewKiroExecutor(nil).Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
 	}
-	if isKiroRefreshPermanent(err) {
-		t.Fatalf("empty refreshToken should be transient, got permanent: %v", err)
+	if got := updated.Metadata["access_token"]; got != "new-access" {
+		t.Fatalf("access_token = %v, want new-access", got)
 	}
-	// Auth metadata must still point at the old refresh token so the caller
-	// can retry on the next cycle instead of locking the credential out.
+	if got := updated.Metadata["refresh_token"]; got != "existing-refresh" {
+		t.Fatalf("refresh_token metadata = %v, want existing-refresh", got)
+	}
 	if got, _ := auth.Metadata["refresh_token"].(string); got != "existing-refresh" {
-		t.Fatalf("refresh_token metadata = %q, want existing-refresh", got)
+		t.Fatalf("original auth refresh_token = %q, want existing-refresh", got)
 	}
+}
+
+func TestKiroAutoRefreshWritesBackSocialAccessTokenWithStableRefreshToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode refresh payload: %v", err)
+		}
+		if payload["refreshToken"] != "stable-refresh-token" {
+			t.Fatalf("refreshToken = %q, want stable-refresh-token", payload["refreshToken"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accessToken":"auto-new-access","expiresIn":3600}`))
+	}))
+	defer server.Close()
+
+	oldEndpoint := kiroSocialRefreshEndpoint
+	kiroSocialRefreshEndpoint = func(string) string { return server.URL }
+	defer func() { kiroSocialRefreshEndpoint = oldEndpoint }()
+
+	dir := t.TempDir()
+	fileName := "kiro-auto-social.json"
+	filePath := filepath.Join(dir, fileName)
+	now := time.Now().UTC()
+	raw := map[string]any{
+		"type":                     "kiro",
+		"auth_method":              "kiro-cli-social",
+		"provider":                 "google",
+		"client_id":                "",
+		"client_secret":            "",
+		"client_id_hash":           "",
+		"email":                    "",
+		"region":                   "",
+		"start_url":                "",
+		"profile_arn":              "",
+		"access_token":             "old-access",
+		"refresh_token":            "stable-refresh-token",
+		"expires_at":               now.Add(time.Hour).Format(time.RFC3339),
+		"last_refresh":             now.Add(-2 * time.Minute).Format(time.RFC3339),
+		"refresh_interval_seconds": 1,
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal auth: %v", err)
+	}
+	if err := os.WriteFile(filePath, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(dir)
+	manager := cliproxyauth.NewManager(store, nil, nil)
+	manager.RegisterExecutor(NewKiroExecutor(nil))
+	if err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !manager.StartAutoRefresh(context.Background(), 10*time.Millisecond) {
+		t.Fatal("expected Kiro provider-level auto-refresh to start")
+	}
+	defer manager.StopAutoRefresh()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		updatedRaw, errRead := os.ReadFile(filePath)
+		if errRead != nil {
+			t.Fatalf("read auth file: %v", errRead)
+		}
+		var updated map[string]any
+		if err := json.Unmarshal(updatedRaw, &updated); err != nil {
+			t.Fatalf("unmarshal updated auth file: %v", err)
+		}
+		if updated["access_token"] == "auto-new-access" {
+			if got := updated["refresh_token"]; got != "stable-refresh-token" {
+				t.Fatalf("refresh_token = %v, want stable-refresh-token", got)
+			}
+			if got, _ := updated["last_refresh"].(string); got == "" {
+				t.Fatalf("last_refresh was not persisted: %#v", updated["last_refresh"])
+			}
+			for _, key := range []string{"client_id", "client_secret", "client_id_hash", "email", "region", "start_url", "profile_arn"} {
+				if _, exists := updated[key]; exists {
+					t.Fatalf("empty metadata key %q should not be persisted: %#v", key, updated[key])
+				}
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	updatedRaw, _ := os.ReadFile(filePath)
+	t.Fatalf("auth file was not refreshed before deadline: %s", string(updatedRaw))
 }
 
 // TestShouldRefreshKiroWithSSO_Classification guards the routing table for

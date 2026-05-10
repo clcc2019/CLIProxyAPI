@@ -9,6 +9,9 @@ import (
 const (
 	refreshRetryBaseDelay  = 200 * time.Millisecond
 	refreshRetryJitterSpan = 100 * time.Millisecond
+	// refreshRetryMaxDelay caps the exponential backoff so callers passing a
+	// large maxRetries do not stall for tens of seconds on a single attempt.
+	refreshRetryMaxDelay = 10 * time.Second
 )
 
 var (
@@ -33,7 +36,16 @@ func exponentialRefreshRetryDelay(attempt int) time.Duration {
 	if attempt <= 0 {
 		return 0
 	}
-	return refreshRetryBaseDelay * time.Duration(1<<(attempt-1))
+	// Guard against overflow when attempt is large: 1<<62 already overflows
+	// time.Duration arithmetic; cap first.
+	if attempt >= 16 {
+		return refreshRetryMaxDelay
+	}
+	delay := refreshRetryBaseDelay * time.Duration(1<<(attempt-1))
+	if delay > refreshRetryMaxDelay {
+		return refreshRetryMaxDelay
+	}
+	return delay
 }
 
 func randomizedRefreshRetryJitter(span time.Duration) time.Duration {

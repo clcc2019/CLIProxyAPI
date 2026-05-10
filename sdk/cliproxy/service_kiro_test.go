@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
@@ -115,6 +116,46 @@ func TestConvertKiroAPIModelsAddsDynamicModel(t *testing.T) {
 	}
 	if !foundAlias {
 		t.Fatalf("expected converted dynamic alias model in %+v", converted)
+	}
+}
+
+func TestKiroModelCacheReturnsFreshClone(t *testing.T) {
+	service := &Service{}
+	auth := &coreauth.Auth{ID: "kiro-cache-auth", Provider: "kiro"}
+	models := []*ModelInfo{{
+		ID:            "claude-sonnet-4.7",
+		DisplayName:   "Kiro Claude Sonnet 4.7",
+		ContextLength: 262144,
+	}}
+
+	service.storeKiroModelCache(auth, models)
+	models[0].DisplayName = "mutated source"
+
+	cached, ok := service.cachedKiroModels(auth)
+	if !ok || len(cached) != 1 {
+		t.Fatalf("cachedKiroModels() ok=%v len=%d", ok, len(cached))
+	}
+	if cached[0].DisplayName != "Kiro Claude Sonnet 4.7" {
+		t.Fatalf("cache did not preserve stored clone: %+v", cached[0])
+	}
+	cached[0].DisplayName = "mutated result"
+	again, ok := service.cachedKiroModels(auth)
+	if !ok || again[0].DisplayName != "Kiro Claude Sonnet 4.7" {
+		t.Fatalf("cache returned shared model pointer: ok=%v models=%+v", ok, again)
+	}
+}
+
+func TestKiroModelCacheIgnoresExpiredEntry(t *testing.T) {
+	service := &Service{
+		kiroModelCache: map[string]kiroModelCacheEntry{
+			"kiro-cache-auth": {
+				models:    []*ModelInfo{{ID: "claude-sonnet-4.7"}},
+				fetchedAt: time.Now().Add(-kiroModelCacheTTL - time.Minute),
+			},
+		},
+	}
+	if cached, ok := service.cachedKiroModels(&coreauth.Auth{ID: "kiro-cache-auth"}); ok || len(cached) != 0 {
+		t.Fatalf("expected expired cache miss, got ok=%v models=%+v", ok, cached)
 	}
 }
 

@@ -162,6 +162,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	}
 
 	body = codexEnsureFinalUpstreamBodyDefaults(body, opts)
+	body = normalizeCodexFinalUpstreamTools(body)
 
 	edits := make([]helps.JSONEdit, 0, 3)
 	if model := gjson.GetBytes(body, "model"); !model.Exists() || model.Type != gjson.String || model.String() != baseModel {
@@ -177,6 +178,19 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 			}
 		} else if store.Type != gjson.False {
 			edits = append(edits, helps.SetRawJSONEdit("store", []byte("false")))
+		}
+	}
+	instructions := gjson.GetBytes(body, "instructions")
+	if !instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) == "") {
+		instructionText := codexDefaultInstructionsFromBody(body)
+		if !instructions.Exists() {
+			if updated, ok := codexAppendTopLevelStringField(body, "instructions", instructionText); ok {
+				body = updated
+			} else {
+				edits = append(edits, helps.SetJSONEdit("instructions", instructionText))
+			}
+		} else {
+			edits = append(edits, helps.SetJSONEdit("instructions", instructionText))
 		}
 	}
 	switch opts.streamMode {
@@ -209,4 +223,247 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	}
 	body = pruneCodexFinalUpstreamBody(body, opts)
 	return body
+}
+
+func normalizeCodexFinalUpstreamTools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if tools.IsArray() {
+		if rawTools, ok := normalizeCodexFinalUpstreamToolsArray(tools); ok {
+			if updated, err := helps.SetRawJSONBytes(body, "tools", rawTools); err == nil {
+				body = updated
+			}
+		}
+	}
+
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if toolChoice.Exists() {
+		if rawChoice, ok := normalizeCodexFinalUpstreamToolChoice(toolChoice); ok {
+			if updated, err := helps.SetRawJSONBytes(body, "tool_choice", rawChoice); err == nil {
+				body = updated
+			}
+		}
+	}
+	return body
+}
+
+func normalizeCodexFinalUpstreamToolsArray(tools gjson.Result) ([]byte, bool) {
+	if !tools.IsArray() {
+		return nil, false
+	}
+
+	items := make([][]byte, 0, len(tools.Array()))
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if rawTool, keep := normalizeCodexFinalUpstreamTool(tool); keep {
+			items = append(items, rawTool)
+		}
+		return true
+	})
+
+	return codexRawJSONArray(items), true
+}
+
+func normalizeCodexFinalUpstreamTool(tool gjson.Result) ([]byte, bool) {
+	if !tool.IsObject() {
+		return nil, false
+	}
+
+	toolType := normalizeCodexFinalUpstreamToolType(tool.Get("type").String())
+	if toolType == "" {
+		if strings.TrimSpace(tool.Get("name").String()) == "" && !tool.Get("input_schema").Exists() && !tool.Get("parameters").Exists() {
+			return nil, false
+		}
+		toolType = "function"
+	}
+
+	switch toolType {
+	case "function":
+		return normalizeCodexFinalUpstreamFunctionTool(tool)
+	case "web_search":
+		return normalizeCodexFinalUpstreamWebSearchTool(tool), true
+	case "image_generation":
+		raw := []byte(tool.Raw)
+		raw, _ = helps.SetJSONBytes(raw, "type", "image_generation")
+		return raw, true
+	default:
+		if strings.TrimSpace(tool.Get("name").String()) == "" {
+			return nil, false
+		}
+		return normalizeCodexFinalUpstreamFunctionTool(tool)
+	}
+}
+
+func normalizeCodexFinalUpstreamFunctionTool(tool gjson.Result) ([]byte, bool) {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		return nil, false
+	}
+
+	raw := []byte(tool.Raw)
+	raw, _ = helps.SetJSONBytes(raw, "type", "function")
+	raw, _ = helps.SetJSONBytes(raw, "name", name)
+	parameters := tool.Get("parameters")
+	if !parameters.Exists() || parameters.Type == gjson.Null {
+		if inputSchema := tool.Get("input_schema"); inputSchema.Exists() && inputSchema.Type != gjson.Null {
+			raw, _ = helps.SetRawJSONBytes(raw, "parameters", []byte(inputSchema.Raw))
+		} else {
+			raw, _ = helps.SetRawJSONBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))
+		}
+	}
+	if !tool.Get("strict").Exists() || tool.Get("strict").Type == gjson.Null {
+		raw, _ = helps.SetJSONBytes(raw, "strict", false)
+	}
+	raw, _ = helps.DeleteJSONBytes(raw, "input_schema")
+	raw, _ = helps.DeleteJSONBytes(raw, "parameters.$schema")
+	raw, _ = helps.DeleteJSONBytes(raw, "cache_control")
+	raw, _ = helps.DeleteJSONBytes(raw, "defer_loading")
+	return raw, true
+}
+
+func normalizeCodexFinalUpstreamWebSearchTool(tool gjson.Result) []byte {
+	raw := []byte(tool.Raw)
+	raw, _ = helps.SetJSONBytes(raw, "type", "web_search")
+	if allowedDomains := tool.Get("allowed_domains"); allowedDomains.Exists() && allowedDomains.IsArray() && !tool.Get("filters.allowed_domains").Exists() {
+		raw, _ = helps.SetRawJSONBytes(raw, "filters.allowed_domains", []byte(allowedDomains.Raw))
+	}
+	raw, _ = helps.DeleteJSONBytes(raw, "name")
+	raw, _ = helps.DeleteJSONBytes(raw, "input_schema")
+	raw, _ = helps.DeleteJSONBytes(raw, "allowed_domains")
+	raw, _ = helps.DeleteJSONBytes(raw, "blocked_domains")
+	raw, _ = helps.DeleteJSONBytes(raw, "cache_control")
+	raw, _ = helps.DeleteJSONBytes(raw, "defer_loading")
+	return raw
+}
+
+func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, bool) {
+	if toolChoice.Type == gjson.String {
+		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
+		case "auto", "":
+			return []byte(`"auto"`), true
+		case "none":
+			return []byte(`"none"`), true
+		case "required", "any":
+			return []byte(`"required"`), true
+		case "null":
+			return []byte(`"auto"`), true
+		}
+		return []byte(`"auto"`), true
+	}
+	if !toolChoice.IsObject() {
+		return nil, false
+	}
+
+	choiceType := strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String()))
+	switch choiceType {
+	case "", "null", "auto":
+		return []byte(`"auto"`), true
+	case "none":
+		return []byte(`"none"`), true
+	case "any", "required":
+		return []byte(`"required"`), true
+	case "tool", "function":
+		name := strings.TrimSpace(toolChoice.Get("name").String())
+		if name == "" {
+			name = strings.TrimSpace(toolChoice.Get("function.name").String())
+		}
+		if name == "" {
+			return []byte(`"auto"`), true
+		}
+		raw := []byte(`{"type":"function"}`)
+		raw, _ = helps.SetJSONBytes(raw, "name", name)
+		return raw, true
+	case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_20250305", "web_search_20260209":
+		return []byte(`{"type":"web_search"}`), true
+	case "image_generation":
+		return []byte(`{"type":"image_generation"}`), true
+	case "allowed_tools":
+		raw := []byte(toolChoice.Raw)
+		tools := toolChoice.Get("tools")
+		if tools.IsArray() {
+			if rawTools, ok := normalizeCodexFinalUpstreamToolsArray(tools); ok {
+				raw, _ = helps.SetRawJSONBytes(raw, "tools", rawTools)
+			}
+		}
+		return raw, true
+	default:
+		return []byte(`"auto"`), true
+	}
+}
+
+func normalizeCodexFinalUpstreamToolType(toolType string) string {
+	switch strings.ToLower(strings.TrimSpace(toolType)) {
+	case "", "none", "null":
+		return ""
+	case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_20250305", "web_search_20260209":
+		return "web_search"
+	default:
+		return strings.ToLower(strings.TrimSpace(toolType))
+	}
+}
+
+func codexRawJSONArray(items [][]byte) []byte {
+	if len(items) == 0 {
+		return []byte("[]")
+	}
+	var buf bytes.Buffer
+	buf.Grow(len(items) * 32)
+	buf.WriteByte('[')
+	for i, item := range items {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(bytes.TrimSpace(item))
+	}
+	buf.WriteByte(']')
+	return buf.Bytes()
+}
+
+func codexDefaultInstructionsFromBody(body []byte) string {
+	if instructions := collectCodexInputInstructionText(gjson.GetBytes(body, "input")); instructions != "" {
+		return instructions
+	}
+	return "You are a helpful assistant."
+}
+
+func collectCodexInputInstructionText(input gjson.Result) string {
+	if !input.IsArray() {
+		return ""
+	}
+
+	var parts []string
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() != "message" {
+			return true
+		}
+		role := item.Get("role").String()
+		if role != "developer" && role != "system" {
+			return true
+		}
+		appendCodexInstructionContentText(&parts, item.Get("content"))
+		return true
+	})
+	return strings.Join(parts, "\n\n")
+}
+
+func appendCodexInstructionContentText(parts *[]string, content gjson.Result) {
+	appendText := func(text string) {
+		text = strings.TrimSpace(text)
+		if text != "" {
+			*parts = append(*parts, text)
+		}
+	}
+
+	if content.Type == gjson.String {
+		appendText(content.String())
+		return
+	}
+	if !content.IsArray() {
+		return
+	}
+	content.ForEach(func(_, part gjson.Result) bool {
+		switch part.Get("type").String() {
+		case "input_text", "text":
+			appendText(part.Get("text").String())
+		}
+		return true
+	})
 }

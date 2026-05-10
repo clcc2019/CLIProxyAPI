@@ -141,38 +141,11 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // metadata parameter is kept for API compatibility but no longer used for thinking configuration.
 // Returns the payload and a boolean indicating whether thinking mode was injected.
 func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, headers http.Header, metadata map[string]any) ([]byte, bool) {
-	// Extract max_tokens for potential use in inferenceConfig
-	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
-	const kiroMaxOutputTokens = 32000
-	var maxTokens int64
-	if mt := gjson.GetBytes(openaiBody, "max_tokens"); mt.Exists() {
-		maxTokens = mt.Int()
-		if maxTokens == -1 {
-			maxTokens = kiroMaxOutputTokens
-			log.Debugf("kiro-openai: max_tokens=-1 converted to %d", kiroMaxOutputTokens)
-		}
-	}
+	// Inference knobs — `-1` is normalised to the Kiro hard cap by the helper.
+	params := kirocommon.ExtractInferenceParams(openaiBody)
 
-	// Extract temperature if specified
-	var temperature float64
-	var hasTemperature bool
-	if temp := gjson.GetBytes(openaiBody, "temperature"); temp.Exists() {
-		temperature = temp.Float()
-		hasTemperature = true
-	}
-
-	// Extract top_p if specified
-	var topP float64
-	var hasTopP bool
-	if tp := gjson.GetBytes(openaiBody, "top_p"); tp.Exists() {
-		topP = tp.Float()
-		hasTopP = true
-		log.Debugf("kiro-openai: extracted top_p: %.2f", topP)
-	}
-
-	// Normalize origin value for Kiro API compatibility
-	origin = normalizeOrigin(origin)
-	log.Debugf("kiro-openai: normalized origin value: %s", origin)
+	// Normalize origin value for Kiro API compatibility (quota routing).
+	origin = kirocommon.NormalizeOrigin(origin)
 
 	messages := gjson.GetBytes(openaiBody, "messages")
 
@@ -182,70 +155,43 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 		tools = gjson.GetBytes(openaiBody, "tools")
 	}
 
-	// Extract system prompt from messages
+	// Extract system prompt from OpenAI `messages[].role=="system"`.
 	systemPrompt := extractSystemPromptFromOpenAI(messages)
-
-	// Inject timestamp context
-	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
-	timestampContext := fmt.Sprintf("[Context: Current time is %s]", timestamp)
-	if systemPrompt != "" {
-		systemPrompt = timestampContext + "\n\n" + systemPrompt
-	} else {
-		systemPrompt = timestampContext
-	}
-	log.Debugf("kiro-openai: injected timestamp context: %s", timestamp)
-
-	// Inject agentic optimization prompt for -agentic model variants
-	if isAgentic {
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		systemPrompt += kirocommon.KiroAgenticSystemPrompt
-	}
-
-	// Handle tool_choice parameter - Kiro doesn't support it natively, so we inject system prompt hints
-	// OpenAI tool_choice values: "none", "auto", "required", or {"type":"function","function":{"name":"..."}}
-	toolChoiceHint := extractToolChoiceHint(openaiBody)
-	if toolChoiceHint != "" {
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		systemPrompt += toolChoiceHint
-		log.Debugf("kiro-openai: injected tool_choice hint into system prompt")
-	}
-
-	// Handle response_format parameter - Kiro doesn't support it natively, so we inject system prompt hints
-	// OpenAI response_format: {"type": "json_object"} or {"type": "json_schema", "json_schema": {...}}
-	responseFormatHint := extractResponseFormatHint(openaiBody)
-	if responseFormatHint != "" {
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		systemPrompt += responseFormatHint
-		log.Debugf("kiro-openai: injected response_format hint into system prompt")
-	}
 
 	// Check for thinking mode
 	// Supports OpenAI reasoning_effort parameter, model name hints, and Anthropic-Beta header
 	thinkingEnabled := checkThinkingModeFromOpenAIWithHeaders(openaiBody, headers)
 
-	// Convert OpenAI tools to Kiro format
+	// Stage 1: wall-clock context.
+	systemPrompt = kirocommon.InjectTimestampContext(systemPrompt, time.Now())
+
+	// Stage 2: agentic optimisation hint.
+	if isAgentic {
+		systemPrompt = kirocommon.AppendSystemHint(systemPrompt, kirocommon.KiroAgenticSystemPrompt)
+	}
+
+	// Stage 3a: tool_choice hint — OpenAI accepts "none", "auto", "required"
+	// or {"type":"function","function":{"name":"..."}}. Injected as system
+	// text since Kiro's API has no equivalent knob.
+	if hint := extractToolChoiceHint(openaiBody); hint != "" {
+		systemPrompt = kirocommon.AppendSystemHint(systemPrompt, hint)
+	}
+
+	// Stage 3b: response_format hint — OpenAI accepts
+	// {"type":"json_object"} or {"type":"json_schema", "json_schema":{...}}.
+	// Also handled via prompt injection.
+	if hint := extractResponseFormatHint(openaiBody); hint != "" {
+		systemPrompt = kirocommon.AppendSystemHint(systemPrompt, hint)
+	}
+
+	// Convert OpenAI tools to Kiro format (needed before thinking hint so we
+	// can report has_tools in the log line).
 	kiroTools := convertOpenAIToolsToKiro(tools)
 
-	// Thinking mode implementation:
-	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
-	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
-	// rather than inline <thinking> tags in assistantResponseEvent.
-	// Use a conservative thinking budget to reduce latency/cost spikes in long sessions.
+	// Stage 4: thinking mode.
 	if thinkingEnabled {
-		thinkingHint := `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>16000</max_thinking_length>`
-		if systemPrompt != "" {
-			systemPrompt = thinkingHint + "\n\n" + systemPrompt
-		} else {
-			systemPrompt = thinkingHint
-		}
-		log.Infof("kiro-openai: injected thinking prompt (official mode), has_tools: %v", len(kiroTools) > 0)
+		systemPrompt = kirocommon.PrependThinkingHint(systemPrompt)
+		log.Infof("kiro: injected thinking prompt (openai, official mode), has_tools: %v", len(kiroTools) > 0)
 	}
 
 	// Process messages and build history
@@ -276,12 +222,8 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 	if currentUserMsg != nil {
 		currentMessage = KiroCurrentMessage{UserInputMessage: *currentUserMsg}
 	} else {
-		fallbackContent := ""
-		if systemPrompt != "" {
-			fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
-		}
 		currentMessage = KiroCurrentMessage{UserInputMessage: KiroUserInputMessage{
-			Content: fallbackContent,
+			Content: kirocommon.BuildFallbackSystemPromptContent(systemPrompt),
 			ModelID: modelID,
 			Origin:  origin,
 		}}
@@ -290,16 +232,16 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 	// Build inferenceConfig if we have any inference parameters
 	// Note: Kiro API doesn't actually use max_tokens for thinking budget
 	var inferenceConfig *KiroInferenceConfig
-	if maxTokens > 0 || hasTemperature || hasTopP {
+	if params.HasAnyInferenceConfig() {
 		inferenceConfig = &KiroInferenceConfig{}
-		if maxTokens > 0 {
-			inferenceConfig.MaxTokens = int(maxTokens)
+		if params.MaxTokens > 0 {
+			inferenceConfig.MaxTokens = int(params.MaxTokens)
 		}
-		if hasTemperature {
-			inferenceConfig.Temperature = temperature
+		if params.HasTemperature {
+			inferenceConfig.Temperature = params.Temperature
 		}
-		if hasTopP {
-			inferenceConfig.TopP = topP
+		if params.HasTopP {
+			inferenceConfig.TopP = params.TopP
 		}
 	}
 
@@ -329,27 +271,17 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 
 	result, err := json.Marshal(payload)
 	if err != nil {
-		log.Debugf("kiro-openai: failed to marshal payload: %v", err)
+		log.Debugf("kiro: failed to marshal payload: %v", err)
 		return nil, false
 	}
 
 	return result, thinkingEnabled
 }
 
-// normalizeOrigin normalizes origin value for Kiro API compatibility
+// normalizeOrigin is a thin alias over kirocommon.NormalizeOrigin, kept to
+// avoid breaking any callers that still reach into this package directly.
 func normalizeOrigin(origin string) string {
-	switch origin {
-	case "KIRO_CLI":
-		return "CLI"
-	case "KIRO_AI_EDITOR":
-		return "AI_EDITOR"
-	case "AMAZON_Q":
-		return "CLI"
-	case "KIRO_IDE":
-		return "AI_EDITOR"
-	default:
-		return origin
-	}
+	return kirocommon.NormalizeOrigin(origin)
 }
 
 // extractMetadataFromMessages extracts metadata from messages[].additional_kwargs (LangChain format).
@@ -453,13 +385,13 @@ func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		originalName := name
 		name = shortenToolNameIfNeeded(name)
 		if name != originalName {
-			log.Debugf("kiro-openai: shortened tool name from '%s' to '%s'", originalName, name)
+			log.Debugf("kiro: shortened tool name from '%s' to '%s'", originalName, name)
 		}
 
 		// CRITICAL FIX: Kiro API requires non-empty description
 		if strings.TrimSpace(description) == "" {
 			description = fmt.Sprintf("Tool: %s", name)
-			log.Debugf("kiro-openai: tool '%s' has empty description, using default: %s", name, description)
+			log.Debugf("kiro: tool '%s' has empty description, using default: %s", name, description)
 		}
 
 		// Truncate long descriptions
@@ -621,7 +553,7 @@ func truncateHistoryIfNeeded(history []KiroHistoryMessage) []KiroHistoryMessage 
 		return history
 	}
 
-	log.Debugf("kiro-openai: truncating history from %d to %d messages", len(history), kiroMaxHistoryMessages)
+	log.Debugf("kiro: truncating history from %d to %d messages", len(history), kiroMaxHistoryMessages)
 	return history[len(history)-kiroMaxHistoryMessages:]
 }
 
@@ -654,7 +586,7 @@ func filterOrphanedToolResults(history []KiroHistoryMessage, currentToolResults 
 				filtered = append(filtered, tr)
 				continue
 			}
-			log.Debugf("kiro-openai: dropping orphaned tool_result in history[%d]: toolUseId=%s (no matching tool_use)", i, tr.ToolUseID)
+			log.Debugf("kiro: dropping orphaned tool_result in history[%d]: toolUseId=%s (no matching tool_use)", i, tr.ToolUseID)
 		}
 		ctx.ToolResults = filtered
 		if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
@@ -669,10 +601,10 @@ func filterOrphanedToolResults(history []KiroHistoryMessage, currentToolResults 
 				filtered = append(filtered, tr)
 				continue
 			}
-			log.Debugf("kiro-openai: dropping orphaned tool_result in currentMessage: toolUseId=%s (no matching tool_use)", tr.ToolUseID)
+			log.Debugf("kiro: dropping orphaned tool_result in currentMessage: toolUseId=%s (no matching tool_use)", tr.ToolUseID)
 		}
 		if len(filtered) != len(currentToolResults) {
-			log.Infof("kiro-openai: dropped %d orphaned tool_result(s) from currentMessage", len(currentToolResults)-len(filtered))
+			log.Infof("kiro: dropped %d orphaned tool_result(s) from currentMessage", len(currentToolResults)-len(filtered))
 		}
 		currentToolResults = filtered
 	}
@@ -770,7 +702,7 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 					Name:      toolName,
 					Input:     inputMap,
 				})
-				log.Debugf("kiro-openai: extracted tool_use from content array: %s", toolName)
+				log.Debugf("kiro: extracted tool_use from content array: %s", toolName)
 			}
 		}
 	}
@@ -805,7 +737,7 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 		} else {
 			finalContent = kirocommon.DefaultAssistantContent
 		}
-		log.Debugf("kiro-openai: assistant content was empty, using default: %s", finalContent)
+		log.Debugf("kiro: assistant content was empty, using default: %s", finalContent)
 	}
 
 	return KiroAssistantResponseMessage{
@@ -856,7 +788,7 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 		} else {
 			finalContent = "Continue"
 		}
-		log.Debugf("kiro-openai: content was empty, using default: %s", finalContent)
+		log.Debugf("kiro: content was empty, using default: %s", finalContent)
 	}
 
 	return finalContent
@@ -872,7 +804,7 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Header) bool {
 	// Check Anthropic-Beta header first (Claude CLI uses this)
 	if kiroclaude.IsThinkingEnabledFromHeader(headers) {
-		log.Debugf("kiro-openai: thinking mode enabled via Anthropic-Beta header")
+		log.Debugf("kiro: thinking mode enabled via Anthropic-Beta header")
 		return true
 	}
 
@@ -882,7 +814,7 @@ func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Head
 	if reasoningEffort.Exists() {
 		effort := reasoningEffort.String()
 		if effort != "" && effort != "none" {
-			log.Debugf("kiro-openai: thinking mode enabled via reasoning_effort: %s", effort)
+			log.Debugf("kiro: thinking mode enabled via reasoning_effort: %s", effort)
 			return true
 		}
 	}
@@ -899,7 +831,7 @@ func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Head
 			if endIdx >= 0 {
 				thinkingMode := bodyStr[startIdx : startIdx+endIdx]
 				if thinkingMode == "interleaved" || thinkingMode == "enabled" {
-					log.Debugf("kiro-openai: thinking mode enabled via AMP/Cursor format: %s", thinkingMode)
+					log.Debugf("kiro: thinking mode enabled via AMP/Cursor format: %s", thinkingMode)
 					return true
 				}
 			}
@@ -910,11 +842,11 @@ func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Head
 	model := gjson.GetBytes(openaiBody, "model").String()
 	modelLower := strings.ToLower(model)
 	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
-		log.Debugf("kiro-openai: thinking mode enabled via model name hint: %s", model)
+		log.Debugf("kiro: thinking mode enabled via model name hint: %s", model)
 		return true
 	}
 
-	log.Debugf("kiro-openai: no thinking mode detected in OpenAI request")
+	log.Debugf("kiro: no thinking mode detected in OpenAI request")
 	return false
 }
 
@@ -1009,7 +941,7 @@ func deduplicateToolResults(toolResults []KiroToolResult) []KiroToolResult {
 			seenIDs[tr.ToolUseID] = true
 			unique = append(unique, tr)
 		} else {
-			log.Debugf("kiro-openai: skipping duplicate toolResult: %s", tr.ToolUseID)
+			log.Debugf("kiro: skipping duplicate toolResult: %s", tr.ToolUseID)
 		}
 	}
 	return unique
