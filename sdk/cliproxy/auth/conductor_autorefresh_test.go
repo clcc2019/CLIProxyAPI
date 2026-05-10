@@ -422,6 +422,49 @@ func TestManager_CheckRefreshes_HonorsBatchSize(t *testing.T) {
 	}
 }
 
+func TestAutoRefreshLoop_HandleDueHonorsBatchSize(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &autoRefreshTestExecutor{provider: "test"}
+	manager.RegisterExecutor(executor)
+	enabled := true
+	manager.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			OAuthRefresh: internalconfig.OAuthRefreshConfig{
+				Enabled:   &enabled,
+				BatchSize: 2,
+			},
+		},
+	})
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		auth := &Auth{
+			ID:       "loop-batch-auth-" + strconv.Itoa(i),
+			Provider: "test",
+			Metadata: map[string]any{"refresh_interval_seconds": 3600},
+		}
+		if _, err := manager.Register(ctx, auth); err != nil {
+			t.Fatalf("register auth %d: %v", i, err)
+		}
+	}
+
+	loop := newAuthAutoRefreshLoop(manager, time.Hour, 1)
+	now := time.Now()
+	loop.rebuild(now)
+	loop.handleDue(ctx, now)
+
+	if got := len(loop.jobs); got != 2 {
+		t.Fatalf("queued refresh jobs = %d, want 2", got)
+	}
+	next, ok := loop.peek()
+	if !ok {
+		t.Fatal("expected remaining due auths to stay scheduled")
+	}
+	if !next.After(now) {
+		t.Fatalf("remaining due auths were not delayed: next=%s now=%s", next, now)
+	}
+}
+
 func waitForRefreshCalls(t *testing.T, executor *autoRefreshTestExecutor, want int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

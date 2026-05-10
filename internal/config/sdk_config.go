@@ -69,7 +69,8 @@ type OAuthRefreshConfig struct {
 	// Nil preserves the legacy default (enabled) once auto-refresh itself is enabled.
 	OnStartup *bool `yaml:"on-startup,omitempty" json:"on-startup,omitempty"`
 
-	// BatchSize limits how many due credentials may be refreshed in one scheduler pass.
+	// BatchSize limits how many due credentials may be dispatched in one scheduler pass.
+	// Additional due credentials are drained in short follow-up batches.
 	// <= 0 preserves the legacy behavior (no per-pass cap).
 	BatchSize int `yaml:"batch-size,omitempty" json:"batch-size,omitempty"`
 }

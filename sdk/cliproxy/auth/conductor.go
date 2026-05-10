@@ -68,13 +68,14 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
-	persistDebounceWindow = time.Second
+	refreshCheckInterval   = 5 * time.Second
+	refreshMaxConcurrency  = 16
+	refreshPendingBackoff  = time.Minute
+	refreshFailureBackoff  = 5 * time.Minute
+	refreshBatchDrainDelay = time.Second
+	quotaBackoffBase       = time.Second
+	quotaBackoffMax        = 30 * time.Minute
+	persistDebounceWindow  = time.Second
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -4258,9 +4259,6 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 		initialRebuildAt = initialRebuildAt.Add(interval)
 	}
 	loop.rebuild(initialRebuildAt)
-	if m.refreshOnStartupEnabled() {
-		m.checkRefreshes(ctx)
-	}
 	go loop.run(ctx)
 	return true
 }

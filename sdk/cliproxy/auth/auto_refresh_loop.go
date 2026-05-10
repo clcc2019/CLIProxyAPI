@@ -189,9 +189,16 @@ func (l *authAutoRefreshLoop) peek() (time.Time, bool) {
 }
 
 func (l *authAutoRefreshLoop) handleDue(ctx context.Context, now time.Time) {
-	due := l.popDue(now)
+	limit := 0
+	if l.manager != nil {
+		limit = l.manager.refreshBatchSize()
+	}
+	due, capped := l.popDue(now, limit)
 	if len(due) == 0 {
 		return
+	}
+	if capped {
+		l.delayDueRemainder(now, now.Add(refreshBatchDrainDelay))
 	}
 	if log.IsLevelEnabled(log.DebugLevel) {
 		log.Debugf("auto-refresh scheduler due auths: %d", len(due))
@@ -201,12 +208,18 @@ func (l *authAutoRefreshLoop) handleDue(ctx context.Context, now time.Time) {
 	}
 }
 
-func (l *authAutoRefreshLoop) popDue(now time.Time) []string {
+func (l *authAutoRefreshLoop) popDue(now time.Time, limit int) ([]string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	var due []string
+	capped := false
 	for len(l.queue) > 0 {
+		if limit > 0 && len(due) >= limit {
+			item := l.queue[0]
+			capped = item != nil && !item.next.After(now)
+			break
+		}
 		item := l.queue[0]
 		if item == nil || item.next.After(now) {
 			break
@@ -218,7 +231,26 @@ func (l *authAutoRefreshLoop) popDue(now time.Time) []string {
 		delete(l.index, popped.id)
 		due = append(due, popped.id)
 	}
-	return due
+	return due, capped
+}
+
+func (l *authAutoRefreshLoop) delayDueRemainder(now, next time.Time) {
+	if !next.After(now) {
+		next = now.Add(refreshCheckInterval)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	changed := false
+	for _, item := range l.queue {
+		if item == nil || item.next.After(now) {
+			continue
+		}
+		item.next = next
+		changed = true
+	}
+	if changed {
+		heap.Init(&l.queue)
+	}
 }
 
 func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, authID string) {
