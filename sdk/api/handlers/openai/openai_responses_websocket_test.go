@@ -569,6 +569,25 @@ func TestAppendWebsocketTimelineEventTruncatesOnce(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketTimelineErrorOnlyWhenRequestLogDisabled(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: false}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+	builder := newResponsesWebsocketTimelineBuilder(h)
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+
+	appendWebsocketTimelineEvent(&builder, "request", []byte(`{"type":"response.create"}`), ts)
+	appendWebsocketTimelineEvent(&builder, "response", []byte(`{"type":"response.created"}`), ts)
+	if got := builder.String(); got != "" {
+		t.Fatalf("normal websocket events should not be retained without request-log: %s", got)
+	}
+
+	appendWebsocketTimelineEvent(&builder, "response", []byte(`{"type":"error","error":{"message":"failed"}}`), ts)
+	got := builder.String()
+	if !strings.Contains(got, "Event: websocket.response") || !strings.Contains(got, `"type":"error"`) {
+		t.Fatalf("error websocket event should be retained: %s", got)
+	}
+}
+
 func TestSetWebsocketTimelineBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -825,6 +844,17 @@ func TestWebsocketToolOutputCacheSkipsOversizedItems(t *testing.T) {
 	cache.record(sessionKey, "call-1", bytes.Repeat([]byte("x"), 97))
 	if _, ok := cache.get(sessionKey, "call-1"); ok {
 		t.Fatal("oversized replacement should remove cached item")
+	}
+}
+
+func TestWebsocketToolOutputCacheUsesDefaultTTL(t *testing.T) {
+	cache := newWebsocketToolOutputCache(0, 0)
+
+	if cache.ttl != websocketToolOutputCacheTTL {
+		t.Fatalf("ttl = %s, want %s", cache.ttl, websocketToolOutputCacheTTL)
+	}
+	if cache.maxPerSession != websocketToolOutputCacheMaxPerSession {
+		t.Fatalf("maxPerSession = %d, want %d", cache.maxPerSession, websocketToolOutputCacheMaxPerSession)
 	}
 }
 

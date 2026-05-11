@@ -12,14 +12,17 @@ import (
 )
 
 const (
-	websocketToolOutputCacheMaxPerSession = 256
-	websocketToolOutputCacheMaxItemBytes  = 1 << 20
-	websocketToolOutputCacheMaxBytes      = 8 << 20
-	websocketToolOutputCacheTTL           = 30 * time.Minute
+	websocketToolOutputCacheMaxPerSession = 64
+	websocketToolOutputCacheMaxItemBytes  = 256 << 10
+	websocketToolOutputCacheMaxBytes      = 2 << 20
+	websocketToolOutputCacheTTL           = 10 * time.Minute
+	websocketToolCallCacheMaxPerSession   = 128
+	websocketToolCallCacheMaxItemBytes    = 128 << 10
+	websocketToolCallCacheMaxBytes        = 1 << 20
 )
 
-var defaultWebsocketToolOutputCache = newWebsocketToolOutputCache(0, websocketToolOutputCacheMaxPerSession)
-var defaultWebsocketToolCallCache = newWebsocketToolOutputCache(0, websocketToolOutputCacheMaxPerSession)
+var defaultWebsocketToolOutputCache = newWebsocketToolOutputCache(websocketToolOutputCacheTTL, websocketToolOutputCacheMaxPerSession)
+var defaultWebsocketToolCallCache = newWebsocketToolOutputCacheWithLimits(websocketToolOutputCacheTTL, websocketToolCallCacheMaxPerSession, websocketToolCallCacheMaxItemBytes, websocketToolCallCacheMaxBytes)
 var defaultWebsocketToolSessionRefs = newWebsocketToolSessionRefCounter()
 var defaultWebsocketToolCachesMu sync.RWMutex
 
@@ -50,7 +53,7 @@ func newWebsocketToolOutputCache(ttl time.Duration, maxPerSession int) *websocke
 }
 
 func newWebsocketToolOutputCacheWithLimits(ttl time.Duration, maxPerSession int, maxItemBytes int, maxBytes int) *websocketToolOutputCache {
-	if ttl < 0 {
+	if ttl <= 0 {
 		ttl = websocketToolOutputCacheTTL
 	}
 	if maxPerSession <= 0 {
