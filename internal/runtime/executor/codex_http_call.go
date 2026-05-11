@@ -64,6 +64,11 @@ func (e *CodexExecutor) prepareCodexHTTPCall(
 	token string,
 	stream bool,
 ) (codexPreparedHTTPCall, error) {
+	// Cache the inbound gin headers once so every helper invoked via this ctx
+	// (prompt-cache resolution, client metadata, installation-id fallback)
+	// shares a single context lookup instead of re-deriving the gin request on
+	// every call.
+	ctx = contextWithCachedCodexGinHeaders(ctx)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	requestKind := codexFinalUpstreamRequestKindForURL(url)
 	streamMode := codexStreamFieldTrue

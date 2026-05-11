@@ -243,6 +243,42 @@ func TestCollectCodexResponseAggregateIdleTimerStopsAfterSuccess(t *testing.T) {
 	}
 }
 
+// TestCollectCodexResponseAggregateCaptureTruncationPreservesCompletedData
+// guards the intent of the capture-limit change: exceeding the request-log
+// budget must not abort the stream, because the same stream carries
+// response.completed which downstream translators depend on.
+func TestCollectCodexResponseAggregateCaptureTruncationPreservesCompletedData(t *testing.T) {
+	originalLimit := codexAggregateCapturedBodyMaxBytes
+	codexAggregateCapturedBodyMaxBytes = 64
+	defer func() { codexAggregateCapturedBodyMaxBytes = originalLimit }()
+
+	// Build an SSE payload whose first event alone already exceeds the tiny
+	// 64 byte capture budget, then follow it with response.completed. The old
+	// code returned an error the moment the budget was exceeded; the new
+	// behaviour keeps reading so completedData still gets populated.
+	big := strings.Repeat("x", 200)
+	sse := strings.Join([]string{
+		"data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_big\",\"filler\":\"" + big + "\"}}",
+		"",
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_big\"}}",
+		"",
+	}, "\n") + "\n"
+
+	got, err := collectCodexResponseAggregate(bytes.NewBufferString(sse), true)
+	if err != nil {
+		t.Fatalf("collectCodexResponseAggregate error: %v", err)
+	}
+	if len(got.completedData) == 0 {
+		t.Fatal("expected completedData even when capture truncates")
+	}
+	// The captured body should be truncated, not empty: whatever fit under the
+	// budget before the first overflow remains. The important assertion is
+	// that the caller still gets the completion marker through.
+	if int64(len(got.body)) > codexAggregateCapturedBodyMaxBytes {
+		t.Fatalf("captured body exceeded truncation budget: len=%d budget=%d", len(got.body), codexAggregateCapturedBodyMaxBytes)
+	}
+}
+
 type trackingReadCloser struct {
 	*strings.Reader
 	closedFlag atomic.Bool

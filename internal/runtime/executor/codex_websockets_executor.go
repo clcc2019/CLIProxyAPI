@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -666,6 +665,12 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		return nil, err
 	}
 
+	// Cache the inbound gin headers once so the downstream helpers
+	// (prompt-cache resolution, client metadata, trace-context propagation)
+	// share a single context lookup rather than walking the gin request each
+	// time.
+	ctx = contextWithCachedCodexGinHeaders(ctx)
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, codexFinalUpstreamBodyOptions{
 		requestKind:                codexFinalUpstreamResponses,
@@ -1147,138 +1152,6 @@ func ensureHeaderWithConfigPrecedence(target http.Header, source http.Header, ke
 	}
 }
 
-type statusErrWithHeaders struct {
-	statusErr
-	headers http.Header
-}
-
-func (e statusErrWithHeaders) Headers() http.Header {
-	if e.headers == nil {
-		return nil
-	}
-	return e.headers.Clone()
-}
-
-func parseCodexWebsocketError(payload []byte) (error, bool) {
-	if len(payload) == 0 {
-		return nil, false
-	}
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "error" {
-		return nil, false
-	}
-	out := normalizeCodexWebsocketErrorBody(payload)
-	status := parseCodexWebsocketErrorStatus(payload, out)
-	if status <= 0 {
-		status = http.StatusInternalServerError
-	}
-
-	headers := parseCodexWebsocketErrorHeaders(payload)
-	err := newCodexStatusErr(status, out)
-	return statusErrWithHeaders{
-		statusErr: err,
-		headers:   headers,
-	}, true
-}
-
-func normalizeCodexWebsocketErrorBody(payload []byte) []byte {
-	out := []byte(`{}`)
-	errNode := gjson.GetBytes(payload, "error")
-	switch {
-	case errNode.Exists() && errNode.IsObject():
-		out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
-	case errNode.Exists() && errNode.Type == gjson.String:
-		out, _ = sjson.SetBytes(out, "error.message", strings.TrimSpace(errNode.String()))
-	case errNode.Exists():
-		out, _ = sjson.SetBytes(out, "error.message", strings.TrimSpace(errNode.Raw))
-	}
-
-	if message := strings.TrimSpace(gjson.GetBytes(payload, "message").String()); message != "" &&
-		strings.TrimSpace(gjson.GetBytes(out, "error.message").String()) == "" {
-		out, _ = sjson.SetBytes(out, "error.message", message)
-	}
-
-	if errType := strings.TrimSpace(gjson.GetBytes(payload, "error_type").String()); errType != "" &&
-		strings.TrimSpace(gjson.GetBytes(out, "error.type").String()) == "" {
-		out, _ = sjson.SetBytes(out, "error.type", errType)
-	}
-
-	if strings.TrimSpace(gjson.GetBytes(out, "error.type").String()) == "" {
-		switch {
-		case isCodexUsageLimitError(out):
-			out, _ = sjson.SetBytes(out, "error.type", "usage_limit_reached")
-		default:
-			out, _ = sjson.SetBytes(out, "error.type", "server_error")
-		}
-	}
-	if strings.TrimSpace(gjson.GetBytes(out, "error.message").String()) == "" {
-		status := parseCodexWebsocketErrorStatus(payload, out)
-		if status <= 0 {
-			status = http.StatusInternalServerError
-		}
-		out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
-	}
-	return out
-}
-
-func parseCodexWebsocketErrorStatus(payload []byte, normalizedBody []byte) int {
-	for _, path := range []string{"status", "status_code", "error.status", "error.status_code"} {
-		if status := int(gjson.GetBytes(payload, path).Int()); status > 0 {
-			return codexStatusCode(status, normalizedBody)
-		}
-	}
-	return codexStatusCode(0, normalizedBody)
-}
-
-func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {
-	headersNode := gjson.GetBytes(payload, "headers")
-	if !headersNode.Exists() || !headersNode.IsObject() {
-		return nil
-	}
-	mapped := make(http.Header)
-	headersNode.ForEach(func(key, value gjson.Result) bool {
-		name := strings.TrimSpace(key.String())
-		if name == "" {
-			return true
-		}
-		switch value.Type {
-		case gjson.String:
-			if v := strings.TrimSpace(value.String()); v != "" {
-				mapped.Set(name, v)
-			}
-		case gjson.Number, gjson.True, gjson.False:
-			if v := strings.TrimSpace(value.Raw); v != "" {
-				mapped.Set(name, v)
-			}
-		default:
-		}
-		return true
-	})
-	if len(mapped) == 0 {
-		return nil
-	}
-	return mapped
-}
-
-func normalizeCodexWebsocketCompletion(payload []byte) []byte {
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.done" {
-		updated, err := sjson.SetBytes(payload, "type", "response.completed")
-		if err == nil && len(updated) > 0 {
-			return updated
-		}
-	}
-	return payload
-}
-
-func encodeCodexWebsocketAsSSE(payload []byte) []byte {
-	if len(payload) == 0 {
-		return nil
-	}
-	line := make([]byte, 0, len("data: ")+len(payload))
-	line = append(line, []byte("data: ")...)
-	line = append(line, payload...)
-	return line
-}
-
 func websocketUpgradeRequestLog(info helps.UpstreamRequestLog) helps.UpstreamRequestLog {
 	upgradeInfo := info
 	upgradeInfo.URL = helps.WebsocketUpgradeRequestURL(info.URL)
@@ -1478,15 +1351,19 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
+			codexMetrics.wsUpstreamError.Add(1)
 			sess.activeMu.Lock()
 			ch := sess.activeCh
 			done := sess.activeDone
 			sess.activeMu.Unlock()
 			if ch != nil {
+				// Terminal error must reach the consumer; do NOT fall through a
+				// `default` that silently drops it. The buffer is 32, and the
+				// consumer either drains it or abandons the read by closing
+				// `done`. Either way we stay wait-free for this goroutine.
 				select {
 				case ch <- codexWebsocketRead{conn: conn, err: errRead}:
 				case <-done:
-				default:
 				}
 				sess.clearActive(ch)
 				close(ch)
@@ -1497,16 +1374,19 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
+				codexMetrics.wsUpstreamBinary.Add(1)
 				errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
 				sess.activeMu.Lock()
 				ch := sess.activeCh
 				done := sess.activeDone
 				sess.activeMu.Unlock()
 				if ch != nil {
+					// Same reasoning as the upstream-disconnect path above:
+					// surfacing the terminal error to the consumer is the
+					// whole point, silently dropping it is a correctness bug.
 					select {
 					case ch <- codexWebsocketRead{conn: conn, err: errBinary}:
 					case <-done:
-					default:
 					}
 					sess.clearActive(ch)
 					close(ch)
@@ -1523,6 +1403,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		done := sess.activeDone
 		sess.activeMu.Unlock()
 		if ch == nil {
+			codexMetrics.wsActiveChMissing.Add(1)
 			continue
 		}
 		select {
@@ -1893,126 +1774,4 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 	for i := range toClose {
 		closeCodexWebsocketSession(toClose[i], reason)
 	}
-}
-
-// CodexAutoExecutor routes Codex requests to the websocket transport when the
-// selected auth enables websockets and the downstream transport is websocket.
-// Other requests use the legacy HTTP implementation.
-type CodexAutoExecutor struct {
-	httpExec *CodexExecutor
-	wsExec   *CodexWebsocketsExecutor
-}
-
-func NewCodexAutoExecutor(cfg *config.Config) *CodexAutoExecutor {
-	return &CodexAutoExecutor{
-		httpExec: NewCodexExecutor(cfg),
-		wsExec:   NewCodexWebsocketsExecutor(cfg),
-	}
-}
-
-func (e *CodexAutoExecutor) Identifier() string { return "codex" }
-
-func (e *CodexAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
-	if e == nil || e.httpExec == nil {
-		return nil
-	}
-	return e.httpExec.PrepareRequest(req, auth)
-}
-
-func (e *CodexAutoExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
-	if e == nil || e.httpExec == nil {
-		return nil, fmt.Errorf("codex auto executor: http executor is nil")
-	}
-	return e.httpExec.HttpRequest(ctx, auth, req)
-}
-
-func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	if e == nil || e.httpExec == nil || e.wsExec == nil {
-		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
-	}
-	if codexUseWebsocketTransport(ctx, auth) {
-		return e.wsExec.Execute(ctx, auth, req, opts)
-	}
-	return e.httpExec.Execute(ctx, auth, req, opts)
-}
-
-func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	if e == nil || e.httpExec == nil || e.wsExec == nil {
-		return nil, fmt.Errorf("codex auto executor: executor is nil")
-	}
-	if codexUseWebsocketTransport(ctx, auth) {
-		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
-	}
-	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
-}
-
-func (e *CodexAutoExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	if e == nil || e.httpExec == nil {
-		return nil, fmt.Errorf("codex auto executor: http executor is nil")
-	}
-	return e.httpExec.Refresh(ctx, auth)
-}
-
-func (e *CodexAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	if e == nil || e.httpExec == nil {
-		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: http executor is nil")
-	}
-	return e.httpExec.CountTokens(ctx, auth, req, opts)
-}
-
-func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
-	if e == nil || e.wsExec == nil {
-		return
-	}
-	e.wsExec.CloseExecutionSession(sessionID)
-}
-
-func (e *CodexAutoExecutor) ResetExecutionSession(sessionID string) {
-	if e == nil || e.wsExec == nil {
-		return
-	}
-	e.wsExec.ResetExecutionSession(sessionID)
-}
-
-func codexUseWebsocketTransport(ctx context.Context, auth *cliproxyauth.Auth) bool {
-	if !codexWebsocketsEnabled(auth) {
-		return false
-	}
-	return cliproxyexecutor.DownstreamWebsocket(ctx)
-}
-
-func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if len(auth.Attributes) > 0 {
-		for _, key := range []string{"websockets", "websocket"} {
-			if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
-				parsed, errParse := strconv.ParseBool(raw)
-				if errParse == nil {
-					return parsed
-				}
-			}
-		}
-	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	for _, key := range []string{"websockets", "websocket"} {
-		raw, ok := auth.Metadata[key]
-		if !ok || raw == nil {
-			continue
-		}
-		switch v := raw.(type) {
-		case bool:
-			return v
-		case string:
-			parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
-			if errParse == nil {
-				return parsed
-			}
-		default:
-		}
-	}
-	return false
 }

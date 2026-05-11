@@ -37,7 +37,41 @@ var (
 	codexInstallationID     string
 )
 
+// codexGinHeadersCtxKey is the typed context key under which a resolved
+// http.Header (from the inbound gin request) is cached for the lifetime of the
+// per-request hot path. Using a typed zero-size struct avoids collisions with
+// the untyped "gin" string key that the gin middleware itself uses.
+type codexGinHeadersCtxKey struct{}
+
+// contextWithCachedCodexGinHeaders returns ctx annotated with a cached copy of
+// the gin request headers. The cache is a no-op when ctx already carries one
+// or when no gin request is in scope, so it is safe to call at every prepare
+// entry point without checking first.
+func contextWithCachedCodexGinHeaders(ctx context.Context) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	if _, ok := ctx.Value(codexGinHeadersCtxKey{}).(http.Header); ok {
+		return ctx
+	}
+	headers := codexGinHeadersFromContextUncached(ctx)
+	if headers == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, codexGinHeadersCtxKey{}, headers)
+}
+
 func codexGinHeadersFromContext(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
+	}
+	if cached, ok := ctx.Value(codexGinHeadersCtxKey{}).(http.Header); ok {
+		return cached
+	}
+	return codexGinHeadersFromContextUncached(ctx)
+}
+
+func codexGinHeadersFromContextUncached(ctx context.Context) http.Header {
 	if ctx == nil {
 		return nil
 	}

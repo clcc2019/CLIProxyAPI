@@ -156,6 +156,17 @@ func pruneCodexFinalUpstreamBody(body []byte, opts codexFinalUpstreamBodyOptions
 	return helps.EditJSONBytes(body, edits...)
 }
 
+// codexFinalUpstreamScanFields lists the fields read by
+// normalizeCodexFinalUpstreamBodyUncached after tools have been normalized, in
+// the precise order consumed below. Batching them through GetManyBytes costs
+// one payload parse instead of four sequential scans.
+var codexFinalUpstreamScanFields = []string{
+	"model",        // idx 0
+	"store",        // idx 1 (only inspected on the /responses kind)
+	"instructions", // idx 2
+	"stream",       // idx 3
+}
+
 func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth *cliproxyauth.Auth, opts codexFinalUpstreamBodyOptions) []byte {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
@@ -164,12 +175,20 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	body = codexEnsureFinalUpstreamBodyDefaults(body, opts)
 	body = normalizeCodexFinalUpstreamTools(body)
 
+	// Resolve all four inspected fields in a single payload traversal so
+	// downstream branches can reuse the decoded Result values rather than
+	// re-parsing the body once per field.
+	scanned := gjson.GetManyBytes(body, codexFinalUpstreamScanFields...)
+	model := scanned[0]
+	store := scanned[1]
+	instructions := scanned[2]
+	stream := scanned[3]
+
 	edits := make([]helps.JSONEdit, 0, 3)
-	if model := gjson.GetBytes(body, "model"); !model.Exists() || model.Type != gjson.String || model.String() != baseModel {
+	if !model.Exists() || model.Type != gjson.String || model.String() != baseModel {
 		edits = append(edits, helps.SetJSONEdit("model", baseModel))
 	}
 	if opts.requestKind == codexFinalUpstreamResponses {
-		store := gjson.GetBytes(body, "store")
 		if !store.Exists() {
 			if updated, ok := codexAppendTopLevelRawField(body, "store", []byte("false")); ok {
 				body = updated
@@ -180,7 +199,6 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 			edits = append(edits, helps.SetRawJSONEdit("store", []byte("false")))
 		}
 	}
-	instructions := gjson.GetBytes(body, "instructions")
 	if !instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) == "") {
 		instructionText := codexDefaultInstructionsFromBody(body)
 		if !instructions.Exists() {
@@ -195,7 +213,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	}
 	switch opts.streamMode {
 	case codexStreamFieldTrue:
-		if stream := gjson.GetBytes(body, "stream"); !stream.Exists() {
+		if !stream.Exists() {
 			if updated, ok := codexAppendTopLevelRawField(body, "stream", []byte("true")); ok {
 				body = updated
 			} else {
@@ -205,7 +223,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 			edits = append(edits, helps.SetRawJSONEdit("stream", []byte("true")))
 		}
 	case codexStreamFieldFalse:
-		if stream := gjson.GetBytes(body, "stream"); !stream.Exists() {
+		if !stream.Exists() {
 			if updated, ok := codexAppendTopLevelRawField(body, "stream", []byte("false")); ok {
 				body = updated
 			} else {

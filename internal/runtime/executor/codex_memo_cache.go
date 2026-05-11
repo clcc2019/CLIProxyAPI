@@ -89,6 +89,7 @@ func (m *codexFinalUpstreamBodyMemo) get(baseModel string, opts codexFinalUpstre
 	// includes input+output but input alone exceeding the item cap is a
 	// dead-certain miss).
 	if len(input) > codexFinalUpstreamBodyMemoMaxItem {
+		codexMetrics.memoBodyMiss.Add(1)
 		return nil
 	}
 	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, input)
@@ -97,8 +98,10 @@ func (m *codexFinalUpstreamBodyMemo) get(baseModel string, opts codexFinalUpstre
 	defer m.mu.RUnlock()
 	entry, ok := m.entries[hash]
 	if !ok || entry.baseModel != baseModel || entry.opts != opts || !bytes.Equal(entry.input, input) {
+		codexMetrics.memoBodyMiss.Add(1)
 		return nil
 	}
+	codexMetrics.memoBodyHit.Add(1)
 	return bytes.Clone(entry.output)
 }
 
@@ -180,6 +183,7 @@ func (m *codexPromptResolutionMemo) get(from sdktranslator.Format, model string,
 	// Skip oversize payloads early so we don't pay for hashing + map lookup on
 	// items that set() would have rejected anyway.
 	if len(payload) > codexPromptResolutionMemoMaxPayload {
+		codexMetrics.memoPromptMiss.Add(1)
 		return codexPromptCacheResolution{}, false
 	}
 	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
@@ -193,8 +197,10 @@ func (m *codexPromptResolutionMemo) get(from sdktranslator.Format, model string,
 		entry.scope != scope ||
 		entry.executionSessionID != executionSessionID ||
 		!bytes.Equal(entry.payload, payload) {
+		codexMetrics.memoPromptMiss.Add(1)
 		return codexPromptCacheResolution{}, false
 	}
+	codexMetrics.memoPromptHit.Add(1)
 	return entry.resolution, true
 }
 
