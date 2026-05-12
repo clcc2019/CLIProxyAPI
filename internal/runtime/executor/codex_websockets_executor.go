@@ -36,15 +36,18 @@ import (
 const (
 	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
-	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
-	codexResponsesWebsocketProbeIdle       = 45 * time.Second
-	codexResponsesWebsocketProbeWriteTO    = 10 * time.Second
-	codexResponsesWebsocketReadBuffer      = 32
-	codexResponsesWebsocketReadLimit       = 64 << 20
-	codexResponsesWebsocketMaxParked       = 64
+	// Rotate before the documented 60 minute upstream connection limit so the
+	// next turn opens a fresh socket instead of discovering the cap mid-chain.
+	codexResponsesWebsocketMaxLifetime  = 55 * time.Minute
+	codexResponsesWebsocketHandshakeTO  = 30 * time.Second
+	codexResponsesWebsocketProbeIdle    = 45 * time.Second
+	codexResponsesWebsocketProbeWriteTO = 10 * time.Second
+	codexResponsesWebsocketReadBuffer   = 8
+	codexResponsesWebsocketReadLimit    = 64 << 20
+	codexResponsesWebsocketMaxParked    = 16
 )
 
-var codexResponsesWebsocketParkTTL = 30 * time.Second
+var codexResponsesWebsocketParkTTL = 10 * time.Second
 
 var codexWebsocketWriteBufferPool sync.Pool
 
@@ -105,6 +108,7 @@ type codexWebsocketSession struct {
 
 	lastActivityUnixNano atomic.Int64
 	lastProbeUnixNano    atomic.Int64
+	openedUnixNano       atomic.Int64
 
 	reuseKey  string
 	parkTimer *time.Timer
@@ -235,6 +239,30 @@ func (s *codexWebsocketSession) markProbe(now time.Time) {
 		now = time.Now()
 	}
 	s.lastProbeUnixNano.Store(now.UnixNano())
+}
+
+func (s *codexWebsocketSession) markOpened(now time.Time) {
+	if s == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.openedUnixNano.Store(now.UnixNano())
+}
+
+func (s *codexWebsocketSession) shouldRotate(now time.Time) bool {
+	if s == nil || codexResponsesWebsocketMaxLifetime <= 0 {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	opened := s.openedUnixNano.Load()
+	if opened <= 0 {
+		return false
+	}
+	return now.Sub(time.Unix(0, opened)) >= codexResponsesWebsocketMaxLifetime
 }
 
 func (s *codexWebsocketSession) shouldProbe(now time.Time) bool {
@@ -674,7 +702,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, codexFinalUpstreamBodyOptions{
 		requestKind:                codexFinalUpstreamResponses,
-		streamMode:                 codexStreamFieldTrue,
+		streamMode:                 codexStreamFieldDelete,
 		preservePreviousResponseID: true,
 	})
 
@@ -1294,6 +1322,13 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	readerConn := sess.readerConn
 	sess.connMu.Unlock()
 	if conn != nil {
+		if sess.shouldRotate(time.Now()) {
+			e.invalidateUpstreamConn(sess, conn, "connection_lifetime", nil)
+			conn = nil
+			readerConn = nil
+		}
+	}
+	if conn != nil {
 		// Validate reused session connections on first reuse and after sustained idleness.
 		// Under steady traffic, per-request pings add measurable overhead without improving
 		// liveness because recent reads/writes already prove the socket is healthy.
@@ -1337,6 +1372,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.connMu.Unlock()
 
 	sess.configureConn(conn)
+	sess.markOpened(time.Now())
 	sess.markProbe(time.Now())
 	go e.readUpstreamLoop(sess, conn)
 	logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
@@ -1566,6 +1602,9 @@ func (e *CodexWebsocketsExecutor) parkExecutionSession(sess *codexWebsocketSessi
 	}
 	reuseKey := strings.TrimSpace(sess.reuseKey)
 	if reuseKey == "" {
+		return false
+	}
+	if sess.shouldRotate(time.Now().Add(codexResponsesWebsocketParkTTL)) {
 		return false
 	}
 

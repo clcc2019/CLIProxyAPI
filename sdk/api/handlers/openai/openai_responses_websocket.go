@@ -35,7 +35,7 @@ const (
 	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
 
 	maxResponsesWebsocketTimelineBytes      = 1 << 20
-	maxResponsesWebsocketErrorTimelineBytes = 16 << 10
+	maxResponsesWebsocketErrorTimelineBytes = 4 << 10
 	maxResponsesWebsocketInboundBytes       = 64 << 20
 )
 
@@ -43,7 +43,8 @@ const responsesWebsocketTimelineTruncatedMarker = "\n...[websocket timeline trun
 
 type websocketTimelineBuilder struct {
 	strings.Builder
-	maxBytes int
+	maxBytes  int
+	errorOnly bool
 }
 
 func newWebsocketTimelineBuilder(maxBytes int) websocketTimelineBuilder {
@@ -51,6 +52,14 @@ func newWebsocketTimelineBuilder(maxBytes int) websocketTimelineBuilder {
 		maxBytes = maxResponsesWebsocketTimelineBytes
 	}
 	return websocketTimelineBuilder{maxBytes: maxBytes}
+}
+
+func newResponsesWebsocketTimelineBuilder(h *OpenAIResponsesAPIHandler) websocketTimelineBuilder {
+	builder := newWebsocketTimelineBuilder(responsesWebsocketTimelineLimit(h))
+	if h != nil && h.Cfg != nil && !h.Cfg.RequestLog {
+		builder.errorOnly = true
+	}
+	return builder
 }
 
 func responsesWebsocketTimelineLimit(h *OpenAIResponsesAPIHandler) int {
@@ -92,7 +101,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", connectionID, clientIP)
 	var wsTerminateErr error
-	wsTimelineLog := newWebsocketTimelineBuilder(responsesWebsocketTimelineLimit(h))
+	wsTimelineLog := newResponsesWebsocketTimelineBuilder(h)
 	defer func() {
 		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
 		if wsTerminateErr != nil {
@@ -1120,6 +1129,9 @@ func appendWebsocketEvent(builder *websocketTimelineBuilder, eventType string, p
 	if len(trimmedPayload) == 0 {
 		return
 	}
+	if !websocketTimelineShouldRecord(builder, eventType, trimmedPayload) {
+		return
+	}
 	if websocketTimelineTruncated(builder) {
 		return
 	}
@@ -1186,6 +1198,9 @@ func appendWebsocketTimelineEvent(builder *websocketTimelineBuilder, eventType s
 	if len(trimmedPayload) == 0 {
 		return
 	}
+	if !websocketTimelineShouldRecord(builder, eventType, trimmedPayload) {
+		return
+	}
 	if websocketTimelineTruncated(builder) {
 		return
 	}
@@ -1241,6 +1256,21 @@ func websocketTimelineTruncated(builder *websocketTimelineBuilder) bool {
 		return false
 	}
 	return builder.Len() > builder.maxBytes
+}
+
+func websocketTimelineShouldRecord(builder *websocketTimelineBuilder, eventType string, payload []byte) bool {
+	if builder == nil || !builder.errorOnly {
+		return true
+	}
+	switch strings.TrimSpace(eventType) {
+	case "disconnect", "error":
+		return true
+	}
+	payloadType := websocketPayloadEventType(payload)
+	if payloadType == wsEventTypeError {
+		return true
+	}
+	return strings.Contains(payloadType, "error") || strings.Contains(payloadType, "failed")
 }
 
 func markAPIResponseTimestamp(c *gin.Context) {

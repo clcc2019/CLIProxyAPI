@@ -1255,10 +1255,21 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 	}
 
 	targetAuth := h.findAuthForDelete(name)
-	if targetAuth == nil && isUnsafeAuthFileName(name) {
+	resolvedName := name
+	if targetAuth != nil {
+		if fn := strings.TrimSpace(targetAuth.FileName); fn != "" {
+			resolvedName = fn
+		} else if id := strings.TrimSpace(targetAuth.ID); id != "" {
+			resolvedName = filepath.Base(id)
+		} else if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
+			resolvedName = filepath.Base(path)
+		}
+	}
+	if isUnsafeAuthFileName(resolvedName) {
 		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
 	}
-	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+
+	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(resolvedName))
 	targetID := ""
 	if targetAuth != nil {
 		targetID = strings.TrimSpace(targetAuth.ID)
@@ -1273,7 +1284,7 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 	}
 	deletedName := filepath.Base(targetPath)
 	if deletedName == "" || deletedName == "." {
-		deletedName = filepath.Base(name)
+		deletedName = filepath.Base(resolvedName)
 	}
 	if targetAuth == nil {
 		if _, errStat := os.Stat(targetPath); errStat != nil {
@@ -1348,6 +1359,10 @@ func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
 			}
 		}
 		if source := strings.TrimSpace(authAttribute(auth, "source")); source != "" && filepath.Base(source) == name {
+			return auth
+		}
+		// Match by stable auth index (16-char sha256 hex sent from the UI).
+		if auth.EnsureIndex() == name {
 			return auth
 		}
 	}

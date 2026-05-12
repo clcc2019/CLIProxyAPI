@@ -256,6 +256,8 @@ func TestPrepareCodexWebsocketRequestNormalizesFinalUpstreamBody(t *testing.T) {
 			"input":"hello",
 			"store":true,
 			"stream":false,
+			"background":true,
+			"prompt_cache_retention":"24h",
 			"stream_options":{"include_usage":true},
 			"temperature":0.2,
 			"context_management":{"compaction":"auto"},
@@ -276,8 +278,14 @@ func TestPrepareCodexWebsocketRequestNormalizesFinalUpstreamBody(t *testing.T) {
 	if got := gjson.GetBytes(body, "store").Bool(); got {
 		t.Fatalf("store = true, want false; body=%s", body)
 	}
-	if got := gjson.GetBytes(body, "stream").Bool(); !got {
-		t.Fatalf("stream = false, want true; body=%s", body)
+	if gjson.GetBytes(body, "stream").Exists() {
+		t.Fatalf("stream should be removed from websocket body: %s", body)
+	}
+	if gjson.GetBytes(body, "background").Exists() {
+		t.Fatalf("background should be removed from websocket body: %s", body)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want 24h; body=%s", got, body)
 	}
 	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_1" {
 		t.Fatalf("previous_response_id = %q, want %q; body=%s", got, "resp_1", body)
@@ -308,8 +316,30 @@ func TestPrepareCodexWebsocketRequestNormalizesFinalUpstreamBody(t *testing.T) {
 	if got := gjson.GetBytes(prepared.wsReqBody, "store").Bool(); got {
 		t.Fatalf("websocket request body store = true, want false; wsReqBody=%s", prepared.wsReqBody)
 	}
+	if gjson.GetBytes(prepared.wsReqBody, "stream").Exists() {
+		t.Fatalf("websocket request body stream should be absent: %s", prepared.wsReqBody)
+	}
+	if gjson.GetBytes(prepared.wsReqBody, "background").Exists() {
+		t.Fatalf("websocket request body background should be absent: %s", prepared.wsReqBody)
+	}
+	if got := gjson.GetBytes(prepared.wsReqBody, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("websocket request body prompt_cache_retention = %q, want 24h; wsReqBody=%s", got, prepared.wsReqBody)
+	}
 	if got := gjson.GetBytes(prepared.wsReqBody, "previous_response_id").String(); got != "resp_1" {
 		t.Fatalf("wsReqBody previous_response_id = %q, want %q", got, "resp_1")
+	}
+}
+
+func TestCodexWebsocketSessionShouldRotateBeforeConnectionLimit(t *testing.T) {
+	sess := &codexWebsocketSession{}
+	now := time.Now()
+	sess.markOpened(now.Add(-codexResponsesWebsocketMaxLifetime + time.Second))
+	if sess.shouldRotate(now) {
+		t.Fatal("session rotated before max lifetime")
+	}
+	sess.markOpened(now.Add(-codexResponsesWebsocketMaxLifetime - time.Second))
+	if !sess.shouldRotate(now) {
+		t.Fatal("session should rotate after max lifetime")
 	}
 }
 
@@ -1204,8 +1234,8 @@ func TestCodexWebsocketsExecuteStreamTranslatesAndNormalizesOpenAIResponsesReque
 	if got := gjson.GetBytes(requestBody, "store").Bool(); got {
 		t.Fatalf("websocket store = true, want false; body=%s", requestBody)
 	}
-	if got := gjson.GetBytes(requestBody, "stream").Bool(); !got {
-		t.Fatalf("websocket stream = false, want true; body=%s", requestBody)
+	if gjson.GetBytes(requestBody, "stream").Exists() {
+		t.Fatalf("websocket stream should be absent; body=%s", requestBody)
 	}
 	if got := gjson.GetBytes(requestBody, "input").IsArray(); !got {
 		t.Fatalf("input should be translated to an array; body=%s", requestBody)
@@ -1304,8 +1334,8 @@ func TestCodexWebsocketsExecuteStreamTranslatesAndNormalizesOpenAIChatRequest(t 
 	if got := gjson.GetBytes(requestBody, "store").Bool(); got {
 		t.Fatalf("websocket store = true, want false; body=%s", requestBody)
 	}
-	if got := gjson.GetBytes(requestBody, "stream").Bool(); !got {
-		t.Fatalf("websocket stream = false, want true; body=%s", requestBody)
+	if gjson.GetBytes(requestBody, "stream").Exists() {
+		t.Fatalf("websocket stream should be absent; body=%s", requestBody)
 	}
 	if gjson.GetBytes(requestBody, "messages").Exists() {
 		t.Fatalf("messages should not be forwarded to websocket upstream: %s", requestBody)
@@ -1358,6 +1388,33 @@ func TestCodexWebsocketParkExecutionSessionCapsParkedSessions(t *testing.T) {
 	}
 	if _, exists := executor.store.parked[fmt.Sprintf("reuse-%d", codexResponsesWebsocketMaxParked+1)]; !exists {
 		t.Fatal("newest parked session should remain")
+	}
+}
+
+func TestCodexWebsocketParkExecutionSessionSkipsExpiringSession(t *testing.T) {
+	executor := NewCodexWebsocketsExecutor(nil)
+	executor.store = &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+	t.Cleanup(func() {
+		executor.closeAllExecutionSessions("test_cleanup")
+	})
+
+	sess := &codexWebsocketSession{
+		sessionID: "session-expiring",
+		reuseKey:  "reuse-expiring",
+	}
+	sess.markOpened(time.Now().Add(-codexResponsesWebsocketMaxLifetime + codexResponsesWebsocketParkTTL/2))
+
+	if executor.parkExecutionSession(sess) {
+		t.Fatal("expiring websocket session should not be parked")
+	}
+
+	executor.store.parkedMu.Lock()
+	defer executor.store.parkedMu.Unlock()
+	if got := len(executor.store.parked); got != 0 {
+		t.Fatalf("parked sessions = %d, want 0", got)
 	}
 }
 

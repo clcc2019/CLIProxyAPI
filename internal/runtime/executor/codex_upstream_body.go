@@ -52,20 +52,21 @@ func codexFinalUpstreamRequestKindForURL(rawURL string) codexFinalUpstreamReques
 }
 
 var codexAllowedResponsesFinalUpstreamFields = map[string]struct{}{
-	"model":               {},
-	"instructions":        {},
-	"input":               {},
-	"tools":               {},
-	"tool_choice":         {},
-	"parallel_tool_calls": {},
-	"reasoning":           {},
-	"store":               {},
-	"stream":              {},
-	"include":             {},
-	"service_tier":        {},
-	"prompt_cache_key":    {},
-	"text":                {},
-	"client_metadata":     {},
+	"model":                  {},
+	"instructions":           {},
+	"input":                  {},
+	"tools":                  {},
+	"tool_choice":            {},
+	"parallel_tool_calls":    {},
+	"reasoning":              {},
+	"store":                  {},
+	"stream":                 {},
+	"include":                {},
+	"service_tier":           {},
+	"prompt_cache_key":       {},
+	"prompt_cache_retention": {},
+	"text":                   {},
+	"client_metadata":        {},
 }
 
 var codexAllowedCompactFinalUpstreamFields = map[string]struct{}{

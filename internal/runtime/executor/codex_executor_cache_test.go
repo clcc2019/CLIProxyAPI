@@ -628,6 +628,7 @@ func TestPrepareCodexHTTPCallNormalizesFinalUpstreamBody(t *testing.T) {
 		"input":"hello",
 		"store":true,
 		"stream":false,
+		"prompt_cache_retention":"24h",
 		"stream_options":{"include_usage":true},
 		"temperature":0.2,
 		"context_management":{"compaction":"auto"},
@@ -658,6 +659,9 @@ func TestPrepareCodexHTTPCallNormalizesFinalUpstreamBody(t *testing.T) {
 	}
 	if got := gjson.GetBytes(body, "stream").Bool(); !got {
 		t.Fatalf("stream = false, want true; body=%s", body)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want 24h; body=%s", got, body)
 	}
 	for _, field := range []string{"stream_options", "temperature", "context_management"} {
 		if gjson.GetBytes(body, field).Exists() {
