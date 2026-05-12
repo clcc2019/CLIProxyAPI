@@ -17,11 +17,12 @@ type capturedRequestBody struct {
 	info          *RequestInfo
 	limit         int64
 	declaredBytes int64
-	buffer        bytes.Buffer
+	buffer        *bytes.Buffer
 	hasher        hash.Hash
 	observedBytes int64
 	truncated     bool
 	complete      bool
+	released      bool
 }
 
 func newCapturedRequestBody(c *gin.Context, info *RequestInfo, limit int64, hashBody bool) *capturedRequestBody {
@@ -34,6 +35,7 @@ func newCapturedRequestBody(c *gin.Context, info *RequestInfo, limit int64, hash
 		info:          info,
 		limit:         limit,
 		declaredBytes: c.Request.ContentLength,
+		buffer:        acquireRequestBuffer(),
 	}
 	if hashBody {
 		capture.hasher = sha256.New()
@@ -59,11 +61,16 @@ func (c *capturedRequestBody) Write(p []byte) (int, error) {
 	}
 
 	c.capturePreview(p)
-	c.truncated = c.observedBytes > int64(c.buffer.Len())
+	if c.buffer != nil {
+		c.truncated = c.observedBytes > int64(c.buffer.Len())
+	}
 	return len(p), nil
 }
 
 func (c *capturedRequestBody) capturePreview(chunk []byte) {
+	if c.buffer == nil {
+		return
+	}
 	remaining := c.limit - int64(c.buffer.Len())
 	if remaining <= 0 {
 		return
@@ -74,24 +81,46 @@ func (c *capturedRequestBody) capturePreview(chunk []byte) {
 		writeLen = int(remaining)
 	}
 	_, _ = c.buffer.Write(chunk[:writeLen])
-	c.info.Body = c.buffer.Bytes()
+	// NOTE: info.Body is only populated in applyToContext (once, after the
+	// body has been fully read) so we do not hand downstream code a pointer
+	// that still aliases the pooled buffer.
 }
 
 func (c *capturedRequestBody) markComplete() {
 	c.complete = true
+	c.publishBody()
 }
 
 func (c *capturedRequestBody) markClosed() {
 	if c.complete {
+		c.publishBody()
 		return
 	}
 	if c.declaredBytes == 0 {
 		c.complete = true
+		c.publishBody()
 		return
 	}
 	if c.declaredBytes > 0 && c.observedBytes == c.declaredBytes {
 		c.complete = true
+		c.publishBody()
 	}
+}
+
+// publishBody snapshots the captured preview into info.Body exactly once.
+// Cloning decouples info.Body's lifetime from the pooled buffer so release can
+// happen without risking torn reads through aliased memory.
+func (c *capturedRequestBody) publishBody() {
+	if c == nil || c.info == nil || c.buffer == nil {
+		return
+	}
+	if len(c.info.Body) > 0 {
+		return
+	}
+	if c.buffer.Len() == 0 {
+		return
+	}
+	c.info.Body = bytes.Clone(c.buffer.Bytes())
 }
 
 func (c *capturedRequestBody) applyToContext(ctx *gin.Context) {
@@ -101,6 +130,19 @@ func (c *capturedRequestBody) applyToContext(ctx *gin.Context) {
 	c.markClosed()
 	if body := c.logBody(); len(body) > 0 {
 		ctx.Set(requestBodyOverrideContextKey, body)
+	}
+}
+
+// release returns the captured buffer to the pool. It is safe to call multiple
+// times; subsequent calls are no-ops.
+func (c *capturedRequestBody) release() {
+	if c == nil || c.released {
+		return
+	}
+	c.released = true
+	if c.buffer != nil {
+		releaseRequestBuffer(c.buffer)
+		c.buffer = nil
 	}
 }
 
@@ -118,9 +160,13 @@ func (c *capturedRequestBody) logBody() []byte {
 }
 
 func (c *capturedRequestBody) summary() string {
+	captured := 0
+	if c.buffer != nil {
+		captured = c.buffer.Len()
+	}
 	summary := fmt.Sprintf(
 		"[request body omitted] captured_bytes=%d observed_bytes=%d complete=%t truncated=%t",
-		c.buffer.Len(),
+		captured,
 		c.observedBytes,
 		c.complete,
 		c.truncated,

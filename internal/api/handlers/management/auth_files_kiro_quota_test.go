@@ -211,6 +211,106 @@ func (e *fakeKiroRefreshExecutor) HttpRequest(context.Context, *coreauth.Auth, *
 	return nil, nil
 }
 
+type blockingKiroRefreshExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *blockingKiroRefreshExecutor) Identifier() string { return "kiro" }
+
+func (e *blockingKiroRefreshExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *blockingKiroRefreshExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *blockingKiroRefreshExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	close(e.started)
+	<-e.release
+	updated := auth.Clone()
+	updated.Disabled = false
+	updated.Status = coreauth.StatusActive
+	updated.Metadata["access_token"] = "new-access-token"
+	updated.Metadata["refresh_token"] = "new-refresh-token"
+	updated.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+	updated.NextRefreshAfter = time.Now().UTC().Add(5 * time.Minute)
+	return updated, nil
+}
+
+func (e *blockingKiroRefreshExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *blockingKiroRefreshExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestKiroUsageInFlightRefreshDoesNotReviveDeletedAuth(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	exec := &blockingKiroRefreshExecutor{started: make(chan struct{}), release: make(chan struct{})}
+	manager.RegisterExecutor(exec)
+	now := time.Now().UTC()
+	auth := &coreauth.Auth{
+		ID:       "kiro-inflight-usage-refresh.json",
+		FileName: "kiro-inflight-usage-refresh.json",
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":                     "kiro",
+			"access_token":             "old-access-token",
+			"refresh_token":            "old-refresh-token",
+			"profile_arn":              "arn:aws:codewhisperer:us-east-1:123:profile/test",
+			"last_refresh":             now.Add(-6 * time.Minute).Format(time.RFC3339),
+			"refresh_interval_seconds": 300,
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := h.refreshKiroUsageAuth(context.Background(), auth, true)
+		done <- err
+	}()
+
+	select {
+	case <-exec.started:
+	case <-time.After(time.Second):
+		close(exec.release)
+		t.Fatal("timed out waiting for Kiro usage refresh to start")
+	}
+
+	disabled := auth.Clone()
+	disabled.Disabled = true
+	disabled.Status = coreauth.StatusDisabled
+	if _, err := manager.Update(coreauth.WithSkipPersist(context.Background()), disabled); err != nil {
+		close(exec.release)
+		t.Fatalf("disable auth: %v", err)
+	}
+	close(exec.release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("refreshKiroUsageAuth() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Kiro usage refresh to finish")
+	}
+
+	got, ok := manager.GetByID(auth.ID)
+	if !ok || got == nil || !got.Disabled || got.Status != coreauth.StatusDisabled {
+		t.Fatalf("expected auth to remain disabled after stale usage refresh, got auth=%#v ok=%v", got, ok)
+	}
+	if got.Metadata["access_token"] == "new-access-token" {
+		t.Fatal("stale Kiro usage refresh updated a disabled auth")
+	}
+}
+
 func TestGetKiroUsageRefreshesDueTokenBeforeRequest(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

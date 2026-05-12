@@ -82,11 +82,16 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 
 // SetupBaseLogger configures the shared logrus instance and Gin writers.
 // It is safe to call multiple times; initialization happens only once.
+//
+// Caller reporting is NOT enabled here: runtime.Caller is a significant hot-path
+// cost at high QPS (stack walk per log line). The effective setting is driven
+// by the configured log level via SetReportCallerForLevel, which is invoked by
+// util.SetLogLevel when the debug flag is applied.
 func SetupBaseLogger() {
 	setupOnce.Do(func() {
 		log.SetOutput(os.Stdout)
-		log.SetReportCaller(true)
 		log.SetFormatter(&LogFormatter{})
+		SetReportCallerForLevel(log.GetLevel())
 
 		ginInfoWriter = log.StandardLogger().Writer()
 		gin.DefaultWriter = ginInfoWriter
@@ -99,6 +104,14 @@ func SetupBaseLogger() {
 
 		log.RegisterExitHandler(closeLogOutputs)
 	})
+}
+
+// SetReportCallerForLevel enables caller reporting only when the effective log
+// level is Debug or more verbose. In production (Info/Warn/Error) logrus will
+// skip the runtime.Caller walk, which is the dominant CPU cost per log line
+// under heavy load.
+func SetReportCallerForLevel(level log.Level) {
+	log.SetReportCaller(level >= log.DebugLevel)
 }
 
 // isDirWritable checks if the specified directory exists and is writable by attempting to create and remove a test file.

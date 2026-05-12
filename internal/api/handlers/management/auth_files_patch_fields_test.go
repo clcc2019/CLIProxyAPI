@@ -15,6 +15,54 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+func TestListAuthFilesFromDisk_IncludesDisabledAndDisableCooling(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "kiro-google.json")
+	initial := `{
+  "type": "kiro",
+  "email": "kiro@example.com",
+  "priority": "7",
+  "proxy_url": "http://127.0.0.1:7890",
+  "disabled": true,
+  "disable-cooling": "true"
+}`
+	if err := os.WriteFile(filePath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	ctx.Request = req
+
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var response struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal(response) error = %v", err)
+	}
+	if len(response.Files) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(response.Files))
+	}
+	file := response.Files[0]
+	if got, ok := file["disabled"].(bool); !ok || !got {
+		t.Fatalf("file.disabled = %#v, want true", file["disabled"])
+	}
+	if got, ok := file["disable_cooling"].(bool); !ok || !got {
+		t.Fatalf("file.disable_cooling = %#v, want true", file["disable_cooling"])
+	}
+}
+
 func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -347,7 +395,7 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	body := `{"name":"kiro-google.json","priority":9,"proxy_url":"http://127.0.0.1:7890","prefix":"kiro-main"}`
+	body := `{"name":"kiro-google.json","priority":9,"proxy_url":"http://127.0.0.1:7890","prefix":"kiro-main","disable-cooling":true}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -375,6 +423,9 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
 	if got, ok := response.File["prefix"].(string); !ok || got != "kiro-main" {
 		t.Fatalf("response.file.prefix = %#v, want kiro-main", response.File["prefix"])
 	}
+	if got, ok := response.File["disable_cooling"].(bool); !ok || !got {
+		t.Fatalf("response.file.disable_cooling = %#v, want true", response.File["disable_cooling"])
+	}
 
 	updated, ok := manager.GetByID(auth.ID)
 	if !ok || updated == nil {
@@ -388,6 +439,12 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
 	}
 	if got := updated.Prefix; got != "kiro-main" {
 		t.Fatalf("Prefix = %q, want kiro-main", got)
+	}
+	if got, ok := updated.Metadata["disable_cooling"].(bool); !ok || !got {
+		t.Fatalf("Metadata[disable_cooling] = %#v, want true", updated.Metadata["disable_cooling"])
+	}
+	if _, ok := updated.Metadata["disable-cooling"]; ok {
+		t.Fatal("Metadata[disable-cooling] should be removed")
 	}
 
 	persisted, err := os.ReadFile(filePath)
@@ -403,6 +460,12 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
 	}
 	if got, ok := document["proxy_url"].(string); !ok || got != "http://127.0.0.1:7890" {
 		t.Fatalf("file.proxy_url = %#v, want proxy", document["proxy_url"])
+	}
+	if got, ok := document["disable_cooling"].(bool); !ok || !got {
+		t.Fatalf("file.disable_cooling = %#v, want true", document["disable_cooling"])
+	}
+	if _, ok := document["disable-cooling"]; ok {
+		t.Fatal("file.disable-cooling should be removed")
 	}
 }
 

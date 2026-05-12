@@ -36,7 +36,8 @@ type RequestInfo struct {
 // logging path off the client-facing critical path.
 type ResponseWriterWrapper struct {
 	gin.ResponseWriter
-	body                bytes.Buffer               // body stores the response body for non-streaming responses.
+	body                *bytes.Buffer              // body stores the response body for non-streaming responses (pooled).
+	bodyReleased        bool                       // bodyReleased guards against double-release of the pooled body buffer.
 	isStreaming         bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
 	streamWriter        logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
 	logger              logging.RequestLogger      // logger is the instance of the request logger service.
@@ -63,8 +64,21 @@ type ResponseWriterWrapper struct {
 func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger, requestInfo *RequestInfo) *ResponseWriterWrapper {
 	return &ResponseWriterWrapper{
 		ResponseWriter: w,
+		body:           acquireResponseBuffer(),
 		logger:         logger,
 		requestInfo:    requestInfo,
+	}
+}
+
+// release returns the pooled body buffer. It is safe to call multiple times.
+func (w *ResponseWriterWrapper) release() {
+	if w == nil || w.bodyReleased {
+		return
+	}
+	w.bodyReleased = true
+	if w.body != nil {
+		releaseResponseBuffer(w.body)
+		w.body = nil
 	}
 }
 
@@ -141,7 +155,7 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 }
 
 func (w *ResponseWriterWrapper) captureResponseBody(data []byte) {
-	if len(data) == 0 || w.bodyTruncated {
+	if len(data) == 0 || w.bodyTruncated || w.body == nil {
 		return
 	}
 	remaining := maxLoggedResponseBodyBytes - w.body.Len()
@@ -158,7 +172,7 @@ func (w *ResponseWriterWrapper) captureResponseBody(data []byte) {
 }
 
 func (w *ResponseWriterWrapper) captureResponseString(data string) {
-	if len(data) == 0 || w.bodyTruncated {
+	if len(data) == 0 || w.bodyTruncated || w.body == nil {
 		return
 	}
 	remaining := maxLoggedResponseBodyBytes - w.body.Len()
@@ -179,7 +193,9 @@ func (w *ResponseWriterWrapper) markResponseBodyTruncated() {
 		return
 	}
 	w.bodyTruncated = true
-	_, _ = w.body.Write(truncatedResponseBodyMarker)
+	if w.body != nil {
+		_, _ = w.body.Write(truncatedResponseBodyMarker)
+	}
 }
 
 // WriteHeader wraps the underlying ResponseWriter's WriteHeader method.
@@ -433,7 +449,7 @@ func (w *ResponseWriterWrapper) extractResponseBody(c *gin.Context) []byte {
 	if body := extractBodyOverride(c, responseBodyOverrideContextKey); len(body) > 0 {
 		return body
 	}
-	if w.body.Len() == 0 {
+	if w.body == nil || w.body.Len() == 0 {
 		return nil
 	}
 	return bytes.Clone(w.body.Bytes())

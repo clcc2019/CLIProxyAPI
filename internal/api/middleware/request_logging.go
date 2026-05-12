@@ -60,7 +60,15 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		if err := wrapper.Finalize(c); err != nil {
 			// Log error but don't interrupt the response
 			// In a real implementation, you might want to use a proper logger here
+			_ = err
 		}
+
+		// Return pooled capture/response buffers now that Finalize has consumed
+		// whatever it needed from them.
+		if bodyCapture != nil {
+			bodyCapture.release()
+		}
+		wrapper.release()
 	}
 }
 

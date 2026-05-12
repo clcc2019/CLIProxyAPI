@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -24,9 +25,15 @@ import (
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
+//
+// Cursor state is stored in a sync.Map of *atomic.Uint64, so Pick advances the
+// per-(provider,model) counter with a single atomic add and no mutex on the hot
+// path. A rarely-taken resetMu protects the whole-map reset used to cap memory
+// growth when the number of distinct keys exceeds maxKeys.
 type RoundRobinSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
+	cursors atomic.Pointer[sync.Map] // map[string]*atomic.Uint64
+	size    atomic.Int64
+	resetMu sync.Mutex
 	maxKeys int
 }
 
@@ -281,14 +288,6 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model)
-	s.mu.Lock()
-	if s.cursors == nil {
-		s.cursors = make(map[string]int)
-	}
-	limit := s.maxKeys
-	if limit <= 0 {
-		limit = 4096
-	}
 
 	// Check if any available auth has gemini_virtual_parent attribute,
 	// indicating gemini-cli virtual auths that should use credential-level polling.
@@ -296,49 +295,72 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if len(parentOrder) > 1 {
 		// Two-level round-robin: first select a credential group, then pick within it.
 		groupKey := key + "::group"
-		s.ensureCursorKey(groupKey, limit)
-		if _, exists := s.cursors[groupKey]; !exists {
-			// Seed with a random initial offset so the starting credential is randomized.
-			s.cursors[groupKey] = rand.IntN(len(parentOrder))
-		}
-		groupIndex := s.cursors[groupKey]
-		if groupIndex >= 2_147_483_640 {
-			groupIndex = 0
-		}
-		s.cursors[groupKey] = groupIndex + 1
-
-		selectedParent := parentOrder[groupIndex%len(parentOrder)]
+		groupIndex := s.nextCursor(groupKey, uint64(len(parentOrder)))
+		selectedParent := parentOrder[groupIndex%uint64(len(parentOrder))]
 		group := groups[selectedParent]
 
 		// Second level: round-robin within the selected credential group.
 		innerKey := key + "::cred:" + selectedParent
-		s.ensureCursorKey(innerKey, limit)
-		innerIndex := s.cursors[innerKey]
-		if innerIndex >= 2_147_483_640 {
-			innerIndex = 0
-		}
-		s.cursors[innerKey] = innerIndex + 1
-		s.mu.Unlock()
-		return group[innerIndex%len(group)], nil
+		innerIndex := s.nextCursor(innerKey, 0)
+		return group[innerIndex%uint64(len(group))], nil
 	}
 
 	// Flat round-robin for non-grouped auths (original behavior).
-	s.ensureCursorKey(key, limit)
-	index := s.cursors[key]
-	if index >= 2_147_483_640 {
-		index = 0
-	}
-	s.cursors[key] = index + 1
-	s.mu.Unlock()
-	return available[index%len(available)], nil
+	index := s.nextCursor(key, 0)
+	return available[index%uint64(len(available))], nil
 }
 
-// ensureCursorKey ensures the cursor map has capacity for the given key.
-// Must be called with s.mu held.
-func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
-	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
-		s.cursors = make(map[string]int)
+// nextCursor atomically returns the current cursor value for key and advances it
+// by one. When seedMod > 1 and the cursor is first created, the initial value is
+// randomized within [0, seedMod) so independent goroutines do not all start at 0.
+//
+// To bound memory, the underlying map is rotated (replaced with a fresh empty
+// map) the first time an insertion would cross maxKeys. Rotation is rare and
+// guarded by resetMu; the hot path (cache hit) is purely atomic.
+func (s *RoundRobinSelector) nextCursor(key string, seedMod uint64) uint64 {
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
 	}
+
+	for {
+		m := s.loadCursors()
+		if cursor, ok := m.Load(key); ok {
+			return cursor.(*atomic.Uint64).Add(1) - 1
+		}
+
+		// Adding a new key. Rotate first if we'd exceed the cap.
+		if s.size.Load() >= int64(limit) {
+			s.resetMu.Lock()
+			if s.size.Load() >= int64(limit) {
+				s.cursors.Store(&sync.Map{})
+				s.size.Store(0)
+			}
+			s.resetMu.Unlock()
+			continue
+		}
+
+		counter := &atomic.Uint64{}
+		if seedMod > 1 {
+			counter.Store(uint64(rand.IntN(int(seedMod))))
+		}
+		if existing, loaded := m.LoadOrStore(key, counter); loaded {
+			return existing.(*atomic.Uint64).Add(1) - 1
+		}
+		s.size.Add(1)
+		return counter.Add(1) - 1
+	}
+}
+
+func (s *RoundRobinSelector) loadCursors() *sync.Map {
+	if m := s.cursors.Load(); m != nil {
+		return m
+	}
+	fresh := &sync.Map{}
+	if s.cursors.CompareAndSwap(nil, fresh) {
+		return fresh
+	}
+	return s.cursors.Load()
 }
 
 // groupByVirtualParent groups auths by their gemini_virtual_parent attribute.
@@ -470,10 +492,13 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 // SessionAffinitySelector wraps another selector with session-sticky behavior.
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
+//
+// Pick is lock-free at the selector level: SessionCache is already thread-safe
+// and the fallback selector handles its own synchronization, so a shared mutex
+// here would serialize every session-affinity request for no benefit.
 type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
-	mu       sync.Mutex
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -545,9 +570,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// No outer lock: SessionCache is thread-safe on its own and the fallback
+	// selector handles its own synchronization. Holding a shared mutex here
+	// would serialize every request and defeat the purpose of sharding work
+	// across sessions.
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {

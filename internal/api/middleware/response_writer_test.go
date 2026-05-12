@@ -52,7 +52,7 @@ func TestExtractResponseBodyPrefersOverride(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	wrapper := &ResponseWriterWrapper{}
+	wrapper := &ResponseWriterWrapper{body: &bytes.Buffer{}}
 	wrapper.body.WriteString("original-response")
 
 	body := wrapper.extractResponseBody(c)

@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,8 +13,31 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+type statOnDeleteStore struct {
+	deletedPath string
+	existed     bool
+}
+
+func (s *statOnDeleteStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
+
+func (s *statOnDeleteStore) Save(context.Context, *coreauth.Auth) (string, error) { return "", nil }
+
+func (s *statOnDeleteStore) Delete(_ context.Context, id string) error {
+	s.deletedPath = id
+	if _, err := os.Stat(id); err == nil {
+		s.existed = true
+		return nil
+	} else if os.IsNotExist(err) {
+		s.existed = false
+		return nil
+	} else {
+		return fmt.Errorf("stat in delete: %w", err)
+	}
+}
 
 func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
@@ -125,5 +149,140 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 	}
 	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
+	}
+}
+
+func TestDeleteAuthFile_ByAuthIndexDoesNotRecreateKiroFile(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "kiro-google-user-example-com.json"
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(authDir)
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": filepath.Join(authDir, fileName),
+		},
+		Metadata: map[string]any{
+			"type":          "kiro",
+			"provider":      "google",
+			"email":         "user@example.com",
+			"access_token":  "access-token",
+			"refresh_token": "refresh-token",
+		},
+	}
+	authIndex := record.EnsureIndex()
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+	filePath := filepath.Join(authDir, fileName)
+	if _, errStat := os.Stat(filePath); errStat != nil {
+		t.Fatalf("expected auth file to be saved, stat err: %v", errStat)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = store
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?auth_index="+url.QueryEscape(authIndex), nil)
+	ctx.Request = req
+
+	h.DeleteAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected kiro auth file to stay deleted, stat err: %v", errStat)
+	}
+	if auth, ok := manager.GetByID(fileName); !ok || auth == nil || !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+		t.Fatalf("expected in-memory auth to be disabled after delete, got auth=%#v ok=%v", auth, ok)
+	}
+}
+
+func TestDeleteAuthFile_StoreDeleteRunsBeforeLocalRemove(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "kiro-google-user-example-com.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"kiro"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	store := &statOnDeleteStore{}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, coreauth.NewManager(nil, nil, nil))
+	h.tokenStore = store
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
+
+	h.DeleteAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if store.deletedPath != filePath {
+		t.Fatalf("store deleted path = %q, want %q", store.deletedPath, filePath)
+	}
+	if !store.existed {
+		t.Fatal("expected backing store Delete to see the local file before fallback removal")
+	}
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected auth file to be removed, stat err: %v", errStat)
+	}
+}
+
+func TestDeleteAuthFile_ByAbsolutePathFromManagedAuth(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "kiro-google-user-example-com.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"kiro"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{"type": "kiro"},
+	}); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?path="+url.QueryEscape(filePath), nil)
+
+	h.DeleteAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected auth file to be removed, stat err: %v", errStat)
+	}
+	if auth, ok := manager.GetByID(fileName); !ok || auth == nil || !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+		t.Fatalf("expected in-memory auth to be disabled after delete, got auth=%#v ok=%v", auth, ok)
 	}
 }

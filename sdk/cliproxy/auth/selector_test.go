@@ -437,17 +437,23 @@ func TestRoundRobinSelectorPick_CursorKeyCap(t *testing.T) {
 	_, _ = selector.Pick(context.Background(), "gemini", "m2", cliproxyexecutor.Options{}, auths)
 	_, _ = selector.Pick(context.Background(), "gemini", "m3", cliproxyexecutor.Options{}, auths)
 
-	selector.mu.Lock()
-	defer selector.mu.Unlock()
-
-	if selector.cursors == nil {
+	m := selector.cursors.Load()
+	if m == nil {
 		t.Fatalf("selector.cursors = nil")
 	}
-	if len(selector.cursors) != 1 {
-		t.Fatalf("len(selector.cursors) = %d, want %d", len(selector.cursors), 1)
+
+	count := 0
+	var lastKey string
+	m.Range(func(k, _ any) bool {
+		count++
+		lastKey, _ = k.(string)
+		return true
+	})
+	if count != 1 {
+		t.Fatalf("cursor count = %d, want %d", count, 1)
 	}
-	if _, ok := selector.cursors["gemini:m3"]; !ok {
-		t.Fatalf("selector.cursors missing key %q", "gemini:m3")
+	if lastKey != "gemini:m3" {
+		t.Fatalf("remaining cursor key = %q, want %q", lastKey, "gemini:m3")
 	}
 }
 

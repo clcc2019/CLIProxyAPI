@@ -465,6 +465,113 @@ func TestAutoRefreshLoop_HandleDueHonorsBatchSize(t *testing.T) {
 	}
 }
 
+func TestManager_InFlightRefreshDoesNotReviveDisabledAuth(t *testing.T) {
+	store := &countingStore{}
+	manager := NewManager(store, &RoundRobinSelector{}, nil)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	executor := &autoRefreshTestExecutor{
+		provider: "kiro",
+		refreshFunc: func(auth *Auth) (*Auth, error) {
+			close(started)
+			<-release
+			updated := auth.Clone()
+			updated.Status = StatusActive
+			updated.Disabled = false
+			if updated.Metadata == nil {
+				updated.Metadata = map[string]any{}
+			}
+			updated.Metadata["access_token"] = "new-token"
+			return updated, nil
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "kiro-inflight-refresh",
+		Provider: "kiro",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "kiro", "refresh_token": "old-refresh-token"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	store.saveCount.Store(0)
+
+	done := make(chan struct{})
+	go func() {
+		manager.refreshAuth(context.Background(), auth.ID)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("timed out waiting for refresh to start")
+	}
+
+	disabled := auth.Clone()
+	disabled.Status = StatusDisabled
+	disabled.Disabled = true
+	if _, err := manager.Update(WithSkipPersist(context.Background()), disabled); err != nil {
+		close(release)
+		t.Fatalf("disable auth: %v", err)
+	}
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for refresh to finish")
+	}
+
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("stale refresh persisted %d times, want 0", got)
+	}
+	got, ok := manager.GetByID(auth.ID)
+	if !ok || got == nil || !got.Disabled || got.Status != StatusDisabled {
+		t.Fatalf("expected auth to remain disabled, got auth=%#v ok=%v", got, ok)
+	}
+}
+
+func TestManager_PublishedRefreshUpdateDoesNotReviveDisabledAuth(t *testing.T) {
+	store := &countingStore{}
+	manager := NewManager(store, &RoundRobinSelector{}, nil)
+	auth := &Auth{
+		ID:       "kiro-published-refresh",
+		Provider: "kiro",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "kiro", "refresh_token": "old-refresh-token"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	store.saveCount.Store(0)
+
+	disabled := auth.Clone()
+	disabled.Status = StatusDisabled
+	disabled.Disabled = true
+	if _, err := manager.Update(WithSkipPersist(context.Background()), disabled); err != nil {
+		t.Fatalf("disable auth: %v", err)
+	}
+
+	updated := auth.Clone()
+	updated.Status = StatusActive
+	updated.Disabled = false
+	updated.Metadata["access_token"] = "new-token"
+	manager.handleExecutionRefreshUpdate(context.Background(), updated)
+
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("published stale refresh persisted %d times, want 0", got)
+	}
+	got, ok := manager.GetByID(auth.ID)
+	if !ok || got == nil || !got.Disabled || got.Status != StatusDisabled {
+		t.Fatalf("expected auth to remain disabled, got auth=%#v ok=%v", got, ok)
+	}
+}
+
 func waitForRefreshCalls(t *testing.T, executor *autoRefreshTestExecutor, want int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,7 +33,14 @@ var requestLogID atomic.Uint64
 const (
 	maxDecompressedLogBodyBytes    = 4 << 20
 	decompressedLogTruncatedMarker = "\n...[decompressed log body truncated]...\n"
-	streamingLogChunkQueueSize     = 16
+	// streamingLogChunkQueueSize bounds the in-flight chunk backlog for a
+	// single streaming response. Chunks are small (<= a few KiB) and the
+	// consumer is a dedicated goroutine, so a deeper queue absorbs bursty
+	// writers (e.g. token-per-chunk SSE) without dropping frames.
+	streamingLogChunkQueueSize = 256
+	// streamingLogChunkWarnInterval rate-limits drop warnings so a persistent
+	// slow consumer does not spam the log with every missed chunk.
+	streamingLogChunkWarnInterval = 128
 )
 
 var (
@@ -1250,6 +1258,33 @@ type FileStreamingLogWriter struct {
 
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
+
+	// droppedChunks counts chunks dropped due to a full channel. Used only for
+	// observability; atomic so WriteChunkAsync remains lock-free.
+	droppedChunks atomic.Uint64
+}
+
+// streamingChunkBufPool recycles chunk scratch buffers between WriteChunkAsync
+// and the consumer goroutine to keep the streaming path off the heap.
+var streamingChunkBufPool = sync.Pool{
+	New: func() any {
+		// Typical SSE chunk is ~4 KiB. Preallocate there; append grows as needed.
+		buf := make([]byte, 0, 4096)
+		return &buf
+	},
+}
+
+// returnStreamingChunkBuffer reuses chunk buffers. Oversized buffers are
+// dropped so pathological payloads do not pin memory in the pool.
+func returnStreamingChunkBuffer(chunk []byte) {
+	if chunk == nil {
+		return
+	}
+	if cap(chunk) > 1<<20 { // 1 MiB
+		return
+	}
+	buf := chunk[:0]
+	streamingChunkBufPool.Put(&buf)
 }
 
 // WriteChunkAsync writes a response chunk asynchronously (non-blocking).
@@ -1260,19 +1295,28 @@ func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
 	if w.chunkChan == nil || len(chunk) == 0 {
 		return
 	}
-	if len(w.chunkChan) >= cap(w.chunkChan) {
-		return
+
+	// Acquire a pooled buffer, populate with chunk contents. Sized from the
+	// pool so small chunks do not trigger a fresh allocation.
+	bufPtr := streamingChunkBufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	if cap(buf) < len(chunk) {
+		buf = make([]byte, 0, len(chunk))
 	}
+	buf = append(buf, chunk...)
 
-	// Make a copy of the chunk to avoid data races
-	chunkCopy := make([]byte, len(chunk))
-	copy(chunkCopy, chunk)
-
-	// Non-blocking send
+	// Non-blocking send: if the consumer is behind, drop the chunk and track
+	// it so operators see persistent backpressure instead of silent loss.
 	select {
-	case w.chunkChan <- chunkCopy:
+	case w.chunkChan <- buf:
+		*bufPtr = buf
 	default:
-		// Channel is full, skip this chunk to avoid blocking
+		*bufPtr = buf[:0]
+		streamingChunkBufPool.Put(bufPtr)
+		dropped := w.droppedChunks.Add(1)
+		if dropped%streamingLogChunkWarnInterval == 1 {
+			log.Warnf("streaming log chunk dropped (backlog full, total_drops=%d)", dropped)
+		}
 	}
 }
 
@@ -1407,6 +1451,8 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 
 	for chunk := range w.chunkChan {
 		if w.responseBodyFile == nil {
+			// Still drain so senders are not blocked on closed consumers.
+			returnStreamingChunkBuffer(chunk)
 			continue
 		}
 		if _, errWrite := w.responseBodyFile.Write(chunk); errWrite != nil {
@@ -1422,6 +1468,7 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 			}
 			w.responseBodyFile = nil
 		}
+		returnStreamingChunkBuffer(chunk)
 	}
 
 	if w.responseBodyFile == nil {

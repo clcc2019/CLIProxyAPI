@@ -135,8 +135,11 @@ type ModelRegistry struct {
 	clientProviders map[string]string
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
-	// availableModelsCache stores per-handler snapshots for GetAvailableModels.
-	availableModelsCache map[string]availableModelsCacheEntry
+	// availableModelsCache stores per-handler snapshots for GetAvailableModels
+	// as a copy-on-write map. Readers load the pointer atomically and never
+	// take the registry lock on cache hits; writers build a new map and swap
+	// the pointer under the registry write lock.
+	availableModelsCache atomic.Pointer[map[string]availableModelsCacheEntry]
 	// availableOpenAIModelSummaries stores the compact /v1/models snapshot.
 	availableOpenAIModelSummaries atomic.Value // stores *openAIModelSummariesCacheEntry
 	// hook is an optional callback sink for model registration changes
@@ -151,27 +154,61 @@ var registryOnce sync.Once
 func GetGlobalRegistry() *ModelRegistry {
 	registryOnce.Do(func() {
 		globalRegistry = &ModelRegistry{
-			models:               make(map[string]*ModelRegistration),
-			clientModels:         make(map[string][]string),
-			clientModelInfos:     make(map[string]map[string]*ModelInfo),
-			clientProviders:      make(map[string]string),
-			availableModelsCache: make(map[string]availableModelsCacheEntry),
-			mutex:                &sync.RWMutex{},
+			models:           make(map[string]*ModelRegistration),
+			clientModels:     make(map[string][]string),
+			clientModelInfos: make(map[string]map[string]*ModelInfo),
+			clientProviders:  make(map[string]string),
+			mutex:            &sync.RWMutex{},
 		}
+		empty := map[string]availableModelsCacheEntry{}
+		globalRegistry.availableModelsCache.Store(&empty)
 	})
 	return globalRegistry
 }
-func (r *ModelRegistry) ensureAvailableModelsCacheLocked() {
-	if r.availableModelsCache == nil {
-		r.availableModelsCache = make(map[string]availableModelsCacheEntry)
+
+// loadAvailableModelsCache returns the current cache snapshot (never nil).
+func (r *ModelRegistry) loadAvailableModelsCache() map[string]availableModelsCacheEntry {
+	if m := r.availableModelsCache.Load(); m != nil {
+		return *m
 	}
+	empty := map[string]availableModelsCacheEntry{}
+	r.availableModelsCache.CompareAndSwap(nil, &empty)
+	if m := r.availableModelsCache.Load(); m != nil {
+		return *m
+	}
+	return empty
 }
 
+// ensureAvailableModelsCacheLocked is retained as a no-op for call-site
+// compatibility. The atomic pointer handles lazy initialization on first read.
+func (r *ModelRegistry) ensureAvailableModelsCacheLocked() {
+	_ = r.loadAvailableModelsCache()
+}
+
+// invalidateAvailableModelsCacheLocked swaps in an empty snapshot. Must be
+// called with r.mutex write-locked so concurrent writers cannot race the swap.
 func (r *ModelRegistry) invalidateAvailableModelsCacheLocked() {
-	if len(r.availableModelsCache) > 0 {
-		clear(r.availableModelsCache)
+	if current := r.availableModelsCache.Load(); current != nil && len(*current) == 0 {
+		// Still refresh the OpenAI summary so the two caches stay consistent.
+		r.publishOpenAIModelSummariesSnapshotLocked(time.Now())
+		return
 	}
+	empty := map[string]availableModelsCacheEntry{}
+	r.availableModelsCache.Store(&empty)
 	r.publishOpenAIModelSummariesSnapshotLocked(time.Now())
+}
+
+// storeAvailableModelsEntryLocked copies the current cache, replaces the entry
+// for handlerType with the given value, and atomically publishes the new map.
+// Must be called with r.mutex write-locked.
+func (r *ModelRegistry) storeAvailableModelsEntryLocked(handlerType string, entry availableModelsCacheEntry) {
+	current := r.loadAvailableModelsCache()
+	next := make(map[string]availableModelsCacheEntry, len(current)+1)
+	for k, v := range current {
+		next[k] = v
+	}
+	next[handlerType] = entry
+	r.availableModelsCache.Store(&next)
 }
 
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
@@ -774,27 +811,25 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any {
 	now := time.Now()
 
-	r.mutex.RLock()
-	if cache, ok := r.availableModelsCache[handlerType]; ok && (cache.expiresAt.IsZero() || now.Before(cache.expiresAt)) {
-		models := cloneModelMaps(cache.models)
-		r.mutex.RUnlock()
-		return models
+	// Fast path: read the atomic cache snapshot without taking the registry
+	// mutex at all. Most calls hit this branch because MarkResult only
+	// invalidates on state change, not on every request.
+	if cache, ok := r.loadAvailableModelsCache()[handlerType]; ok && (cache.expiresAt.IsZero() || now.Before(cache.expiresAt)) {
+		return cloneModelMaps(cache.models)
 	}
-	r.mutex.RUnlock()
 
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	r.ensureAvailableModelsCacheLocked()
 
-	if cache, ok := r.availableModelsCache[handlerType]; ok && (cache.expiresAt.IsZero() || now.Before(cache.expiresAt)) {
+	if cache, ok := r.loadAvailableModelsCache()[handlerType]; ok && (cache.expiresAt.IsZero() || now.Before(cache.expiresAt)) {
 		return cloneModelMaps(cache.models)
 	}
 
 	models, expiresAt := r.buildAvailableModelsLocked(handlerType, now)
-	r.availableModelsCache[handlerType] = availableModelsCacheEntry{
+	r.storeAvailableModelsEntryLocked(handlerType, availableModelsCacheEntry{
 		models:    cloneModelMaps(models),
 		expiresAt: expiresAt,
-	}
+	})
 
 	return models
 }

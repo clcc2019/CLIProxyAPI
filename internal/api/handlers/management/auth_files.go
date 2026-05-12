@@ -427,6 +427,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						}
 					}
 				}
+				if disabled, ok := boolFromGJSON(data, "disabled"); ok {
+					fileData["disabled"] = disabled
+				}
+				if disableCooling, ok := boolFromGJSON(data, "disable_cooling", "disable-cooling"); ok {
+					fileData["disable_cooling"] = disableCooling
+				}
 				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
 					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
 						fileData["note"] = trimmed
@@ -599,7 +605,31 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if websockets, ok := authFileWebsockets(auth); ok {
 		entry["websockets"] = websockets
 	}
+	if disableCooling, ok := auth.DisableCoolingOverride(); ok {
+		entry["disable_cooling"] = disableCooling
+	}
 	return entry
+}
+
+func boolFromGJSON(data []byte, keys ...string) (bool, bool) {
+	for _, key := range keys {
+		value := gjson.GetBytes(data, key)
+		if !value.Exists() {
+			continue
+		}
+		switch value.Type {
+		case gjson.True:
+			return true, true
+		case gjson.False:
+			return false, true
+		case gjson.String:
+			parsed, err := strconv.ParseBool(strings.TrimSpace(value.String()))
+			if err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return false, false
 }
 
 func serializeAuthError(err *coreauth.Error) gin.H {
@@ -995,14 +1025,16 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					full = abs
 				}
 			}
-			if err = os.Remove(full); err == nil {
-				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
-					c.JSON(500, gin.H{"error": errDel.Error()})
-					return
-				}
-				deleted++
-				h.disableAuth(ctx, full)
+			if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
+				c.JSON(500, gin.H{"error": errDel.Error()})
+				return
 			}
+			if err = os.Remove(full); err != nil && !os.IsNotExist(err) {
+				c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove file: %v", err)})
+				return
+			}
+			deleted++
+			h.disableAuth(ctx, full)
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
@@ -1128,7 +1160,14 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 	if c == nil {
 		return nil, nil
 	}
-	names := uniqueAuthFileNames(c.QueryArray("name"))
+	queryNames := append([]string{}, c.QueryArray("name")...)
+	queryNames = append(queryNames, c.QueryArray("id")...)
+	queryNames = append(queryNames, c.QueryArray("auth_index")...)
+	queryNames = append(queryNames, c.QueryArray("authIndex")...)
+	queryNames = append(queryNames, c.QueryArray("file_name")...)
+	queryNames = append(queryNames, c.QueryArray("fileName")...)
+	queryNames = append(queryNames, c.QueryArray("path")...)
+	names := uniqueAuthFileNames(queryNames)
 	if len(names) > 0 {
 		return names, nil
 	}
@@ -1143,8 +1182,14 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 	}
 
 	var objectBody struct {
-		Name  string   `json:"name"`
-		Names []string `json:"names"`
+		Name           string   `json:"name"`
+		ID             string   `json:"id"`
+		Names          []string `json:"names"`
+		AuthIndex      string   `json:"auth_index"`
+		AuthIndexCamel string   `json:"authIndex"`
+		FileName       string   `json:"file_name"`
+		FileNameCamel  string   `json:"fileName"`
+		Path           string   `json:"path"`
 	}
 	if body[0] == '[' {
 		var arrayBody []string
@@ -1160,6 +1205,24 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 	out := make([]string, 0, len(objectBody.Names)+1)
 	if strings.TrimSpace(objectBody.Name) != "" {
 		out = append(out, objectBody.Name)
+	}
+	if strings.TrimSpace(objectBody.ID) != "" {
+		out = append(out, objectBody.ID)
+	}
+	if strings.TrimSpace(objectBody.AuthIndex) != "" {
+		out = append(out, objectBody.AuthIndex)
+	}
+	if strings.TrimSpace(objectBody.AuthIndexCamel) != "" {
+		out = append(out, objectBody.AuthIndexCamel)
+	}
+	if strings.TrimSpace(objectBody.FileName) != "" {
+		out = append(out, objectBody.FileName)
+	}
+	if strings.TrimSpace(objectBody.FileNameCamel) != "" {
+		out = append(out, objectBody.FileNameCamel)
+	}
+	if strings.TrimSpace(objectBody.Path) != "" {
+		out = append(out, objectBody.Path)
 	}
 	out = append(out, objectBody.Names...)
 	return uniqueAuthFileNames(out), nil
@@ -1187,13 +1250,17 @@ func uniqueAuthFileNames(names []string) []string {
 
 func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string, int, error) {
 	name = strings.TrimSpace(name)
-	if isUnsafeAuthFileName(name) {
+	if name == "" {
 		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
 	}
 
+	targetAuth := h.findAuthForDelete(name)
+	if targetAuth == nil && isUnsafeAuthFileName(name) {
+		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
+	}
 	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
 	targetID := ""
-	if targetAuth := h.findAuthForDelete(name); targetAuth != nil {
+	if targetAuth != nil {
 		targetID = strings.TrimSpace(targetAuth.ID)
 		if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
 			targetPath = path
@@ -1204,21 +1271,36 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 			targetPath = abs
 		}
 	}
-	if errRemove := os.Remove(targetPath); errRemove != nil {
-		if os.IsNotExist(errRemove) {
-			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
+	deletedName := filepath.Base(targetPath)
+	if deletedName == "" || deletedName == "." {
+		deletedName = filepath.Base(name)
+	}
+	if targetAuth == nil {
+		if _, errStat := os.Stat(targetPath); errStat != nil {
+			if os.IsNotExist(errStat) {
+				return deletedName, http.StatusNotFound, errAuthFileNotFound
+			}
+			return deletedName, http.StatusInternalServerError, fmt.Errorf("failed to stat file: %w", errStat)
 		}
-		return filepath.Base(name), http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
 	}
 	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
-		return filepath.Base(name), http.StatusInternalServerError, errDeleteRecord
+		return deletedName, http.StatusInternalServerError, errDeleteRecord
+	}
+	if errRemove := os.Remove(targetPath); errRemove != nil {
+		if os.IsNotExist(errRemove) {
+			if targetAuth == nil {
+				return deletedName, http.StatusNotFound, errAuthFileNotFound
+			}
+		} else {
+			return deletedName, http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
+		}
 	}
 	if targetID != "" {
 		h.disableAuth(ctx, targetID)
 	} else {
 		h.disableAuth(ctx, targetPath)
 	}
-	return filepath.Base(name), http.StatusOK, nil
+	return deletedName, http.StatusOK, nil
 }
 
 func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
@@ -1232,15 +1314,40 @@ func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
 	if auth, ok := h.authManager.GetByID(name); ok {
 		return auth
 	}
+	cleanedName := filepath.Clean(name)
+	if !filepath.IsAbs(cleanedName) {
+		if abs, errAbs := filepath.Abs(cleanedName); errAbs == nil {
+			cleanedName = abs
+		}
+	}
 	auths := h.authManager.List()
 	for _, auth := range auths {
 		if auth == nil {
 			continue
 		}
+		auth.EnsureIndex()
+		if strings.TrimSpace(auth.Index) == name {
+			return auth
+		}
 		if strings.TrimSpace(auth.FileName) == name {
 			return auth
 		}
-		if filepath.Base(strings.TrimSpace(authAttribute(auth, "path"))) == name {
+		path := strings.TrimSpace(authAttribute(auth, "path"))
+		if filepath.Base(path) == name {
+			return auth
+		}
+		if path != "" {
+			cleanedPath := filepath.Clean(path)
+			if !filepath.IsAbs(cleanedPath) {
+				if abs, errAbs := filepath.Abs(cleanedPath); errAbs == nil {
+					cleanedPath = abs
+				}
+			}
+			if cleanedPath == cleanedName {
+				return auth
+			}
+		}
+		if source := strings.TrimSpace(authAttribute(auth, "source")); source != "" && filepath.Base(source) == name {
 			return auth
 		}
 	}
@@ -1392,16 +1499,17 @@ func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) err
 }
 
 type patchAuthFileFieldsRequest struct {
-	Name           string            `json:"name"`
-	Prefix         *string           `json:"prefix"`
-	ProxyURL       *string           `json:"proxy_url"`
-	Headers        map[string]string `json:"headers"`
-	Priority       json.RawMessage   `json:"priority"`
-	Note           *string           `json:"note"`
-	UserAgent      *string           `json:"user_agent"`
-	ExcludedModels *[]string         `json:"excluded_models"`
-	DisableCooling json.RawMessage   `json:"disable_cooling"`
-	Websockets     *bool             `json:"websockets"`
+	Name                 string            `json:"name"`
+	Prefix               *string           `json:"prefix"`
+	ProxyURL             *string           `json:"proxy_url"`
+	Headers              map[string]string `json:"headers"`
+	Priority             json.RawMessage   `json:"priority"`
+	Note                 *string           `json:"note"`
+	UserAgent            *string           `json:"user_agent"`
+	ExcludedModels       *[]string         `json:"excluded_models"`
+	DisableCooling       json.RawMessage   `json:"disable_cooling"`
+	DisableCoolingLegacy json.RawMessage   `json:"disable-cooling"`
+	Websockets           *bool             `json:"websockets"`
 }
 
 func resolvePatchAuthFilePath(targetAuth *coreauth.Auth, authDir, fallbackName string) string {
@@ -1700,7 +1808,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	disableCoolingPresent, disableCoolingSet, disableCoolingValue, err := parseOptionalJSONBoolField(req.DisableCooling)
+	disableCoolingRaw := req.DisableCooling
+	if len(disableCoolingRaw) == 0 {
+		disableCoolingRaw = req.DisableCoolingLegacy
+	}
+	disableCoolingPresent, disableCoolingSet, disableCoolingValue, err := parseOptionalJSONBoolField(disableCoolingRaw)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -2106,7 +2218,7 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		_, _ = h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
 		return
 	}
 	authID := h.authIDForPath(id)
@@ -2118,7 +2230,7 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		_, _ = h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
 	}
 }
 

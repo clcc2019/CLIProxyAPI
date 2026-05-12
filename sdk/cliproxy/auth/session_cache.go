@@ -35,7 +35,8 @@ func NewSessionCache(ttl time.Duration) *SessionCache {
 }
 
 // Get retrieves the auth ID bound to a session, if still valid.
-// Does NOT refresh the TTL on access.
+// Does NOT refresh the TTL on access. Expired entries are not eagerly deleted
+// on read — cleanupLoop handles removal to keep the hot path on the read lock.
 func (c *SessionCache) Get(sessionID string) (string, bool) {
 	if sessionID == "" {
 		return "", false
@@ -47,9 +48,6 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 		return "", false
 	}
 	if time.Now().After(entry.expiresAt) {
-		c.mu.Lock()
-		delete(c.entries, sessionID)
-		c.mu.Unlock()
 		return "", false
 	}
 	return entry.authID, true

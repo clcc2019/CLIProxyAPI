@@ -97,6 +97,21 @@ func TestStatusCodeFromError_UnwrapsStreamBootstrap429(t *testing.T) {
 	}
 }
 
+func TestRetryAfterFromError_UnwrapsStreamBootstrapRetryAfter(t *testing.T) {
+	want := 2 * time.Minute
+	cause := &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: want}
+	bootstrapErr := newStreamBootstrapError(cause, nil)
+	wrappedErr := fmt.Errorf("conductor stream failed: %w", bootstrapErr)
+
+	got := retryAfterFromError(wrappedErr)
+	if got == nil {
+		t.Fatal("retryAfterFromError() = nil")
+	}
+	if *got != want {
+		t.Fatalf("retryAfterFromError() = %v, want %v", *got, want)
+	}
+}
+
 func TestIsAuthBlockedForModel_ClaudeWithCreditsStillBlockedDuringCooldown(t *testing.T) {
 	auth := &Auth{
 		ID:       "ag-1",

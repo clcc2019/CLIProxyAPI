@@ -183,6 +183,9 @@ func (h *Handler) refreshKiroUsageAuth(ctx context.Context, auth *coreauth.Auth,
 	if latest, ok := h.authManager.GetByID(auth.ID); ok && latest != nil {
 		refreshAuth = latest
 	}
+	if refreshAuth.Disabled || refreshAuth.Status == coreauth.StatusDisabled {
+		return refreshAuth, http.StatusOK, nil
+	}
 	shouldRefresh, required := shouldRefreshKiroUsageAuth(refreshAuth, time.Now().UTC())
 	if !shouldRefresh {
 		if force {
@@ -217,7 +220,7 @@ func (h *Handler) refreshKiroUsageAuth(ctx context.Context, auth *coreauth.Auth,
 	if updated.Provider == "" {
 		updated.Provider = refreshAuth.Provider
 	}
-	if _, err := h.authManager.Update(ctx, updated); err != nil {
+	if _, err := h.authManager.Update(coreauth.WithRefreshUpdate(ctx), updated); err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
 	if latest, ok := h.authManager.GetByID(updated.ID); ok && latest != nil {
@@ -445,7 +448,7 @@ func (h *Handler) persistResolvedKiroProfileArn(ctx context.Context, auth *corea
 	}
 	updated.Attributes["profile_arn"] = profileArn
 	updated.UpdatedAt = time.Now().UTC()
-	if _, err := h.authManager.Update(ctx, updated); err != nil {
+	if _, err := h.authManager.Update(coreauth.WithRefreshUpdate(ctx), updated); err != nil {
 		return
 	}
 }

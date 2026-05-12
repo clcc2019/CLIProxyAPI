@@ -56,6 +56,9 @@ func SanitizeFunctionName(name string) string {
 
 // SetLogLevel configures the logrus log level based on the configuration.
 // It sets the log level to DebugLevel if debug mode is enabled, otherwise to InfoLevel.
+// Caller reporting is toggled in step with the level: enabled for Debug (for
+// source annotations during troubleshooting) and disabled otherwise to skip the
+// per-log runtime.Caller walk on the hot path.
 func SetLogLevel(cfg *config.Config) {
 	currentLevel := log.GetLevel()
 	var newLevel log.Level
@@ -69,6 +72,7 @@ func SetLogLevel(cfg *config.Config) {
 		log.SetLevel(newLevel)
 		log.Infof("log level changed from %s to %s (debug=%t)", currentLevel, newLevel, cfg.Debug)
 	}
+	log.SetReportCaller(newLevel >= log.DebugLevel)
 }
 
 // ResolveAuthDir normalizes the auth directory path for consistent reuse throughout the app.

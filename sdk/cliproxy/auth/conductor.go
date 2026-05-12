@@ -1427,7 +1427,16 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	applyDefaultRefreshInterval(auth)
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+	existing, ok := m.auths[auth.ID]
+	if isRefreshUpdate(ctx) && (!ok || authRefreshSuppressed(existing)) {
+		var existingClone *Auth
+		if existing != nil {
+			existingClone = existing.Clone()
+		}
+		m.mu.Unlock()
+		return existingClone, nil
+	}
+	if ok && existing != nil {
 		if !auth.indexAssigned && auth.Index == "" {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
@@ -2921,8 +2930,8 @@ func retryAfterFromError(err error) *time.Duration {
 	type retryAfterProvider interface {
 		RetryAfter() *time.Duration
 	}
-	rap, ok := err.(retryAfterProvider)
-	if !ok || rap == nil {
+	var rap retryAfterProvider
+	if !errors.As(err, &rap) || rap == nil {
 		return nil
 	}
 	retryAfter := rap.RetryAfter()
@@ -4012,7 +4021,7 @@ func (m *Manager) handleExecutionRefreshUpdate(ctx context.Context, updated *Aut
 	if ctx != nil {
 		updateCtx = context.WithoutCancel(ctx)
 	}
-	if _, err := m.Update(updateCtx, updated); err != nil {
+	if _, err := m.Update(withRefreshUpdate(updateCtx), updated); err != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", updated.ID).Warnf("failed to persist refreshed auth: %v", err)
 	}
 }
@@ -4367,7 +4376,7 @@ func (m *Manager) queueRefreshReschedule(authID string) {
 }
 
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil || a.Disabled {
+	if authRefreshSuppressed(a) {
 		return false
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
@@ -4419,6 +4428,10 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return now.Sub(lastRefresh) >= *lead
 	}
 	return true
+}
+
+func authRefreshSuppressed(auth *Auth) bool {
+	return auth == nil || auth.Disabled || auth.Status == StatusDisabled
 }
 
 func authPreferredInterval(a *Auth) time.Duration {
@@ -4698,18 +4711,18 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 	result, err, _ := m.refreshGroup.Do(id, func() (any, error) {
 		m.mu.RLock()
 		current := m.auths[id]
-		exec := (ProviderExecutor)(nil)
-		if current != nil {
-			exec = m.executors[current.Provider]
+		if current == nil {
+			m.mu.RUnlock()
+			return managerRefreshOutcome{auth: auth.Clone()}, nil
 		}
-		var cloned *Auth
-		if current != nil {
-			cloned = current.Clone()
+		if current.Disabled || current.Status == StatusDisabled {
+			currentClone := current.Clone()
+			m.mu.RUnlock()
+			return managerRefreshOutcome{auth: currentClone}, nil
 		}
+		exec := m.executors[current.Provider]
+		cloned := current.Clone()
 		m.mu.RUnlock()
-		if cloned == nil {
-			cloned = auth.Clone()
-		}
 		if exec == nil {
 			return managerRefreshOutcome{auth: cloned}, nil
 		}
@@ -4720,7 +4733,7 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 			// next tick and apply the same treatment.
 			if isPermanentRefreshError(refreshErr) {
 				m.mu.Lock()
-				if cur := m.auths[id]; cur != nil {
+				if cur := m.auths[id]; !authRefreshSuppressed(cur) {
 					now := time.Now()
 					cur.NextRefreshAfter = now.Add(refreshPermanentBackoff)
 					cur.LastError = resultErrorFromError(refreshErr)
@@ -4744,7 +4757,7 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 		// refresh token lands on disk synchronously before the caller uses
 		// the returned auth. Update also resets NextRefreshAfter using the
 		// executor's intended interval, and rebroadcasts to the scheduler.
-		persisted, updateErr := m.Update(ctx, updated)
+		persisted, updateErr := m.Update(withRefreshUpdate(ctx), updated)
 		if updateErr != nil {
 			logEntryWithRequestID(ctx).WithField("auth_id", id).Warnf("coordinated refresh: persist failed: %v", updateErr)
 			return managerRefreshOutcome{auth: updated, err: updateErr}, nil
@@ -4803,12 +4816,12 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 	auth := m.auths[id]
 	var exec ProviderExecutor
 	var cloned *Auth
-	if auth != nil {
+	if !authRefreshSuppressed(auth) {
 		exec = m.executors[auth.Provider]
 		cloned = auth.Clone()
 	}
 	m.mu.RUnlock()
-	if auth == nil || exec == nil {
+	if cloned == nil || exec == nil {
 		return nil, nil
 	}
 	updated, err := exec.Refresh(ctx, cloned)
@@ -4826,7 +4839,7 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 		permanent := isPermanentRefreshError(err)
 		shouldReschedule := false
 		m.mu.Lock()
-		if current := m.auths[id]; current != nil {
+		if current := m.auths[id]; !authRefreshSuppressed(current) {
 			if permanent {
 				current.NextRefreshAfter = now.Add(refreshPermanentBackoff)
 				current.Status = StatusError
@@ -4872,7 +4885,7 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 	} else if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	persisted, updateErr := m.Update(ctx, updated)
+	persisted, updateErr := m.Update(withRefreshUpdate(ctx), updated)
 	if updateErr != nil {
 		return updated, updateErr
 	}
