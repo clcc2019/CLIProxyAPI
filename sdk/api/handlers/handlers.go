@@ -6,6 +6,8 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -242,6 +244,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		appendMeta(coreexecutor.PinnedAuthMetadataKey, pinnedAuthID)
 	}
+	if clientPrincipal := clientPrincipalFromContext(ctx); clientPrincipal != "" {
+		appendMeta(coreexecutor.ClientPrincipalMetadataKey, hashClientPrincipal(clientPrincipal))
+	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		appendMeta(coreexecutor.SelectedAuthCallbackMetadataKey, selectedCallback)
 	}
@@ -252,6 +257,37 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		appendMeta(coreexecutor.DisallowFreeAuthMetadataKey, true)
 	}
 	return meta
+}
+
+func clientPrincipalFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	raw, exists := ginCtx.Get("apiKey")
+	if !exists || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
+func hashClientPrincipal(principal string) string {
+	principal = strings.TrimSpace(principal)
+	if principal == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(principal))
+	return hex.EncodeToString(sum[:])
 }
 
 func requestHeadersFromContext(ctx context.Context) http.Header {

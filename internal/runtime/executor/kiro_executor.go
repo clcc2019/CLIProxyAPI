@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,9 @@ const (
 	// streaming request vs. matching kiroMaxFrameSize.
 	kiroStreamReaderBuffer = 64 << 10
 	kiroIDEAgentMode       = "vibe"
+	kiroIDEVersion         = "0.12.155"
+	kiroIDEAWSSDKVersion   = "1.0.34"
+	kiroIDEAPIClient       = "codewhispererstreaming"
 	kiroCLIUserAgent       = "aws-sdk-rust/1.3.9 os/linux lang/rust/1.92.0"
 	kiroCLIAmzAgent        = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.92.0 os/linux lang/rust/1.92.0 m/E app/AmazonQ-For-CLI"
 	kiroRefreshSkew        = 2 * time.Minute
@@ -170,6 +174,14 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	content, toolUses, usageInfo, stopReason, parseErr := e.parseEventStream(ctx, httpResp.Body)
 	if parseErr != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, parseErr)
+		fields := log.Fields{"provider": "kiro"}
+		if auth != nil {
+			fields["auth_id"] = auth.ID
+		}
+		if requestID := firstNonEmptyKiroString(httpResp.Header.Get("x-amzn-requestid"), httpResp.Header.Get("x-request-id")); requestID != "" {
+			fields["request_id"] = requestID
+		}
+		log.WithFields(fields).Warnf("kiro: upstream event stream failed: %v", parseErr)
 		return resp, parseErr
 	}
 	// Kiro's upstream frequently omits tokenUsage entirely — fill the gaps
@@ -257,7 +269,11 @@ func (e *KiroExecutor) refreshIfKiroTokenExpiring(ctx context.Context, auth *cli
 			log.Warnf("kiro executor: permanent refresh failure for auth=%s (soft=%t): %v", auth.ID, !required, err)
 			return auth, accessToken, profileArn, err
 		}
-		return auth, accessToken, profileArn, err
+		if required {
+			return auth, accessToken, profileArn, err
+		}
+		log.Debugf("kiro executor: opportunistic refresh failed for auth=%s; continuing with current access token: %v", auth.ID, err)
+		return auth, accessToken, profileArn, nil
 	}
 	if refreshed == nil {
 		return auth, accessToken, profileArn, nil
@@ -288,13 +304,13 @@ func kiroRefreshDecisionBeforeRequest(auth *cliproxyauth.Auth, now time.Time) (b
 	}
 	lastRefresh, ok := kiroLastRefreshTime(auth)
 	if !ok || lastRefresh.IsZero() {
-		return true, true
+		return true, false
 	}
 	if !lastRefresh.Add(interval).After(now) {
-		return true, true
+		return true, false
 	}
 	if !auth.NextRefreshAfter.IsZero() {
-		return !now.Before(auth.NextRefreshAfter), true
+		return !now.Before(auth.NextRefreshAfter), false
 	}
 	return false, false
 }
@@ -339,11 +355,13 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	updated.Metadata["expires_at"] = tokenData.ExpiresAt
 	updated.Metadata["last_refresh"] = now.Format(time.RFC3339)
 	updated.Metadata["refresh_interval_seconds"] = refreshIntervalSeconds
+	updated.Metadata["machine_id"] = kiroMachineIDFromAuth(updated)
+	if updated.Attributes == nil {
+		updated.Attributes = map[string]string{}
+	}
+	updated.Attributes["machine_id"] = kiroMachineIDFromAuth(updated)
 	if tokenData.ProfileArn != "" {
 		updated.Metadata["profile_arn"] = tokenData.ProfileArn
-		if updated.Attributes == nil {
-			updated.Attributes = map[string]string{}
-		}
 		updated.Attributes["profile_arn"] = tokenData.ProfileArn
 	}
 	sdkauth.RemoveEmptyKiroMetadataFields(updated.Metadata)
@@ -560,6 +578,40 @@ func (e *KiroExecutor) doKiroRequestWithFallback(ctx context.Context, auth *clip
 		} else if idx == 0 && len(payload) == 0 {
 			payload, _ = buildKiroPayloadForFormat(prepared.sourceBody, prepared.modelID, prepared.profileArn, endpoint.Origin, prepared.isAgentic, prepared.isChatOnly, prepared.from, prepared.headers)
 		}
+		preparedPayload, prepareStats, prepareErr := prepareKiroPayloadForUpstream(payload)
+		if prepareStats.changed() {
+			authID, authLabel, _, _ := authLogInfo(auth)
+			fields := log.Fields{
+				"endpoint":                 endpoint.Name,
+				"origin":                   endpoint.Origin,
+				"original_bytes":           prepareStats.OriginalBytes,
+				"final_bytes":              prepareStats.FinalBytes,
+				"original_history_entries": prepareStats.OriginalHistoryEntries,
+				"final_history_entries":    prepareStats.FinalHistoryEntries,
+				"normalized_history":       prepareStats.NormalizedHistory,
+				"stripped_tool_context":    prepareStats.StrippedToolContext,
+				"repaired_tool_results":    prepareStats.RepairedToolResults,
+				"trimmed_history":          prepareStats.TrimmedHistory,
+				"compacted":                prepareStats.Compacted,
+			}
+			if authID != "" {
+				fields["auth_id"] = authID
+			}
+			if authLabel != "" {
+				fields["auth_label"] = authLabel
+			}
+			log.WithFields(fields).Info("kiro: prepared request payload before upstream")
+		}
+		if prepareErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, prepareErr)
+			log.WithFields(log.Fields{
+				"endpoint":    endpoint.Name,
+				"origin":      endpoint.Origin,
+				"final_bytes": prepareStats.FinalBytes,
+			}).Warnf("kiro: refusing payload before upstream: %v", prepareErr)
+			return nil, preparedPayload, prepareErr
+		}
+		payload = preparedPayload
 		lastPayload = payload
 		httpResp, err := e.doKiroRequest(ctx, auth, endpoint, payload, accessToken)
 		if err == nil {
@@ -595,8 +647,7 @@ func (e *KiroExecutor) doKiroRequest(ctx context.Context, auth *cliproxyauth.Aut
 	httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
 	httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 	httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
-	httpReq.Header.Set("User-Agent", kiroCLIUserAgent)
-	httpReq.Header.Set("x-amz-user-agent", kiroCLIAmzAgent)
+	applyKiroRuntimeIdentityHeaders(httpReq, auth)
 	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 	var attrs map[string]string
 	if auth != nil {
@@ -617,6 +668,16 @@ func (e *KiroExecutor) doKiroRequest(ctx context.Context, auth *cliproxyauth.Aut
 		AuthValue: authValue,
 	})
 
+	if err := validateKiroGeneratePayload(payload); err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		log.WithFields(log.Fields{
+			"auth_id":  authID,
+			"endpoint": endpointConfig.Name,
+			"url":      endpointConfig.URL,
+		}).Warnf("kiro: refusing malformed request before upstream: %v", err)
+		return nil, err
+	}
+
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -629,8 +690,10 @@ func (e *KiroExecutor) doKiroRequest(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	b, _ := helps.ReadErrorResponseBody(httpResp.Body)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+	logKiroUpstreamHTTPError(auth, endpointConfig, httpResp, b)
+	retryAfter := kiroRetryAfterFromHeaders(httpResp.Header, time.Now())
 	closeKiroResponseBody(httpResp)
-	return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
+	return nil, statusErr{code: httpResp.StatusCode, msg: string(b), retryAfter: retryAfter}
 }
 
 type kiroEventStreamMessage struct {
@@ -1086,15 +1149,13 @@ func parseKiroEventPayload(payload []byte, eventTypes ...string) parsedKiroEvent
 
 	var event map[string]any
 	if err := json.Unmarshal(payload, &event); err != nil {
-		return parsedKiroEvent{}
+		return parsedKiroEvent{err: fmt.Errorf("kiro API error: invalid event JSON: %w", err)}
 	}
 	if errType, _ := event["_type"].(string); errType != "" {
-		msg, _ := event["message"].(string)
-		return parsedKiroEvent{err: fmt.Errorf("kiro API error: %s - %s", errType, msg)}
+		return parsedKiroEvent{err: newKiroUpstreamEventError(event, errType)}
 	}
 	if typ, _ := event["type"].(string); typ == "error" || typ == "exception" {
-		msg, _ := event["message"].(string)
-		return parsedKiroEvent{err: fmt.Errorf("kiro API error: %s", msg)}
+		return parsedKiroEvent{err: newKiroUpstreamEventError(event, typ)}
 	}
 
 	parsed := parsedKiroEvent{}
@@ -1684,6 +1745,78 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 	return accessToken, profileArn
 }
 
+func applyKiroRuntimeIdentityHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+	if req == nil {
+		return
+	}
+	if shouldUseKiroIDEIdentity(auth) {
+		machineID := kiroMachineIDFromAuth(auth)
+		req.Header.Set("User-Agent", kiroIDEUserAgent(machineID))
+		req.Header.Set("x-amz-user-agent", kiroIDEAmzUserAgent(machineID))
+		return
+	}
+	req.Header.Set("User-Agent", kiroCLIUserAgent)
+	req.Header.Set("x-amz-user-agent", kiroCLIAmzAgent)
+}
+
+func shouldUseKiroIDEIdentity(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	authMethod := strings.ToLower(metadataString(auth.Metadata, "auth_method", "authMethod"))
+	provider := strings.ToLower(metadataString(auth.Metadata, "provider"))
+	if isKiroSocialAuth(authMethod, provider) {
+		return true
+	}
+	if kiroauth.NormalizeKiroMachineID(metadataString(auth.Metadata, "machine_id", "machineId", "device_id", "deviceId")) != "" {
+		return !isKiroSSOAuth(authMethod, provider)
+	}
+	return false
+}
+
+func kiroMachineIDFromAuth(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return kiroauth.StableKiroMachineID("")
+	}
+	seed := firstNonEmptyKiroString(
+		auth.ID,
+		auth.FileName,
+		auth.Label,
+		metadataString(auth.Metadata, "email"),
+		metadataString(auth.Metadata, "profile_arn", "profileArn"),
+		metadataString(auth.Metadata, "client_id", "clientId"),
+	)
+	return kiroauth.MachineIDFromMaps(auth.Metadata, auth.Attributes, seed)
+}
+
+func kiroIDEUserAgent(machineID string) string {
+	platform, release := kiroDevicePlatform()
+	suffix := "KiroIDE-" + kiroIDEVersion
+	if machineID = kiroauth.NormalizeKiroMachineID(machineID); machineID != "" {
+		suffix += "-" + machineID
+	}
+	return fmt.Sprintf("aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#22.22.0 api/%s#%s m/E %s", kiroIDEAWSSDKVersion, platform, release, kiroIDEAPIClient, kiroIDEAWSSDKVersion, suffix)
+}
+
+func kiroIDEAmzUserAgent(machineID string) string {
+	suffix := "KiroIDE-" + kiroIDEVersion
+	if machineID = kiroauth.NormalizeKiroMachineID(machineID); machineID != "" {
+		suffix = "KiroIDE " + kiroIDEVersion + " " + machineID
+	}
+	return fmt.Sprintf("aws-sdk-js/%s %s", kiroIDEAWSSDKVersion, suffix)
+}
+
+func kiroDevicePlatform() (string, string) {
+	switch runtime.GOOS {
+	case "windows":
+		return "win32", "10.0.19043"
+	case "darwin":
+		return "macos", "14.0.0"
+	default:
+		return "linux", "6.0.0"
+	}
+}
+
 func metadataString(metadata map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := metadata[key].(string); ok && strings.TrimSpace(value) != "" {
@@ -2066,7 +2199,7 @@ func refreshKiroSocialToken(ctx context.Context, cfg *config.Config, auth *clipr
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "*/*")
-	httpReq.Header.Set("User-Agent", kiroCLIUserAgent)
+	applyKiroRuntimeIdentityHeaders(httpReq, auth)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 30*time.Second)
 	httpResp, err := httpClient.Do(httpReq)
@@ -2200,6 +2333,102 @@ func isSafeAWSRegion(region string) bool {
 		return false
 	}
 	return strings.Count(region, "-") >= 2
+}
+
+func kiroRetryAfterFromHeaders(headers http.Header, now time.Time) *time.Duration {
+	if headers == nil {
+		return nil
+	}
+	value := strings.TrimSpace(headers.Get("Retry-After"))
+	if value == "" {
+		return nil
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
+		d := time.Duration(seconds) * time.Second
+		return &d
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if retryAt, err := http.ParseTime(value); err == nil && retryAt.After(now) {
+		d := retryAt.Sub(now)
+		return &d
+	}
+	return nil
+}
+
+func logKiroUpstreamHTTPError(auth *cliproxyauth.Auth, endpoint kiroEndpointConfig, resp *http.Response, body []byte) {
+	if resp == nil {
+		return
+	}
+	fields := log.Fields{
+		"provider": "kiro",
+		"status":   resp.StatusCode,
+		"endpoint": endpoint.Name,
+		"url":      endpoint.URL,
+	}
+	if auth != nil {
+		fields["auth_id"] = auth.ID
+		if auth.Label != "" {
+			fields["auth_label"] = auth.Label
+		}
+	}
+	if requestID := firstNonEmptyKiroString(
+		resp.Header.Get("x-amzn-requestid"),
+		resp.Header.Get("x-amz-request-id"),
+		resp.Header.Get("x-request-id"),
+	); requestID != "" {
+		fields["request_id"] = requestID
+	}
+	if retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After")); retryAfter != "" {
+		fields["retry_after"] = retryAfter
+	}
+	if kind, message := kiroErrorSummary(body); kind != "" || message != "" {
+		if kind != "" {
+			fields["error_type"] = kind
+		}
+		if message != "" {
+			fields["error_message"] = message
+		}
+	}
+	if len(body) > 0 {
+		fields["body"] = truncateKiroLogBody(string(body), 2048)
+	}
+	log.WithFields(fields).Warn("kiro: upstream request failed")
+}
+
+func kiroErrorSummary(body []byte) (kind, message string) {
+	if len(body) == 0 {
+		return "", ""
+	}
+	root := gjson.ParseBytes(body)
+	if root.IsObject() {
+		kind = firstNonEmptyKiroString(
+			root.Get("__type").String(),
+			root.Get("_type").String(),
+			root.Get("error.type").String(),
+			root.Get("error.code").String(),
+			root.Get("errorType").String(),
+			root.Get("code").String(),
+			root.Get("type").String(),
+		)
+		message = firstNonEmptyKiroString(
+			root.Get("message").String(),
+			root.Get("error.message").String(),
+			root.Get("error_description").String(),
+			root.Get("detail").String(),
+		)
+		return kind, message
+	}
+	return "", truncateKiroLogBody(string(body), 512)
+}
+
+func truncateKiroLogBody(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
 }
 
 func closeKiroResponseBody(resp *http.Response) {

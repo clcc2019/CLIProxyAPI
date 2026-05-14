@@ -117,7 +117,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *cliproxyauth.Auth, url string, prepared codexPreparedRequest, needResponseHeaders bool) (codexNonStreamHTTPResult, bool, error) {
 	key := e.codexResponseDedupeKey(auth, url, prepared)
 	result, executed, shared, err := e.responseDedupe.Do(ctx, key, func() (codexNonStreamHTTPResult, error) {
-		httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
+		httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth, 0)
 		httpResp, errDo := httpClient.Do(prepared.httpReq)
 		if errDo != nil {
 			return codexNonStreamHTTPResult{}, errDo
@@ -161,7 +161,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 	key := e.codexResponseDedupeKey(auth, url, prepared)
 	captureBody := e.cfg != nil && e.cfg.RequestLog
 	result, executed, shared, err := e.responseDedupe.Do(ctx, key, func() (codexNonStreamHTTPResult, error) {
-		httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
+		httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth, 0)
 		httpResp, errDo := httpClient.Do(prepared.httpReq)
 		if errDo != nil {
 			return codexNonStreamHTTPResult{}, errDo

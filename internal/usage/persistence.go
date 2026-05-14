@@ -12,11 +12,12 @@ import (
 const persistedStatisticsStateVersion = 1
 
 type persistedStatisticsState struct {
-	Version          int                             `json:"version"`
-	SavedAt          time.Time                       `json:"saved_at"`
-	Snapshot         StatisticsSnapshot              `json:"snapshot"`
-	AggregateRecords []persistedUsageAggregateRecord `json:"aggregate_records,omitempty"`
-	RolledUp         *AggregatedUsageSnapshot        `json:"rolled_up_aggregated,omitempty"`
+	Version           int                              `json:"version"`
+	SavedAt           time.Time                        `json:"saved_at"`
+	Snapshot          StatisticsSnapshot               `json:"snapshot"`
+	AggregateRecords  []persistedUsageAggregateRecord  `json:"aggregate_records,omitempty"`
+	RolledUp          *AggregatedUsageSnapshot         `json:"rolled_up_aggregated,omitempty"`
+	ClientAPIKeyQuota *persistedClientAPIKeyQuotaState `json:"client_api_key_quota,omitempty"`
 }
 
 type persistedUsageAggregateRecord struct {
@@ -113,6 +114,9 @@ func LoadPersistedStateBytes(data []byte, stats *RequestStatistics) (bool, error
 	}
 
 	stats.restorePersistedState(state)
+	if state.ClientAPIKeyQuota != nil {
+		defaultClientAPIKeyQuotaTracker.restorePersistedState(*state.ClientAPIKeyQuota, time.Now().UTC())
+	}
 	return true, nil
 }
 
@@ -154,6 +158,10 @@ func (s *RequestStatistics) persistedState() persistedStatisticsState {
 	if s.rolledUpAggregated != nil {
 		cloned := cloneAggregatedUsageSnapshot(*s.rolledUpAggregated)
 		state.RolledUp = &cloned
+	}
+	quotaState := defaultClientAPIKeyQuotaTracker.persistedState()
+	if !quotaState.isZero() {
+		state.ClientAPIKeyQuota = &quotaState
 	}
 
 	return state

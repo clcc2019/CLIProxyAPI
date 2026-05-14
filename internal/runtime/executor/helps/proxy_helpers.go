@@ -14,6 +14,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -38,6 +39,7 @@ var (
 	defaultTransportOnce   sync.Once
 	httpClientCache        sync.Map
 	proxyTransportCache    sync.Map
+	proxyTransportBuilds   singleflight.Group
 	customCATransportCache sync.Map
 )
 
@@ -58,20 +60,19 @@ var (
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	contextRT := contextRoundTripper(ctx)
+	authProxy := authProxyURL(auth)
 	pool, errCA := misc.CustomRootCAsFromEnv()
 	if errCA != nil {
 		log.Warnf("custom CA disabled: %v", errCA)
 		pool = nil
 	}
 
-	if rt := contextRoundTripper(ctx); rt != nil && authProxyURL(auth) != "" {
-		if pool != nil {
-			rt = misc.RoundTripperWithCustomRootCAs(rt, pool)
-		}
-		return newHTTPClient(rt, timeout)
+	if contextRT != nil && authProxy != "" {
+		return cachedContextHTTPClient(contextRT, pool, timeout)
 	}
 
-	proxyURL := resolvedProxyURL(cfg, auth)
+	proxyURL := resolvedProxyURLWithAuthProxy(cfg, authProxy)
 	if proxyURL != "" {
 		transport := cachedProxyTransport(proxyURL)
 		if transport != nil {
@@ -84,11 +85,8 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyURL)
 	}
 
-	if rt := contextRoundTripper(ctx); rt != nil {
-		if pool != nil {
-			rt = misc.RoundTripperWithCustomRootCAs(rt, pool)
-		}
-		return newHTTPClient(rt, timeout)
+	if contextRT != nil {
+		return cachedContextHTTPClient(contextRT, pool, timeout)
 	}
 
 	if pool != nil {
@@ -96,6 +94,21 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		return cachedHTTPClient("default-ca:"+customRootCAPoolKey(pool), transport, timeout)
 	}
 	return cachedHTTPClient(defaultClientCacheKey, cachedDefaultTransport(), timeout)
+}
+
+// NewCodexHTTPClient returns the standard Go HTTP client path for Codex
+// upstream requests, preserving the shared proxy-aware transport cache.
+func NewCodexHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	return NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+}
+
+func cachedContextHTTPClient(rt http.RoundTripper, pool *x509.CertPool, timeout time.Duration) *http.Client {
+	transportKey := "context:" + roundTripperCacheKey(rt)
+	if pool != nil {
+		rt = cachedCustomCATransport(transportKey, rt, pool)
+		return cachedHTTPClient("context-ca:"+transportKey+":"+customRootCAPoolKey(pool), rt, timeout)
+	}
+	return cachedHTTPClient(transportKey, rt, timeout)
 }
 
 func cachedCustomCATransport(transportKey string, transport http.RoundTripper, pool *x509.CertPool) http.RoundTripper {
@@ -132,16 +145,28 @@ func cachedProxyTransport(proxyURL string) http.RoundTripper {
 		}
 	}
 
-	transport := buildProxyTransport(proxyURL)
-	if transport == nil {
-		return nil
-	}
+	result, _, _ := proxyTransportBuilds.Do(proxyURL, func() (any, error) {
+		if cached, ok := proxyTransportCache.Load(proxyURL); ok {
+			if transport, okTransport := cached.(http.RoundTripper); okTransport {
+				return transport, nil
+			}
+		}
 
-	actual, _ := proxyTransportCache.LoadOrStore(proxyURL, transport)
-	if cached, ok := actual.(http.RoundTripper); ok {
-		return cached
+		transport := buildProxyTransport(proxyURL)
+		if transport == nil {
+			return nil, nil
+		}
+
+		actual, _ := proxyTransportCache.LoadOrStore(proxyURL, transport)
+		if cached, ok := actual.(http.RoundTripper); ok {
+			return cached, nil
+		}
+		return transport, nil
+	})
+	if transport, ok := result.(http.RoundTripper); ok {
+		return transport
 	}
-	return transport
+	return nil
 }
 
 func cachedDefaultTransport() http.RoundTripper {
@@ -183,7 +208,11 @@ func contextRoundTripper(ctx context.Context) http.RoundTripper {
 }
 
 func resolvedProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
-	if proxyURL := authProxyURL(auth); proxyURL != "" {
+	return resolvedProxyURLWithAuthProxy(cfg, authProxyURL(auth))
+}
+
+func resolvedProxyURLWithAuthProxy(cfg *config.Config, proxyURL string) string {
+	if proxyURL != "" {
 		return proxyURL
 	}
 	if cfg == nil {

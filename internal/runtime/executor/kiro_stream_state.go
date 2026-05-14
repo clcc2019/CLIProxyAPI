@@ -274,7 +274,7 @@ func (s *kiroStreamState) flushTrailingToolUse() {
 func (s *kiroStreamState) handleReadError(err error) {
 	helps.RecordAPIResponseError(s.ctx, s.executor.cfg, err)
 	if s.reporter != nil {
-		s.reporter.PublishFailure(s.ctx)
+		s.reporter.PublishFailureWithError(s.ctx, err)
 	}
 	s.streamFailed = true
 	s.sendChunk(cliproxyexecutor.StreamChunk{Err: err})
@@ -284,8 +284,9 @@ func (s *kiroStreamState) handleReadError(err error) {
 // returned inside the parsedKiroEvent. Same semantics, same ctx-aware send.
 func (s *kiroStreamState) handleParseError(err error) {
 	helps.RecordAPIResponseError(s.ctx, s.executor.cfg, err)
+	log.Warnf("kiro: upstream event stream failed: %v", err)
 	if s.reporter != nil {
-		s.reporter.PublishFailure(s.ctx)
+		s.reporter.PublishFailureWithError(s.ctx, err)
 	}
 	s.streamFailed = true
 	s.sendChunk(cliproxyexecutor.StreamChunk{Err: err})

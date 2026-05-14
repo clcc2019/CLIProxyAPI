@@ -59,6 +59,28 @@ func TestRequestExecutionMetadataIncludesExecutionHints(t *testing.T) {
 	}
 }
 
+func TestRequestExecutionMetadataIncludesHashedClientPrincipal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Set("apiKey", "client-secret-key")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	meta := requestExecutionMetadata(ctx)
+
+	got, _ := meta[coreexecutor.ClientPrincipalMetadataKey].(string)
+	if got == "" {
+		t.Fatalf("client principal metadata missing: %#v", meta)
+	}
+	if got == "client-secret-key" {
+		t.Fatalf("client principal metadata should be hashed, got raw key")
+	}
+	if want := hashClientPrincipal("client-secret-key"); got != want {
+		t.Fatalf("client principal metadata = %q, want %q", got, want)
+	}
+}
+
 func TestRequestExecutionMetadataEmptyReturnsNil(t *testing.T) {
 	if meta := requestExecutionMetadata(context.Background()); meta != nil {
 		t.Fatalf("requestExecutionMetadata() = %#v, want nil", meta)

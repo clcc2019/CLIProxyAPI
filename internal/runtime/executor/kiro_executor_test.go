@@ -265,7 +265,7 @@ func TestShouldRefreshKiroBeforeRequestDefaultsOldKiroAuths(t *testing.T) {
 		Provider: "kiro",
 		Metadata: map[string]any{
 			"type":         "kiro",
-			"last_refresh": now.Add(-11 * time.Minute).Format(time.RFC3339),
+			"last_refresh": now.Add(-31 * time.Minute).Format(time.RFC3339),
 			"expires_at":   now.Add(30 * time.Minute).Format(time.RFC3339),
 		},
 	}
@@ -289,7 +289,7 @@ func TestShouldRefreshKiroBeforeRequestDefaultsOldKiroAuths(t *testing.T) {
 	}
 }
 
-func TestKiroRequestTimeIntervalRefreshFailureReturnsError(t *testing.T) {
+func TestKiroRequestTimeIntervalRefreshFailureUsesCurrentToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "temporary refresh failure", http.StatusBadGateway)
 	}))
@@ -315,8 +315,12 @@ func TestKiroRequestTimeIntervalRefreshFailureReturnsError(t *testing.T) {
 		},
 	}
 
-	if _, _, _, err := NewKiroExecutor(nil).refreshIfKiroTokenExpiring(context.Background(), auth, "old-access", ""); err == nil {
-		t.Fatal("expected interval refresh failure to return error")
+	_, accessToken, _, err := NewKiroExecutor(nil).refreshIfKiroTokenExpiring(context.Background(), auth, "old-access", "")
+	if err != nil {
+		t.Fatalf("expected soft interval refresh failure to be ignored, got %v", err)
+	}
+	if accessToken != "old-access" {
+		t.Fatalf("accessToken = %q, want old-access", accessToken)
 	}
 }
 
@@ -397,6 +401,32 @@ func TestDoKiroRequestWithFallbackTriesNextEndpoint(t *testing.T) {
 	}
 	if got := rt.requests[1].Header.Get("x-amz-user-agent"); got != kiroCLIAmzAgent {
 		t.Fatalf("x-amz-user-agent = %q, want %q", got, kiroCLIAmzAgent)
+	}
+}
+
+func TestKiroSocialRequestUsesMachineIDUserAgent(t *testing.T) {
+	machineID := strings.Repeat("a", 64)
+	auth := &cliproxyauth.Auth{
+		ID:       "kiro-social",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"auth_method": "kiro-cli-social",
+			"provider":    "google",
+			"machine_id":  machineID,
+		},
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://q.us-east-1.amazonaws.com/generateAssistantResponse", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	applyKiroRuntimeIdentityHeaders(req, auth)
+
+	if got := req.Header.Get("User-Agent"); !strings.Contains(got, "KiroIDE-"+kiroIDEVersion+"-"+machineID) {
+		t.Fatalf("User-Agent = %q, want KiroIDE machine id suffix", got)
+	}
+	if got := req.Header.Get("x-amz-user-agent"); !strings.Contains(got, "KiroIDE "+kiroIDEVersion+" "+machineID) {
+		t.Fatalf("x-amz-user-agent = %q, want KiroIDE machine id suffix", got)
 	}
 }
 
@@ -713,9 +743,10 @@ func testKiroRefreshUsesSocialEndpoint(t *testing.T, extraMetadata map[string]an
 	if refreshInterval < kiroauth.DefaultRefreshIntervalMinSeconds || refreshInterval > kiroauth.DefaultRefreshIntervalMaxSeconds {
 		t.Fatalf("refresh_interval_seconds = %d, want %d-%d", refreshInterval, kiroauth.DefaultRefreshIntervalMinSeconds, kiroauth.DefaultRefreshIntervalMaxSeconds)
 	}
-	if updated.NextRefreshAfter.Before(time.Now().Add(time.Minute-time.Second)) ||
-		updated.NextRefreshAfter.After(time.Now().Add(time.Minute+time.Second)) {
-		t.Fatalf("NextRefreshAfter = %s, want 1 minute from now", updated.NextRefreshAfter)
+	minNext := time.Now().Add(time.Duration(kiroauth.DefaultRefreshIntervalMinSeconds)*time.Second - time.Second)
+	maxNext := time.Now().Add(time.Duration(kiroauth.DefaultRefreshIntervalMaxSeconds)*time.Second + time.Second)
+	if updated.NextRefreshAfter.Before(minNext) || updated.NextRefreshAfter.After(maxNext) {
+		t.Fatalf("NextRefreshAfter = %s, want within default refresh interval", updated.NextRefreshAfter)
 	}
 	for key, value := range extraMetadata {
 		if raw, ok := value.(string); ok && strings.TrimSpace(raw) == "" {
@@ -986,6 +1017,7 @@ func TestKiroWrapAuthScoped429(t *testing.T) {
 		{"429 quota wrapped", statusErr{code: 429, msg: "quota exceeded"}, true, 429},
 		{"429 usage limit wrapped", statusErr{code: 429, msg: `{"message":"AGENTIC_REQUEST usage limit reached"}`}, true, 429},
 		{"429 credits wrapped", statusErr{code: 429, msg: `{"message":"Kiro credits exhausted"}`}, true, 429},
+		{"429 insufficient model capacity not wrapped", statusErr{code: 429, msg: `{"message":"I am experiencing high traffic, please try again shortly.","reason":"INSUFFICIENT_MODEL_CAPACITY"}`}, false, 429},
 		{"429 throttling not wrapped", statusErr{code: 429, msg: `{"__type":"ThrottlingException","message":"Rate exceeded"}`}, false, 429},
 		{"429 too many requests not wrapped", statusErr{code: 429, msg: `{"message":"Too many requests, try again later"}`}, false, 429},
 		{"401 not wrapped", statusErr{code: 401, msg: "unauthorized"}, false, 401},
@@ -1292,5 +1324,61 @@ func TestKiroCredentials_IndependentMetadataAndAttributes(t *testing.T) {
 				t.Fatalf("profile_arn = %q, want %q", gotArn, tc.wantArn)
 			}
 		})
+	}
+}
+
+func TestParseKiroEventPayload_ClassifiesValidationError(t *testing.T) {
+	parsed := parseKiroEventPayload([]byte(`{"_type":"ValidationException","message":"Improperly formed request: missing content"}`))
+	if parsed.err == nil {
+		t.Fatal("expected event error")
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(parsed.err, &status) {
+		t.Fatalf("expected status error, got %T", parsed.err)
+	}
+	if got := status.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", got, http.StatusBadRequest)
+	}
+	if !strings.Contains(parsed.err.Error(), "Improperly formed request") {
+		t.Fatalf("error = %q, want upstream message", parsed.err.Error())
+	}
+}
+
+func TestValidateKiroGeneratePayloadRejectsMalformedPayload(t *testing.T) {
+	err := validateKiroGeneratePayload([]byte(`{"conversationState":{"conversationId":"c","currentMessage":{"userInputMessage":{"modelId":"auto","origin":"AI_EDITOR"}}}}`))
+	if err == nil {
+		t.Fatal("expected malformed payload error")
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(err, &status) {
+		t.Fatalf("expected status error, got %T", err)
+	}
+	if got := status.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", got, http.StatusBadRequest)
+	}
+	if !strings.Contains(err.Error(), "content is required") {
+		t.Fatalf("error = %q, want content validation reason", err.Error())
+	}
+}
+
+func TestDoKiroRequest_AttachesRetryAfterFromHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"quota exceeded"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	payload := []byte(`{"conversationState":{"conversationId":"c","currentMessage":{"userInputMessage":{"content":"hi","modelId":"auto","origin":"AI_EDITOR"}}}}`)
+	_, err := NewKiroExecutor(nil).doKiroRequest(context.Background(), &cliproxyauth.Auth{ID: "auth-1"}, kiroEndpointConfig{URL: server.URL, Origin: "AI_EDITOR", Name: "test"}, payload, "token")
+	if err == nil {
+		t.Fatal("expected upstream error")
+	}
+	var se statusErr
+	if !errors.As(err, &se) {
+		t.Fatalf("expected statusErr, got %T", err)
+	}
+	if se.retryAfter == nil || *se.retryAfter != 7*time.Second {
+		t.Fatalf("retryAfter = %v, want 7s", se.retryAfter)
 	}
 }

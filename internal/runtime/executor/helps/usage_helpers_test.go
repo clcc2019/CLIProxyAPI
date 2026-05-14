@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -118,6 +119,34 @@ func TestParseOpenAIStreamUsageZeroUsageObjectIgnored(t *testing.T) {
 	}
 }
 
+func TestParseClaudeUsageSeparatesCacheReadAndCreation(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":20,"cache_creation_input_tokens":30}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.InputTokens != 150 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 150)
+	}
+	if detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+	}
+	if detail.CachedTokens != 20 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 20)
+	}
+	if detail.CacheCreationTokens != 30 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 30)
+	}
+	if detail.TotalTokens != 155 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 155)
+	}
+}
+
+func TestParseClaudeStreamUsageIgnoresZeroUsage(t *testing.T) {
+	line := []byte(`data: {"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`)
+	_, ok := ParseClaudeStreamUsage(line)
+	if ok {
+		t.Fatal("expected all-zero Claude usage chunk to be ignored")
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
@@ -125,12 +154,26 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		requestedAt: time.Now().Add(-1500 * time.Millisecond),
 	}
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false, nil)
 	if record.Latency < time.Second {
 		t.Fatalf("latency = %v, want >= 1s", record.Latency)
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesErrorMessage(t *testing.T) {
+	reporter := &UsageReporter{provider: "openai", model: "gpt-5.4", requestedAt: time.Now()}
+
+	record := reporter.buildRecord(
+		usage.Detail{},
+		true,
+		errors.New(`{"error":{"message":"upstream quota exhausted"}}`),
+	)
+
+	if record.ErrorMessage != "upstream quota exhausted" {
+		t.Fatalf("error message = %q, want upstream quota exhausted", record.ErrorMessage)
 	}
 }
 

@@ -3,10 +3,12 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,6 +213,32 @@ func (e *fakeKiroRefreshExecutor) HttpRequest(context.Context, *coreauth.Auth, *
 	return nil, nil
 }
 
+type errorKiroRefreshExecutor struct {
+	err error
+}
+
+func (e *errorKiroRefreshExecutor) Identifier() string { return "kiro" }
+
+func (e *errorKiroRefreshExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *errorKiroRefreshExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *errorKiroRefreshExecutor) Refresh(context.Context, *coreauth.Auth) (*coreauth.Auth, error) {
+	return nil, e.err
+}
+
+func (e *errorKiroRefreshExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *errorKiroRefreshExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
 type blockingKiroRefreshExecutor struct {
 	started chan struct{}
 	release chan struct{}
@@ -366,6 +394,62 @@ func TestGetKiroUsageRefreshesDueTokenBeforeRequest(t *testing.T) {
 	}
 	if got := updated.Metadata["access_token"]; got != "new-access-token" {
 		t.Fatalf("persisted access_token = %#v, want refreshed token", got)
+	}
+}
+
+func TestGetKiroUsageRequiredRefreshFailureReturnsMessage(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeKiroUsageClient{}
+	previousFactory := newKiroUsageClient
+	newKiroUsageClient = func(*config.Config) kiroUsageClient { return client }
+	t.Cleanup(func() { newKiroUsageClient = previousFactory })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&errorKiroRefreshExecutor{err: errors.New("refresh unavailable")})
+	now := time.Now().UTC()
+	auth := &coreauth.Auth{
+		ID:       "kiro-expired-refresh-fails.json",
+		FileName: "kiro-expired-refresh-fails.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"type":                     "kiro",
+			"access_token":             "old-access-token",
+			"refresh_token":            "old-refresh-token",
+			"profile_arn":              "arn:aws:codewhisperer:us-east-1:123:profile/test",
+			"auth_method":              "kiro-cli-social",
+			"provider":                 "google",
+			"last_refresh":             now.Add(-time.Hour).Format(time.RFC3339),
+			"refresh_interval_seconds": 300,
+			"expires_at":               now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/kiro-usage?name=kiro-expired-refresh-fails.json", nil)
+
+	h.GetKiroUsage(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if client.calls != 0 {
+		t.Fatalf("usage calls = %d, want 0 when required refresh failed", client.calls)
+	}
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if payload.Message == "" || !strings.Contains(payload.Message, "refresh unavailable") {
+		t.Fatalf("message = %q, want refresh failure detail", payload.Message)
 	}
 }
 
@@ -542,7 +626,8 @@ func TestReadKiroUsageAuthFromDiskNormalizesKiroCLIToken(t *testing.T) {
 		"accessToken": "access-token",
 		"refreshToken": "refresh-token",
 		"profileArn": "arn:aws:codewhisperer:us-east-1:123:profile/test",
-		"expiresAt": "2026-05-09T06:54:01Z"
+		"expiresAt": "2026-05-09T06:54:01Z",
+		"proxy_url": "http://127.0.0.1:7890"
 	}`)
 	if err := os.WriteFile(filepath.Join(dir, "kiro-raw.json"), raw, 0o600); err != nil {
 		t.Fatalf("write auth file: %v", err)
@@ -561,6 +646,9 @@ func TestReadKiroUsageAuthFromDiskNormalizesKiroCLIToken(t *testing.T) {
 	}
 	if got := auth.Metadata["auth_method"]; got != "kiro-cli-social" {
 		t.Fatalf("auth_method = %#v, want kiro-cli-social", got)
+	}
+	if got := auth.ProxyURL; got != "http://127.0.0.1:7890" {
+		t.Fatalf("proxy URL = %q, want per-file proxy", got)
 	}
 }
 
@@ -591,5 +679,168 @@ func TestGetKiroUsageRejectsNonKiroAuth(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestGetKiroUsageCachesResponseAcrossPolls(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeKiroUsageClient{}
+	previousFactory := newKiroUsageClient
+	newKiroUsageClient = func(*config.Config) kiroUsageClient { return client }
+	t.Cleanup(func() { newKiroUsageClient = previousFactory })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	now := time.Now().UTC()
+	auth := &coreauth.Auth{
+		ID:       "kiro-cache.json",
+		FileName: "kiro-cache.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"type":                     "kiro",
+			"access_token":             "access-token",
+			"refresh_token":            "refresh-token",
+			"profile_arn":              "arn:aws:codewhisperer:us-east-1:123:profile/test",
+			"auth_method":              "kiro-cli-social",
+			"provider":                 "google",
+			"last_refresh":             now.Format(time.RFC3339),
+			"refresh_interval_seconds": 1800,
+			"expires_at":               now.Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	doRequest := func(query string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/kiro-usage?name=kiro-cache.json"+query, nil)
+		h.GetKiroUsage(ctx)
+		return rec
+	}
+
+	if rec := doRequest(""); rec.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(""); rec.Code != http.StatusOK {
+		t.Fatalf("second request status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if client.calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (cache should serve second poll)", client.calls)
+	}
+
+	// force=true must bypass the cache and produce one more upstream call.
+	if rec := doRequest("&force=true"); rec.Code != http.StatusOK {
+		t.Fatalf("force request status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if client.calls != 2 {
+		t.Fatalf("upstream calls after force = %d, want 2", client.calls)
+	}
+
+	// ttl=0 also bypasses cache (treated as force).
+	if rec := doRequest("&ttl=0"); rec.Code != http.StatusOK {
+		t.Fatalf("ttl=0 request status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if client.calls != 3 {
+		t.Fatalf("upstream calls after ttl=0 = %d, want 3", client.calls)
+	}
+}
+
+func TestGetKiroUsageInvalidatesCacheAfterRefresh(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeKiroUsageClient{}
+	previousFactory := newKiroUsageClient
+	newKiroUsageClient = func(*config.Config) kiroUsageClient { return client }
+	t.Cleanup(func() { newKiroUsageClient = previousFactory })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	refreshExec := &fakeKiroRefreshExecutor{}
+	manager.RegisterExecutor(refreshExec)
+	now := time.Now().UTC()
+	auth := &coreauth.Auth{
+		ID:       "kiro-cache-invalidate.json",
+		FileName: "kiro-cache-invalidate.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"type":                     "kiro",
+			"access_token":             "access-token",
+			"refresh_token":            "refresh-token",
+			"profile_arn":              "arn:aws:codewhisperer:us-east-1:123:profile/test",
+			"auth_method":              "kiro-cli-social",
+			"provider":                 "google",
+			"last_refresh":             now.Format(time.RFC3339),
+			"refresh_interval_seconds": 1800,
+			"expires_at":               now.Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	// Warm the cache with a successful response.
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/kiro-usage?name=kiro-cache-invalidate.json", nil)
+	h.GetKiroUsage(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("warmup status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if client.calls != 1 {
+		t.Fatalf("warmup upstream calls = %d, want 1", client.calls)
+	}
+
+	// Trigger a forced refresh through the handler — cache should be cleared
+	// so the next read fetches fresh data.
+	if _, _, err := h.refreshKiroUsageAuth(context.Background(), auth, true); err != nil {
+		t.Fatalf("refreshKiroUsageAuth() error = %v", err)
+	}
+	if !refreshExec.refreshed {
+		t.Fatal("expected refresh executor to be invoked")
+	}
+
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/kiro-usage?name=kiro-cache-invalidate.json", nil)
+	h.GetKiroUsage(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-refresh status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if client.calls != 2 {
+		t.Fatalf("post-refresh upstream calls = %d, want 2 (cache should have been invalidated)", client.calls)
+	}
+}
+
+func TestParseKiroUsageRequestOptionsClampsTTL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		query     string
+		wantForce bool
+		wantTTL   time.Duration
+	}{
+		{"", false, kiroUsageCacheDefaultTTL},
+		{"?force=true", true, kiroUsageCacheDefaultTTL},
+		{"?force=1", true, kiroUsageCacheDefaultTTL},
+		{"?ttl=15", false, 15 * time.Second},
+		{"?ttl=0", true, kiroUsageCacheDefaultTTL},
+		{"?ttl=-5", true, kiroUsageCacheDefaultTTL},
+		{"?ttl=99999", false, kiroUsageCacheMaxTTL},
+		{"?ttl=abc", false, kiroUsageCacheDefaultTTL},
+	}
+	for _, tt := range tests {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodGet, "/x"+tt.query, nil)
+		got := parseKiroUsageRequestOptions(c)
+		if got.force != tt.wantForce || got.ttl != tt.wantTTL {
+			t.Fatalf("parseKiroUsageRequestOptions(%q) = {force:%v ttl:%v}, want {force:%v ttl:%v}", tt.query, got.force, got.ttl, tt.wantForce, tt.wantTTL)
+		}
 	}
 }

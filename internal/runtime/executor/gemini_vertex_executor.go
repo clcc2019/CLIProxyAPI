@@ -660,7 +660,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		}
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailureWithError(ctx, errRead)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 		}
 	}()
@@ -788,7 +788,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		}
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailureWithError(ctx, errRead)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 		}
 	}()

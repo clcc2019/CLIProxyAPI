@@ -22,6 +22,10 @@ const (
 	DefaultMaxIdleConnsPerHost = 64
 	// DefaultIdleConnTimeout matches Go's default while documenting the shared pool policy.
 	DefaultIdleConnTimeout = 90 * time.Second
+	// DefaultDialTimeout bounds outbound connection setup through proxy dialers.
+	DefaultDialTimeout = 30 * time.Second
+	// DefaultDialKeepAlive matches Go's default TCP keep-alive behavior.
+	DefaultDialKeepAlive = 30 * time.Second
 )
 
 // Mode describes how a proxy setting should be interpreted.
@@ -60,7 +64,9 @@ func Parse(raw string) (Setting, error) {
 		return setting, nil
 	}
 
-	parsedURL, errParse := url.Parse(trimmed)
+	normalized := normalizeProxyURLInput(trimmed)
+
+	parsedURL, errParse := url.Parse(normalized)
 	if errParse != nil {
 		setting.Mode = ModeInvalid
 		return setting, fmt.Errorf("parse proxy URL failed: %w", errParse)
@@ -79,6 +85,21 @@ func Parse(raw string) (Setting, error) {
 		setting.Mode = ModeInvalid
 		return setting, fmt.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
 	}
+}
+
+func normalizeProxyURLInput(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.Contains(trimmed, "://") {
+		return trimmed
+	}
+	// Match 9router's operator-friendly shorthand for local proxy settings,
+	// but keep bare host names invalid so typos still surface clearly.
+	candidate := "http://" + trimmed
+	parsed, err := url.Parse(candidate)
+	if err != nil || parsed.Host == "" || parsed.Port() == "" {
+		return trimmed
+	}
+	return candidate
 }
 
 func cloneDefaultTransport() *http.Transport {
@@ -113,6 +134,10 @@ func NewDirectTransport() *http.Transport {
 	return ApplyHTTPTransportPoolSettings(clone)
 }
 
+func newProxyForwardDialer() *net.Dialer {
+	return &net.Dialer{Timeout: DefaultDialTimeout, KeepAlive: DefaultDialKeepAlive}
+}
+
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
 func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	setting, errParse := Parse(raw)
@@ -127,13 +152,16 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 		return NewDirectTransport(), setting.Mode, nil
 	case ModeProxy:
 		if setting.URL.Scheme == "socks5" || setting.URL.Scheme == "socks5h" {
-			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuthFromURL(setting.URL), proxy.Direct)
+			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuthFromURL(setting.URL), newProxyForwardDialer())
 			if errSOCKS5 != nil {
 				return nil, setting.Mode, fmt.Errorf("create SOCKS5 dialer failed: %w", errSOCKS5)
 			}
 			transport := cloneDefaultTransport()
 			transport.Proxy = nil
-			transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				return dialer.Dial(network, addr)
 			}
 			return ApplyHTTPTransportPoolSettings(transport), setting.Mode, nil
@@ -159,7 +187,7 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	case ModeDirect:
 		return proxy.Direct, setting.Mode, nil
 	case ModeProxy:
-		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
+		dialer, errDialer := proxy.FromURL(setting.URL, newProxyForwardDialer())
 		if errDialer == nil {
 			return dialer, setting.Mode, nil
 		}
@@ -182,7 +210,7 @@ func (d *connectProxyDialer) Dial(network, addr string) (net.Conn, error) {
 	if d == nil || d.proxyURL == nil {
 		return nil, fmt.Errorf("proxy dialer is not configured")
 	}
-	baseDialer := &net.Dialer{Timeout: 30 * time.Second}
+	baseDialer := &net.Dialer{Timeout: DefaultDialTimeout, KeepAlive: DefaultDialKeepAlive}
 	var conn net.Conn
 	var err error
 	switch d.proxyURL.Scheme {

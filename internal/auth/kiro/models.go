@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,6 +85,8 @@ func IsUnauthorizedStatusError(err error) bool {
 }
 
 type KiroUsageInfo struct {
+	Message                          string                `json:"message,omitempty"`
+	Quotas                           map[string]any        `json:"quotas,omitempty"`
 	DaysUntilReset                   *int                  `json:"daysUntilReset,omitempty"`
 	NextDateReset                    *float64              `json:"nextDateReset,omitempty"`
 	NextResetAt                      string                `json:"nextResetAt,omitempty"`
@@ -94,6 +98,14 @@ type KiroUsageInfo struct {
 	TotalRemainingUsageWithPrecision *float64              `json:"totalRemainingUsageWithPrecision,omitempty"`
 	TotalUsagePercentage             *float64              `json:"totalUsagePercentage,omitempty"`
 	Exhausted                        bool                  `json:"exhausted"`
+}
+
+type KiroQuotaInfo struct {
+	Used      float64 `json:"used"`
+	Total     float64 `json:"total"`
+	Remaining float64 `json:"remaining"`
+	ResetAt   *string `json:"resetAt"`
+	Unlimited bool    `json:"unlimited"`
 }
 
 type KiroUserInfo struct {
@@ -122,6 +134,7 @@ type KiroUsageBreakdown struct {
 
 type KiroFreeTrialInfo struct {
 	FreeTrialStatus           string   `json:"freeTrialStatus,omitempty"`
+	FreeTrialExpiry           any      `json:"freeTrialExpiry,omitempty"`
 	UsageLimit                *int     `json:"usageLimit,omitempty"`
 	CurrentUsage              *int     `json:"currentUsage,omitempty"`
 	UsageLimitWithPrecision   *float64 `json:"usageLimitWithPrecision,omitempty"`
@@ -140,6 +153,22 @@ func NewKiroAuth(cfg *config.Config) *KiroAuth {
 		httpClient: client,
 		endpoint:   kiroCodeWhispererEndpoint,
 	}
+}
+
+// WithHTTPClient overrides the HTTP client used for management/quota requests.
+// Callers in the runtime path inject a proxy-aware client built from
+// helps.NewProxyAwareHTTPClient so the management quota requests honour
+// per-account auth.ProxyURL, the global cfg.ProxyURL, the context
+// RoundTripper, and the shared transport pool — matching the executor path.
+//
+// Returns the receiver to support fluent construction in the call site.
+// A nil client is ignored so this is safe to call unconditionally.
+func (k *KiroAuth) WithHTTPClient(client *http.Client) *KiroAuth {
+	if k == nil || client == nil {
+		return k
+	}
+	k.httpClient = client
+	return k
 }
 
 func (k *KiroAuth) ListAvailableModels(ctx context.Context, tokenData *TokenData) ([]*KiroModel, error) {
@@ -224,7 +253,7 @@ func (k *KiroAuth) GetUsageLimits(ctx context.Context, tokenData *TokenData) (*K
 		query["isEmailRequired"] = "true"
 	}
 
-	body, err := k.makeRequest(ctx, kiroGetUsageLimitsPath, tokenData, query)
+	body, err := k.makeUsageLimitsRequest(ctx, tokenData, query, profileArn)
 	if err != nil {
 		return nil, err
 	}
@@ -235,6 +264,109 @@ func (k *KiroAuth) GetUsageLimits(ctx context.Context, tokenData *TokenData) (*K
 	}
 	usage.normalize()
 	return &usage, nil
+}
+
+func (k *KiroAuth) makeUsageLimitsRequest(ctx context.Context, tokenData *TokenData, query map[string]string, profileArn string) ([]byte, error) {
+	type attempt struct {
+		name string
+		run  func() ([]byte, error)
+	}
+
+	attempts := []attempt{
+		{
+			name: "codewhisperer-post",
+			run: func() ([]byte, error) {
+				return k.makeRequest(ctx, kiroGetUsageLimitsPath, tokenData, query)
+			},
+		},
+		{
+			name: "codewhisperer-get",
+			run: func() ([]byte, error) {
+				params := url.Values{}
+				params.Set("isEmailRequired", "true")
+				params.Set("origin", "AI_EDITOR")
+				params.Set("resourceType", "AGENTIC_REQUEST")
+				return k.makeUsageLimitsGET(ctx, strings.TrimRight(k.endpointFor(profileArn), "/")+"/"+kiroGetUsageLimitsPath, tokenData, params)
+			},
+		},
+		{
+			name: "q-get",
+			run: func() ([]byte, error) {
+				params := url.Values{}
+				params.Set("origin", "AI_EDITOR")
+				params.Set("resourceType", "AGENTIC_REQUEST")
+				if strings.TrimSpace(profileArn) != "" {
+					params.Set("profileArn", strings.TrimSpace(profileArn))
+				} else {
+					params.Set("isEmailRequired", "true")
+				}
+				return k.makeUsageLimitsGET(ctx, strings.TrimRight(k.qEndpointFor(profileArn), "/")+"/"+kiroGetUsageLimitsPath, tokenData, params)
+			},
+		},
+	}
+
+	errorsText := make([]string, 0, len(attempts))
+	var authErr error
+	for _, attempt := range attempts {
+		body, err := attempt.run()
+		if err == nil {
+			return body, nil
+		}
+		errorsText = append(errorsText, attempt.name+":"+strings.TrimSpace(err.Error()))
+		if authErr == nil && IsUnauthorizedStatusError(err) {
+			authErr = err
+		}
+	}
+	if authErr != nil {
+		return nil, authErr
+	}
+	return nil, fmt.Errorf("kiro: get usage limits failed: %s", strings.Join(errorsText, "; "))
+}
+
+func (k *KiroAuth) makeUsageLimitsGET(ctx context.Context, endpoint string, tokenData *TokenData, params url.Values) ([]byte, error) {
+	if strings.TrimSpace(endpoint) == "" {
+		return nil, fmt.Errorf("kiro: get usage limits endpoint is empty")
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("kiro: failed to parse get usage limits endpoint: %w", err)
+	}
+	query := parsed.Query()
+	for key, values := range params {
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				query.Add(key, value)
+			}
+		}
+	}
+	parsed.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("kiro: failed to create get usage limits request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(tokenData.AccessToken))
+	req.Header.Set("Accept", "application/json")
+	applyKiroCodeWhispererHeaders(req, "1", tokenData)
+
+	resp, err := k.client().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("kiro: getUsageLimits GET request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("kiro: failed to read getUsageLimits GET response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &StatusError{
+			Operation:  "getUsageLimits GET",
+			StatusCode: resp.StatusCode,
+			Body:       string(body),
+		}
+	}
+	return body, nil
 }
 
 func (k *KiroAuth) ResolveProfileArn(ctx context.Context, tokenData *TokenData) (string, error) {
@@ -298,6 +430,7 @@ func (u *KiroUsageInfo) normalize() {
 			}
 		}
 	}
+	u.normalizeQuotas()
 	if hasLimit {
 		remaining := totalLimit - totalCurrent
 		if remaining < 0 {
@@ -312,6 +445,45 @@ func (u *KiroUsageInfo) normalize() {
 		u.TotalRemainingUsageWithPrecision = floatPtr(remaining)
 		u.TotalUsagePercentage = floatPtr(percentage)
 	}
+}
+
+func (u *KiroUsageInfo) normalizeQuotas() {
+	if u == nil || len(u.UsageBreakdownList) == 0 {
+		return
+	}
+	quotas := make(map[string]any, len(u.Quotas)+len(u.UsageBreakdownList)*2)
+	for key, value := range u.Quotas {
+		if strings.TrimSpace(key) != "" {
+			quotas[key] = value
+		}
+	}
+	for i := range u.UsageBreakdownList {
+		breakdown := u.UsageBreakdownList[i]
+		resourceType := strings.ToLower(strings.TrimSpace(breakdown.ResourceType))
+		if resourceType == "" {
+			resourceType = "unknown"
+		}
+		quotas[resourceType] = KiroQuotaInfo{
+			Used:      kiroQuotaUsed(breakdown),
+			Total:     kiroQuotaTotal(breakdown),
+			Remaining: kiroQuotaRemaining(breakdown),
+			ResetAt:   kiroResetAtPtr(breakdown.NextDateReset, u.NextDateReset, u.NextResetAt),
+			Unlimited: false,
+		}
+
+		if breakdown.FreeTrialInfo == nil {
+			continue
+		}
+		trial := breakdown.FreeTrialInfo
+		quotas[resourceType+"_freetrial"] = KiroQuotaInfo{
+			Used:      kiroQuotaUsed(*trial),
+			Total:     kiroQuotaTotal(*trial),
+			Remaining: kiroQuotaRemaining(*trial),
+			ResetAt:   kiroResetAtPtr(trial.FreeTrialExpiry, breakdown.NextDateReset, u.NextDateReset, u.NextResetAt),
+			Unlimited: false,
+		}
+	}
+	u.Quotas = quotas
 }
 
 func (b *KiroUsageBreakdown) normalize() {
@@ -399,6 +571,132 @@ func (f KiroFreeTrialInfo) currentPrecision() (float64, bool) {
 	return 0, false
 }
 
+func kiroQuotaUsed(source interface{ currentPrecision() (float64, bool) }) float64 {
+	value, ok := source.currentPrecision()
+	if !ok || value < 0 {
+		return 0
+	}
+	return value
+}
+
+func kiroQuotaTotal(source interface{ limitPrecision() (float64, bool) }) float64 {
+	value, ok := source.limitPrecision()
+	if !ok || value < 0 {
+		return 0
+	}
+	return value
+}
+
+func kiroQuotaRemaining(source any) float64 {
+	switch value := source.(type) {
+	case KiroUsageBreakdown:
+		if value.RemainingWithPrecision != nil {
+			return nonNegativeFloat(*value.RemainingWithPrecision)
+		}
+		return kiroQuotaRemainingFromPrecision(value)
+	case KiroFreeTrialInfo:
+		if value.RemainingWithPrecision != nil {
+			return nonNegativeFloat(*value.RemainingWithPrecision)
+		}
+		return kiroQuotaRemainingFromPrecision(value)
+	default:
+		return 0
+	}
+}
+
+func kiroQuotaRemainingFromPrecision(source interface {
+	limitPrecision() (float64, bool)
+	currentPrecision() (float64, bool)
+}) float64 {
+	limit, okLimit := source.limitPrecision()
+	current, okCurrent := source.currentPrecision()
+	if !okLimit || !okCurrent {
+		return 0
+	}
+	return nonNegativeFloat(limit - current)
+}
+
+func nonNegativeFloat(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func kiroResetAtPtr(values ...any) *string {
+	for _, value := range values {
+		if resetAt := kiroResetAt(value); resetAt != "" {
+			return &resetAt
+		}
+	}
+	return nil
+}
+
+func kiroResetAt(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return normalizeKiroResetAtString(v)
+	case *string:
+		if v == nil {
+			return ""
+		}
+		return normalizeKiroResetAtString(*v)
+	case float64:
+		return kiroResetAtFromUnix(v)
+	case *float64:
+		if v == nil {
+			return ""
+		}
+		return kiroResetAtFromUnix(*v)
+	case int:
+		return kiroResetAtFromUnix(float64(v))
+	case int64:
+		return kiroResetAtFromUnix(float64(v))
+	case json.Number:
+		parsed, err := v.Float64()
+		if err != nil {
+			return ""
+		}
+		return kiroResetAtFromUnix(parsed)
+	case time.Time:
+		if v.IsZero() {
+			return ""
+		}
+		return v.UTC().Format(time.RFC3339)
+	default:
+		return ""
+	}
+}
+
+func normalizeKiroResetAtString(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if parsed, err := strconv.ParseFloat(trimmed, 64); err == nil {
+		return kiroResetAtFromUnix(parsed)
+	}
+	if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		return parsed.UTC().Format(time.RFC3339)
+	}
+	if parsed, err := time.Parse("2006-01-02", trimmed); err == nil {
+		return parsed.UTC().Format(time.RFC3339)
+	}
+	return trimmed
+}
+
+func kiroResetAtFromUnix(value float64) string {
+	if value <= 0 {
+		return ""
+	}
+	if value < 1e12 {
+		return time.Unix(0, int64(value*float64(time.Second))).UTC().Format(time.RFC3339)
+	}
+	return time.Unix(0, int64(value*float64(time.Millisecond))).UTC().Format(time.RFC3339)
+}
+
 func floatPtr(value float64) *float64 {
 	return &value
 }
@@ -470,7 +768,7 @@ func (k *KiroAuth) makeRequest(ctx context.Context, path string, tokenData *Toke
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 	req.Header.Set("x-amz-target", target)
-	applyKiroCodeWhispererHeaders(req, "1")
+	applyKiroCodeWhispererHeaders(req, "1", tokenData)
 
 	resp, err := k.client().Do(req)
 	if err != nil {
@@ -503,9 +801,48 @@ func kiroTargetForOperation(path string) string {
 	}
 }
 
-func applyKiroCodeWhispererHeaders(req *http.Request, maxAttempts string) {
+func applyKiroCodeWhispererHeaders(req *http.Request, maxAttempts string, tokenData *TokenData) {
 	applyKiroCLIHeaders(req, maxAttempts)
+	if isKiroModelIDEIdentity(tokenData) {
+		machineID := MachineIDFromTokenData(tokenData)
+		req.Header.Set("User-Agent", kiroModelIDEUserAgent(machineID))
+		req.Header.Set("x-amz-user-agent", kiroModelIDEAmzUserAgent(machineID))
+		return
+	}
 	req.Header.Set("x-amz-user-agent", kiroCodeWhispererAmzAgent)
+}
+
+func isKiroModelIDEIdentity(tokenData *TokenData) bool {
+	if tokenData == nil {
+		return false
+	}
+	authMethod := strings.ToLower(strings.TrimSpace(tokenData.AuthMethod))
+	provider := strings.ToLower(strings.TrimSpace(tokenData.Provider))
+	if authMethod == kiroCLISocialAuthMethod || authMethod == "social" || authMethod == "kiro-social" {
+		return true
+	}
+	switch provider {
+	case "google", "github", "gitlab", "kiro-cli", "kiro-social", "social":
+		return true
+	default:
+		return NormalizeKiroMachineID(tokenData.MachineID) != "" && !isKiroBuilderIDLikeAuth(tokenData)
+	}
+}
+
+func kiroModelIDEUserAgent(machineID string) string {
+	suffix := "KiroIDE-0.12.155"
+	if machineID = NormalizeKiroMachineID(machineID); machineID != "" {
+		suffix += "-" + machineID
+	}
+	return "aws-sdk-js/1.0.34 ua/2.1 os/linux#6.0.0 lang/js md/nodejs#22.22.0 api/codewhispererstreaming#1.0.34 m/E " + suffix
+}
+
+func kiroModelIDEAmzUserAgent(machineID string) string {
+	suffix := "KiroIDE-0.12.155"
+	if machineID = NormalizeKiroMachineID(machineID); machineID != "" {
+		suffix = "KiroIDE 0.12.155 " + machineID
+	}
+	return "aws-sdk-js/1.0.34 " + suffix
 }
 
 func (k *KiroAuth) fetchProfileArnFromTarget(ctx context.Context, tokenData *TokenData, target string) (string, error) {
@@ -520,7 +857,7 @@ func (k *KiroAuth) fetchProfileArnFromTarget(ctx context.Context, tokenData *Tok
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(tokenData.AccessToken))
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
-	applyKiroCodeWhispererHeaders(req, "1")
+	applyKiroCodeWhispererHeaders(req, "1", tokenData)
 	req.Header.Set("x-amz-target", target)
 
 	resp, err := k.client().Do(req)
@@ -585,6 +922,20 @@ func (k *KiroAuth) endpointFor(profileArn string) string {
 		return strings.TrimRight(strings.TrimSpace(k.endpoint), "/")
 	}
 	return kiroCodeWhispererEndpoint
+}
+
+func (k *KiroAuth) qEndpointFor(profileArn string) string {
+	if k != nil {
+		endpoint := strings.TrimRight(strings.TrimSpace(k.endpoint), "/")
+		if endpoint != "" && endpoint != kiroCodeWhispererEndpoint {
+			return endpoint
+		}
+	}
+	region := ExtractRegionFromProfileArn(profileArn)
+	if region == "" {
+		region = DefaultRegion
+	}
+	return "https://q." + region + ".amazonaws.com"
 }
 
 func (k *KiroAuth) client() *http.Client {

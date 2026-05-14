@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -53,6 +54,78 @@ func (e *kiroRefreshPermanentError) StatusCode() int { return 401 }
 // the refresh token itself is no longer usable.
 func isKiroRefreshPermanent(err error) bool {
 	return errors.Is(err, ErrKiroRefreshInvalidGrant)
+}
+
+type kiroUpstreamEventError struct {
+	Kind       string
+	Message    string
+	statusCode int
+}
+
+func (e *kiroUpstreamEventError) Error() string {
+	if e == nil {
+		return "kiro API error"
+	}
+	parts := []string{"kiro API error"}
+	if strings.TrimSpace(e.Kind) != "" {
+		parts = append(parts, strings.TrimSpace(e.Kind))
+	}
+	if strings.TrimSpace(e.Message) != "" {
+		parts = append(parts, strings.TrimSpace(e.Message))
+	}
+	return strings.Join(parts, ": ")
+}
+
+func (e *kiroUpstreamEventError) StatusCode() int {
+	if e == nil || e.statusCode == 0 {
+		return http.StatusInternalServerError
+	}
+	return e.statusCode
+}
+
+func (e *kiroUpstreamEventError) RetryAfter() *time.Duration { return nil }
+
+func (e *kiroUpstreamEventError) IsAuthScopedFailure() bool {
+	return e != nil && e.StatusCode() == http.StatusTooManyRequests && isKiroQuotaExhausted429Message(e.Error())
+}
+
+func newKiroUpstreamEventError(event map[string]any, fallbackKind string) error {
+	if len(event) == 0 {
+		return &kiroUpstreamEventError{Kind: fallbackKind, statusCode: http.StatusInternalServerError}
+	}
+	kind := firstNonEmptyKiroString(
+		firstKiroString(event, "__type", "_type", "errorType", "error_type", "error", "code"),
+		fallbackKind,
+	)
+	message := firstKiroString(event, "message", "errorMessage", "error_message", "detail", "reason")
+	statusCode := kiroEventErrorStatusCode(event, kind, message)
+	return &kiroUpstreamEventError{Kind: kind, Message: message, statusCode: statusCode}
+}
+
+func kiroEventErrorStatusCode(event map[string]any, kind, message string) int {
+	if code := int64Field(event, "statusCode", "status_code", "httpStatusCode", "http_status_code"); code >= 100 && code <= 599 {
+		return int(code)
+	}
+	lower := strings.ToLower(strings.TrimSpace(kind + " " + message + " " + firstKiroString(event, "status")))
+	switch {
+	case strings.Contains(lower, "throttl"), strings.Contains(lower, "too many"), strings.Contains(lower, "rate limit"), isKiroTransientModelCapacity429Message(lower):
+		return http.StatusTooManyRequests
+	case strings.Contains(lower, "unauthor"), strings.Contains(lower, "invalid bearer"), strings.Contains(lower, "expired bearer"):
+		return http.StatusUnauthorized
+	case strings.Contains(lower, "accessdenied"), strings.Contains(lower, "access denied"), strings.Contains(lower, "forbidden"):
+		return http.StatusForbidden
+	case strings.Contains(lower, "notfound"), strings.Contains(lower, "not found"):
+		return http.StatusNotFound
+	case strings.Contains(lower, "validation"), strings.Contains(lower, "badrequest"), strings.Contains(lower, "bad request"),
+		strings.Contains(lower, "invalid"), strings.Contains(lower, "malformed"), strings.Contains(lower, "improperly formed"),
+		strings.Contains(lower, "serialization"), strings.Contains(lower, "deserialization"), strings.Contains(lower, "failed_precondition"),
+		strings.Contains(lower, "failed precondition"):
+		return http.StatusBadRequest
+	case strings.Contains(lower, "timeout"):
+		return http.StatusGatewayTimeout
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // classifyKiroOAuthError returns a permanent error when the upstream OAuth
@@ -154,6 +227,9 @@ func isKiroQuotaExhausted429Message(message string) bool {
 	if lower == "" {
 		return false
 	}
+	if isKiroTransientModelCapacity429Message(lower) {
+		return false
+	}
 	quotaSignals := [...]string{
 		"quota",
 		"usage limit",
@@ -163,7 +239,6 @@ func isKiroQuotaExhausted429Message(message string) bool {
 		"request limit",
 		"monthly limit",
 		"daily limit",
-		"capacity",
 		"credit",
 		"credits",
 		"allowance",
@@ -173,6 +248,29 @@ func isKiroQuotaExhausted429Message(message string) bool {
 		"service quota exceeded",
 	}
 	for _, signal := range quotaSignals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func isKiroTransientModelCapacity429Message(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	transientSignals := [...]string{
+		"insufficient_model_capacity",
+		"insufficient model capacity",
+		"experiencing high traffic",
+		"high traffic",
+		"please try again shortly",
+		"selected model is at capacity",
+		"model is at capacity",
+		"no capacity available",
+	}
+	for _, signal := range transientSignals {
 		if strings.Contains(lower, signal) {
 			return true
 		}

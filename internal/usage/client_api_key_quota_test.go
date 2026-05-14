@@ -79,3 +79,26 @@ func TestClientAPIKeyQuotaTrackerUsesDefaultKiroClaudePriceAliases(t *testing.T)
 		t.Fatalf("used cost = %v, want 18", exceeded.Used)
 	}
 }
+
+func TestClientAPIKeyQuotaTrackerChargesCacheCreationAsPromptInput(t *testing.T) {
+	tracker := newClientAPIKeyQuotaTracker()
+	tracker.setModelPrices(config.ModelPrices{
+		"claude-test": {Prompt: 2, Cache: 0.5},
+	})
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	tracker.record(coreusage.Record{
+		APIKey:      "client-key",
+		RequestedAt: now,
+		Model:       "claude-test",
+		Detail: coreusage.Detail{
+			InputTokens:         1_500_000,
+			CachedTokens:        500_000,
+			CacheCreationTokens: 250_000,
+		},
+	})
+
+	usage := tracker.usage("client-key", now)
+	if usage.DailyCost != 2.25 {
+		t.Fatalf("daily cost = %v, want 2.25", usage.DailyCost)
+	}
+}

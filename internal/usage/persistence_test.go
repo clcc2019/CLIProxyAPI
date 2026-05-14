@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -144,5 +145,43 @@ func TestPersistedStateRestoresRolledUpAggregateHistory(t *testing.T) {
 	}
 	if got := aggregated.Windows["all"].TotalTokens; got != 12 {
 		t.Fatalf("all-window total tokens = %d, want 12", got)
+	}
+}
+
+func TestPersistedStateRestoresClientAPIKeyQuotaCounters(t *testing.T) {
+	previousTracker := defaultClientAPIKeyQuotaTracker
+	defaultClientAPIKeyQuotaTracker = newClientAPIKeyQuotaTracker()
+	t.Cleanup(func() {
+		defaultClientAPIKeyQuotaTracker = previousTracker
+	})
+
+	defaultClientAPIKeyQuotaTracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1},
+	})
+	now := time.Now().UTC()
+	defaultClientAPIKeyQuotaTracker.record(coreusage.Record{
+		APIKey:      "persisted-quota-key",
+		RequestedAt: now,
+		Model:       "gpt-test",
+		Detail:      coreusage.Detail{InputTokens: 1_000_000},
+	})
+
+	data, err := MarshalPersistedState(NewRequestStatistics())
+	if err != nil {
+		t.Fatalf("MarshalPersistedState error: %v", err)
+	}
+
+	defaultClientAPIKeyQuotaTracker = newClientAPIKeyQuotaTracker()
+	loaded, err := LoadPersistedStateBytes(data, NewRequestStatistics())
+	if err != nil {
+		t.Fatalf("LoadPersistedStateBytes error: %v", err)
+	}
+	if !loaded {
+		t.Fatal("LoadPersistedStateBytes loaded = false, want true")
+	}
+
+	usage := defaultClientAPIKeyQuotaTracker.usage("persisted-quota-key", now)
+	if usage.DailyCost != 1 || usage.MonthlyCost != 1 || usage.TotalCost != 1 {
+		t.Fatalf("restored quota usage = %+v, want all costs 1", usage)
 	}
 }

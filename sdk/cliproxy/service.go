@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisstate"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -699,47 +700,18 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			default:
-				return "round-robin"
-			}
-		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-
+		nextStrategy := newCfg.Routing.Strategy
 		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
 		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+		previousStrategy = effectiveRoutingStrategy(previousStrategy, previousSessionAffinity)
+		nextStrategy = effectiveRoutingStrategy(nextStrategy, nextSessionAffinity)
 
 		selectorChanged := previousStrategy != nextStrategy ||
 			previousSessionAffinity != nextSessionAffinity ||
 			previousSessionAffinityTTL != nextSessionAffinityTTL
 
 		if s.coreManager != nil && selectorChanged {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
-			}
-
-			if nextSessionAffinity {
-				ttl := time.Hour
-				if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
-					if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
-						ttl = parsed
-					}
-				}
-				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-					Fallback: selector,
-					TTL:      ttl,
-				})
-			}
-
+			selector := configuredCredentialSelector(nextStrategy, nextSessionAffinity, nextSessionAffinityTTL)
 			s.coreManager.SetSelector(selector)
 		}
 
@@ -1374,7 +1346,8 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 		return nil
 	}
 
-	apiModels, err := kiroauth.NewKiroAuth(s.cfg).ListAvailableModels(ctx, tokenData)
+	modelClient := s.newKiroModelClient(ctx, a)
+	apiModels, err := modelClient.ListAvailableModels(ctx, tokenData)
 	if err != nil && kiroauth.IsUnauthorizedStatusError(err) {
 		if refreshed, refreshErr := s.refreshKiroAuthForModelFetch(ctx, a, true); refreshErr != nil {
 			log.Warnf("kiro: model list auth failed and token refresh failed: %v", refreshErr)
@@ -1382,7 +1355,8 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 			a = refreshed
 			tokenData = extractKiroTokenData(a)
 			if tokenData != nil && strings.TrimSpace(tokenData.AccessToken) != "" {
-				apiModels, err = kiroauth.NewKiroAuth(s.cfg).ListAvailableModels(ctx, tokenData)
+				modelClient = s.newKiroModelClient(ctx, a)
+				apiModels, err = modelClient.ListAvailableModels(ctx, tokenData)
 			}
 		}
 	}
@@ -1415,6 +1389,14 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 	s.persistKiroResolvedProfileArn(ctx, a, tokenData.ProfileArn)
 	log.Infof("kiro: fetched %d dynamic models from API", len(dynamicModels))
 	return dynamicModels
+}
+
+func (s *Service) newKiroModelClient(ctx context.Context, a *coreauth.Auth) *kiroauth.KiroAuth {
+	var cfg *config.Config
+	if s != nil {
+		cfg = s.cfg
+	}
+	return kiroauth.NewKiroAuth(cfg).WithHTTPClient(helps.NewProxyAwareHTTPClient(ctx, cfg, a, 30*time.Second))
 }
 
 func (s *Service) cachedKiroModels(a *coreauth.Auth) ([]*ModelInfo, bool) {
@@ -1511,7 +1493,11 @@ func extractKiroTokenData(a *coreauth.Auth) *kiroauth.TokenData {
 		tokenData.ProfileArn = kiroAuthMetadataString(a.Metadata, "profile_arn", "profileArn")
 		tokenData.ClientID = kiroAuthMetadataString(a.Metadata, "client_id", "clientId")
 		tokenData.ClientSecret = kiroAuthMetadataString(a.Metadata, "client_secret", "clientSecret")
+		tokenData.AuthMethod = kiroAuthMetadataString(a.Metadata, "auth_method", "authMethod")
+		tokenData.Provider = kiroAuthMetadataString(a.Metadata, "provider")
+		tokenData.Email = kiroAuthMetadataString(a.Metadata, "email")
 		tokenData.Region = kiroAuthMetadataString(a.Metadata, "region")
+		tokenData.MachineID = kiroAuthMetadataString(a.Metadata, "machine_id", "machineId", "device_id", "deviceId")
 	}
 	if a.Attributes != nil {
 		if tokenData.AccessToken == "" {
@@ -1522,6 +1508,15 @@ func extractKiroTokenData(a *coreauth.Auth) *kiroauth.TokenData {
 		}
 		if tokenData.ProfileArn == "" {
 			tokenData.ProfileArn = strings.TrimSpace(a.Attributes["profile_arn"])
+		}
+		if tokenData.AuthMethod == "" {
+			tokenData.AuthMethod = strings.TrimSpace(a.Attributes["auth_method"])
+		}
+		if tokenData.Provider == "" {
+			tokenData.Provider = strings.TrimSpace(a.Attributes["provider"])
+		}
+		if tokenData.MachineID == "" {
+			tokenData.MachineID = strings.TrimSpace(a.Attributes["machine_id"])
 		}
 	}
 	if tokenData.AccessToken == "" {

@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -458,13 +459,34 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				log.Errorf("response body close error: %v", errClose)
 			}
 		}()
+		var streamUsage cliproxyusage.Detail
+		streamUsageSeen := false
+		recordStreamUsage := func(detail cliproxyusage.Detail) {
+			streamUsageSeen = true
+			mergeClaudeStreamUsage(&streamUsage, detail)
+		}
+		publishStreamUsage := func(failed bool, err error) {
+			if streamUsageSeen {
+				if failed {
+					reporter.PublishFailureWithUsageAndError(ctx, streamUsage, err)
+				} else {
+					reporter.Publish(ctx, streamUsage)
+				}
+				return
+			}
+			if failed {
+				reporter.PublishFailureWithError(ctx, err)
+			} else {
+				reporter.EnsurePublished(ctx)
+			}
+		}
 
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
 			errRead := helps.ReadStreamLines(decodedBody, func(line []byte) error {
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-					reporter.Publish(ctx, detail)
+					recordStreamUsage(detail)
 				}
 				if isClaudeOAuthToken(apiKey) {
 					line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolReverseMap)
@@ -476,8 +498,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			})
 			if errRead != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-				reporter.PublishFailure(ctx)
+				publishStreamUsage(true, errRead)
 				out <- cliproxyexecutor.StreamChunk{Err: errRead}
+			} else {
+				publishStreamUsage(false, nil)
 			}
 			return
 		}
@@ -487,7 +511,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		errRead := helps.ReadStreamLines(decodedBody, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
+				recordStreamUsage(detail)
 			}
 			if isClaudeOAuthToken(apiKey) {
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolReverseMap)
@@ -509,8 +533,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		})
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			reporter.PublishFailure(ctx)
+			publishStreamUsage(true, errRead)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
+		} else {
+			publishStreamUsage(false, nil)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -763,6 +789,34 @@ func validateClaudeAggregatedStream(data []byte) error {
 		return statusErr{code: http.StatusBadGateway, msg: "Claude stream ended before message completion"}
 	}
 	return nil
+}
+
+func mergeClaudeStreamUsage(dst *cliproxyusage.Detail, src cliproxyusage.Detail) {
+	if dst == nil {
+		return
+	}
+	if src.InputTokens > dst.InputTokens {
+		dst.InputTokens = src.InputTokens
+	}
+	if src.OutputTokens > dst.OutputTokens {
+		dst.OutputTokens = src.OutputTokens
+	}
+	if src.ReasoningTokens > dst.ReasoningTokens {
+		dst.ReasoningTokens = src.ReasoningTokens
+	}
+	if src.CachedTokens > dst.CachedTokens {
+		dst.CachedTokens = src.CachedTokens
+	}
+	if src.CacheCreationTokens > dst.CacheCreationTokens {
+		dst.CacheCreationTokens = src.CacheCreationTokens
+	}
+	if src.TotalTokens > dst.TotalTokens {
+		dst.TotalTokens = src.TotalTokens
+	}
+	componentTotal := dst.InputTokens + dst.OutputTokens + dst.ReasoningTokens
+	if componentTotal > dst.TotalTokens {
+		dst.TotalTokens = componentTotal
+	}
 }
 
 type compositeReadCloser struct {

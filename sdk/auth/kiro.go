@@ -99,6 +99,7 @@ func (a *KiroAuthenticator) loginWithSocialOAuth(ctx context.Context, cfg *confi
 	}()
 
 	redirectURI := kiroauth.OAuthRedirectURI(port)
+
 	pkce, err := kiroauth.GeneratePKCECodes()
 	if err != nil {
 		return nil, err
@@ -118,7 +119,7 @@ func (a *KiroAuthenticator) loginWithSocialOAuth(ctx context.Context, cfg *confi
 
 	fmt.Println("Starting Kiro OAuth login...")
 	fmt.Printf("\nTo authenticate Kiro, visit:\n%s\n\n", loginURL)
-	fmt.Printf("Waiting for OAuth callback on %s\n", redirectURI)
+	fmt.Printf("Waiting for Kiro OAuth callback on %s\n", redirectURI)
 	if !opts.NoBrowser {
 		if errOpen := browser.OpenURL(loginURL); errOpen != nil {
 			log.Warnf("Failed to open browser automatically: %v", errOpen)
@@ -283,6 +284,9 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.TokenData, sour
 		expiresAt = now.Add(time.Hour)
 		tokenData.ExpiresAt = expiresAt.UTC().Format(time.RFC3339)
 	}
+	if kiroauth.NormalizeKiroMachineID(tokenData.MachineID) == "" {
+		tokenData.MachineID = kiroauth.GenerateKiroMachineID()
+	}
 
 	provider := kiroauth.SanitizeEmailForFilename(strings.ToLower(strings.TrimSpace(tokenData.Provider)))
 	if provider == "" {
@@ -295,6 +299,7 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.TokenData, sour
 		"type":                     "kiro",
 		"last_refresh":             now.UTC().Format(time.RFC3339),
 		"refresh_interval_seconds": kiroauth.RandomRefreshIntervalSeconds(),
+		"machine_id":               kiroauth.MachineIDFromTokenData(tokenData),
 	}
 	setNonEmptyKiroMetadata(metadata,
 		"access_token", tokenData.AccessToken,
@@ -309,6 +314,7 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.TokenData, sour
 		"email", tokenData.Email,
 		"region", tokenData.Region,
 		"start_url", tokenData.StartURL,
+		"machine_id", tokenData.MachineID,
 	)
 
 	attributes := map[string]string{"source": source}
@@ -323,6 +329,9 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.TokenData, sour
 	}
 	if region := strings.TrimSpace(tokenData.Region); region != "" {
 		attributes["region"] = region
+	}
+	if machineID := kiroauth.MachineIDFromTokenData(tokenData); machineID != "" {
+		attributes["machine_id"] = machineID
 	}
 
 	refreshInterval := time.Duration(metadata["refresh_interval_seconds"].(int)) * time.Second
@@ -375,6 +384,10 @@ func RemoveEmptyKiroMetadataFields(metadata map[string]any) {
 		"auth_method",
 		"authMethod",
 		"provider",
+		"machine_id",
+		"machineId",
+		"device_id",
+		"deviceId",
 	} {
 		if value, ok := metadata[key]; ok && kiroMetadataValueEmpty(value) {
 			delete(metadata, key)
@@ -459,8 +472,17 @@ func startKiroOAuthCallbackServer(port int) (*http.Server, int, <-chan kiroOAuth
 		}
 		_, _ = w.Write([]byte("<h1>Kiro login failed</h1><p>Please check the CLI output.</p>"))
 	}
-	mux.HandleFunc(kiroauth.OAuthCallbackPath, handler)
-	mux.HandleFunc("/callback", handler)
+	registeredPaths := map[string]struct{}{}
+	for _, path := range []string{kiroauth.OAuthCallbackPath, "/callback", "/"} {
+		if path == "" {
+			path = "/"
+		}
+		if _, ok := registeredPaths[path]; ok {
+			continue
+		}
+		registeredPaths[path] = struct{}{}
+		mux.HandleFunc(path, handler)
+	}
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {

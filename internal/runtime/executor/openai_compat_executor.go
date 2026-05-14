@@ -294,7 +294,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 		})
 		if errRead != nil {
 			helps.RecordAPIResponseError(state.ctx, e.cfg, errRead)
-			state.reporter.PublishFailure(state.ctx)
+			state.reporter.PublishFailureWithError(state.ctx, errRead)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 		} else if !passthroughOpenAI {
 			// In case the upstream close the stream without a terminal [DONE] marker.
@@ -349,7 +349,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			if reporter != nil {
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailureWithError(ctx, errRead)
 			}
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 		} else if reporter != nil {

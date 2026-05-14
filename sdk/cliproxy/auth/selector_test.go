@@ -886,10 +886,22 @@ func TestExtractSessionID_CodexHeaders(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_PromptCacheKey(t *testing.T) {
+func TestExtractSessionID_ConversationIDPriorityOverPromptCacheKey(t *testing.T) {
 	t.Parallel()
 
 	payload := []byte(`{"prompt_cache_key":"cache-123","conversation_id":"conv-456"}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "conv:conv-456"
+	if got != want {
+		t.Errorf("ExtractSessionID() with conversation_id and prompt_cache_key = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_PromptCacheKey(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"prompt_cache_key":"cache-123"}`)
 
 	got := ExtractSessionID(nil, payload, nil)
 	want := "cache:cache-123"
@@ -1498,6 +1510,54 @@ func TestSessionAffinitySelector_RoundRobinDistribution(t *testing.T) {
 		if got != expected {
 			t.Errorf("auth %s got %d sessions, want %d (round-robin should distribute evenly)", auth.ID, got, expected)
 		}
+	}
+}
+
+func TestSessionAffinitySelector_ProviderScopeIsolation(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	optsA := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"session_id":"same-session"}}`),
+		Metadata:        map[string]any{cliproxyexecutor.ProviderScopeMetadataKey: "providers:claude,gemini"},
+	}
+	optsB := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"session_id":"same-session"}}`),
+		Metadata:        map[string]any{cliproxyexecutor.ProviderScopeMetadataKey: "providers:claude,codex"},
+	}
+
+	authA := &Auth{ID: "auth-a"}
+	authB := &Auth{ID: "auth-b"}
+
+	first, err := selector.Pick(context.Background(), "mixed", "model", optsA, []*Auth{authA})
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "mixed", "model", optsB, []*Auth{authB})
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	third, err := selector.Pick(context.Background(), "mixed", "model", optsA, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("third Pick() error = %v", err)
+	}
+
+	if first.ID != "auth-a" || second.ID != "auth-b" || third.ID != "auth-a" {
+		t.Fatalf("provider-scoped affinity picks = %s, %s, %s; want auth-a, auth-b, auth-a", first.ID, second.ID, third.ID)
+	}
+}
+
+func TestExtractSessionID_ClientPrincipalFallback(t *testing.T) {
+	t.Parallel()
+
+	got := ExtractSessionID(nil, nil, map[string]any{cliproxyexecutor.ClientPrincipalMetadataKey: "client-hash"})
+	if got != "client:client-hash" {
+		t.Fatalf("ExtractSessionID() = %q, want client:client-hash", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"sync"
@@ -53,6 +54,57 @@ func (e *autoRefreshTestExecutor) refreshedIDs() []string {
 	out := make([]string, len(e.ids))
 	copy(out, e.ids)
 	return out
+}
+
+func TestManagerRefreshAuthOncePersistsRefreshErrorRuntimeState(t *testing.T) {
+	store := &captureAuthStore{}
+	manager := NewManager(store, &RoundRobinSelector{}, nil)
+	executor := &autoRefreshTestExecutor{
+		provider: "kiro",
+		refreshFunc: func(auth *Auth) (*Auth, error) {
+			return nil, &Error{Code: "refresh_failed", Message: "kiro refresh 502", Retryable: true, HTTPStatus: http.StatusBadGateway}
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "kiro-refresh-error",
+		Provider: "kiro",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "kiro", "refresh_interval_seconds": 1},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	store.saved = nil
+
+	if _, err := manager.refreshAuthOnce(context.Background(), auth.ID); err == nil {
+		t.Fatal("expected refresh error")
+	}
+	manager.flushPersistQueue()
+
+	saved := store.saved[auth.ID]
+	if saved == nil {
+		t.Fatal("expected refresh error state to be persisted")
+	}
+	rawState, ok := saved.Metadata[runtimeStateMetadataKey]
+	if !ok {
+		t.Fatalf("runtime state metadata missing: %#v", saved.Metadata)
+	}
+	data, err := json.Marshal(rawState)
+	if err != nil {
+		t.Fatalf("marshal runtime state: %v", err)
+	}
+	var state AuthRuntimeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("unmarshal runtime state: %v", err)
+	}
+	if state.LastError == nil || state.LastError.Message != "kiro refresh 502" {
+		t.Fatalf("runtime last_error = %#v, want refresh failure", state.LastError)
+	}
+	if state.LastError.HTTPStatus != http.StatusBadGateway || !state.LastError.Retryable {
+		t.Fatalf("runtime last_error metadata = %#v", state.LastError)
+	}
 }
 
 func TestManager_StartAutoRefresh_DisabledByDefault(t *testing.T) {

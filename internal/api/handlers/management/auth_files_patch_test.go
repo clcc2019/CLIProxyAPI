@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,6 +15,70 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+func TestListAuthFilesFromDiskExposesRuntimeStateError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	runtimeUpdatedAt := time.Date(2026, 5, 13, 9, 30, 0, 0, time.UTC)
+	runtimeSavedAt := runtimeUpdatedAt.Add(2 * time.Second)
+	raw := map[string]any{
+		"type":  "kiro",
+		"email": "kiro@example.com",
+		"cliproxy_runtime_state": map[string]any{
+			"version":        1,
+			"status":         "error",
+			"status_message": "refresh token invalid - re-login required",
+			"unavailable":    true,
+			"updated_at":     runtimeUpdatedAt.Format(time.RFC3339),
+			"saved_at":       runtimeSavedAt.Format(time.RFC3339),
+			"last_error": map[string]any{
+				"code":        "refresh_failed",
+				"message":     "kiro refresh rejected",
+				"retryable":   false,
+				"http_status": http.StatusUnauthorized,
+			},
+		},
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal auth file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kiro-google.json"), data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, nil)
+	resp := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(resp)
+	h.ListAuthFiles(c)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(body.Files) != 1 {
+		t.Fatalf("files = %#v, want one file", body.Files)
+	}
+	file := body.Files[0]
+	if got := file["status_message"]; got != "refresh token invalid - re-login required" {
+		t.Fatalf("status_message = %#v", got)
+	}
+	lastError, ok := file["last_error"].(map[string]any)
+	if !ok {
+		t.Fatalf("last_error = %#v, want object", file["last_error"])
+	}
+	if got := lastError["message"]; got != "kiro refresh rejected" {
+		t.Fatalf("last_error.message = %#v", got)
+	}
+	if got := int(lastError["http_status"].(float64)); got != http.StatusUnauthorized {
+		t.Fatalf("last_error.http_status = %d", got)
+	}
+}
 
 func TestPatchAuthFileFieldsUpdatesUserAgent(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")

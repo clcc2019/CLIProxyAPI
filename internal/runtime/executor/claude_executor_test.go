@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -1004,6 +1005,27 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamConvertsValidClaudeStream(t *testi
 	}
 	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 3 {
 		t.Fatalf("usage.total_tokens = %d, want 3", got)
+	}
+}
+
+func TestMergeClaudeStreamUsageKeepsMostCompleteUsage(t *testing.T) {
+	var detail cliproxyusage.Detail
+	mergeClaudeStreamUsage(&detail, cliproxyusage.Detail{
+		InputTokens:         150,
+		CachedTokens:        20,
+		CacheCreationTokens: 30,
+		TotalTokens:         150,
+	})
+	mergeClaudeStreamUsage(&detail, cliproxyusage.Detail{
+		OutputTokens: 75,
+		TotalTokens:  75,
+	})
+
+	if detail.InputTokens != 150 || detail.OutputTokens != 75 || detail.CachedTokens != 20 || detail.CacheCreationTokens != 30 {
+		t.Fatalf("merged detail = %+v", detail)
+	}
+	if detail.TotalTokens != 225 {
+		t.Fatalf("total tokens = %d, want 225", detail.TotalTokens)
 	}
 }
 

@@ -2,6 +2,7 @@ package proxyutil
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -33,6 +34,8 @@ func TestParse(t *testing.T) {
 		{name: "direct", input: "direct", want: ModeDirect},
 		{name: "none", input: "none", want: ModeDirect},
 		{name: "http", input: "http://proxy.example.com:8080", want: ModeProxy},
+		{name: "http shorthand host port", input: "proxy.example.com:8080", want: ModeProxy},
+		{name: "http shorthand with auth", input: "user:pass@proxy.example.com:8080", want: ModeProxy},
 		{name: "https", input: "https://proxy.example.com:8443", want: ModeProxy},
 		{name: "socks5", input: "socks5://proxy.example.com:1080", want: ModeProxy},
 		{name: "socks5h", input: "socks5h://proxy.example.com:1080", want: ModeProxy},
@@ -115,6 +118,29 @@ func TestBuildHTTPTransportHTTPProxy(t *testing.T) {
 	}
 }
 
+func TestBuildHTTPTransportHTTPProxyShorthand(t *testing.T) {
+	t.Parallel()
+
+	transport, mode, errBuild := BuildHTTPTransport("proxy.example.com:8080")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
+	}
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("transport.Proxy returned error: %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://proxy.example.com:8080" {
+		t.Fatalf("proxy URL = %v, want http://proxy.example.com:8080", proxyURL)
+	}
+}
+
 func TestBuildHTTPTransportSOCKS5ProxyInheritsDefaultTransportSettings(t *testing.T) {
 	t.Parallel()
 
@@ -162,6 +188,32 @@ func TestBuildHTTPTransportSOCKS5HProxy(t *testing.T) {
 	}
 	if transport.DialContext == nil {
 		t.Fatal("expected SOCKS5H transport to have custom DialContext")
+	}
+}
+
+func TestBuildHTTPTransportSOCKS5DialContextHonorsCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	transport, mode, errBuild := BuildHTTPTransport("socks5://127.0.0.1:1")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if transport == nil || transport.DialContext == nil {
+		t.Fatal("expected SOCKS5 transport with custom DialContext")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn, errDial := transport.DialContext(ctx, "tcp", "example.com:443")
+	if conn != nil {
+		conn.Close()
+		t.Fatal("expected nil connection for canceled context")
+	}
+	if errDial != context.Canceled {
+		t.Fatalf("DialContext error = %v, want context.Canceled", errDial)
 	}
 }
 

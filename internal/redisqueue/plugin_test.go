@@ -58,15 +58,16 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:    "openai",
-			Model:       "gpt-5.4-mini",
-			Alias:       "client-mini",
-			APIKey:      "test-key",
-			AuthIndex:   "0",
-			AuthType:    "apikey",
-			Source:      "user@example.com",
-			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:     2500 * time.Millisecond,
+			Provider:     "openai",
+			Model:        "gpt-5.4-mini",
+			Alias:        "client-mini",
+			APIKey:       "test-key",
+			AuthIndex:    "0",
+			AuthType:     "apikey",
+			Source:       "user@example.com",
+			RequestedAt:  time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:      2500 * time.Millisecond,
+			ErrorMessage: " upstream quota exhausted\ntry later ",
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -82,6 +83,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 		requireStringField(t, payload, "auth_type", "apikey")
 		requireStringField(t, payload, "request_id", "gin-request-id")
 		requireBoolField(t, payload, "failed", true)
+		requireStringField(t, payload, "error_message", "upstream quota exhausted try later")
 	})
 }
 

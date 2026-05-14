@@ -142,6 +142,7 @@ type RequestDetail struct {
 	ModelReasoningEffort string     `json:"model_reasoning_effort,omitempty"`
 	Tokens               TokenStats `json:"tokens"`
 	Failed               bool       `json:"failed"`
+	ErrorMessage         string     `json:"error_message,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -269,6 +270,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		ModelReasoningEffort: strings.TrimSpace(record.ModelReasoningEffort),
 		Tokens:               detail,
 		Failed:               failed,
+		ErrorMessage:         normalizeRequestErrorMessage(record.ErrorMessage, failed),
 	}
 	s.updateAPIStats(stats, modelName, requestDetail)
 	s.appendAggregateRecord(statsKey, modelName, requestDetail)
@@ -427,6 +429,13 @@ func trimDetailedSnapshot(snapshot StatisticsSnapshot, limit int) StatisticsSnap
 	return snapshot
 }
 
+// TrimDetailedSnapshot exposes per-model detail truncation for callers (e.g. API handlers)
+// that need to bound the number of request detail records returned without mutating the
+// in-memory retention configuration.
+func TrimDetailedSnapshot(snapshot StatisticsSnapshot, limit int) StatisticsSnapshot {
+	return trimDetailedSnapshot(snapshot, limit)
+}
+
 // Snapshot returns a copy of the aggregated metrics for external consumption.
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	return s.snapshotWithDetails(true)
@@ -580,6 +589,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				if detail.LatencyMs < 0 {
 					detail.LatencyMs = 0
 				}
+				detail.ErrorMessage = normalizeRequestErrorMessage(detail.ErrorMessage, detail.Failed)
 				if detail.Timestamp.IsZero() {
 					detail.Timestamp = time.Now()
 				}
@@ -922,6 +932,30 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}
 	return tokens
+}
+
+func normalizeRequestErrorMessage(message string, failed bool) string {
+	if !failed {
+		return ""
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+	message = strings.Join(strings.Fields(message), " ")
+	const maxLen = 2000
+	if len(message) > maxLen {
+		message = truncateRequestErrorMessage(message, maxLen)
+	}
+	return message
+}
+
+func truncateRequestErrorMessage(message string, maxLen int) string {
+	runes := []rune(message)
+	if len(runes) <= maxLen {
+		return message
+	}
+	return strings.TrimSpace(string(runes[:maxLen])) + "..."
 }
 
 func mergeTokenStats(dst *TokenStats, src TokenStats) {

@@ -416,7 +416,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 				if errStream != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errStream)
-					reporter.PublishFailure(ctx)
+					reporter.PublishFailureWithError(ctx, errStream)
 					out <- cliproxyexecutor.StreamChunk{Err: errStream}
 				}
 				return
@@ -425,7 +425,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			data, errRead := helps.ReadNonStreamResponseBody(resp.Body)
 			if errRead != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailureWithError(ctx, errRead)
 				out <- cliproxyexecutor.StreamChunk{Err: errRead}
 				return
 			}

@@ -10,6 +10,8 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+var validKiroRetryTestPayload = []byte(`{"conversationState":{"conversationId":"c","currentMessage":{"userInputMessage":{"content":"hi","modelId":"auto","origin":"AI_EDITOR"}}}}`)
+
 // TestPermanentAuthErrorSatisfiesInterfaces is a compile-time guard that
 // kiroRefreshPermanentError and kiroAuthScopedQuotaError still satisfy
 // their respective interfaces.
@@ -28,7 +30,7 @@ func TestDoKiroRequestWithFallbackRetry_DoesNotReplayTransientFailure(t *testing
 
 	exec := NewKiroExecutor(nil)
 	prepared := &kiroPreparedRequest{
-		firstPayload: []byte(`{}`),
+		firstPayload: validKiroRetryTestPayload,
 		endpoints: []kiroEndpointConfig{
 			{URL: server.URL, Origin: "AI_EDITOR", Name: "only"},
 		},
@@ -54,7 +56,7 @@ func TestDoKiroRequestWithFallbackRetry_DoesNotAuthScopeThrottling429(t *testing
 
 	exec := NewKiroExecutor(nil)
 	prepared := &kiroPreparedRequest{
-		firstPayload: []byte(`{}`),
+		firstPayload: validKiroRetryTestPayload,
 		endpoints: []kiroEndpointConfig{
 			{URL: server.URL, Origin: "AI_EDITOR", Name: "only"},
 		},

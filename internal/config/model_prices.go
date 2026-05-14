@@ -48,6 +48,11 @@ func LookupModelPrice(prices ModelPrices, names ...string) (ModelPrice, bool) {
 			}
 		}
 	}
+	for _, key := range []string{"default", "*"} {
+		if price, ok := prices[key]; ok {
+			return price, true
+		}
+	}
 	return ModelPrice{}, false
 }
 

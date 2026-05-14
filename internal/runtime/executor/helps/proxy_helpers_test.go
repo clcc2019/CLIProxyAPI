@@ -85,9 +85,18 @@ func TestNewProxyAwareHTTPClientPrefersContextRoundTripperForAuthProxy(t *testin
 		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example.com:8080"},
 		0,
 	)
+	second := NewProxyAwareHTTPClient(
+		ctx,
+		&config.Config{},
+		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example.com:8080"},
+		0,
+	)
 
 	if client.Transport != expected {
 		t.Fatalf("transport = %T %v, want cached context round tripper", client.Transport, client.Transport)
+	}
+	if client != second {
+		t.Fatal("expected context round tripper client to be reused")
 	}
 }
 
@@ -141,6 +150,47 @@ func TestNewProxyAwareHTTPClientReusesCustomCATransport(t *testing.T) {
 	}
 	if first.Transport == nil || first.Transport != second.Transport {
 		t.Fatal("expected custom-CA transport to be reused")
+	}
+}
+
+func TestNewProxyAwareHTTPClientReusesContextCustomCATransport(t *testing.T) {
+	t.Setenv("CODEX_CA_CERTIFICATE", mustCreateProxyHelperTestCertificatePEM(t))
+	t.Setenv("SSL_CERT_FILE", "")
+
+	base := &http.Transport{}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(base))
+	auth := &cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example.com:8080"}
+
+	first := NewProxyAwareHTTPClient(ctx, &config.Config{}, auth, 0)
+	second := NewProxyAwareHTTPClient(ctx, &config.Config{}, auth, 0)
+
+	if first != second {
+		t.Fatal("expected context custom-CA client to be reused")
+	}
+	if first.Transport == nil || first.Transport != second.Transport {
+		t.Fatal("expected context custom-CA transport to be reused")
+	}
+	if first.Transport == base {
+		t.Fatal("expected context transport to be cloned with custom root CAs")
+	}
+}
+
+func TestNewCodexHTTPClientUsesNativeProxyAwareClient(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://codex-native-proxy.example.com:8080"}}
+
+	client := NewCodexHTTPClient(context.Background(), cfg, nil, 5*time.Second)
+	proxyAware := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 5*time.Second)
+
+	if client != proxyAware {
+		t.Fatal("expected Codex client to reuse proxy-aware client cache")
+	}
+	if _, ok := client.Transport.(*http.Transport); !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if client.Timeout != 5*time.Second {
+		t.Fatalf("Timeout = %s, want %s", client.Timeout, 5*time.Second)
 	}
 }
 

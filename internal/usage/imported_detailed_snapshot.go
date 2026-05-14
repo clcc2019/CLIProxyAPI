@@ -43,6 +43,7 @@ func normalizeImportedRequestDetail(detail RequestDetail) RequestDetail {
 	detail.Source = strings.TrimSpace(detail.Source)
 	detail.AuthIndex = strings.TrimSpace(detail.AuthIndex)
 	detail.ModelReasoningEffort = strings.TrimSpace(detail.ModelReasoningEffort)
+	detail.ErrorMessage = normalizeRequestErrorMessage(detail.ErrorMessage, detail.Failed)
 	return detail
 }
 

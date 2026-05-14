@@ -399,6 +399,101 @@ func TestKiroAuthGetUsageLimits(t *testing.T) {
 	}
 }
 
+func TestKiroAuthGetUsageLimitsFallsBackToGET(t *testing.T) {
+	var sawPost bool
+	var sawGet bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			_ = requireKiroServiceRequest(t, r, kiroGetUsageLimitsTarget)
+			sawPost = true
+			http.Error(w, "temporary upstream failure", http.StatusBadGateway)
+		case http.MethodGet:
+			if r.URL.Path != "/getUsageLimits" {
+				t.Fatalf("GET path = %q, want /getUsageLimits", r.URL.Path)
+			}
+			if r.Header.Get("Authorization") != "Bearer access-token" {
+				t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+			}
+			if r.URL.Query().Get("origin") != "AI_EDITOR" || r.URL.Query().Get("resourceType") != "AGENTIC_REQUEST" {
+				t.Fatalf("unexpected query: %s", r.URL.RawQuery)
+			}
+			sawGet = true
+			writeJSON(t, w, map[string]any{
+				"usageBreakdownList": []map[string]any{{
+					"resourceType":              "AGENTIC_REQUEST",
+					"usageLimitWithPrecision":   10,
+					"currentUsageWithPrecision": 2,
+				}},
+			})
+		default:
+			t.Fatalf("method = %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	auth := &KiroAuth{httpClient: server.Client(), endpoint: server.URL}
+	usage, err := auth.GetUsageLimits(context.Background(), &TokenData{
+		AccessToken: "access-token",
+		ProfileArn:  "arn:aws:codewhisperer:us-west-2:123:profile/test",
+	})
+	if err != nil {
+		t.Fatalf("GetUsageLimits() error = %v", err)
+	}
+	if !sawPost || !sawGet {
+		t.Fatalf("expected POST then GET fallback, sawPost=%t sawGet=%t", sawPost, sawGet)
+	}
+	if usage.TotalRemainingUsageWithPrecision == nil || *usage.TotalRemainingUsageWithPrecision != 8 {
+		t.Fatalf("total remaining = %#v, want 8", usage.TotalRemainingUsageWithPrecision)
+	}
+}
+
+func TestKiroUsageInfoNormalizePopulatesQuotas(t *testing.T) {
+	resetAt := 1767225600000.0
+	creditLimit := 200.0
+	creditCurrent := 12.5
+	trialLimit := 50.0
+	trialCurrent := 5.0
+	usage := &KiroUsageInfo{
+		NextDateReset: &resetAt,
+		UsageBreakdownList: []KiroUsageBreakdown{
+			{
+				ResourceType:              "CREDIT",
+				DisplayName:               "Credits",
+				UsageLimitWithPrecision:   &creditLimit,
+				CurrentUsageWithPrecision: &creditCurrent,
+				FreeTrialInfo: &KiroFreeTrialInfo{
+					FreeTrialStatus:           "ACTIVE",
+					FreeTrialExpiry:           "2026-02-01T00:00:00Z",
+					UsageLimitWithPrecision:   &trialLimit,
+					CurrentUsageWithPrecision: &trialCurrent,
+				},
+			},
+		},
+	}
+
+	usage.normalize()
+
+	quota, ok := usage.Quotas["credit"].(KiroQuotaInfo)
+	if !ok {
+		t.Fatalf("credit quota = %#v, want KiroQuotaInfo", usage.Quotas["credit"])
+	}
+	if quota.Used != 12.5 || quota.Total != 200 || quota.Remaining != 187.5 || quota.ResetAt == nil {
+		t.Fatalf("unexpected credit quota: %+v", quota)
+	}
+
+	trialQuota, ok := usage.Quotas["credit_freetrial"].(KiroQuotaInfo)
+	if !ok {
+		t.Fatalf("credit_freetrial quota = %#v, want KiroQuotaInfo", usage.Quotas["credit_freetrial"])
+	}
+	if trialQuota.Used != 5 || trialQuota.Total != 50 || trialQuota.Remaining != 45 {
+		t.Fatalf("unexpected free trial quota: %+v", trialQuota)
+	}
+	if trialQuota.ResetAt == nil || *trialQuota.ResetAt != "2026-02-01T00:00:00Z" {
+		t.Fatalf("free trial resetAt = %#v, want 2026-02-01T00:00:00Z", trialQuota.ResetAt)
+	}
+}
+
 func TestKiroAuthGetUsageLimitsRequestsEmailWhenProfileArnMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get("x-amz-target") {

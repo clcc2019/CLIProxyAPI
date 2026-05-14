@@ -17,6 +17,7 @@ func TestClientAPIKeysUnmarshalYAMLCompatibility(t *testing.T) {
 api-keys:
   - " key-a "
   - api-key: "key-b"
+    note: " Team B "
     allowed-models:
       - " GPT-5-* "
       - "gpt-5-*"
@@ -37,6 +38,7 @@ api-keys:
 		{APIKey: "key-a"},
 		{
 			APIKey:         "key-b",
+			Note:           "Team B",
 			AllowedModels:  []string{"gpt-5-*", "claude-*"},
 			ExcludedModels: []string{"*", "gpt-5-mini"},
 		},
@@ -51,6 +53,7 @@ func TestClientAPIKeysMarshalYAMLPreservesLegacyShape(t *testing.T) {
 		{APIKey: "key-a"},
 		{
 			APIKey:         "key-b",
+			Note:           "Production",
 			AllowedModels:  []string{"gpt-5-*"},
 			ExcludedModels: []string{"*-mini"},
 			Quota:          ClientAPIKeyQuota{DailyCost: 1.5, MonthlyCost: 30},
@@ -79,6 +82,9 @@ func TestClientAPIKeysMarshalYAMLPreservesLegacyShape(t *testing.T) {
 	if second["api-key"] != "key-b" {
 		t.Fatalf("unexpected api-key: %#v", second["api-key"])
 	}
+	if second["note"] != "Production" {
+		t.Fatalf("unexpected note: %#v", second["note"])
+	}
 	if !reflect.DeepEqual(second["allowed-models"], []string{"gpt-5-*"}) {
 		t.Fatalf("unexpected allowed-models: %#v", second["allowed-models"])
 	}
@@ -99,6 +105,7 @@ func TestClientAPIKeysUnmarshalJSONCompatibility(t *testing.T) {
 		"key-a",
 		{
 			"apiKey": "key-b",
+			"note": "Team B",
 			"allowedModels": ["GPT-5-*"],
 			"excluded-models": ["*-mini"]
 		}
@@ -111,7 +118,7 @@ func TestClientAPIKeysUnmarshalJSONCompatibility(t *testing.T) {
 
 	want := ClientAPIKeys{
 		{APIKey: "key-a"},
-		{APIKey: "key-b", AllowedModels: []string{"gpt-5-*"}, ExcludedModels: []string{"*-mini"}},
+		{APIKey: "key-b", Note: "Team B", AllowedModels: []string{"gpt-5-*"}, ExcludedModels: []string{"*-mini"}},
 	}
 	if !reflect.DeepEqual(parsed, want) {
 		t.Fatalf("unexpected api keys: %#v", parsed)
@@ -181,6 +188,39 @@ func TestClientAPIKeysQuotaJSONAliases(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(parsed, want) {
 		t.Fatalf("unexpected api keys: %#v", parsed)
+	}
+}
+
+func TestClientAPIKeysJSONNoteAliases(t *testing.T) {
+	input := []byte(`[
+		{"api-key": "note-key-a", "remark": "Remark label"},
+		{"api-key": "note-key-b", "description": "Description label"}
+	]`)
+
+	var parsed ClientAPIKeys
+	if err := json.Unmarshal(input, &parsed); err != nil {
+		t.Fatalf("json unmarshal failed: %v", err)
+	}
+
+	want := ClientAPIKeys{
+		{APIKey: "note-key-a", Note: "Remark label"},
+		{APIKey: "note-key-b", Note: "Description label"},
+	}
+	if !reflect.DeepEqual(parsed, want) {
+		t.Fatalf("unexpected api keys: %#v", parsed)
+	}
+}
+
+func TestNormalizeClientAPIKeysMergesFirstNote(t *testing.T) {
+	keys := NormalizeClientAPIKeys(ClientAPIKeys{
+		{APIKey: "merge-key", Note: ""},
+		{APIKey: "merge-key", Note: "owner"},
+		{APIKey: "merge-key", Note: "later"},
+	})
+
+	want := ClientAPIKeys{{APIKey: "merge-key", Note: "owner"}}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("unexpected normalized keys: %#v", keys)
 	}
 }
 

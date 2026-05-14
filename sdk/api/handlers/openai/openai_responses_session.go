@@ -26,20 +26,20 @@ func responsesExplicitExecutionSessionID(req *http.Request, rawJSON []byte) stri
 		return ""
 	}
 	for _, path := range []string{
-		"prompt_cache_key",
-		"metadata.prompt_cache_key",
-		"metadata.conversation_id",
-		"metadata.conversationId",
-		"metadata.thread_id",
-		"metadata.threadId",
 		"metadata.session_id",
 		"metadata.sessionId",
-		"conversation_id",
-		"conversationId",
-		"thread_id",
-		"threadId",
 		"session_id",
 		"sessionId",
+		"metadata.thread_id",
+		"metadata.threadId",
+		"thread_id",
+		"threadId",
+		"metadata.conversation_id",
+		"metadata.conversationId",
+		"conversation_id",
+		"conversationId",
+		"prompt_cache_key",
+		"metadata.prompt_cache_key",
 	} {
 		if sessionID := strings.TrimSpace(gjson.GetBytes(rawJSON, path).String()); sessionID != "" {
 			return sessionID

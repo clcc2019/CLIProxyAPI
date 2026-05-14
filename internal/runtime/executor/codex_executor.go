@@ -217,7 +217,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = call.prepared.body
 	helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
 
-	httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(call.prepared.httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -249,6 +249,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		streamState := newCodexStreamCompletionState()
 		terminalFailure := false
+		var terminalFailureErr error
 		emittedPayload := false
 		// pendingTerminalErr captures the terminal upstream error observed
 		// mid-stream (e.g. usage_limit_reached) so the downstream client is
@@ -275,6 +276,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
 					log.Warnf("codex stream terminated with %s: %s", eventType, terminalErr.Error())
 					terminalFailure = true
+					terminalFailureErr = terminalErr
 					if !emittedPayload {
 						return terminalErr
 					}
@@ -293,6 +295,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					log.Warnf("codex stream terminated with response.incomplete: reason=%s", reason)
 					terminalFailure = true
+					terminalFailureErr = errors.New("response.incomplete: reason=" + reason)
 				case "response.failed":
 					message := gjson.GetBytes(eventData, "response.error.message").String()
 					if message == "" {
@@ -300,6 +303,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					log.Warnf("codex stream terminated with response.failed: %s", message)
 					terminalFailure = true
+					terminalFailureErr = errors.New(message)
 				}
 				if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
 					if detail, ok := helps.ParseCodexUsage(completed.data); ok {
@@ -335,7 +339,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailureWithError(ctx, errRead)
 			_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
 		} else if pendingTerminalErr != nil {
 			// The stream ended gracefully after we detected a terminal upstream
@@ -343,10 +347,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			// client so it can render a failure instead of treating the partial
 			// payload as a complete response.
 			helps.RecordAPIResponseError(ctx, e.cfg, pendingTerminalErr)
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailureWithError(ctx, pendingTerminalErr)
 			_ = send(cliproxyexecutor.StreamChunk{Err: pendingTerminalErr})
 		} else if terminalFailure {
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailureWithError(ctx, terminalFailureErr)
 		}
 		reporter.EnsurePublished(ctx)
 	}()

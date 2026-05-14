@@ -21,9 +21,10 @@ import (
 
 const (
 	SocialAuthEndpoint       = "https://prod.us-east-1.auth.desktop.kiro.dev"
-	SocialSigninEndpoint     = "https://app.kiro.dev"
+	SocialSigninEndpoint     = SocialAuthEndpoint
+	SocialOAuthRedirectURI   = "kiro://kiro.kiroAgent/authenticate-success"
 	DefaultOAuthCallbackPort = 3128
-	OAuthCallbackPath        = "/"
+	OAuthCallbackPath        = "/oauth/callback"
 	OAuthRedirectHost        = "localhost"
 )
 
@@ -48,6 +49,34 @@ type SocialTokenResponse struct {
 	RefreshToken string `json:"refreshToken"`
 	ProfileArn   string `json:"profileArn"`
 	ExpiresIn    int    `json:"expiresIn"`
+}
+
+func (r *SocialTokenResponse) UnmarshalJSON(data []byte) error {
+	type alias SocialTokenResponse
+	var wire struct {
+		alias
+		AccessTokenSnake  string `json:"access_token"`
+		RefreshTokenSnake string `json:"refresh_token"`
+		ProfileArnSnake   string `json:"profile_arn"`
+		ExpiresInSnake    int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*r = SocialTokenResponse(wire.alias)
+	if strings.TrimSpace(r.AccessToken) == "" {
+		r.AccessToken = strings.TrimSpace(wire.AccessTokenSnake)
+	}
+	if strings.TrimSpace(r.RefreshToken) == "" {
+		r.RefreshToken = strings.TrimSpace(wire.RefreshTokenSnake)
+	}
+	if strings.TrimSpace(r.ProfileArn) == "" {
+		r.ProfileArn = strings.TrimSpace(wire.ProfileArnSnake)
+	}
+	if r.ExpiresIn <= 0 {
+		r.ExpiresIn = wire.ExpiresInSnake
+	}
+	return nil
 }
 
 func GeneratePKCECodes() (*PKCECodes, error) {
@@ -78,6 +107,10 @@ func OAuthRedirectURI(port int) string {
 	return fmt.Sprintf("http://%s:%d%s", OAuthRedirectHost, port, OAuthCallbackPath)
 }
 
+func KiroSocialOAuthRedirectURI() string {
+	return SocialOAuthRedirectURI
+}
+
 func NewSocialOAuthClient(cfg *config.Config) *SocialOAuthClient {
 	client := &http.Client{Timeout: 30 * time.Second}
 	if cfg != nil {
@@ -102,9 +135,6 @@ func (c *SocialOAuthClient) BuildLoginURL(provider, redirectURI, state, codeChal
 }
 
 func (c *SocialOAuthClient) BuildLoginURLWithOptions(provider, redirectURI, state, codeChallenge string, opts SocialLoginURLOptions) (string, error) {
-	// The official Kiro CLI login URL does not carry provider or prompt
-	// selectors; the hosted sign-in page presents Google/GitHub choices.
-	_ = opts
 	redirectURI = strings.TrimSpace(redirectURI)
 	state = strings.TrimSpace(state)
 	codeChallenge = strings.TrimSpace(codeChallenge)
@@ -117,16 +147,22 @@ func (c *SocialOAuthClient) BuildLoginURLWithOptions(provider, redirectURI, stat
 	if codeChallenge == "" {
 		return "", fmt.Errorf("kiro oauth: code challenge is required")
 	}
-	if _, err := normalizeKiroSocialProvider(provider); err != nil {
+	idp, err := kiroSocialIdentityProvider(provider)
+	if err != nil {
 		return "", err
 	}
 	params := url.Values{}
+	params.Set("idp", idp)
 	params.Set("state", state)
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
 	params.Set("redirect_uri", redirectURI)
-	params.Set("redirect_from", "kirocli")
-	return strings.TrimRight(c.signinEndpointURL(), "/") + "/signin?" + params.Encode(), nil
+	if prompt := strings.TrimSpace(opts.Prompt); prompt != "" {
+		params.Set("prompt", prompt)
+	} else if opts.ForceReauth {
+		params.Set("prompt", "select_account")
+	}
+	return strings.TrimRight(c.signinEndpointURL(), "/") + "/login?" + params.Encode(), nil
 }
 
 func (c *SocialOAuthClient) ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string) (*SocialTokenResponse, error) {
@@ -216,6 +252,21 @@ func normalizeKiroSocialProvider(provider string) (string, error) {
 		return "google", nil
 	case "github":
 		return "github", nil
+	default:
+		return "", fmt.Errorf("kiro oauth: unsupported social provider %q", provider)
+	}
+}
+
+func kiroSocialIdentityProvider(provider string) (string, error) {
+	normalized, err := normalizeKiroSocialProvider(provider)
+	if err != nil {
+		return "", err
+	}
+	switch normalized {
+	case "google":
+		return "Google", nil
+	case "github":
+		return "Github", nil
 	default:
 		return "", fmt.Errorf("kiro oauth: unsupported social provider %q", provider)
 	}

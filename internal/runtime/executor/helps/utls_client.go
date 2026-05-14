@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -271,16 +270,6 @@ var anthropicFingerprintHosts = map[string]struct{}{
 	"api.anthropic.com": {},
 }
 
-// codexFingerprintHosts contains the official OpenAI/Codex hosts that should
-// use utls Chrome TLS fingerprinting. OpenAI-compatible custom base_url hosts
-// intentionally fall back to the normal proxy-aware transport.
-var codexFingerprintHosts = map[string]struct{}{
-	"api.openai.com": {},
-	"chatgpt.com":    {},
-}
-
-const codexTLSClientHelloEnvVar = "CODEX_TLS_CLIENT_HELLO"
-
 // fallbackRoundTripper uses utls for selected HTTPS hosts and falls back to
 // standard transport for all other requests.
 type fallbackRoundTripper struct {
@@ -308,20 +297,6 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 	return newFingerprintHTTPClient(proxyURL, rootCAs, baseClient.Transport, timeout, anthropicFingerprintHosts, defaultTLSClientHelloID())
 }
 
-// NewCodexFingerprintHTTPClient creates an HTTP client that uses a Chrome TLS
-// fingerprint for official Codex/OpenAI hosts while preserving injected context
-// transports and normal proxy-aware behavior for custom base_url hosts.
-func NewCodexFingerprintHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	baseClient := NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	if shouldUseContextRoundTripperForFingerprintClient(ctx, cfg, auth) {
-		return baseClient
-	}
-
-	proxyURL := resolvedProxyURL(cfg, auth)
-	rootCAs := customRootCAsForUTLS("codex utls")
-	return newFingerprintHTTPClient(proxyURL, rootCAs, baseClient.Transport, timeout, codexFingerprintHosts, codexTLSClientHelloID())
-}
-
 func newFingerprintHTTPClient(proxyURL string, rootCAs *x509.CertPool, fallback http.RoundTripper, timeout time.Duration, hosts map[string]struct{}, clientHello tls.ClientHelloID) *http.Client {
 	proxyURL = strings.TrimSpace(proxyURL)
 	transportKey := fingerprintTransportCacheKey{
@@ -339,54 +314,10 @@ func newFingerprintHTTPClient(proxyURL string, rootCAs *x509.CertPool, fallback 
 	return cachedFingerprintHTTPClient(clientKey, transport, timeout)
 }
 
-func shouldUseContextRoundTripperForFingerprintClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) bool {
-	if contextRoundTripper(ctx) == nil {
-		return false
-	}
-	if authProxyURL(auth) != "" {
-		return true
-	}
-	return resolvedProxyURL(cfg, auth) == ""
-}
-
 func defaultTLSClientHelloID() tls.ClientHelloID {
 	// Keep this explicit rather than HelloChrome_Auto so the effective
 	// browser-version fingerprint does not silently change on dependency bumps.
 	return tls.HelloChrome_133
-}
-
-func codexTLSClientHelloID() tls.ClientHelloID {
-	return parseTLSClientHelloID(os.Getenv(codexTLSClientHelloEnvVar), defaultTLSClientHelloID())
-}
-
-func parseTLSClientHelloID(value string, fallback tls.ClientHelloID) tls.ClientHelloID {
-	switch normalizeTLSClientHelloName(value) {
-	case "":
-		return fallback
-	case "auto", "chromeauto":
-		return tls.HelloChrome_Auto
-	case "chrome133":
-		return tls.HelloChrome_133
-	case "chrome131":
-		return tls.HelloChrome_131
-	case "chrome120":
-		return tls.HelloChrome_120
-	case "chrome120pq":
-		return tls.HelloChrome_120_PQ
-	case "chrome115pq":
-		return tls.HelloChrome_115_PQ
-	default:
-		log.Warnf("unsupported %s=%q, using default Chrome 133 TLS fingerprint", codexTLSClientHelloEnvVar, strings.TrimSpace(value))
-		return fallback
-	}
-}
-
-func normalizeTLSClientHelloName(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = strings.ReplaceAll(value, "-", "")
-	value = strings.ReplaceAll(value, "_", "")
-	value = strings.ReplaceAll(value, " ", "")
-	return value
 }
 
 func customRootCAsForUTLS(logPrefix string) *x509.CertPool {
@@ -452,11 +383,12 @@ func roundTripperCacheKey(rt http.RoundTripper) string {
 		return ""
 	}
 	value := reflect.ValueOf(rt)
+	typeName := reflect.TypeOf(rt).String()
 	switch value.Kind() {
 	case reflect.Ptr, reflect.Map, reflect.Chan, reflect.Func, reflect.Slice, reflect.UnsafePointer:
-		return fmt.Sprintf("%T:%x", rt, value.Pointer())
+		return typeName + ":" + strconv.FormatUint(uint64(value.Pointer()), 16)
 	default:
-		return fmt.Sprintf("%T:%v", rt, rt)
+		return typeName + ":" + fmt.Sprint(rt)
 	}
 }
 

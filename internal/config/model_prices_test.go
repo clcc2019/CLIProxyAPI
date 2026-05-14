@@ -35,3 +35,17 @@ func TestEffectiveModelPricesKeepsUserOverride(t *testing.T) {
 		t.Fatalf("override was not used: %+v", price)
 	}
 }
+
+func TestLookupModelPriceUsesDefaultFallback(t *testing.T) {
+	prices := EffectiveModelPrices(ModelPrices{
+		"default": {Prompt: 1.25, Completion: 2.5, Cache: 0.25},
+	})
+
+	price, ok := LookupModelPrice(prices, "unpriced-custom-model")
+	if !ok {
+		t.Fatal("expected default price fallback to resolve")
+	}
+	if price.Prompt != 1.25 || price.Completion != 2.5 || price.Cache != 0.25 {
+		t.Fatalf("unexpected fallback price: %+v", price)
+	}
+}

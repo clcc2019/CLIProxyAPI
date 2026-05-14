@@ -61,9 +61,13 @@ func TestKiroCreateAuthRecordBuilderIDMetadata(t *testing.T) {
 	if refreshInterval < kiroauth.DefaultRefreshIntervalMinSeconds || refreshInterval > kiroauth.DefaultRefreshIntervalMaxSeconds {
 		t.Fatalf("refresh_interval_seconds = %d, want %d-%d", refreshInterval, kiroauth.DefaultRefreshIntervalMinSeconds, kiroauth.DefaultRefreshIntervalMaxSeconds)
 	}
-	if record.NextRefreshAfter.Before(time.Now().Add(time.Minute-time.Second)) ||
-		record.NextRefreshAfter.After(time.Now().Add(time.Minute+time.Second)) {
-		t.Fatalf("NextRefreshAfter = %s, want 1 minute from now", record.NextRefreshAfter)
+	minNext := time.Now().Add(time.Duration(kiroauth.DefaultRefreshIntervalMinSeconds)*time.Second - time.Second)
+	maxNext := time.Now().Add(time.Duration(kiroauth.DefaultRefreshIntervalMaxSeconds)*time.Second + time.Second)
+	if record.NextRefreshAfter.Before(minNext) || record.NextRefreshAfter.After(maxNext) {
+		t.Fatalf("NextRefreshAfter = %s, want within default refresh interval", record.NextRefreshAfter)
+	}
+	if machineID := kiroauth.NormalizeKiroMachineID(record.Metadata["machine_id"].(string)); machineID == "" {
+		t.Fatalf("machine_id metadata is invalid: %#v", record.Metadata["machine_id"])
 	}
 	if record.Attributes["source"] != "aws-builder-id" || record.Attributes["auth_method"] != "builder-id" {
 		t.Fatalf("unexpected attributes: %+v", record.Attributes)
@@ -104,8 +108,11 @@ func TestKiroRegistersDefaultAutoRefresh(t *testing.T) {
 	if !coreauth.ProviderDefaultAutoRefresh("kiro") {
 		t.Fatal("expected Kiro to enable provider-level auto refresh")
 	}
-	if got := coreauth.ProviderDefaultRefreshInterval("kiro"); got != time.Minute {
-		t.Fatalf("Kiro default refresh interval = %s, want %s", got, time.Minute)
+	got := coreauth.ProviderDefaultRefreshInterval("kiro")
+	min := time.Duration(kiroauth.DefaultRefreshIntervalMinSeconds) * time.Second
+	max := time.Duration(kiroauth.DefaultRefreshIntervalMaxSeconds) * time.Second
+	if got < min || got > max {
+		t.Fatalf("Kiro default refresh interval = %s, want %s-%s", got, min, max)
 	}
 }
 
@@ -241,7 +248,7 @@ func TestKiroOAuthCallbackServerReceivesCode(t *testing.T) {
 	}
 	defer func() { _ = srv.Shutdown(context.Background()) }()
 
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d?code=auth-code&state=state-123", port))
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/oauth/callback?code=auth-code&state=state-123", port))
 	if err != nil {
 		t.Fatalf("callback GET: %v", err)
 	}
@@ -276,7 +283,7 @@ func TestKiroOAuthCallbackServerIgnoresNonCallbackRequest(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d?code=auth-code&state=state-123", port))
+	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/oauth/callback?code=auth-code&state=state-123", port))
 	if err != nil {
 		t.Fatalf("callback GET: %v", err)
 	}

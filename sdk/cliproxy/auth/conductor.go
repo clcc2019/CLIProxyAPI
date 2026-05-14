@@ -1437,6 +1437,9 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return existingClone, nil
 	}
 	if ok && existing != nil {
+		if isRefreshUpdate(ctx) {
+			preserveEditableAuthFileOptions(existing, auth)
+		}
 		if !auth.indexAssigned && auth.Index == "" {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
@@ -1915,6 +1918,40 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 	}
 }
 
+func withPinnedAuthMetadata(opts cliproxyexecutor.Options, authID string) cliproxyexecutor.Options {
+	authID = strings.TrimSpace(authID)
+	if authID == "" || pinnedAuthIDFromMetadata(opts.Metadata) == authID {
+		return opts
+	}
+	metadata := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		metadata[key] = value
+	}
+	metadata[cliproxyexecutor.PinnedAuthMetadataKey] = authID
+	opts.Metadata = metadata
+	return opts
+}
+
+func isRecoverableAffinityPickError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) {
+		return true
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	switch authErr.Code {
+	case "auth_not_found", "auth_unavailable", "model_cooldown":
+		return true
+	default:
+		return false
+	}
+}
+
 func selectedAuthIDFromMetadata(meta map[string]any) string {
 	if len(meta) == 0 {
 		return ""
@@ -1960,6 +1997,24 @@ func pinSelectedKiroAuth(opts cliproxyexecutor.Options) cliproxyexecutor.Options
 		metadata[key] = value
 	}
 	metadata[cliproxyexecutor.PinnedAuthMetadataKey] = selected
+	opts.Metadata = metadata
+	return opts
+}
+
+func withProviderScopeMetadata(opts cliproxyexecutor.Options, providers []string) cliproxyexecutor.Options {
+	providers = normalizeProviderKeys(providers)
+	if len(providers) == 0 {
+		return opts
+	}
+	scope := "providers:" + strings.Join(providers, ",")
+	if metadataStringValue(opts.Metadata, cliproxyexecutor.ProviderScopeMetadataKey) == scope {
+		return opts
+	}
+	metadata := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		metadata[key] = value
+	}
+	metadata[cliproxyexecutor.ProviderScopeMetadataKey] = scope
 	opts.Metadata = metadata
 	return opts
 }
@@ -3032,7 +3087,8 @@ func isRequestInvalidError(err error) bool {
 		msg := err.Error()
 		return strings.Contains(msg, "invalid_request_error") ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
-			strings.Contains(msg, "FAILED_PRECONDITION")
+			strings.Contains(msg, "FAILED_PRECONDITION") ||
+			isMalformedRequestErrorMessage(msg)
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
@@ -3044,6 +3100,32 @@ func isRequestInvalidError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func isMalformedRequestErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"improperly formed request",
+		"malformed payload",
+		"malformed request",
+		"validationexception",
+		"validation exception",
+		"serializationexception",
+		"deserializationexception",
+		"schema validation",
+		"extra inputs are not permitted",
+		"unexpected field",
+		"invalid json",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
@@ -3291,7 +3373,7 @@ func (m *Manager) useSchedulerFastPathForProvider(provider string) bool {
 	if strings.EqualFold(strings.TrimSpace(provider), "kiro") {
 		return false
 	}
-	return isBuiltInSelector(m.selector)
+	return isBuiltInSelector(m.selector) || schedulerBackedSessionAffinitySelector(m.selector) != nil
 }
 
 func useSchedulerFastPathForProviders(m *Manager, providers []string) bool {
@@ -3301,7 +3383,15 @@ func useSchedulerFastPathForProviders(m *Manager, providers []string) bool {
 	if len(providers) == 1 && strings.EqualFold(strings.TrimSpace(providers[0]), "kiro") {
 		return false
 	}
-	return isBuiltInSelector(m.selector)
+	return isBuiltInSelector(m.selector) || schedulerBackedSessionAffinitySelector(m.selector) != nil
+}
+
+func schedulerBackedSessionAffinitySelector(selector Selector) *SessionAffinitySelector {
+	affinity, ok := selector.(*SessionAffinitySelector)
+	if !ok || affinity == nil || affinity.cache == nil || !isBuiltInSelector(affinity.fallback) {
+		return nil
+	}
+	return affinity
 }
 
 func shouldRetrySchedulerPick(err error) bool {
@@ -3635,6 +3725,99 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if model != "" && m.singleLegacySelectionRequired(provider, model, tried) {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
+	if affinity := schedulerBackedSessionAffinitySelector(m.selectorForProvider(provider)); affinity != nil {
+		return m.pickNextSingleWithSchedulerAffinity(ctx, affinity, provider, model, opts, tried)
+	}
+	return m.pickNextSingleWithScheduler(ctx, provider, model, opts, tried)
+}
+
+func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affinity *SessionAffinitySelector, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		return m.pickNextSingleWithScheduler(ctx, provider, model, opts, tried)
+	}
+
+	cacheKey := sessionAffinityCacheKey(provider, primaryID, opts.Metadata)
+	if cachedAuthID, ok := affinity.cache.GetAndRefresh(cacheKey); ok {
+		if auth, executor, okCached, errPick := m.pickCachedSingleWithScheduler(ctx, provider, model, opts, tried, cachedAuthID); errPick != nil || okCached {
+			return auth, executor, errPick
+		}
+	}
+
+	if fallbackID != "" && fallbackID != primaryID {
+		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, opts.Metadata)
+		if cachedAuthID, ok := affinity.cache.Get(fallbackKey); ok {
+			if auth, executor, okCached, errPick := m.pickCachedSingleWithScheduler(ctx, provider, model, opts, tried, cachedAuthID); errPick != nil || okCached {
+				affinity.cache.Set(cacheKey, auth.ID)
+				return auth, executor, errPick
+			}
+		}
+	}
+
+	auth, executor, errPick := m.pickNextSingleStableWithScheduler(ctx, provider, model, opts, tried, cacheKey)
+	if errPick != nil {
+		return nil, nil, errPick
+	}
+	if auth != nil {
+		affinity.cache.Set(cacheKey, auth.ID)
+	}
+	return auth, executor, nil
+}
+
+func (m *Manager) pickCachedSingleWithScheduler(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, authID string) (*Auth, ProviderExecutor, bool, error) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil, nil, false, nil
+	}
+	pinnedOpts := withPinnedAuthMetadata(opts, authID)
+	auth, executor, errPick := m.pickNextSingleWithScheduler(ctx, provider, model, pinnedOpts, tried)
+	if errPick == nil {
+		return auth, executor, auth != nil, nil
+	}
+	if isRecoverableAffinityPickError(errPick) {
+		return nil, nil, false, nil
+	}
+	return nil, nil, false, errPick
+}
+
+func (m *Manager) pickNextSingleStableWithScheduler(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, affinityKey string) (*Auth, ProviderExecutor, error) {
+	executor, okExecutor := m.Executor(provider)
+	if !okExecutor {
+		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	for {
+		selected, errPick := m.scheduler.pickSingleStable(ctx, provider, model, opts, tried, affinityKey)
+		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+			m.syncScheduler()
+			selected, errPick = m.scheduler.pickSingleStable(ctx, provider, model, opts, tried, affinityKey)
+		}
+		if errPick != nil {
+			return nil, nil, errPick
+		}
+		if selected == nil {
+			return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		if disallowFreeAuth && isFreeCodexAuth(selected) {
+			if tried == nil {
+				tried = make(map[string]struct{})
+			}
+			tried[selected.ID] = struct{}{}
+			continue
+		}
+		authCopy, staleSelection := m.clonePickedAuthForExecution(provider, selected)
+		if staleSelection {
+			m.syncScheduler()
+			continue
+		}
+		if authCopy == nil {
+			return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		return authCopy, executor, nil
+	}
+}
+
+func (m *Manager) pickNextSingleWithScheduler(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	executor, okExecutor := m.Executor(provider)
 	if !okExecutor {
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -3673,6 +3856,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	opts = pinSelectedKiroAuthForProviders(providers, opts)
+	opts = withProviderScopeMetadata(opts, normalizeProviderKeys(providers))
 	selector := m.selector
 	if len(providers) == 1 && strings.EqualFold(strings.TrimSpace(providers[0]), "kiro") {
 		selector = m.selectorForProvider("kiro")
@@ -3778,10 +3962,104 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	opts = pinSelectedKiroAuthForProviders(eligibleProviders, opts)
+	opts = withProviderScopeMetadata(opts, eligibleProviders)
 	model = strings.TrimSpace(model)
 	if model != "" && m.mixedLegacySelectionRequired(eligibleProviders, model, tried) {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
+	if affinity := schedulerBackedSessionAffinitySelector(m.selector); affinity != nil {
+		return m.pickNextMixedWithSchedulerAffinity(ctx, affinity, eligibleProviders, model, opts, tried)
+	}
+	return m.pickNextMixedWithScheduler(ctx, eligibleProviders, model, opts, tried)
+}
+
+func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affinity *SessionAffinitySelector, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		return m.pickNextMixedWithScheduler(ctx, providers, model, opts, tried)
+	}
+
+	cacheKey := sessionAffinityCacheKey("mixed", primaryID, opts.Metadata)
+	if cachedAuthID, ok := affinity.cache.GetAndRefresh(cacheKey); ok {
+		if auth, executor, provider, okCached, errPick := m.pickCachedMixedWithScheduler(ctx, providers, model, opts, tried, cachedAuthID); errPick != nil || okCached {
+			return auth, executor, provider, errPick
+		}
+	}
+
+	if fallbackID != "" && fallbackID != primaryID {
+		fallbackKey := sessionAffinityCacheKey("mixed", fallbackID, opts.Metadata)
+		if cachedAuthID, ok := affinity.cache.Get(fallbackKey); ok {
+			if auth, executor, provider, okCached, errPick := m.pickCachedMixedWithScheduler(ctx, providers, model, opts, tried, cachedAuthID); errPick != nil || okCached {
+				affinity.cache.Set(cacheKey, auth.ID)
+				return auth, executor, provider, errPick
+			}
+		}
+	}
+
+	auth, executor, provider, errPick := m.pickNextMixedStableWithScheduler(ctx, providers, model, opts, tried, cacheKey)
+	if errPick != nil {
+		return nil, nil, "", errPick
+	}
+	if auth != nil {
+		affinity.cache.Set(cacheKey, auth.ID)
+	}
+	return auth, executor, provider, nil
+}
+
+func (m *Manager) pickCachedMixedWithScheduler(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, authID string) (*Auth, ProviderExecutor, string, bool, error) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil, nil, "", false, nil
+	}
+	pinnedOpts := withPinnedAuthMetadata(opts, authID)
+	auth, executor, provider, errPick := m.pickNextMixedWithScheduler(ctx, providers, model, pinnedOpts, tried)
+	if errPick == nil {
+		return auth, executor, provider, auth != nil, nil
+	}
+	if isRecoverableAffinityPickError(errPick) {
+		return nil, nil, "", false, nil
+	}
+	return nil, nil, "", false, errPick
+}
+
+func (m *Manager) pickNextMixedStableWithScheduler(ctx context.Context, eligibleProviders []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, affinityKey string) (*Auth, ProviderExecutor, string, error) {
+	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	for {
+		selected, providerKey, errPick := m.scheduler.pickMixedStable(ctx, eligibleProviders, model, opts, tried, affinityKey)
+		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+			m.syncScheduler()
+			selected, providerKey, errPick = m.scheduler.pickMixedStable(ctx, eligibleProviders, model, opts, tried, affinityKey)
+		}
+		if errPick != nil {
+			return nil, nil, "", errPick
+		}
+		if selected == nil {
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		if disallowFreeAuth && isFreeCodexAuth(selected) {
+			if tried == nil {
+				tried = make(map[string]struct{})
+			}
+			tried[selected.ID] = struct{}{}
+			continue
+		}
+		executor, okExecutor := m.Executor(providerKey)
+		if !okExecutor {
+			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		authCopy, staleSelection := m.clonePickedAuthForExecution(providerKey, selected)
+		if staleSelection {
+			m.syncScheduler()
+			continue
+		}
+		if authCopy == nil {
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		return authCopy, executor, providerKey, nil
+	}
+}
+
+func (m *Manager) pickNextMixedWithScheduler(ctx context.Context, eligibleProviders []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
@@ -4071,6 +4349,95 @@ func preserveRuntimeState(existing, auth *Auth) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = cloneRecentRequestRing(existing.recentRequests)
+}
+
+var refreshPreservedMetadataKeys = []string{
+	"prefix",
+	"proxy_url",
+	"proxy-url",
+	"proxyUrl",
+	"priority",
+	"note",
+	"headers",
+	"excluded_models",
+	"excluded-models",
+	"excludedModels",
+	"disable_cooling",
+	"disable-cooling",
+	"disableCooling",
+	"user_agent",
+	"user-agent",
+	"userAgent",
+	"websockets",
+	"websocket",
+	"websocket_handshake_debug",
+}
+
+var refreshPreservedAttributeKeys = []string{
+	"path",
+	"source",
+	"priority",
+	"note",
+	"proxy_url",
+	"excluded_models",
+	"excluded_models_hash",
+	"websockets",
+	"user_agent",
+	"user-agent",
+	"userAgent",
+}
+
+func preserveEditableAuthFileOptions(existing, auth *Auth) {
+	if existing == nil || auth == nil {
+		return
+	}
+	auth.Prefix = existing.Prefix
+	auth.ProxyURL = existing.ProxyURL
+
+	if auth.Metadata == nil && len(existing.Metadata) > 0 {
+		auth.Metadata = make(map[string]any, len(existing.Metadata))
+	}
+	for _, key := range refreshPreservedMetadataKeys {
+		if existing.Metadata != nil {
+			if value, ok := existing.Metadata[key]; ok {
+				auth.Metadata[key] = value
+				continue
+			}
+		}
+		if auth.Metadata != nil {
+			delete(auth.Metadata, key)
+		}
+	}
+
+	if auth.Attributes == nil && len(existing.Attributes) > 0 {
+		auth.Attributes = make(map[string]string, len(existing.Attributes))
+	}
+	for _, key := range refreshPreservedAttributeKeys {
+		if existing.Attributes != nil {
+			if value, ok := existing.Attributes[key]; ok {
+				auth.Attributes[key] = value
+				continue
+			}
+		}
+		if auth.Attributes != nil {
+			delete(auth.Attributes, key)
+		}
+	}
+	for key := range auth.Attributes {
+		if strings.HasPrefix(key, "header:") {
+			delete(auth.Attributes, key)
+		}
+	}
+	if len(existing.Attributes) > 0 {
+		for key, value := range existing.Attributes {
+			if strings.HasPrefix(key, "header:") && strings.TrimSpace(value) != "" {
+				auth.Attributes[key] = value
+			}
+		}
+	}
+	ApplyAuthFileOptionsFromMetadata(auth)
+	ApplyCodexMetadataFromMetadata(auth)
+	ApplyCustomHeadersFromMetadata(auth)
 }
 
 func (m *Manager) enqueuePersistAuthID(ctx context.Context, authID string) {
@@ -4732,6 +5099,7 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 			// auth; the auto-refresh loop will also see the error on its
 			// next tick and apply the same treatment.
 			if isPermanentRefreshError(refreshErr) {
+				shouldPersist := false
 				m.mu.Lock()
 				if cur := m.auths[id]; !authRefreshSuppressed(cur) {
 					now := time.Now()
@@ -4741,12 +5109,16 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 					cur.Unavailable = true
 					cur.StatusMessage = "refresh token invalid — re-login required"
 					m.auths[id] = cur
+					shouldPersist = true
 					if m.scheduler != nil {
 						m.scheduler.upsertAuth(cur.CloneForScheduler())
 					}
 				}
 				m.mu.Unlock()
 				m.queueRefreshReschedule(id)
+				if shouldPersist {
+					m.enqueuePersistAuthID(ctx, id)
+				}
 			}
 			return managerRefreshOutcome{err: refreshErr}, nil
 		}
@@ -4838,6 +5210,7 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 		// failing state. Park it until an operator re-logs in.
 		permanent := isPermanentRefreshError(err)
 		shouldReschedule := false
+		shouldPersist := false
 		m.mu.Lock()
 		if current := m.auths[id]; !authRefreshSuppressed(current) {
 			if permanent {
@@ -4851,6 +5224,7 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 			current.LastError = resultErrorFromError(err)
 			m.auths[id] = current
 			shouldReschedule = true
+			shouldPersist = true
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.CloneForScheduler())
 			}
@@ -4861,6 +5235,9 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 		}
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
+		}
+		if shouldPersist {
+			m.enqueuePersistAuthID(ctx, id)
 		}
 		return m.authCloneByID(id), err
 	}
@@ -5104,5 +5481,13 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	execCtx := ctx
+	if execCtx == nil {
+		execCtx = req.Context()
+	}
+	if rt := m.roundTripperFor(auth); rt != nil {
+		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+	}
+	return exec.HttpRequest(execCtx, auth, req)
 }

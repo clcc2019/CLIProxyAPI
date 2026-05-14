@@ -17,6 +17,12 @@ import (
 
 const usageFlushTimeout = 5 * time.Second
 
+// dashboardDetailResponseLimit caps the per-model request details returned by the
+// dashboard /usage and /usage/details endpoints. The in-memory retention and the
+// /usage/export response are unaffected so historic detail data remains available
+// for backups and forensic inspection.
+const dashboardDetailResponseLimit = 30
+
 type usageExportPayload struct {
 	Version    int                            `json:"version"`
 	ExportedAt time.Time                      `json:"exported_at"`
@@ -60,7 +66,10 @@ func (h *Handler) GetDetailedUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "usage statistics are still being processed"})
 		return
 	}
-	snapshot := h.detailedUsageSnapshot()
+	snapshot := usage.TrimDetailedSnapshot(
+		h.detailedUsageSnapshot(),
+		dashboardDetailResponseLimit,
+	)
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
 		"failed_requests": snapshot.FailureCount,

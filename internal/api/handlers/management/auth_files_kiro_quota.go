@@ -9,13 +9,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"golang.org/x/sync/singleflight"
 )
 
 type kiroUsageClient interface {
@@ -24,6 +27,114 @@ type kiroUsageClient interface {
 
 var newKiroUsageClient = func(cfg *config.Config) kiroUsageClient {
 	return kiroauth.NewKiroAuth(cfg)
+}
+
+// kiroUsageCacheDefaultTTL bounds how long a successful KiroUsageInfo response
+// is reused between dashboards. Multiple monitoring tools (CPA Usage Keeper,
+// CLIProxyAPI Quota Inspector, ProxyPilot, ZeroLimit, CLIProxy Pool Watch, ...)
+// poll this endpoint on the order of seconds; without a cache each poll fans
+// out to CodeWhisperer's getUsageLimits and burns rate-limit budget. 30s is a
+// pragmatic default — long enough to collapse polling clusters, short enough
+// that the displayed remaining quota tracks real consumption.
+const (
+	kiroUsageCacheDefaultTTL = 30 * time.Second
+	kiroUsageCacheMaxTTL     = 5 * time.Minute
+)
+
+// kiroUsageCacheEntry retains a KiroUsageInfo until expiresAt. We snapshot the
+// pointer rather than re-marshalling JSON because gin.Context.JSON copes with
+// pointer values directly.
+type kiroUsageCacheEntry struct {
+	usage     *kiroauth.KiroUsageInfo
+	expiresAt time.Time
+}
+
+// kiroUsageCache is a per-handler cache + singleflight collapse for kiro
+// usage queries. Process-wide is not appropriate because tests construct
+// fresh Handlers and the cache must not leak across them.
+type kiroUsageCache struct {
+	entries sync.Map // auth.ID -> *kiroUsageCacheEntry
+	flights singleflight.Group
+}
+
+func (c *kiroUsageCache) load(authID string, now time.Time) (*kiroauth.KiroUsageInfo, bool) {
+	if c == nil || authID == "" {
+		return nil, false
+	}
+	value, ok := c.entries.Load(authID)
+	if !ok {
+		return nil, false
+	}
+	entry, ok := value.(*kiroUsageCacheEntry)
+	if !ok || entry == nil || entry.usage == nil {
+		return nil, false
+	}
+	if !now.Before(entry.expiresAt) {
+		c.entries.Delete(authID)
+		return nil, false
+	}
+	return entry.usage, true
+}
+
+func (c *kiroUsageCache) store(authID string, usage *kiroauth.KiroUsageInfo, ttl time.Duration) {
+	if c == nil || authID == "" || usage == nil || ttl <= 0 {
+		return
+	}
+	c.entries.Store(authID, &kiroUsageCacheEntry{usage: usage, expiresAt: time.Now().Add(ttl)})
+}
+
+func (c *kiroUsageCache) invalidate(authID string) {
+	if c == nil || authID == "" {
+		return
+	}
+	c.entries.Delete(authID)
+}
+
+// kiroUsageHandlerCache resolves the per-handler cache, lazily creating it.
+// The cache is opt-out via `?force=true` and TTL-overridable via `?ttl=NN`.
+func (h *Handler) kiroUsageHandlerCache() *kiroUsageCache {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.kiroUsageCache == nil {
+		h.kiroUsageCache = &kiroUsageCache{}
+	}
+	return h.kiroUsageCache
+}
+
+// kiroUsageRequestOptions captures the per-request knobs supported by the
+// quota endpoint. ttl is clamped at kiroUsageCacheMaxTTL to avoid pathological
+// cache lifetimes; force bypasses cache fully (still records the response).
+type kiroUsageRequestOptions struct {
+	force bool
+	ttl   time.Duration
+}
+
+func parseKiroUsageRequestOptions(c *gin.Context) kiroUsageRequestOptions {
+	opts := kiroUsageRequestOptions{ttl: kiroUsageCacheDefaultTTL}
+	if c == nil {
+		return opts
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Query("force"))) {
+	case "1", "true", "yes", "on":
+		opts.force = true
+	}
+	if raw := strings.TrimSpace(c.Query("ttl")); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil {
+			if seconds <= 0 {
+				opts.force = true
+			} else {
+				ttl := time.Duration(seconds) * time.Second
+				if ttl > kiroUsageCacheMaxTTL {
+					ttl = kiroUsageCacheMaxTTL
+				}
+				opts.ttl = ttl
+			}
+		}
+	}
+	return opts
 }
 
 func (h *Handler) GetKiroUsage(c *gin.Context) {
@@ -52,47 +163,174 @@ func (h *Handler) GetKiroUsage(c *gin.Context) {
 	}
 
 	if refreshed, status, err := h.refreshKiroUsageAuthIfNeeded(c.Request.Context(), auth); err != nil {
+		if status == http.StatusBadGateway {
+			c.JSON(http.StatusOK, kiroUsageUnavailableInfo(auth, err))
+			return
+		}
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	} else if refreshed != nil {
 		auth = refreshed
 	}
 
-	tokenData, err := tokenDataFromKiroAuth(auth)
-	if err != nil {
+	if _, err := tokenDataFromKiroAuth(auth); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	opts := parseKiroUsageRequestOptions(c)
+	cache := h.kiroUsageHandlerCache()
+
+	// Cache hit short-circuits the upstream call. Profile_arn discovered on a
+	// previous call is already persisted, so we don't need to re-run the
+	// resolve path here.
+	if !opts.force && cache != nil {
+		if cached, ok := cache.load(auth.ID, time.Now()); ok {
+			c.JSON(http.StatusOK, cached)
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	usageClient := newKiroUsageClient(h.cfg)
-	usage, err := usageClient.GetUsageLimits(ctx, tokenData)
+	usage, err := h.fetchKiroUsageWithCache(ctx, c.Request.Context(), auth, opts)
 	if err != nil {
 		if kiroauth.IsUnauthorizedStatusError(err) {
 			refreshed, status, refreshErr := h.refreshKiroUsageAuth(c.Request.Context(), auth, true)
 			if refreshErr != nil {
+				if status == http.StatusBadGateway {
+					c.JSON(http.StatusOK, kiroUsageUnavailableInfo(auth, refreshErr))
+					return
+				}
 				c.JSON(status, gin.H{"error": refreshErr.Error()})
 				return
 			}
 			if refreshed != nil {
 				auth = refreshed
 			}
-			tokenData, refreshErr = tokenDataFromKiroAuth(auth)
-			if refreshErr != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": refreshErr.Error()})
-				return
+			if cache != nil {
+				cache.invalidate(auth.ID)
 			}
-			usage, err = usageClient.GetUsageLimits(ctx, tokenData)
+			usage, err = h.fetchKiroUsageWithCache(ctx, c.Request.Context(), auth, opts)
 		}
 	}
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		c.JSON(http.StatusOK, kiroUsageUnavailableInfo(auth, err))
 		return
 	}
-	h.persistResolvedKiroProfileArn(c.Request.Context(), auth, tokenData.ProfileArn)
 	c.JSON(http.StatusOK, usage)
+}
+
+func kiroUsageUnavailableInfo(auth *coreauth.Auth, err error) *kiroauth.KiroUsageInfo {
+	message := "Unable to fetch Kiro usage right now."
+	if auth != nil {
+		authMethod := strings.ToLower(kiroAuthString(auth, "auth_method", "authMethod"))
+		provider := strings.ToLower(kiroAuthString(auth, "provider"))
+		switch {
+		case authMethod == "idc" || provider == "idc":
+			message = "Kiro quota API is unavailable for the current AWS IAM Identity Center session. Chat may still work. If this persists after renewing your session, reconnect Kiro."
+		case isKiroUsageSocialAuth(authMethod, provider):
+			message = "Kiro quota API authentication expired or is unavailable for this social login. Chat may still work. If this persists, reconnect Kiro."
+		case kiroauth.IsUnauthorizedStatusError(err):
+			message = "Kiro quota API rejected the current token. Chat may still work. If this persists, reconnect Kiro."
+		}
+	}
+	if err != nil {
+		detail := strings.TrimSpace(err.Error())
+		if detail != "" && !strings.Contains(message, detail) {
+			message += " (" + detail + ")"
+		}
+	}
+	return &kiroauth.KiroUsageInfo{Message: message, Quotas: map[string]any{}}
+}
+
+func isKiroUsageSocialAuth(authMethod, provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(authMethod)) {
+	case "kiro-cli-social", "kiro-social", "social", "google", "github", "gitlab":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "google", "github", "gitlab", "kiro-cli", "kiro-social", "social":
+		return true
+	default:
+		return false
+	}
+}
+
+// fetchKiroUsageWithCache fans concurrent callers for the same auth into a
+// single upstream request via singleflight, then memoises the result for the
+// configured TTL. force=true bypasses the cache read and refreshes the entry.
+func (h *Handler) fetchKiroUsageWithCache(ctx context.Context, requestCtx context.Context, auth *coreauth.Auth, opts kiroUsageRequestOptions) (*kiroauth.KiroUsageInfo, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("kiro auth is missing")
+	}
+	cache := h.kiroUsageHandlerCache()
+
+	// Singleflight key includes a stable suffix so that a force=true caller
+	// does not piggyback on a non-force in-flight (the force-caller may
+	// genuinely need a freshly-issued response, e.g., right after refresh).
+	flightKey := auth.ID
+	if opts.force {
+		flightKey += "|force"
+	}
+
+	type result struct {
+		usage *kiroauth.KiroUsageInfo
+		err   error
+	}
+
+	value, err, _ := cache.flights.Do(flightKey, func() (any, error) {
+		// Re-check cache inside the singleflight to coalesce stragglers.
+		if !opts.force && cache != nil {
+			if cached, ok := cache.load(auth.ID, time.Now()); ok {
+				return result{usage: cached}, nil
+			}
+		}
+		usage, err := h.executeKiroUsage(ctx, requestCtx, auth)
+		if err != nil {
+			return result{err: err}, nil
+		}
+		if cache != nil && usage != nil && opts.ttl > 0 {
+			cache.store(auth.ID, usage, opts.ttl)
+		}
+		return result{usage: usage}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	res, ok := value.(result)
+	if !ok {
+		return nil, fmt.Errorf("kiro usage: invalid singleflight result")
+	}
+	return res.usage, res.err
+}
+
+// executeKiroUsage performs one upstream request through a proxy-aware HTTP
+// client. The request context bounds the call; the outer requestCtx is used
+// for any persistence-side updates so they survive a per-request timeout.
+func (h *Handler) executeKiroUsage(ctx context.Context, requestCtx context.Context, auth *coreauth.Auth) (*kiroauth.KiroUsageInfo, error) {
+	tokenData, err := tokenDataFromKiroAuth(auth)
+	if err != nil {
+		return nil, err
+	}
+
+	usageClient := newKiroUsageClient(h.cfg)
+	// Inject a proxy-aware HTTP client that honours per-account auth.ProxyURL,
+	// the global cfg.ProxyURL, the context RoundTripper, and the shared
+	// transport pool — same chain used by the kiro request executor. This
+	// only applies to the real *kiroauth.KiroAuth implementation; tests
+	// inject their own kiroUsageClient stub which does not need this.
+	if real, ok := usageClient.(*kiroauth.KiroAuth); ok {
+		real.WithHTTPClient(helps.NewProxyAwareHTTPClient(ctx, h.cfg, auth, 30*time.Second))
+	}
+
+	usage, err := usageClient.GetUsageLimits(ctx, tokenData)
+	if err != nil {
+		return nil, err
+	}
+	h.persistResolvedKiroProfileArn(requestCtx, auth, tokenData.ProfileArn)
+	return usage, nil
 }
 
 func (h *Handler) resolveKiroUsageAuth(ctx context.Context, name, authIndex string) (*coreauth.Auth, int, error) {
@@ -158,14 +396,16 @@ func (h *Handler) readKiroUsageAuthFromDisk(_ context.Context, name string) (*co
 	if provider == "" {
 		provider = "unknown"
 	}
-	return &coreauth.Auth{
+	auth := &coreauth.Auth{
 		ID:         name,
 		FileName:   name,
 		Provider:   provider,
 		Status:     coreauth.StatusActive,
 		Attributes: map[string]string{"path": fullPath},
 		Metadata:   metadata,
-	}, http.StatusOK, nil
+	}
+	coreauth.ApplyAuthFileOptionsFromMetadata(auth)
+	return auth, http.StatusOK, nil
 }
 
 func (h *Handler) refreshKiroUsageAuthIfNeeded(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, int, error) {
@@ -194,14 +434,23 @@ func (h *Handler) refreshKiroUsageAuth(ctx context.Context, auth *coreauth.Auth,
 			return refreshAuth, http.StatusOK, nil
 		}
 	}
-	exec, ok := h.kiroUsageRefreshExecutor(refreshAuth.Provider)
-	if !ok || exec == nil {
+	// Ensure the kiro executor is registered with the manager so that
+	// Manager.RefreshAuth can dispatch to it. Returns silently if a
+	// non-kiro provider has no executor and we are not forcing.
+	if _, ok := h.kiroUsageRefreshExecutor(refreshAuth.Provider); !ok {
 		if force {
 			return nil, http.StatusBadGateway, fmt.Errorf("kiro auth refresh executor is unavailable")
 		}
 		return refreshAuth, http.StatusOK, nil
 	}
-	updated, err := exec.Refresh(ctx, refreshAuth.Clone())
+
+	// Route the actual refresh through Manager.RefreshAuth so it shares the
+	// singleflight group with the auto-refresh loop and any in-flight
+	// request-time refresh. Calling exec.Refresh directly here would
+	// double-spend the rotating refresh_token (AWS SSO-OIDC and the kiro
+	// social endpoint both rotate on every successful call), bricking the
+	// credential with invalid_grant on the second concurrent call.
+	updated, err := h.authManager.RefreshAuth(ctx, refreshAuth)
 	if err != nil {
 		if required {
 			return nil, http.StatusBadGateway, err
@@ -211,17 +460,11 @@ func (h *Handler) refreshKiroUsageAuth(ctx context.Context, auth *coreauth.Auth,
 	if updated == nil {
 		return refreshAuth, http.StatusOK, nil
 	}
-	if updated.ID == "" {
-		updated.ID = refreshAuth.ID
-	}
-	if updated.FileName == "" {
-		updated.FileName = refreshAuth.FileName
-	}
-	if updated.Provider == "" {
-		updated.Provider = refreshAuth.Provider
-	}
-	if _, err := h.authManager.Update(coreauth.WithRefreshUpdate(ctx), updated); err != nil {
-		return nil, http.StatusInternalServerError, err
+	// On a successful refresh, drop any cached usage entry — the new
+	// access token may resolve to a different profile_arn or change the
+	// upstream view of the account, so the safer behaviour is to refetch.
+	if cache := h.kiroUsageHandlerCache(); cache != nil {
+		cache.invalidate(updated.ID)
 	}
 	if latest, ok := h.authManager.GetByID(updated.ID); ok && latest != nil {
 		return latest, http.StatusOK, nil
@@ -403,6 +646,15 @@ func tokenDataFromKiroAuth(auth *coreauth.Auth) (*kiroauth.TokenData, error) {
 	}
 	if tokenData.Region == "" {
 		tokenData.Region = kiroAuthString(auth, "region")
+	}
+	if tokenData.AuthMethod == "" {
+		tokenData.AuthMethod = kiroAuthString(auth, "auth_method", "authMethod")
+	}
+	if tokenData.Provider == "" {
+		tokenData.Provider = kiroAuthString(auth, "provider")
+	}
+	if tokenData.MachineID == "" {
+		tokenData.MachineID = kiroAuthString(auth, "machine_id", "machineId", "device_id", "deviceId")
 	}
 	if strings.TrimSpace(tokenData.AccessToken) == "" {
 		return nil, fmt.Errorf("kiro access token is missing")

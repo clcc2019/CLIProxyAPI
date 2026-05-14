@@ -561,6 +561,16 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 }
 
+func TestIsRequestInvalidError_KiroMalformedRequest(t *testing.T) {
+	err := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "kiro API error: ValidationException: Improperly formed request: missing currentMessage.content",
+	}
+	if !isRequestInvalidError(err) {
+		t.Fatal("expected Kiro malformed request to be treated as request-invalid")
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

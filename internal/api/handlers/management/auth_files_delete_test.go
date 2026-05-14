@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,88 @@ type statOnDeleteStore struct {
 	existed     bool
 }
 
+func setupManagementDeleteTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+}
+
+func writeAuthTestFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write auth file %s: %v", name, err)
+	}
+	return path
+}
+
+func newAuthDeleteTestHandler(authDir string, manager *coreauth.Manager, store coreauth.Store) *Handler {
+	if manager == nil {
+		manager = coreauth.NewManager(nil, nil, nil)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = store
+	return h
+}
+
+func performAuthDelete(t *testing.T, h *Handler, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodDelete, target, nil)
+	h.DeleteAuthFile(ctx)
+	return rec
+}
+
+func performAuthDeleteBody(t *testing.T, h *Handler, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files", bytes.NewBufferString(body))
+	h.DeleteAuthFile(ctx)
+	return rec
+}
+
+func assertHTTPStatus(t *testing.T, rec *httptest.ResponseRecorder, want int) {
+	t.Helper()
+	if rec.Code != want {
+		t.Fatalf("expected status %d, got %d with body %s", want, rec.Code, rec.Body.String())
+	}
+}
+
+func assertFileMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected file to be removed, stat err: %v", err)
+	}
+}
+
+func assertAuthDisabled(t *testing.T, manager *coreauth.Manager, id string) {
+	t.Helper()
+	auth, ok := manager.GetByID(id)
+	if !ok || auth == nil || !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+		t.Fatalf("expected in-memory auth %q to be disabled after delete, got auth=%#v ok=%v", id, auth, ok)
+	}
+}
+
+func listAuthFilesForTest(t *testing.T, h *Handler) []any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(ctx)
+	assertHTTPStatus(t, rec, http.StatusOK)
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode list payload: %v", err)
+	}
+	filesRaw, ok := payload["files"].([]any)
+	if !ok {
+		t.Fatalf("expected files array, payload: %#v", payload)
+	}
+	return filesRaw
+}
+
 func (s *statOnDeleteStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
 
 func (s *statOnDeleteStore) Save(context.Context, *coreauth.Auth) (string, error) { return "", nil }
@@ -40,8 +123,7 @@ func (s *statOnDeleteStore) Delete(_ context.Context, id string) error {
 }
 
 func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
-	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
+	setupManagementDeleteTest(t)
 
 	tempDir := t.TempDir()
 	authDir := filepath.Join(tempDir, "auth")
@@ -54,14 +136,8 @@ func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
 	}
 
 	fileName := "codex-user@example.com-plus.json"
-	shadowPath := filepath.Join(authDir, fileName)
-	realPath := filepath.Join(externalDir, fileName)
-	if errWriteShadow := os.WriteFile(shadowPath, []byte(`{"type":"codex","email":"shadow@example.com"}`), 0o600); errWriteShadow != nil {
-		t.Fatalf("failed to write shadow file: %v", errWriteShadow)
-	}
-	if errWriteReal := os.WriteFile(realPath, []byte(`{"type":"codex","email":"real@example.com"}`), 0o600); errWriteReal != nil {
-		t.Fatalf("failed to write real file: %v", errWriteReal)
-	}
+	shadowPath := writeAuthTestFile(t, authDir, fileName, `{"type":"codex","email":"shadow@example.com"}`)
+	realPath := writeAuthTestFile(t, externalDir, fileName, `{"type":"codex","email":"real@example.com"}`)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	record := &coreauth.Auth{
@@ -82,79 +158,37 @@ func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
 		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
-	h.tokenStore = &memoryAuthStore{}
+	h := newAuthDeleteTestHandler(authDir, manager, &memoryAuthStore{})
 
-	deleteRec := httptest.NewRecorder()
-	deleteCtx, _ := gin.CreateTestContext(deleteRec)
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
-	deleteCtx.Request = deleteReq
-	h.DeleteAuthFile(deleteCtx)
-
-	if deleteRec.Code != http.StatusOK {
-		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
-	}
-	if _, errStatReal := os.Stat(realPath); !os.IsNotExist(errStatReal) {
-		t.Fatalf("expected managed auth file to be removed, stat err: %v", errStatReal)
-	}
+	deleteRec := performAuthDelete(t, h, "/v0/management/auth-files?name="+url.QueryEscape(fileName))
+	assertHTTPStatus(t, deleteRec, http.StatusOK)
+	assertFileMissing(t, realPath)
 	if _, errStatShadow := os.Stat(shadowPath); errStatShadow != nil {
 		t.Fatalf("expected shadow auth file to remain, stat err: %v", errStatShadow)
 	}
 
-	listRec := httptest.NewRecorder()
-	listCtx, _ := gin.CreateTestContext(listRec)
-	listReq := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
-	listCtx.Request = listReq
-	h.ListAuthFiles(listCtx)
-
-	if listRec.Code != http.StatusOK {
-		t.Fatalf("expected list status %d, got %d with body %s", http.StatusOK, listRec.Code, listRec.Body.String())
-	}
-	var listPayload map[string]any
-	if errUnmarshal := json.Unmarshal(listRec.Body.Bytes(), &listPayload); errUnmarshal != nil {
-		t.Fatalf("failed to decode list payload: %v", errUnmarshal)
-	}
-	filesRaw, ok := listPayload["files"].([]any)
-	if !ok {
-		t.Fatalf("expected files array, payload: %#v", listPayload)
-	}
+	filesRaw := listAuthFilesForTest(t, h)
 	if len(filesRaw) != 0 {
 		t.Fatalf("expected removed auth to be hidden from list, got %d entries", len(filesRaw))
 	}
 }
 
 func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
-	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
+	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
 	fileName := "fallback-user.json"
-	filePath := filepath.Join(authDir, fileName)
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
-		t.Fatalf("failed to write auth file: %v", errWrite)
-	}
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"codex"}`)
 
-	manager := coreauth.NewManager(nil, nil, nil)
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
-	h.tokenStore = &memoryAuthStore{}
+	h := newAuthDeleteTestHandler(authDir, nil, &memoryAuthStore{})
 
-	deleteRec := httptest.NewRecorder()
-	deleteCtx, _ := gin.CreateTestContext(deleteRec)
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
-	deleteCtx.Request = deleteReq
-	h.DeleteAuthFile(deleteCtx)
-
-	if deleteRec.Code != http.StatusOK {
-		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
-	}
-	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
-		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
-	}
+	deleteRec := performAuthDelete(t, h, "/v0/management/auth-files?name="+url.QueryEscape(fileName))
+	assertHTTPStatus(t, deleteRec, http.StatusOK)
+	assertFileMissing(t, filePath)
 }
 
 func TestDeleteAuthFile_ByAuthIndexDoesNotRecreateKiroFile(t *testing.T) {
-	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
+	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
 	fileName := "kiro-google-user-example-com.json"
@@ -186,72 +220,111 @@ func TestDeleteAuthFile_ByAuthIndexDoesNotRecreateKiroFile(t *testing.T) {
 		t.Fatalf("expected auth file to be saved, stat err: %v", errStat)
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
-	h.tokenStore = store
+	h := newAuthDeleteTestHandler(authDir, manager, store)
 
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	req := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?auth_index="+url.QueryEscape(authIndex), nil)
-	ctx.Request = req
-
-	h.DeleteAuthFile(ctx)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
-	}
-	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
-		t.Fatalf("expected kiro auth file to stay deleted, stat err: %v", errStat)
-	}
-	if auth, ok := manager.GetByID(fileName); !ok || auth == nil || !auth.Disabled || auth.Status != coreauth.StatusDisabled {
-		t.Fatalf("expected in-memory auth to be disabled after delete, got auth=%#v ok=%v", auth, ok)
-	}
+	rec := performAuthDelete(t, h, "/v0/management/auth-files?auth_index="+url.QueryEscape(authIndex))
+	assertHTTPStatus(t, rec, http.StatusOK)
+	assertFileMissing(t, filePath)
+	assertAuthDisabled(t, manager, fileName)
 }
 
 func TestDeleteAuthFile_StoreDeleteRunsBeforeLocalRemove(t *testing.T) {
-	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
+	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
 	fileName := "kiro-google-user-example-com.json"
-	filePath := filepath.Join(authDir, fileName)
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"kiro"}`), 0o600); errWrite != nil {
-		t.Fatalf("failed to write auth file: %v", errWrite)
-	}
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
 
 	store := &statOnDeleteStore{}
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, coreauth.NewManager(nil, nil, nil))
-	h.tokenStore = store
+	h := newAuthDeleteTestHandler(authDir, nil, store)
 
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
-
-	h.DeleteAuthFile(ctx)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
-	}
+	rec := performAuthDelete(t, h, "/v0/management/auth-files?name="+url.QueryEscape(fileName))
+	assertHTTPStatus(t, rec, http.StatusOK)
 	if store.deletedPath != filePath {
 		t.Fatalf("store deleted path = %q, want %q", store.deletedPath, filePath)
 	}
 	if !store.existed {
 		t.Fatal("expected backing store Delete to see the local file before fallback removal")
 	}
-	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
-		t.Fatalf("expected auth file to be removed, stat err: %v", errStat)
-	}
+	assertFileMissing(t, filePath)
 }
 
-func TestDeleteAuthFile_ByAbsolutePathFromManagedAuth(t *testing.T) {
-	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
+func TestDeleteAuthFile_AcceptsFilenameBody(t *testing.T) {
+	setupManagementDeleteTest(t)
+
+	authDir := t.TempDir()
+	fileName := "kiro-google-user-example-com.json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+
+	h := newAuthDeleteTestHandler(authDir, nil, &memoryAuthStore{})
+
+	rec := performAuthDeleteBody(t, h, `{"filename":"`+fileName+`"}`)
+	assertHTTPStatus(t, rec, http.StatusOK)
+	assertFileMissing(t, filePath)
+}
+
+func TestDeleteAuthFile_DisablesLegacyKiroIDWithoutJSONSuffix(t *testing.T) {
+	setupManagementDeleteTest(t)
+
+	authDir := t.TempDir()
+	legacyID := "kiro-google-user-example-com"
+	fileName := legacyID + ".json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       legacyID,
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{"type": "kiro"},
+	}); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := newAuthDeleteTestHandler(authDir, manager, &memoryAuthStore{})
+
+	rec := performAuthDelete(t, h, "/v0/management/auth-files?name="+url.QueryEscape(fileName))
+	assertHTTPStatus(t, rec, http.StatusOK)
+	assertFileMissing(t, filePath)
+	assertAuthDisabled(t, manager, legacyID)
+}
+
+func TestDeleteAuthFile_LegacyKiroRecordWithoutPathDeletesJSONFile(t *testing.T) {
+	setupManagementDeleteTest(t)
+
+	authDir := t.TempDir()
+	legacyName := "kiro-google-user-example-com"
+	fileName := legacyName + ".json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       legacyName,
+		FileName: legacyName,
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"type": "kiro"},
+	}); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := newAuthDeleteTestHandler(authDir, manager, &memoryAuthStore{})
+
+	rec := performAuthDelete(t, h, "/v0/management/auth-files?name="+url.QueryEscape(legacyName))
+	assertHTTPStatus(t, rec, http.StatusOK)
+	assertFileMissing(t, filePath)
+	assertAuthDisabled(t, manager, legacyName)
+}
+
+func TestListAuthFiles_HidesFileBackedAuthMissingOnDisk(t *testing.T) {
+	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
 	fileName := "kiro-google-user-example-com.json"
 	filePath := filepath.Join(authDir, fileName)
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"kiro"}`), 0o600); errWrite != nil {
-		t.Fatalf("failed to write auth file: %v", errWrite)
-	}
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
@@ -267,22 +340,39 @@ func TestDeleteAuthFile_ByAbsolutePathFromManagedAuth(t *testing.T) {
 		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
-	h.tokenStore = &memoryAuthStore{}
+	h := newAuthDeleteTestHandler(authDir, manager, nil)
 
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?path="+url.QueryEscape(filePath), nil)
+	filesRaw := listAuthFilesForTest(t, h)
+	if len(filesRaw) != 0 {
+		t.Fatalf("expected missing file-backed auth to be hidden, got %d entries", len(filesRaw))
+	}
+}
 
-	h.DeleteAuthFile(ctx)
+func TestDeleteAuthFile_ByAbsolutePathFromManagedAuth(t *testing.T) {
+	setupManagementDeleteTest(t)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	authDir := t.TempDir()
+	fileName := "kiro-google-user-example-com.json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{"type": "kiro"},
+	}); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
-	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
-		t.Fatalf("expected auth file to be removed, stat err: %v", errStat)
-	}
-	if auth, ok := manager.GetByID(fileName); !ok || auth == nil || !auth.Disabled || auth.Status != coreauth.StatusDisabled {
-		t.Fatalf("expected in-memory auth to be disabled after delete, got auth=%#v ok=%v", auth, ok)
-	}
+
+	h := newAuthDeleteTestHandler(authDir, manager, &memoryAuthStore{})
+
+	rec := performAuthDelete(t, h, "/v0/management/auth-files?path="+url.QueryEscape(filePath))
+	assertHTTPStatus(t, rec, http.StatusOK)
+	assertFileMissing(t, filePath)
+	assertAuthDisabled(t, manager, fileName)
 }

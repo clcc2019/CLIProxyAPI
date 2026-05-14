@@ -43,6 +43,41 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestRequestStatisticsRecordIncludesErrorMessageForFailures(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:       "test-key",
+		Model:        "gpt-5.4",
+		RequestedAt:  time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		Failed:       true,
+		ErrorMessage: " upstream quota exhausted\ntry later ",
+	})
+
+	snapshot := stats.Snapshot()
+	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].ErrorMessage != "upstream quota exhausted try later" {
+		t.Fatalf("error_message = %q, want normalized error", details[0].ErrorMessage)
+	}
+}
+
+func TestRequestStatisticsRecordOmitsErrorMessageForSuccess(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:       "test-key",
+		Model:        "gpt-5.4",
+		RequestedAt:  time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		ErrorMessage: "should not leak",
+	})
+
+	detail := stats.Snapshot().APIs["test-key"].Models["gpt-5.4"].Details[0]
+	if detail.ErrorMessage != "" {
+		t.Fatalf("error_message = %q, want empty for success", detail.ErrorMessage)
+	}
+}
+
 func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 	stats := NewRequestStatistics()
 	timestamp := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)

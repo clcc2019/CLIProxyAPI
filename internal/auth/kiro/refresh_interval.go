@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	DefaultRefreshIntervalMinSeconds = 60
-	DefaultRefreshIntervalMaxSeconds = 60
+	DefaultRefreshIntervalMinSeconds = 25 * 60
+	DefaultRefreshIntervalMaxSeconds = 30 * 60
 )
 
 func RandomRefreshIntervalSeconds() int {

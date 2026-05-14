@@ -160,6 +160,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
+	if provider == "kiro" {
+		applyKiroMachineIDAttribute(a.Attributes, metadata, id)
+	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	if provider == "codex" {
 		applyFileAuthUserAgent(a.Attributes, metadata)
@@ -177,6 +180,21 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	return []*coreauth.Auth{a}
+}
+
+func applyKiroMachineIDAttribute(attrs map[string]string, metadata map[string]any, fallbackSeed string) {
+	if attrs == nil {
+		return
+	}
+	for _, key := range []string{"machine_id", "machineId", "device_id", "deviceId"} {
+		if raw, ok := metadata[key].(string); ok && strings.TrimSpace(raw) != "" {
+			attrs["machine_id"] = strings.TrimSpace(raw)
+			return
+		}
+	}
+	if strings.TrimSpace(fallbackSeed) != "" {
+		attrs["machine_id_seed"] = fallbackSeed
+	}
 }
 
 // applyFileAuthUserAgent maps an auth-file-level user_agent field to the

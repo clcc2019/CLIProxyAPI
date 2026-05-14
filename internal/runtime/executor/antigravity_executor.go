@@ -1171,7 +1171,7 @@ attemptLoop:
 				})
 				if errRead != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-					reporter.PublishFailure(ctx)
+					reporter.PublishFailureWithError(ctx, errRead)
 					out <- cliproxyexecutor.StreamChunk{Err: errRead}
 				} else {
 					reporter.EnsurePublished(ctx)
@@ -1652,7 +1652,7 @@ attemptLoop:
 				}
 				if errRead != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-					reporter.PublishFailure(ctx)
+					reporter.PublishFailureWithError(ctx, errRead)
 					out <- cliproxyexecutor.StreamChunk{Err: errRead}
 				} else {
 					reporter.EnsurePublished(ctx)

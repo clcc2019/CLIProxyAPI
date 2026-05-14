@@ -63,6 +63,12 @@ type clientAPIKeyQuotaTracker struct {
 	monthly     map[string]map[string]clientAPIKeyQuotaCounters
 }
 
+type persistedClientAPIKeyQuotaState struct {
+	Total   map[string]float64            `json:"total,omitempty"`
+	Daily   map[string]map[string]float64 `json:"daily,omitempty"`
+	Monthly map[string]map[string]float64 `json:"monthly,omitempty"`
+}
+
 var defaultClientAPIKeyQuotaTracker = newClientAPIKeyQuotaTracker()
 
 func newClientAPIKeyQuotaTracker() *clientAPIKeyQuotaTracker {
@@ -90,6 +96,41 @@ func (t *clientAPIKeyQuotaTracker) setModelPrices(prices config.ModelPrices) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.modelPrices = config.EffectiveModelPrices(prices)
+}
+
+func (t *clientAPIKeyQuotaTracker) persistedState() persistedClientAPIKeyQuotaState {
+	if t == nil {
+		return persistedClientAPIKeyQuotaState{}
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	return persistedClientAPIKeyQuotaState{
+		Total:   persistedClientAPIKeyQuotaCounters(t.total),
+		Daily:   persistedClientAPIKeyQuotaBuckets(t.daily),
+		Monthly: persistedClientAPIKeyQuotaBuckets(t.monthly),
+	}
+}
+
+func (state persistedClientAPIKeyQuotaState) isZero() bool {
+	return len(state.Total) == 0 && len(state.Daily) == 0 && len(state.Monthly) == 0
+}
+
+func (t *clientAPIKeyQuotaTracker) restorePersistedState(state persistedClientAPIKeyQuotaState, now time.Time) {
+	if t == nil {
+		return
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.total = restoredClientAPIKeyQuotaCounters(state.Total)
+	t.daily = restoredClientAPIKeyQuotaBuckets(state.Daily)
+	t.monthly = restoredClientAPIKeyQuotaBuckets(state.Monthly)
+	t.pruneLocked(now)
 }
 
 func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) {
@@ -206,9 +247,13 @@ func (t *clientAPIKeyQuotaTracker) costForRecordLocked(record coreusage.Record) 
 	if !ok {
 		return 0
 	}
-	detail := normaliseDetail(record.Detail)
+	detail := record.Detail
 	cachedTokens := maxInt64(detail.CachedTokens, 0)
+	cacheCreationTokens := maxInt64(detail.CacheCreationTokens, 0)
 	inputTokens := maxInt64(detail.InputTokens, 0)
+	if minimumInputTokens := cachedTokens + cacheCreationTokens; inputTokens < minimumInputTokens {
+		inputTokens = minimumInputTokens
+	}
 	outputTokens := maxInt64(detail.OutputTokens, 0)
 	promptTokens := inputTokens - cachedTokens
 	if promptTokens < 0 {
@@ -256,6 +301,86 @@ func pruneClientAPIKeyQuotaBuckets(source map[string]map[string]clientAPIKeyQuot
 			delete(source, apiKey)
 		}
 	}
+}
+
+func persistedClientAPIKeyQuotaCounters(source map[string]clientAPIKeyQuotaCounters) map[string]float64 {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(source))
+	for apiKey, counters := range source {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" || counters.cost <= 0 {
+			continue
+		}
+		out[apiKey] = counters.cost
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func persistedClientAPIKeyQuotaBuckets(source map[string]map[string]clientAPIKeyQuotaCounters) map[string]map[string]float64 {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]float64, len(source))
+	for apiKey, buckets := range source {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" || len(buckets) == 0 {
+			continue
+		}
+		persistedBuckets := make(map[string]float64, len(buckets))
+		for bucket, counters := range buckets {
+			bucket = strings.TrimSpace(bucket)
+			if bucket == "" || counters.cost <= 0 {
+				continue
+			}
+			persistedBuckets[bucket] = counters.cost
+		}
+		if len(persistedBuckets) > 0 {
+			out[apiKey] = persistedBuckets
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func restoredClientAPIKeyQuotaCounters(source map[string]float64) map[string]clientAPIKeyQuotaCounters {
+	out := make(map[string]clientAPIKeyQuotaCounters, len(source))
+	for apiKey, cost := range source {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" || cost <= 0 {
+			continue
+		}
+		out[apiKey] = clientAPIKeyQuotaCounters{cost: cost}
+	}
+	return out
+}
+
+func restoredClientAPIKeyQuotaBuckets(source map[string]map[string]float64) map[string]map[string]clientAPIKeyQuotaCounters {
+	out := make(map[string]map[string]clientAPIKeyQuotaCounters, len(source))
+	for apiKey, buckets := range source {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" || len(buckets) == 0 {
+			continue
+		}
+		restoredBuckets := make(map[string]clientAPIKeyQuotaCounters, len(buckets))
+		for bucket, cost := range buckets {
+			bucket = strings.TrimSpace(bucket)
+			if bucket == "" || cost <= 0 {
+				continue
+			}
+			restoredBuckets[bucket] = clientAPIKeyQuotaCounters{cost: cost}
+		}
+		if len(restoredBuckets) > 0 {
+			out[apiKey] = restoredBuckets
+		}
+	}
+	return out
 }
 
 func nextDailyResetUTC(now time.Time) time.Time {

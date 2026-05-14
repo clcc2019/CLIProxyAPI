@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"hash/fnv"
 	"sort"
 	"strings"
 	"sync"
@@ -234,11 +235,13 @@ func newAuthScheduler(selector Selector) *authScheduler {
 
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
 func selectorStrategy(selector Selector) schedulerStrategy {
-	switch selector.(type) {
+	switch typed := selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
+	case *SessionAffinitySelector:
+		return selectorStrategy(typed.fallback)
 	default:
 		return schedulerStrategyCustom
 	}
@@ -317,6 +320,38 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	}
 	filter := newAuthFilter(pinnedAuthID, tried)
 	if picked := shard.pickReady(preferWebsocket, s.strategy, filter); picked != nil {
+		return picked, nil
+	}
+	return nil, shard.unavailableError(provider, model, filter)
+}
+
+// pickSingleStable returns a ready auth using rendezvous hashing over the session key.
+// It keeps session-affinity cache misses stable across process restarts while still
+// respecting priority, websocket preference, pins, tried auths, and cooldown state.
+func (s *authScheduler) pickSingleStable(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, affinityKey string) (*Auth, error) {
+	if strings.TrimSpace(affinityKey) == "" {
+		return s.pickSingle(ctx, provider, model, opts, tried)
+	}
+	if s == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	modelKey := canonicalModelKey(model)
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	providerState := s.providers[providerKey]
+	if providerState == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	shard := providerState.ensureModel(modelKey, time.Now())
+	if shard == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	filter := newAuthFilter(pinnedAuthID, tried)
+	if picked := shard.pickReadyStable(preferWebsocket, filter, affinityKey); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableError(provider, model, filter)
@@ -470,6 +505,106 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableError(normalized, model, filter)
+}
+
+func (s *authScheduler) pickMixedStable(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, affinityKey string) (*Auth, string, error) {
+	if strings.TrimSpace(affinityKey) == "" {
+		return s.pickMixed(ctx, providers, model, opts, tried)
+	}
+	if s == nil {
+		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	normalized := normalizeProviderKeys(providers)
+	if len(normalized) == 0 {
+		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if len(normalized) == 1 {
+		providerKey := normalized[0]
+		picked, errPick := s.pickSingleStable(ctx, providerKey, model, opts, tried, affinityKey)
+		if errPick != nil {
+			return nil, "", errPick
+		}
+		if picked == nil {
+			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		return picked, providerKey, nil
+	}
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	modelKey := canonicalModelKey(model)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if pinnedAuthID != "" {
+		providerKey := s.authProviders[pinnedAuthID]
+		if providerKey == "" || !containsProvider(normalized, providerKey) {
+			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		shard := providerState.ensureModel(modelKey, time.Now())
+		filter := newAuthFilter(pinnedAuthID, tried)
+		if picked := shard.pickReadyStable(false, filter, affinityKey); picked != nil {
+			return picked, providerKey, nil
+		}
+		return nil, "", shard.unavailableError("mixed", model, filter)
+	}
+
+	filter := newAuthFilter("", tried)
+	bestPriority := 0
+	hasCandidate := false
+	now := time.Now()
+	for _, providerKey := range normalized {
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			continue
+		}
+		shard := providerState.ensureModel(modelKey, now)
+		if shard == nil {
+			continue
+		}
+		shard.promoteExpired(now)
+		priorityReady, okPriority := shard.highestReadyPriority(false, filter)
+		if !okPriority {
+			continue
+		}
+		if !hasCandidate || priorityReady > bestPriority {
+			bestPriority = priorityReady
+			hasCandidate = true
+		}
+	}
+	if !hasCandidate {
+		return nil, "", s.mixedUnavailableError(normalized, model, filter)
+	}
+
+	var picked *Auth
+	pickedProvider := ""
+	bestScore := uint64(0)
+	for _, providerKey := range normalized {
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			continue
+		}
+		shard := providerState.ensureModel(modelKey, now)
+		if shard == nil {
+			continue
+		}
+		candidate := shard.pickReadyStableAtPriority(false, bestPriority, filter, affinityKey)
+		if candidate == nil {
+			continue
+		}
+		score := stableAffinityScore(affinityKey, candidate.ID)
+		if picked == nil || score > bestScore || (score == bestScore && candidate.ID < picked.ID) {
+			picked = candidate
+			pickedProvider = providerKey
+			bestScore = score
+		}
+	}
+	if picked == nil {
+		return nil, "", s.mixedUnavailableError(normalized, model, filter)
+	}
+	return picked, pickedProvider, nil
 }
 
 func (s *authScheduler) clearMixedCursors() {
@@ -958,6 +1093,22 @@ func (m *modelScheduler) pickReady(preferWebsocket bool, strategy schedulerStrat
 	return picked
 }
 
+func (m *modelScheduler) pickReadyStable(preferWebsocket bool, filter authFilter, affinityKey string) *Auth {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	m.promoteExpiredLocked(time.Now())
+	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, filter)
+	if !okPriority {
+		m.mu.Unlock()
+		return nil
+	}
+	picked := m.pickReadyStableAtPriorityLocked(preferWebsocket, priorityReady, filter, affinityKey)
+	m.mu.Unlock()
+	return picked
+}
+
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
 func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, filter authFilter) *Auth {
 	if m == nil {
@@ -1052,6 +1203,41 @@ func (m *modelScheduler) pickReadyAtPriority(preferWebsocket bool, priority int,
 	picked := m.pickReadyAtPriorityLocked(preferWebsocket, priority, strategy, filter)
 	m.mu.Unlock()
 	return picked
+}
+
+func (m *modelScheduler) pickReadyStableAtPriority(preferWebsocket bool, priority int, filter authFilter, affinityKey string) *Auth {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	picked := m.pickReadyStableAtPriorityLocked(preferWebsocket, priority, filter, affinityKey)
+	m.mu.RUnlock()
+	return picked
+}
+
+func (m *modelScheduler) pickReadyStableAtPriorityLocked(preferWebsocket bool, priority int, filter authFilter, affinityKey string) *Auth {
+	if m == nil {
+		return nil
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return nil
+	}
+	view := &bucket.all
+	if preferWebsocket {
+		if filter.empty() {
+			if len(bucket.ws.flat) > 0 {
+				view = &bucket.ws
+			}
+		} else if bucket.ws.pickFirst(filter) != nil {
+			view = &bucket.ws
+		}
+	}
+	picked := view.pickStable(filter, affinityKey)
+	if picked == nil || picked.auth == nil {
+		return nil
+	}
+	return picked.auth
 }
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
@@ -1376,6 +1562,33 @@ func (v *readyView) pickFirstNoFilter() *scheduledAuth {
 		return nil
 	}
 	return v.flat[0]
+}
+
+func (v *readyView) pickStable(filter authFilter, affinityKey string) *scheduledAuth {
+	if len(v.flat) == 0 {
+		return nil
+	}
+	var picked *scheduledAuth
+	bestScore := uint64(0)
+	for _, entry := range v.flat {
+		if !filter.matches(entry) || entry.auth == nil {
+			continue
+		}
+		score := stableAffinityScore(affinityKey, entry.auth.ID)
+		if picked == nil || score > bestScore || (score == bestScore && entry.auth.ID < picked.auth.ID) {
+			picked = entry
+			bestScore = score
+		}
+	}
+	return picked
+}
+
+func stableAffinityScore(affinityKey, authID string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(affinityKey))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(authID))
+	return h.Sum64()
 }
 
 // pickRoundRobin returns the next ready entry using flat or grouped round-robin traversal.

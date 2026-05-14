@@ -27,6 +27,7 @@ type TokenData struct {
 	Email        string
 	StartURL     string
 	Region       string
+	MachineID    string
 }
 
 type tokenWire struct {
@@ -51,6 +52,10 @@ type tokenWire struct {
 	StartURL          string `json:"startUrl"`
 	StartURLOld       string `json:"start_url"`
 	Region            string `json:"region"`
+	MachineID         string `json:"machineId"`
+	MachineIDOld      string `json:"machine_id"`
+	DeviceID          string `json:"deviceId"`
+	DeviceIDOld       string `json:"device_id"`
 }
 
 func LoadKiroIDEToken() (*TokenData, error) {
@@ -98,6 +103,7 @@ func ParseTokenData(data []byte) (*TokenData, error) {
 		Email:        strings.TrimSpace(wire.Email),
 		StartURL:     firstNonEmpty(wire.StartURL, wire.StartURLOld),
 		Region:       strings.TrimSpace(wire.Region),
+		MachineID:    firstNonEmpty(wire.MachineID, wire.MachineIDOld, wire.DeviceID, wire.DeviceIDOld),
 	}, nil
 }
 

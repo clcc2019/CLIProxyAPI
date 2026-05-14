@@ -48,6 +48,10 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	// kiroUsageCache memoises kiro getUsageLimits responses with a short TTL
+	// and collapses concurrent dashboard polls into a single upstream call.
+	// Lazily allocated under h.mu by kiroUsageHandlerCache.
+	kiroUsageCache *kiroUsageCache
 }
 
 // NewHandler creates a new management handler instance.

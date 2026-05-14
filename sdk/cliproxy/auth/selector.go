@@ -537,7 +537,8 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 //  4. metadata.user_id (non-Claude Code format)
 //  5. prompt_cache_key / metadata.prompt_cache_key
 //  6. Kiro native conversationState identifiers
-//  7. Hash-based fallback from messages
+//  7. client principal metadata
+//  8. Hash-based fallback from messages
 //
 // Note: The cache key includes provider and session ID, but intentionally does
 // not include model. Claude Code and similar clients can issue multiple model
@@ -580,7 +581,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 
-	cacheKey := sessionAffinityCacheKey(provider, primaryID)
+	cacheKey := sessionAffinityCacheKey(provider, primaryID, opts.Metadata)
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
@@ -600,7 +601,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey := sessionAffinityCacheKey(provider, fallbackID)
+		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, opts.Metadata)
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
@@ -621,8 +622,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	return auth, nil
 }
 
-func sessionAffinityCacheKey(provider, sessionID string) string {
-	return strings.TrimSpace(strings.ToLower(provider)) + "::" + sessionID
+func sessionAffinityCacheKey(provider, sessionID string, metadata map[string]any) string {
+	scope := metadataStringValue(metadata, cliproxyexecutor.ProviderScopeMetadataKey)
+	if scope == "" {
+		scope = strings.TrimSpace(strings.ToLower(provider))
+	}
+	return scope + "::" + sessionID
 }
 
 func selectorLogEntry(ctx context.Context) *log.Entry {
@@ -668,10 +673,11 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 //  6. Conversation_id header / execution session metadata
 //  7. explicit body session_id / thread_id fields
 //  8. metadata.user_id (non-Claude Code format)
-//  9. prompt_cache_key / metadata.prompt_cache_key in request body
-//  10. explicit conversation_id fields
+//  9. explicit conversation_id fields
+//  10. prompt_cache_key / metadata.prompt_cache_key in request body
 //  11. Kiro native conversationState identifiers
-//  12. Stable hash from first few messages content (fallback)
+//  12. client principal metadata
+//  13. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -740,6 +746,9 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	}
 
 	if len(payload) == 0 {
+		if principal := metadataStringValue(metadata, cliproxyexecutor.ClientPrincipalMetadataKey); principal != "" {
+			return "client:" + principal, ""
+		}
 		return "", ""
 	}
 
@@ -768,15 +777,7 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "user:" + userID, ""
 	}
 
-	// 9. prompt_cache_key / metadata.prompt_cache_key
-	if promptCacheKey := gjson.GetBytes(payload, "prompt_cache_key").String(); promptCacheKey != "" {
-		return "cache:" + promptCacheKey, ""
-	}
-	if promptCacheKey := gjson.GetBytes(payload, "metadata.prompt_cache_key").String(); promptCacheKey != "" {
-		return "cache:" + promptCacheKey, ""
-	}
-
-	// 10. explicit conversation identifiers
+	// 9. explicit conversation identifiers
 	for _, path := range []string{
 		"metadata.conversation_id",
 		"metadata.conversationId",
@@ -786,6 +787,14 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		if convID := strings.TrimSpace(gjson.GetBytes(payload, path).String()); convID != "" {
 			return "conv:" + convID, ""
 		}
+	}
+
+	// 10. prompt_cache_key / metadata.prompt_cache_key
+	if promptCacheKey := gjson.GetBytes(payload, "prompt_cache_key").String(); promptCacheKey != "" {
+		return "cache:" + promptCacheKey, ""
+	}
+	if promptCacheKey := gjson.GetBytes(payload, "metadata.prompt_cache_key").String(); promptCacheKey != "" {
+		return "cache:" + promptCacheKey, ""
 	}
 
 	// 11. Kiro native conversationState identifiers
@@ -803,7 +812,12 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "kiro-cont:" + continuationID, ""
 	}
 
-	// 12. Hash-based fallback from message content
+	// 12. client principal metadata
+	if principal := metadataStringValue(metadata, cliproxyexecutor.ClientPrincipalMetadataKey); principal != "" {
+		return "client:" + principal, ""
+	}
+
+	// 13. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
 }
 

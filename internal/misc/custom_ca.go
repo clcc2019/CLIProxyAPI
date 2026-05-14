@@ -11,7 +11,7 @@ import (
 )
 
 var customRootCAsCache struct {
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	key  string
 	pool *x509.CertPool
 	err  error
@@ -23,6 +23,14 @@ func CustomRootCAsFromEnv() (*x509.CertPool, error) {
 	codeXCA := strings.TrimSpace(os.Getenv("CODEX_CA_CERTIFICATE"))
 	sslCertFile := strings.TrimSpace(os.Getenv("SSL_CERT_FILE"))
 	cacheKey := codeXCA + "\x00" + sslCertFile
+
+	customRootCAsCache.mu.RLock()
+	if customRootCAsCache.key == cacheKey {
+		pool, err := customRootCAsCache.pool, customRootCAsCache.err
+		customRootCAsCache.mu.RUnlock()
+		return pool, err
+	}
+	customRootCAsCache.mu.RUnlock()
 
 	customRootCAsCache.mu.Lock()
 	defer customRootCAsCache.mu.Unlock()

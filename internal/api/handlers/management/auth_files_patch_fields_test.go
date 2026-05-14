@@ -377,7 +377,9 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
   "email": "kiro@example.com",
   "access_token": "access-token",
   "refresh_token": "refresh-token",
-  "expires_at": "2026-05-09T06:54:01Z"
+  "expires_at": "2026-05-09T06:54:01Z",
+  "proxyUrl": "http://old-proxy.local",
+  "disableCooling": false
 }`
 	if err := os.WriteFile(filePath, []byte(initial), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -466,6 +468,12 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
 	}
 	if _, ok := document["disable-cooling"]; ok {
 		t.Fatal("file.disable-cooling should be removed")
+	}
+	if _, ok := document["proxyUrl"]; ok {
+		t.Fatal("file.proxyUrl should be removed")
+	}
+	if _, ok := document["disableCooling"]; ok {
+		t.Fatal("file.disableCooling should be removed")
 	}
 }
 

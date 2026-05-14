@@ -1,10 +1,14 @@
 package management
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -89,13 +93,13 @@ func TestRequestKiroTokenReturnsLoginURLAndRegistersState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse auth url: %v", err)
 	}
-	if parsed.Scheme != "https" || parsed.Host != "app.kiro.dev" || parsed.Path != "/signin" {
+	if parsed.Scheme != "https" || parsed.Host != "prod.us-east-1.auth.desktop.kiro.dev" || parsed.Path != "/login" {
 		t.Fatalf("auth url = %s, want Kiro login endpoint", parsed.String())
 	}
 
 	query := parsed.Query()
-	if got := query.Get("idp"); got != "" {
-		t.Fatalf("idp = %q, want empty", got)
+	if got := query.Get("idp"); got != "Github" {
+		t.Fatalf("idp = %q, want Github", got)
 	}
 	if got := query.Get("redirect_uri"); got != kiroauth.OAuthRedirectURI(kiroauth.DefaultOAuthCallbackPort) {
 		t.Fatalf("redirect_uri = %q, want %q", got, kiroauth.OAuthRedirectURI(kiroauth.DefaultOAuthCallbackPort))
@@ -109,12 +113,12 @@ func TestRequestKiroTokenReturnsLoginURLAndRegistersState(t *testing.T) {
 	if query.Get("code_challenge") == "" {
 		t.Fatal("code_challenge is empty")
 	}
-	if got := query.Get("redirect_from"); got != "kirocli" {
-		t.Fatalf("redirect_from = %q, want kirocli", got)
+	if got := query.Get("redirect_from"); got != "" {
+		t.Fatalf("redirect_from = %q, want empty", got)
 	}
 }
 
-func TestRequestKiroTokenUsesOfficialSigninURL(t *testing.T) {
+func TestRequestKiroTokenForceReauthAddsPrompt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
@@ -142,11 +146,14 @@ func TestRequestKiroTokenUsesOfficialSigninURL(t *testing.T) {
 		t.Fatalf("parse auth url: %v", err)
 	}
 	query := parsed.Query()
-	if got := query.Get("idp"); got != "" {
-		t.Fatalf("idp = %q, want empty", got)
+	if parsed.Scheme != "https" || parsed.Host != "prod.us-east-1.auth.desktop.kiro.dev" || parsed.Path != "/login" {
+		t.Fatalf("auth url = %s, want Kiro login endpoint", parsed.String())
 	}
-	if got := query.Get("prompt"); got != "" {
-		t.Fatalf("prompt = %q, want empty", got)
+	if got := query.Get("idp"); got != "Google" {
+		t.Fatalf("idp = %q, want Google", got)
+	}
+	if got := query.Get("prompt"); got != "select_account" {
+		t.Fatalf("prompt = %q, want select_account", got)
 	}
 	if got := query.Get("max_age"); got != "" {
 		t.Fatalf("max_age = %q, want empty", got)
@@ -165,5 +172,72 @@ func TestRequestKiroTokenRejectsInvalidCustomFileName(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostOAuthCallbackAcceptsKiroDeepLink(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	state := "0123456789abcdef0123456789abcdef"
+	RegisterOAuthSession(state, "kiro")
+	defer CompleteOAuthSession(state)
+
+	body := []byte(fmt.Sprintf(`{"provider":"kiro","redirect_url":"kiro://kiro.kiroAgent/authenticate-success?code=auth-code&state=%s"}`, state))
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/oauth-callback", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.PostOAuthCallback(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(filepath.Join(authDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state)))
+	if err != nil {
+		t.Fatalf("read callback file: %v", err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode callback file: %v", err)
+	}
+	if payload["code"] != "auth-code" || payload["state"] != state || payload["error"] != "" {
+		t.Fatalf("unexpected callback payload: %+v", payload)
+	}
+}
+
+func TestPostOAuthCallbackAcceptsKiroLocalCallbackURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	state := "abcdef0123456789abcdef0123456789"
+	RegisterOAuthSession(state, "kiro")
+	defer CompleteOAuthSession(state)
+
+	callbackURL := fmt.Sprintf("http://localhost:3128/oauth/callback?login_option=google&code=auth-code&state=%s", state)
+	body := []byte(fmt.Sprintf(`{"provider":"kiro","redirect_url":%q}`, callbackURL))
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/oauth-callback", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.PostOAuthCallback(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(filepath.Join(authDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state)))
+	if err != nil {
+		t.Fatalf("read callback file: %v", err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode callback file: %v", err)
+	}
+	if payload["code"] != "auth-code" || payload["state"] != state || payload["error"] != "" {
+		t.Fatalf("unexpected callback payload: %+v", payload)
 	}
 }

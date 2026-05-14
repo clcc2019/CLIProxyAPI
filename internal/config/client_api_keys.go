@@ -15,6 +15,7 @@ import (
 // of client-visible model IDs and usage quotas.
 type ClientAPIKeyEntry struct {
 	APIKey         string            `yaml:"api-key" json:"api-key"`
+	Note           string            `yaml:"note,omitempty" json:"note,omitempty"`
 	AllowedModels  []string          `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
 	ExcludedModels []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 	Quota          ClientAPIKeyQuota `yaml:"quota,omitempty" json:"quota,omitempty"`
@@ -134,12 +135,15 @@ func (keys ClientAPIKeys) MarshalYAML() (any, error) {
 		if entry.APIKey == "" {
 			continue
 		}
-		if len(entry.AllowedModels) == 0 && len(entry.ExcludedModels) == 0 && !entry.Quota.HasLimits() {
+		if entry.Note == "" && len(entry.AllowedModels) == 0 && len(entry.ExcludedModels) == 0 && !entry.Quota.HasLimits() {
 			out = append(out, entry.APIKey)
 			continue
 		}
 		item := map[string]any{
 			"api-key": entry.APIKey,
+		}
+		if entry.Note != "" {
+			item["note"] = entry.Note
 		}
 		if len(entry.AllowedModels) > 0 {
 			item["allowed-models"] = entry.AllowedModels
@@ -221,6 +225,7 @@ func (keys *ClientAPIKeys) UnmarshalJSON(data []byte) error {
 			} else if value, ok := typed["key"]; ok {
 				entry.APIKey = strings.TrimSpace(fmt.Sprintf("%v", value))
 			}
+			entry.Note = extractClientAPIKeyNote(typed)
 			entry.AllowedModels = extractClientAPIKeyModels(typed, "allowed-models", "allowedModels")
 			entry.ExcludedModels = extractClientAPIKeyModels(typed, "excluded-models", "excludedModels")
 			entry.Quota = extractClientAPIKeyQuota(typed)
@@ -255,6 +260,17 @@ func extractClientAPIKeyModels(record map[string]any, names ...string) []string 
 		}
 	}
 	return nil
+}
+
+func extractClientAPIKeyNote(record map[string]any) string {
+	for _, name := range []string{"note", "remark", "description"} {
+		raw, ok := record[name]
+		if !ok {
+			continue
+		}
+		return strings.TrimSpace(fmt.Sprintf("%v", raw))
+	}
+	return ""
 }
 
 func extractClientAPIKeyQuota(record map[string]any) ClientAPIKeyQuota {
@@ -371,6 +387,7 @@ func normalizeClientAPIKeyEntry(entry ClientAPIKeyEntry) ClientAPIKeyEntry {
 	if isPlaceholderClientAPIKey(entry.APIKey) {
 		return ClientAPIKeyEntry{}
 	}
+	entry.Note = strings.TrimSpace(entry.Note)
 	entry.AllowedModels = NormalizeModelPatternList(entry.AllowedModels)
 	entry.ExcludedModels = NormalizeModelPatternList(entry.ExcludedModels)
 	entry.Quota = NormalizeClientAPIKeyQuota(entry.Quota)
@@ -400,6 +417,9 @@ func NormalizeClientAPIKeys(entries ClientAPIKeys) ClientAPIKeys {
 		key := entry.APIKey
 		if index, exists := indexByKey[key]; exists {
 			current := out[index]
+			if current.Note == "" {
+				current.Note = entry.Note
+			}
 			current.AllowedModels = mergeModelPatternLists(current.AllowedModels, entry.AllowedModels)
 			current.ExcludedModels = mergeModelPatternLists(current.ExcludedModels, entry.ExcludedModels)
 			current.Quota = mergeClientAPIKeyQuota(current.Quota, entry.Quota)

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -489,6 +490,186 @@ func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	manager.SetSelector(&FillFirstSelector{})
 	if manager.scheduler.strategy != schedulerStrategyFillFirst {
 		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyFillFirst)
+	}
+}
+
+func TestManager_InitializesSchedulerForSessionAffinityFallback(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	if manager.scheduler == nil {
+		t.Fatalf("manager.scheduler = nil")
+	}
+	if manager.scheduler.strategy != schedulerStrategyRoundRobin {
+		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyRoundRobin)
+	}
+}
+
+func TestManagerPickNextSessionAffinityUsesSchedulerAndFailsOver(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+
+	for _, auth := range []*Auth{
+		{ID: "affinity-a", Provider: "gemini", Status: StatusActive},
+		{ID: "affinity-b", Provider: "gemini", Status: StatusActive},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"session_id":"session-a"}}`)}
+	first, _, errPick := manager.pickNext(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("first pickNext() error = %v", errPick)
+	}
+	second, _, errPick := manager.pickNext(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("second pickNext() error = %v", errPick)
+	}
+	if first == nil || second == nil || first.ID != second.ID {
+		t.Fatalf("same session picks = %v, %v; want same auth", first, second)
+	}
+
+	if _, errUpdate := manager.Update(context.Background(), &Auth{ID: first.ID, Provider: "gemini", Status: StatusDisabled, Disabled: true}); errUpdate != nil {
+		t.Fatalf("Update(%s disabled) error = %v", first.ID, errUpdate)
+	}
+	third, _, errPick := manager.pickNext(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("third pickNext() error = %v", errPick)
+	}
+	if third == nil || third.ID == first.ID {
+		t.Fatalf("after cached auth disabled pick = %v, want a different auth than %s", third, first.ID)
+	}
+}
+
+func TestManagerPickNextSessionAffinityStableAcrossRestart(t *testing.T) {
+	t.Parallel()
+
+	newManager := func(t *testing.T) *Manager {
+		t.Helper()
+		selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Minute,
+		})
+		t.Cleanup(selector.Stop)
+		manager := NewManager(nil, selector, nil)
+		manager.executors["gemini"] = schedulerTestExecutor{}
+		for _, auth := range []*Auth{
+			{ID: "affinity-a", Provider: "gemini", Status: StatusActive},
+			{ID: "affinity-b", Provider: "gemini", Status: StatusActive},
+			{ID: "affinity-c", Provider: "gemini", Status: StatusActive},
+		} {
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+			}
+		}
+		return manager
+	}
+
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"session_id":"restart-session"}}`)}
+	firstManager := newManager(t)
+	first, _, errPick := firstManager.pickNext(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("first manager pickNext() error = %v", errPick)
+	}
+	secondManager := newManager(t)
+	second, _, errPick := secondManager.pickNext(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("second manager pickNext() error = %v", errPick)
+	}
+	if first == nil || second == nil || first.ID != second.ID {
+		t.Fatalf("restart picks = %v, %v; want same auth", first, second)
+	}
+}
+
+func TestManagerPickNextSessionAffinityStableDistribution(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	for _, auth := range []*Auth{
+		{ID: "affinity-a", Provider: "gemini", Status: StatusActive},
+		{ID: "affinity-b", Provider: "gemini", Status: StatusActive},
+		{ID: "affinity-c", Provider: "gemini", Status: StatusActive},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	seen := make(map[string]struct{}, 3)
+	for index := 0; index < 64; index++ {
+		opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"session_id":"session-` + strconv.Itoa(index) + `"}}`)}
+		got, _, errPick := manager.pickNext(context.Background(), "gemini", "", opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickNext() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNext() #%d auth = nil", index)
+		}
+		seen[got.ID] = struct{}{}
+	}
+	if len(seen) < 2 {
+		t.Fatalf("len(seen) = %d, want at least 2 auths used", len(seen))
+	}
+}
+
+func TestManagerPickNextMixedSessionAffinityStableAcrossRestart(t *testing.T) {
+	t.Parallel()
+
+	newManager := func(t *testing.T) *Manager {
+		t.Helper()
+		selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Minute,
+		})
+		t.Cleanup(selector.Stop)
+		manager := NewManager(nil, selector, nil)
+		manager.executors["gemini"] = schedulerTestExecutor{}
+		manager.executors["claude"] = schedulerTestExecutor{}
+		for _, auth := range []*Auth{
+			{ID: "gemini-a", Provider: "gemini", Status: StatusActive},
+			{ID: "gemini-b", Provider: "gemini", Status: StatusActive},
+			{ID: "claude-a", Provider: "claude", Status: StatusActive},
+		} {
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+			}
+		}
+		return manager
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ClientPrincipalMetadataKey: "client-hash"}}
+	firstManager := newManager(t)
+	first, _, firstProvider, errPick := firstManager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("first manager pickNextMixed() error = %v", errPick)
+	}
+	secondManager := newManager(t)
+	second, _, secondProvider, errPick := secondManager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("second manager pickNextMixed() error = %v", errPick)
+	}
+	if first == nil || second == nil || first.ID != second.ID || firstProvider != secondProvider {
+		t.Fatalf("restart mixed picks = %v/%s, %v/%s; want same auth and provider", first, firstProvider, second, secondProvider)
 	}
 }
 

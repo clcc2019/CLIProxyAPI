@@ -24,6 +24,10 @@ const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// ClientPrincipalMetadataKey stores a stable, non-secret client principal identifier for affinity.
+	ClientPrincipalMetadataKey = "client_principal"
+	// ProviderScopeMetadataKey scopes affinity caches to a normalized provider set.
+	ProviderScopeMetadataKey = "provider_scope"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.

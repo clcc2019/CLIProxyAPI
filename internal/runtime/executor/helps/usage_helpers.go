@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -68,11 +69,23 @@ func (r *UsageReporter) CaptureModelReasoningEffort(payloads ...[]byte) {
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false)
+	r.publishWithOutcome(ctx, detail, false, nil)
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true)
+	r.PublishFailureWithError(ctx, nil)
+}
+
+func (r *UsageReporter) PublishFailureWithError(ctx context.Context, err error) {
+	r.publishWithOutcome(ctx, usage.Detail{}, true, err)
+}
+
+func (r *UsageReporter) PublishFailureWithUsage(ctx context.Context, detail usage.Detail) {
+	r.PublishFailureWithUsageAndError(ctx, detail, nil)
+}
+
+func (r *UsageReporter) PublishFailureWithUsageAndError(ctx context.Context, detail usage.Detail, err error) {
+	r.publishWithOutcome(ctx, detail, true, err)
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -80,11 +93,11 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
-		r.PublishFailure(ctx)
+		r.PublishFailureWithError(ctx, *errPtr)
 	}
 }
 
-func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, err error) {
 	if r == nil {
 		return
 	}
@@ -95,7 +108,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		}
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(ctx, r.buildRecord(detail, failed, err))
 	})
 }
 
@@ -108,13 +121,13 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false, nil))
 	})
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, err error) usage.Record {
 	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed}
+		return usage.Record{Detail: detail, Failed: failed, ErrorMessage: usageErrorMessage(err)}
 	}
 	return usage.Record{
 		Provider:             r.provider,
@@ -129,8 +142,59 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		RequestedAt:          r.requestedAt,
 		Latency:              r.latency(),
 		Failed:               failed,
+		ErrorMessage:         usageErrorMessage(err),
 		Detail:               detail,
 	}
+}
+
+const maxUsageErrorMessageLen = 2000
+
+func usageErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	raw := strings.TrimSpace(err.Error())
+	if raw == "" {
+		return ""
+	}
+
+	message := strings.TrimSpace(SummarizeErrorBody("", []byte(raw)))
+	if message == "" {
+		message = raw
+	}
+	message = strings.Join(strings.Fields(message), " ")
+
+	status := usageErrorStatusCode(err)
+	if status > 0 {
+		message = fmt.Sprintf("HTTP %d: %s", status, message)
+	}
+
+	if len(message) > maxUsageErrorMessageLen {
+		message = truncateUsageErrorMessage(message, maxUsageErrorMessageLen)
+	}
+	return message
+}
+
+func truncateUsageErrorMessage(message string, maxLen int) string {
+	runes := []rune(message)
+	if len(runes) <= maxLen {
+		return message
+	}
+	return strings.TrimSpace(string(runes[:maxLen])) + "..."
+}
+
+func usageErrorStatusCode(err error) int {
+	type statusCoder interface{ StatusCode() int }
+	var statusErr statusCoder
+	if !errors.As(err, &statusErr) || statusErr == nil {
+		return 0
+	}
+	status := statusErr.StatusCode()
+	if status < 100 || status > 999 {
+		return 0
+	}
+	return status
 }
 
 func normalizeReasoningEffortValue(value string) string {
@@ -379,20 +443,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 
 func ParseClaudeUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
-	if !usageNode.Exists() {
-		return usage.Detail{}
-	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		CachedTokens: usageNode.Get("cache_read_input_tokens").Int(),
-	}
-	if detail.CachedTokens == 0 {
-		// fall back to creation tokens when read tokens are absent
-		detail.CachedTokens = usageNode.Get("cache_creation_input_tokens").Int()
-	}
-	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
-	return detail
+	return parseClaudeUsageNode(usageNode)
 }
 
 func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
@@ -404,16 +455,37 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		CachedTokens: usageNode.Get("cache_read_input_tokens").Int(),
+	detail := parseClaudeUsageNode(usageNode)
+	if usageDetailIsZero(detail) {
+		return usage.Detail{}, false
 	}
-	if detail.CachedTokens == 0 {
-		detail.CachedTokens = usageNode.Get("cache_creation_input_tokens").Int()
+	return detail, true
+}
+
+func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
+	if !usageNode.Exists() {
+		return usage.Detail{}
+	}
+	uncachedInputTokens := usageNode.Get("input_tokens").Int()
+	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
+	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
+	detail := usage.Detail{
+		InputTokens:         uncachedInputTokens + cacheReadTokens + cacheCreationTokens,
+		OutputTokens:        usageNode.Get("output_tokens").Int(),
+		CachedTokens:        cacheReadTokens,
+		CacheCreationTokens: cacheCreationTokens,
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
-	return detail, true
+	return detail
+}
+
+func usageDetailIsZero(detail usage.Detail) bool {
+	return detail.InputTokens == 0 &&
+		detail.OutputTokens == 0 &&
+		detail.ReasoningTokens == 0 &&
+		detail.CachedTokens == 0 &&
+		detail.CacheCreationTokens == 0 &&
+		detail.TotalTokens == 0
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {

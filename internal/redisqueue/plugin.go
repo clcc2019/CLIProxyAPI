@@ -68,12 +68,13 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	detail := requestDetail{
-		Timestamp: timestamp,
-		LatencyMs: record.Latency.Milliseconds(),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    tokens,
-		Failed:    failed,
+		Timestamp:    timestamp,
+		LatencyMs:    record.Latency.Milliseconds(),
+		Source:       record.Source,
+		AuthIndex:    record.AuthIndex,
+		Tokens:       tokens,
+		Failed:       failed,
+		ErrorMessage: normalizeUsageQueueErrorMessage(record.ErrorMessage, failed),
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
@@ -104,12 +105,13 @@ type queuedUsageDetail struct {
 }
 
 type requestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    tokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp    time.Time  `json:"timestamp"`
+	LatencyMs    int64      `json:"latency_ms"`
+	Source       string     `json:"source"`
+	AuthIndex    string     `json:"auth_index"`
+	Tokens       tokenStats `json:"tokens"`
+	Failed       bool       `json:"failed"`
+	ErrorMessage string     `json:"error_message,omitempty"`
 }
 
 type tokenStats struct {
@@ -133,3 +135,27 @@ func resolveEndpoint(ctx context.Context) string {
 }
 
 const httpStatusBadRequest = 400
+
+func normalizeUsageQueueErrorMessage(message string, failed bool) string {
+	if !failed {
+		return ""
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+	message = strings.Join(strings.Fields(message), " ")
+	const maxLen = 2000
+	if len(message) > maxLen {
+		message = truncateUsageQueueErrorMessage(message, maxLen)
+	}
+	return message
+}
+
+func truncateUsageQueueErrorMessage(message string, maxLen int) string {
+	runes := []rune(message)
+	if len(runes) <= maxLen {
+		return message
+	}
+	return strings.TrimSpace(string(runes[:maxLen])) + "..."
+}
