@@ -38,3 +38,30 @@ func TestAuthenticateIncludesClientAPIKeyQuotaMetadata(t *testing.T) {
 		t.Fatalf("quota metadata = %#v, want %#v", got, quota)
 	}
 }
+
+func TestAuthenticateRejectsDisabledClientAPIKey(t *testing.T) {
+	provider := newProvider("test", internalconfig.ClientAPIKeys{{
+		APIKey:   "disabled-key",
+		Disabled: true,
+	}})
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.test/v1/models", nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer disabled-key")
+
+	result, authErr := provider.Authenticate(context.Background(), req)
+	if result != nil {
+		t.Fatalf("expected no auth result, got %#v", result)
+	}
+	if authErr == nil {
+		t.Fatal("expected auth error")
+	}
+	if authErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", authErr.StatusCode, http.StatusTooManyRequests)
+	}
+	if authErr.Message != "API key disabled" {
+		t.Fatalf("message = %q, want %q", authErr.Message, "API key disabled")
+	}
+}

@@ -303,6 +303,46 @@ func TestCacheSignature_EvictsOldestWhenGroupExceedsCapacity(t *testing.T) {
 	}
 }
 
+// TestEnforceGroupEntryLimit_EvictsNOldest exercises the heap-based eviction
+// path that runs when more than one entry must be removed at once. This guards
+// the fast path/heap path split in enforceGroupEntryLimitLocked.
+func TestEnforceGroupEntryLimit_EvictsNOldest(t *testing.T) {
+	const overflow = 5
+	entries := make(map[string]SignatureEntry, SignatureCacheMaxEntriesPerGroup+overflow)
+	now := time.Now()
+
+	// Seed `overflow` distinctly-old entries that should all be evicted.
+	oldKeys := make([]string, overflow)
+	for i := 0; i < overflow; i++ {
+		key := fmt.Sprintf("old-%02d", i)
+		entries[key] = SignatureEntry{
+			Signature: makeTestSignature(key),
+			Timestamp: now.Add(-time.Hour - time.Duration(i)*time.Second),
+		}
+		oldKeys[i] = key
+	}
+
+	// Fill to exactly capacity + overflow with much newer entries.
+	for i := 0; i < SignatureCacheMaxEntriesPerGroup; i++ {
+		key := fmt.Sprintf("new-%05d", i)
+		entries[key] = SignatureEntry{
+			Signature: makeTestSignature(key),
+			Timestamp: now.Add(time.Duration(i) * time.Second),
+		}
+	}
+
+	enforceGroupEntryLimitLocked(entries)
+
+	if len(entries) != SignatureCacheMaxEntriesPerGroup {
+		t.Fatalf("expected size %d after eviction, got %d", SignatureCacheMaxEntriesPerGroup, len(entries))
+	}
+	for _, k := range oldKeys {
+		if _, ok := entries[k]; ok {
+			t.Fatalf("expected old key %q to be evicted", k)
+		}
+	}
+}
+
 func TestRunProtectedCacheCleanupLoop_RestartsAfterPanic(t *testing.T) {
 	previousDelay := CacheCleanupRestartDelay
 	CacheCleanupRestartDelay = 0

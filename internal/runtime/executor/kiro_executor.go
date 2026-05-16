@@ -135,7 +135,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	defer trackKiroFailureUnlessTransientCapacity(ctx, reporter, &err)
 
 	auth, accessToken, profileArn, err = e.refreshIfKiroTokenExpiring(ctx, auth, accessToken, profileArn)
 	if err != nil {
@@ -171,6 +171,8 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	defer closeKiroResponseBody(httpResp)
 
+	displayModel := helps.PayloadRequestedModel(opts, req.Model)
+	promptCachePlan := buildKiroPromptCachePlan(auth, prepared, actualPayload, displayModel)
 	content, toolUses, usageInfo, stopReason, parseErr := e.parseEventStream(ctx, httpResp.Body)
 	if parseErr != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, parseErr)
@@ -190,8 +192,12 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if report := fillKiroUsageEstimates(&usageInfo, kiroUsageRequestPayload(prepared, actualPayload), content, toolUses); report.FilledInput || report.FilledOutput {
 		log.WithFields(kiroUsageEstimateLogKV(usageInfo, report)).Debug("kiro: usage filled from local estimator (non-stream)")
 	}
+	if applyKiroPromptCachePlan(&usageInfo, promptCachePlan) {
+		log.WithFields(kiroPromptCacheUsageLogKV(usageInfo, promptCachePlan)).Debug("kiro: usage augmented from prompt cache tracker (non-stream)")
+	}
+	markKiroPromptCachePlanSuccess(promptCachePlan)
 	reporter.Publish(ctx, usageInfo)
-	raw := kiroclaude.BuildClaudeResponse(content, toolUses, helps.PayloadRequestedModel(opts, req.Model), usageInfo, stopReason)
+	raw := kiroclaude.BuildClaudeResponse(content, toolUses, displayModel, usageInfo, stopReason)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, raw)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FromString("kiro"), prepared.from, req.Model, opts.OriginalRequest, prepared.translated, raw, &param)
@@ -206,7 +212,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	defer trackKiroFailureUnlessTransientCapacity(ctx, reporter, &err)
 
 	auth, accessToken, profileArn, err = e.refreshIfKiroTokenExpiring(ctx, auth, accessToken, profileArn)
 	if err != nil {
@@ -241,11 +247,13 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 	}
 
+	displayModel := helps.PayloadRequestedModel(opts, req.Model)
+	promptCachePlan := buildKiroPromptCachePlan(auth, prepared, actualPayload, displayModel)
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
 		defer closeKiroResponseBody(httpResp)
-		e.streamToChannel(ctx, httpResp.Body, out, prepared.from, helps.PayloadRequestedModel(opts, req.Model), opts.OriginalRequest, kiroUsageRequestPayload(prepared, actualPayload), reporter)
+		e.streamToChannel(ctx, httpResp.Body, out, prepared.from, displayModel, opts.OriginalRequest, kiroUsageRequestPayload(prepared, actualPayload), reporter, promptCachePlan)
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -785,9 +793,10 @@ func (e *KiroExecutor) parseEventStream(ctx context.Context, body io.Reader) (st
 // idle-timeout watchdog gets a handle it can use to forcibly close the
 // connection and unblock a hung read. If the caller supplies a plain Reader
 // the timeout degrades gracefully to a best-effort ctx cancellation.
-func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, kiroReq []byte, reporter *helps.UsageReporter) {
+func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, kiroReq []byte, reporter *helps.UsageReporter, promptCachePlan *kiroPromptCachePlan) {
 	reader := bufio.NewReaderSize(body, kiroStreamReaderBuffer)
 	state := newKiroStreamState(ctx, e, out, targetFormat, model, originalReq, kiroReq, reporter)
+	state.promptCachePlan = promptCachePlan
 	defer state.finalize()
 
 	// Optional closer for the idle-timeout watchdog. When the underlying
@@ -2361,6 +2370,9 @@ func logKiroUpstreamHTTPError(auth *cliproxyauth.Auth, endpoint kiroEndpointConf
 	if resp == nil {
 		return
 	}
+	if isKiroTransientModelCapacityHTTPError(resp.StatusCode, body) {
+		return
+	}
 	fields := log.Fields{
 		"provider": "kiro",
 		"status":   resp.StatusCode,
@@ -2395,6 +2407,34 @@ func logKiroUpstreamHTTPError(auth *cliproxyauth.Auth, endpoint kiroEndpointConf
 		fields["body"] = truncateKiroLogBody(string(body), 2048)
 	}
 	log.WithFields(fields).Warn("kiro: upstream request failed")
+}
+
+func trackKiroFailureUnlessTransientCapacity(ctx context.Context, reporter *helps.UsageReporter, errPtr *error) {
+	if reporter == nil || errPtr == nil {
+		return
+	}
+	if isKiroTransientModelCapacity429Error(*errPtr) {
+		return
+	}
+	reporter.TrackFailure(ctx, errPtr)
+}
+
+func isKiroTransientModelCapacity429Error(err error) bool {
+	if err == nil {
+		return false
+	}
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var sc statusCoder
+	if !errors.As(err, &sc) || sc == nil || sc.StatusCode() != http.StatusTooManyRequests {
+		return false
+	}
+	return isKiroTransientModelCapacity429Message(err.Error())
+}
+
+func isKiroTransientModelCapacityHTTPError(status int, body []byte) bool {
+	return status == http.StatusTooManyRequests && isKiroTransientModelCapacity429Message(string(body))
 }
 
 func kiroErrorSummary(body []byte) (kind, message string) {

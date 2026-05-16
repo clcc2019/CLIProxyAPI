@@ -2,10 +2,12 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -334,7 +336,11 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.TokenData, sour
 		attributes["machine_id"] = machineID
 	}
 
-	refreshInterval := time.Duration(metadata["refresh_interval_seconds"].(int)) * time.Second
+	// Resolve refresh interval defensively. While createAuthRecord constructs
+	// metadata locally as int, JSON-decoded metadata (from disk, Redis, or
+	// callers reusing this helper) would carry float64. A bare .(int) panics
+	// in those paths.
+	refreshInterval := kiroRefreshIntervalFromMetadata(metadata)
 	return &coreauth.Auth{
 		ID:               fileName,
 		Provider:         a.Provider(),
@@ -604,4 +610,39 @@ func parseBoolMetadata(value string) bool {
 	default:
 		return false
 	}
+}
+
+// kiroRefreshIntervalFromMetadata extracts the refresh interval from metadata in
+// a type-tolerant way. JSON-decoded numeric values arrive as float64 while
+// freshly-built metadata uses int; both must work without panicking. A zero
+// return falls back to the executor's per-call computation, which is safe.
+func kiroRefreshIntervalFromMetadata(metadata map[string]any) time.Duration {
+	if metadata == nil {
+		return 0
+	}
+	for _, key := range []string{"refresh_interval_seconds", "refreshIntervalSeconds", "refresh_interval", "refreshInterval"} {
+		switch v := metadata[key].(type) {
+		case int:
+			if v > 0 {
+				return time.Duration(v) * time.Second
+			}
+		case int64:
+			if v > 0 {
+				return time.Duration(v) * time.Second
+			}
+		case float64:
+			if v > 0 {
+				return time.Duration(int64(v)) * time.Second
+			}
+		case json.Number:
+			if n, err := v.Int64(); err == nil && n > 0 {
+				return time.Duration(n) * time.Second
+			}
+		case string:
+			if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n > 0 {
+				return time.Duration(n) * time.Second
+			}
+		}
+	}
+	return 0
 }

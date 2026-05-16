@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"encoding/hex"
 	"runtime/debug"
@@ -175,13 +176,57 @@ func enforceGroupEntryLimitLocked(entries map[string]SignatureEntry) {
 		return
 	}
 
-	for range excessEntries {
-		oldestKey, ok := oldestEntryKey(entries)
-		if !ok {
-			return
+	// Single-pass eviction: scan once and keep a max-heap of the oldest
+	// `excessEntries` entries by Timestamp. The previous implementation called
+	// oldestEntryKey() once per evicted entry, which scanned the whole map each
+	// time — O(n × excess). Bursty inserts at the cap stalled all signature
+	// lookups (which contend on the same sc.mu).
+	if excessEntries == 1 {
+		// Fast path: the common case is a single eviction per insert. A linear
+		// scan is faster than building a heap.
+		if oldestKey, ok := oldestEntryKey(entries); ok {
+			delete(entries, oldestKey)
 		}
-		delete(entries, oldestKey)
+		return
 	}
+
+	h := make(oldestHeap, 0, excessEntries)
+	for key, entry := range entries {
+		if len(h) < excessEntries {
+			heap.Push(&h, oldestEntry{key: key, ts: entry.Timestamp})
+			continue
+		}
+		// h[0] is the *newest* among the oldest excessEntries (max-heap).
+		// Replace if the candidate is older.
+		if entry.Timestamp.Before(h[0].ts) {
+			h[0] = oldestEntry{key: key, ts: entry.Timestamp}
+			heap.Fix(&h, 0)
+		}
+	}
+	for _, item := range h {
+		delete(entries, item.key)
+	}
+}
+
+// oldestEntry / oldestHeap form a max-heap on Timestamp so we can collect the
+// N oldest entries in a single map scan.
+type oldestEntry struct {
+	key string
+	ts  time.Time
+}
+
+type oldestHeap []oldestEntry
+
+func (h oldestHeap) Len() int           { return len(h) }
+func (h oldestHeap) Less(i, j int) bool { return h[i].ts.After(h[j].ts) }
+func (h oldestHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *oldestHeap) Push(x any)        { *h = append(*h, x.(oldestEntry)) }
+func (h *oldestHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
 }
 
 func oldestEntryKey(entries map[string]SignatureEntry) (string, bool) {

@@ -23,7 +23,12 @@ func TestPersistedStateRestoresSummaryDetailsAndRecentAggregates(t *testing.T) {
 		SetDetailRetentionLimit(prevLimit)
 	})
 
-	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	// Anchor the test on the wall clock so retention pruning inside
+	// LoadPersistedState (which uses time.Now()) doesn't drop records
+	// once the hard-coded date drifts past the 7-day retention window.
+	// Truncate to the second so SSE timestamp formatting in the snapshot
+	// stays deterministic across save/restore.
+	now := time.Now().UTC().Truncate(time.Second)
 	stats := NewRequestStatistics()
 	stats.Record(context.Background(), coreusage.Record{
 		APIKey:      "api-1",
@@ -101,7 +106,10 @@ func TestPersistedStateRestoresRolledUpAggregateHistory(t *testing.T) {
 		SetDetailRetentionLimit(prevLimit)
 	})
 
-	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	// Anchor on the wall clock so retention pruning inside LoadPersistedState
+	// (which uses time.Now()) doesn't drop records as the hard-coded date
+	// drifts past the 7-day retention window.
+	now := time.Now().UTC().Truncate(time.Second)
 	stats := NewRequestStatistics()
 	stats.Record(context.Background(), coreusage.Record{
 		APIKey:      "api-2",

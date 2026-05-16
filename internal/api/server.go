@@ -49,11 +49,16 @@ const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authe
 
 const (
 	inboundReadHeaderTimeout = 30 * time.Second
-	inboundIdleTimeout       = 120 * time.Second
-	inboundMaxHeaderBytes    = 1 << 20
-	inboundMaxRequestBytes   = 64 << 20
-	corsAllowedMethods       = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-	corsAllowedHeaders       = "Authorization, Content-Type, Accept, X-Requested-With, Idempotency-Key, X-Local-Password, X-API-Key, Anthropic-Beta, OpenAI-Beta"
+	// inboundReadTimeout caps how long the server will wait for the full request
+	// body. It must be longer than ReadHeaderTimeout but bounded so a slow client
+	// cannot pin a goroutine + a credential indefinitely. Streaming responses
+	// are unaffected (they are write-side, governed by handler context).
+	inboundReadTimeout     = 5 * time.Minute
+	inboundIdleTimeout     = 120 * time.Second
+	inboundMaxHeaderBytes  = 1 << 20
+	inboundMaxRequestBytes = 64 << 20
+	corsAllowedMethods     = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+	corsAllowedHeaders     = "Authorization, Content-Type, Accept, X-Requested-With, Idempotency-Key, X-Local-Password, X-API-Key, Anthropic-Beta, OpenAI-Beta"
 )
 
 type serverOptionConfig struct {
@@ -196,6 +201,30 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	// ready reports whether the proxy has finished bootstrapping (auth load,
+	// initial credential refresh, dependent stores reachable). The /readyz
+	// probe reflects this; orchestrators should route traffic only when it is
+	// true. /healthz remains a pure liveness check.
+	ready atomic.Bool
+}
+
+// SetReady marks the server as ready (or not) to receive traffic. The /readyz
+// probe reflects this state. Callers wire it from the bootstrap path once
+// dependencies are confirmed reachable.
+func (s *Server) SetReady(ready bool) {
+	if s == nil {
+		return
+	}
+	s.ready.Store(ready)
+}
+
+// Ready reports the current readiness state.
+func (s *Server) Ready() bool {
+	if s == nil {
+		return false
+	}
+	return s.ready.Load()
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -230,6 +259,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
 	engine.Use(middleware.RequestBodyLimitMiddleware(inboundMaxRequestBytes))
+	// Concurrency limiter is opt-in via cfg.Limits.MaxInFlightRequests; when 0
+	// the middleware is a no-op so default behavior is preserved.
+	engine.Use(middleware.ConcurrencyLimitMiddleware(cfg.Limits.MaxInFlightRequests, cfg.Limits.RetryAfterSeconds))
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -332,11 +364,15 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
 	}
 
-	// Create HTTP server
+	// Create HTTP server. WriteTimeout intentionally left zero because most
+	// routes (SSE, WebSocket, long upstream streams) keep the response open
+	// for minutes; per-request deadlines are enforced via c.Request.Context()
+	// in the stream forwarder. ReadTimeout caps slow body uploads.
 	s.server = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler:           engine,
 		ReadHeaderTimeout: inboundReadHeaderTimeout,
+		ReadTimeout:       inboundReadTimeout,
 		IdleTimeout:       inboundIdleTimeout,
 		MaxHeaderBytes:    inboundMaxHeaderBytes,
 	}
@@ -357,6 +393,28 @@ func (s *Server) setupRoutes() {
 	}
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
+
+	// /readyz reflects bootstrap state. Distinct from /healthz so orchestrators
+	// can hold traffic until dependencies are confirmed reachable, while still
+	// keeping the process alive (so liveness probes don't restart it during a
+	// slow auth load).
+	readyzHandler := func(c *gin.Context) {
+		if !s.Ready() {
+			if c.Request.Method == http.MethodHead {
+				c.Status(http.StatusServiceUnavailable)
+				return
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
+			return
+		}
+		if c.Request.Method == http.MethodHead {
+			c.Status(http.StatusOK)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ready"})
+	}
+	s.engine.GET("/readyz", readyzHandler)
+	s.engine.HEAD("/readyz", readyzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)

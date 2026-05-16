@@ -49,8 +49,12 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 		// Log if thinking blocks were extracted
 		for _, block := range blocks {
 			if block["type"] == "thinking" {
-				thinkingContent := block["thinking"].(string)
-				log.Infof("kiro: buildClaudeResponse extracted thinking block (len: %d)", len(thinkingContent))
+				// Guard the assertion: extraction shape may evolve and any
+				// future caller producing a non-string "thinking" field would
+				// otherwise panic the response builder goroutine.
+				if thinkingContent, ok := block["thinking"].(string); ok {
+					log.Infof("kiro: buildClaudeResponse extracted thinking block (len: %d)", len(thinkingContent))
+				}
 			}
 		}
 	}

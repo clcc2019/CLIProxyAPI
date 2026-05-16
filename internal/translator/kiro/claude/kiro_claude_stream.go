@@ -5,10 +5,52 @@ package claude
 
 import (
 	"encoding/json"
+	"strconv"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
+
+// sseFrameBufPool reuses scratch buffers across the per-chunk SSE builders.
+// The hot paths (text_delta, thinking_delta, input_json_delta, content_block_stop)
+// previously did 5–15 allocations per chunk: a fresh map[string]interface{},
+// reflection-based json.Marshal, then []byte("event: ... data: " + string(b) + "\n\n")
+// which adds 3 more allocations. With a pooled buffer + hand-built JSON we
+// drop to one alloc per event (the returned []byte). Run with -benchmem to
+// confirm.
+var sseFrameBufPool = sync.Pool{
+	New: func() any {
+		// 256 bytes covers the typical text_delta event; the buffer grows for
+		// larger chunks but the common case avoids any reallocation.
+		b := make([]byte, 0, 256)
+		return &b
+	},
+}
+
+func acquireSSEFrameBuf() *[]byte {
+	bp := sseFrameBufPool.Get().(*[]byte)
+	*bp = (*bp)[:0]
+	return bp
+}
+
+func releaseSSEFrameBuf(bp *[]byte) {
+	// Drop oversized buffers so a single huge tool-call payload doesn't
+	// permanently inflate every pooled buffer.
+	if cap(*bp) > 64*1024 {
+		return
+	}
+	sseFrameBufPool.Put(bp)
+}
+
+// appendJSONString writes s to dst as a JSON-quoted string. We reach for the
+// stdlib's json.Marshal here for correctness on edge cases (control chars,
+// non-UTF-8) — strconv.AppendQuote uses Go syntax (e.g. \xNN escapes) which
+// json.Unmarshal does not accept on the receiving end.
+func appendJSONString(dst []byte, s string) []byte {
+	encoded, _ := json.Marshal(s)
+	return append(dst, encoded...)
+}
 
 // BuildClaudeMessageStartEvent creates the message_start SSE event.
 //
@@ -79,52 +121,68 @@ func BuildClaudeContentBlockStartEvent(index int, blockType, toolUseID, toolName
 	return []byte("event: content_block_start\ndata: " + string(result) + "\n\n")
 }
 
-// BuildClaudeStreamEvent creates a text_delta content_block_delta SSE event
+// BuildClaudeStreamEvent creates a text_delta content_block_delta SSE event.
+// Hot path — called once per text chunk during streaming. Hand-built JSON +
+// pooled buffer avoids the per-chunk map allocation, reflection-based marshal,
+// and the []byte/string round-trips of a generic implementation.
 func BuildClaudeStreamEvent(contentDelta string, index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]interface{}{
-			"type": "text_delta",
-			"text": contentDelta,
-		},
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_delta\ndata: " + string(result) + "\n\n")
+	bp := acquireSSEFrameBuf()
+	defer releaseSSEFrameBuf(bp)
+	buf := *bp
+
+	buf = append(buf, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"...)
+	buf = strconv.AppendInt(buf, int64(index), 10)
+	buf = append(buf, ",\"delta\":{\"type\":\"text_delta\",\"text\":"...)
+	buf = appendJSONString(buf, contentDelta)
+	buf = append(buf, "}}\n\n"...)
+
+	out := make([]byte, len(buf))
+	copy(out, buf)
+	*bp = buf
+	return out
 }
 
-// BuildClaudeInputJsonDeltaEvent creates an input_json_delta event for tool use streaming
+// BuildClaudeInputJsonDeltaEvent creates an input_json_delta event for tool use streaming.
+// Hot path during tool-use streaming.
 func BuildClaudeInputJsonDeltaEvent(partialJSON string, index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]interface{}{
-			"type":         "input_json_delta",
-			"partial_json": partialJSON,
-		},
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_delta\ndata: " + string(result) + "\n\n")
+	bp := acquireSSEFrameBuf()
+	defer releaseSSEFrameBuf(bp)
+	buf := *bp
+
+	buf = append(buf, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"...)
+	buf = strconv.AppendInt(buf, int64(index), 10)
+	buf = append(buf, ",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":"...)
+	buf = appendJSONString(buf, partialJSON)
+	buf = append(buf, "}}\n\n"...)
+
+	out := make([]byte, len(buf))
+	copy(out, buf)
+	*bp = buf
+	return out
 }
 
-// BuildClaudeContentBlockStopEvent creates a content_block_stop SSE event
+// BuildClaudeContentBlockStopEvent creates a content_block_stop SSE event.
+// Hot path — called once per content block close.
 func BuildClaudeContentBlockStopEvent(index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_stop",
-		"index": index,
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_stop\ndata: " + string(result) + "\n\n")
+	bp := acquireSSEFrameBuf()
+	defer releaseSSEFrameBuf(bp)
+	buf := *bp
+
+	buf = append(buf, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":"...)
+	buf = strconv.AppendInt(buf, int64(index), 10)
+	buf = append(buf, "}\n\n"...)
+
+	out := make([]byte, len(buf))
+	copy(out, buf)
+	*bp = buf
+	return out
 }
 
 // BuildClaudeThinkingBlockStopEvent creates a content_block_stop SSE event for thinking blocks.
+// Identical wire format to BuildClaudeContentBlockStopEvent; the duplicate
+// helper is preserved so call sites keep their semantic naming.
 func BuildClaudeThinkingBlockStopEvent(index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_stop",
-		"index": index,
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_stop\ndata: " + string(result) + "\n\n")
+	return BuildClaudeContentBlockStopEvent(index)
 }
 
 // BuildClaudeMessageDeltaEvent creates the message_delta event with stop_reason and usage
@@ -181,17 +239,22 @@ func BuildClaudePingEventWithUsage(inputTokens, outputTokens int64) []byte {
 
 // BuildClaudeThinkingDeltaEvent creates a thinking_delta event for Claude API compatibility.
 // This is used when streaming thinking content wrapped in <thinking> tags.
+// Hot path — called per thinking chunk.
 func BuildClaudeThinkingDeltaEvent(thinkingDelta string, index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]interface{}{
-			"type":     "thinking_delta",
-			"thinking": thinkingDelta,
-		},
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_delta\ndata: " + string(result) + "\n\n")
+	bp := acquireSSEFrameBuf()
+	defer releaseSSEFrameBuf(bp)
+	buf := *bp
+
+	buf = append(buf, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"...)
+	buf = strconv.AppendInt(buf, int64(index), 10)
+	buf = append(buf, ",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":"...)
+	buf = appendJSONString(buf, thinkingDelta)
+	buf = append(buf, "}}\n\n"...)
+
+	out := make([]byte, len(buf))
+	copy(out, buf)
+	*bp = buf
+	return out
 }
 
 // PendingTagSuffix detects if the buffer ends with a partial prefix of the given tag.

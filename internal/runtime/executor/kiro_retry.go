@@ -7,15 +7,23 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-// doKiroRequestWithFallbackRetry is intentionally a pass-through for Kiro.
-// Kiro's generateAssistantResponse carries conversation state and is not
-// safe to replay as a generic whole-request retry: even a transient-looking
-// network/5xx error can correspond to an upstream attempt that already
-// consumed quota or advanced continuation state. The retry recovery we keep
-// is the explicit 401 path in Execute/ExecuteStream, which refreshes the
-// token and sends the request once with fresh credentials.
-//
-// The function name is retained to keep the surrounding executor flow stable.
+const kiroMonthlyRequestCountSameAuthRetries = 3
+
+// doKiroRequestWithFallbackRetry avoids generic Kiro request replay because
+// generateAssistantResponse carries conversation state. The only same-auth
+// replay allowed here is Kiro's explicit 402 MONTHLY_REQUEST_COUNT response,
+// which is rejected before generation state advances. After three same-auth
+// retries, the wrapped error tells the conductor to fail over to another auth.
 func (e *KiroExecutor) doKiroRequestWithFallbackRetry(ctx context.Context, auth *cliproxyauth.Auth, prepared *kiroPreparedRequest, accessToken string) (*http.Response, []byte, error) {
-	return e.doKiroRequestWithFallback(ctx, auth, prepared, accessToken)
+	var lastPayload []byte
+	for attempt := 0; ; attempt++ {
+		resp, payload, err := e.doKiroRequestWithFallback(ctx, auth, prepared, accessToken)
+		lastPayload = payload
+		if err == nil || !isKiroMonthlyRequestCount402Error(err) || attempt >= kiroMonthlyRequestCountSameAuthRetries {
+			return resp, payload, err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, lastPayload, ctxErr
+		}
+	}
 }

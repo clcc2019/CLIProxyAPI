@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
@@ -182,12 +185,26 @@ func runTUI(flags runtimeFlags, state startupState) error {
 }
 
 func startSupportServices(configFilePath string, localModel bool) {
-	managementasset.StartAutoUpdater(context.Background(), configFilePath)
-	misc.StartAntigravityVersionUpdater(context.Background())
+	// Tie background updaters to a SIGINT/SIGTERM-bound context so they exit
+	// promptly on shutdown. Previously each updater used context.Background()
+	// and could outlive the main service, leaking goroutines and (for the
+	// management asset auto-updater) keeping a polling http.Client alive past
+	// process drain in k8s rolling restarts.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	supportServicesShutdown.Store(&cancel)
+
+	managementasset.StartAutoUpdater(ctx, configFilePath)
+	misc.StartAntigravityVersionUpdater(ctx)
 	if !localModel {
-		registry.StartModelsUpdater(context.Background())
+		registry.StartModelsUpdater(ctx)
 	}
 }
+
+// supportServicesShutdown holds the cancel func for the support-services
+// context so test harnesses (or future graceful-shutdown wiring) can stop
+// background updaters explicitly. Stored as a pointer so swapping in a no-op
+// is race-free via atomic.Pointer.
+var supportServicesShutdown atomic.Pointer[context.CancelFunc]
 
 func runStandaloneTUI(state startupState, password string, localModel bool) error {
 	startSupportServices(state.configFilePath, localModel)

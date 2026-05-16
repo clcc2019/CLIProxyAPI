@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -544,5 +545,66 @@ func TestSnapshotSummaryOmitsDetailsButPreservesAggregates(t *testing.T) {
 	}
 	if model.Latency.Count != 2 || model.Latency.TotalMs != 2000 || model.Latency.MinMs != 800 || model.Latency.MaxMs != 1200 {
 		t.Fatalf("latency summary = %+v, want count=2 total=2000 min=800 max=1200", model.Latency)
+	}
+}
+
+// TestRequestStatisticsConcurrentRecordSnapshotIsRaceFree exercises the
+// atomic-counter contract under heavy concurrent Record/Snapshot to surface
+// any races introduced by moving the four global counters out of the lock.
+// Run with -race to catch regressions.
+func TestRequestStatisticsConcurrentRecordSnapshotIsRaceFree(t *testing.T) {
+	prevEnabled := StatisticsEnabled()
+	SetStatisticsEnabled(true)
+	t.Cleanup(func() { SetStatisticsEnabled(prevEnabled) })
+
+	stats := NewRequestStatistics()
+	const writers = 8
+	const writesPerWriter = 200
+	const readers = 4
+	const readsPerReader = 200
+
+	var wg sync.WaitGroup
+	wg.Add(writers + readers)
+
+	now := time.Now().UTC()
+	for w := 0; w < writers; w++ {
+		go func(idx int) {
+			defer wg.Done()
+			for i := 0; i < writesPerWriter; i++ {
+				stats.Record(context.Background(), coreusage.Record{
+					APIKey:      "k",
+					Model:       "m",
+					Source:      "src",
+					RequestedAt: now,
+					Latency:     time.Millisecond,
+					Detail: coreusage.Detail{
+						InputTokens:  1,
+						OutputTokens: 1,
+						TotalTokens:  2,
+					},
+				})
+			}
+		}(w)
+	}
+	for r := 0; r < readers; r++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < readsPerReader; i++ {
+				_ = stats.Snapshot()
+			}
+		}()
+	}
+	wg.Wait()
+
+	final := stats.Snapshot()
+	expected := int64(writers * writesPerWriter)
+	if final.TotalRequests != expected {
+		t.Fatalf("TotalRequests=%d, want %d", final.TotalRequests, expected)
+	}
+	if final.SuccessCount != expected {
+		t.Fatalf("SuccessCount=%d, want %d", final.SuccessCount, expected)
+	}
+	if final.TotalTokens != expected*2 {
+		t.Fatalf("TotalTokens=%d, want %d", final.TotalTokens, expected*2)
 	}
 }

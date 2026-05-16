@@ -7,6 +7,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	log "github.com/sirupsen/logrus"
+	// automaxprocs sets GOMAXPROCS from the container CPU quota at startup.
+	// In CPU-limited containers (k8s, ECS) Go would otherwise see all host
+	// CPUs and over-schedule goroutines, paying measurable GC and tail-latency
+	// cost. The blank import installs the init hook; no other code needed.
+	_ "go.uber.org/automaxprocs"
 )
 
 var (

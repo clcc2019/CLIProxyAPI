@@ -113,7 +113,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				if partResult.Get("thought").Bool() {
 					// Continue existing thinking block
 					if (*param).(*Params).ResponseType == 2 {
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partTextResult.String())
+						data := translatorcommon.ClaudeThinkingDeltaJSON((*param).(*Params).ResponseIndex, partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).HasContent = true
 					} else {
@@ -125,13 +125,13 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, (*param).(*Params).ResponseIndex)
 								// output = output + "\n\n\n"
 							}
-							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
+							appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON((*param).(*Params).ResponseIndex)))
 							(*param).(*Params).ResponseIndex++
 						}
 
 						// Start a new thinking content block
-						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, (*param).(*Params).ResponseIndex))
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partTextResult.String())
+						appendEvent("content_block_start", string(translatorcommon.ClaudeContentBlockStartThinkingJSON((*param).(*Params).ResponseIndex)))
+						data := translatorcommon.ClaudeThinkingDeltaJSON((*param).(*Params).ResponseIndex, partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).ResponseType = 2 // Set state to thinking
 						(*param).(*Params).HasContent = true
@@ -140,7 +140,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					// Process regular text content (user-visible output)
 					// Continue existing text block
 					if (*param).(*Params).ResponseType == 1 {
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex)), "delta.text", partTextResult.String())
+						data := translatorcommon.ClaudeTextDeltaJSON((*param).(*Params).ResponseIndex, partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).HasContent = true
 					} else {
@@ -152,13 +152,13 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, (*param).(*Params).ResponseIndex)
 								// output = output + "\n\n\n"
 							}
-							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
+							appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON((*param).(*Params).ResponseIndex)))
 							(*param).(*Params).ResponseIndex++
 						}
 
 						// Start a new text content block
-						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, (*param).(*Params).ResponseIndex))
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex)), "delta.text", partTextResult.String())
+						appendEvent("content_block_start", string(translatorcommon.ClaudeContentBlockStartTextJSON((*param).(*Params).ResponseIndex)))
+						data := translatorcommon.ClaudeTextDeltaJSON((*param).(*Params).ResponseIndex, partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).ResponseType = 1 // Set state to content
 						(*param).(*Params).HasContent = true
@@ -176,7 +176,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				// If we are already in tool use mode and name is empty, treat as continuation (delta).
 				if (*param).(*Params).ResponseType == 3 && upstreamToolName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+						data := translatorcommon.ClaudeInputJSONDeltaJSON((*param).(*Params).ResponseIndex, fcArgsResult.Raw)
 						appendEvent("content_block_delta", string(data))
 					}
 					// Continue to next part without closing/opening logic
@@ -186,7 +186,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				// Handle state transitions when switching to function calls
 				// Close any existing function call block first
 				if (*param).(*Params).ResponseType == 3 {
-					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
+					appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON((*param).(*Params).ResponseIndex)))
 					(*param).(*Params).ResponseIndex++
 					(*param).(*Params).ResponseType = 0
 				}
@@ -200,7 +200,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 				// Close any other existing content block
 				if (*param).(*Params).ResponseType != 0 {
-					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
+					appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON((*param).(*Params).ResponseIndex)))
 					(*param).(*Params).ResponseIndex++
 				}
 
@@ -213,7 +213,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				appendEvent("content_block_start", string(data))
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+					data = translatorcommon.ClaudeInputJSONDeltaJSON((*param).(*Params).ResponseIndex, fcArgsResult.Raw)
 					appendEvent("content_block_delta", string(data))
 				}
 				(*param).(*Params).ResponseType = 3
@@ -227,7 +227,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
 			// Only send final events if we have actually output content
 			if (*param).(*Params).HasContent {
-				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
+				appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON((*param).(*Params).ResponseIndex)))
 
 				template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 				if (*param).(*Params).SawToolCall {

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -53,27 +54,59 @@ func New(ctx context.Context, cfg config.RedisConfig) (*Store, error) {
 }
 
 func redisOptions(cfg config.RedisConfig) (*redis.Options, error) {
+	var opts *redis.Options
 	if rawURL := strings.TrimSpace(cfg.URL); rawURL != "" {
-		opts, err := redis.ParseURL(rawURL)
+		parsed, err := redis.ParseURL(rawURL)
 		if err != nil {
 			return nil, fmt.Errorf("parse redis url: %w", err)
 		}
-		return opts, nil
+		opts = parsed
+	} else {
+		addr := strings.TrimSpace(cfg.Addr)
+		if addr == "" {
+			addr = defaultAddr
+		}
+		db := cfg.DB
+		if db < 0 {
+			db = 0
+		}
+		opts = &redis.Options{
+			Addr:     addr,
+			Username: strings.TrimSpace(cfg.Username),
+			Password: cfg.Password,
+			DB:       db,
+		}
 	}
-	addr := strings.TrimSpace(cfg.Addr)
-	if addr == "" {
-		addr = defaultAddr
+
+	// Apply explicit pool / timeout settings on top of the parsed options so
+	// that operators can override library defaults regardless of which form
+	// (URL or addr) they used to configure Redis. Library defaults
+	// (PoolSize=10×GOMAXPROCS, ReadTimeout=3s, etc.) work poorly in
+	// CPU-quota'd containers; surface the knobs.
+	if cfg.PoolSize > 0 {
+		opts.PoolSize = cfg.PoolSize
 	}
-	db := cfg.DB
-	if db < 0 {
-		db = 0
+	if cfg.MinIdleConns > 0 {
+		opts.MinIdleConns = cfg.MinIdleConns
 	}
-	return &redis.Options{
-		Addr:     addr,
-		Username: strings.TrimSpace(cfg.Username),
-		Password: cfg.Password,
-		DB:       db,
-	}, nil
+	if cfg.DialTimeoutMs > 0 {
+		opts.DialTimeout = time.Duration(cfg.DialTimeoutMs) * time.Millisecond
+	}
+	if cfg.ReadTimeoutMs > 0 {
+		opts.ReadTimeout = time.Duration(cfg.ReadTimeoutMs) * time.Millisecond
+	}
+	if cfg.WriteTimeoutMs > 0 {
+		opts.WriteTimeout = time.Duration(cfg.WriteTimeoutMs) * time.Millisecond
+	}
+	if cfg.PoolTimeoutMs > 0 {
+		opts.PoolTimeout = time.Duration(cfg.PoolTimeoutMs) * time.Millisecond
+	}
+	if cfg.MaxRetries != 0 {
+		// MaxRetries=-1 disables retries in go-redis; preserve that semantic.
+		opts.MaxRetries = cfg.MaxRetries
+	}
+
+	return opts, nil
 }
 
 func (s *Store) Addr() string {

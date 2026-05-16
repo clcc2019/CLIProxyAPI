@@ -239,6 +239,37 @@ type RedisConfig struct {
 	Password  string `yaml:"password,omitempty" json:"password,omitempty"`
 	DB        int    `yaml:"db" json:"db"`
 	KeyPrefix string `yaml:"key-prefix" json:"key-prefix"`
+
+	// PoolSize caps how many connections may exist concurrently. 0 falls back
+	// to go-redis defaults (10 × runtime.GOMAXPROCS), which can be too small
+	// in CPU-quota'd containers and too large on big hosts. A reasonable
+	// production default is 32–128 depending on traffic.
+	PoolSize int `yaml:"pool-size,omitempty" json:"pool-size,omitempty"`
+
+	// MinIdleConns keeps a warm pool to avoid handshake spikes on bursts.
+	// 0 disables warming (default).
+	MinIdleConns int `yaml:"min-idle-conns,omitempty" json:"min-idle-conns,omitempty"`
+
+	// DialTimeoutMs caps the time to establish a new connection. 0 uses the
+	// go-redis default (5s).
+	DialTimeoutMs int `yaml:"dial-timeout-ms,omitempty" json:"dial-timeout-ms,omitempty"`
+
+	// ReadTimeoutMs caps how long a single Redis read may block before failing.
+	// 0 uses the go-redis default (3s). A stalled Redis read otherwise pins
+	// state-write goroutines indefinitely.
+	ReadTimeoutMs int `yaml:"read-timeout-ms,omitempty" json:"read-timeout-ms,omitempty"`
+
+	// WriteTimeoutMs caps how long a single Redis write may block. 0 uses
+	// the go-redis default (matches ReadTimeout).
+	WriteTimeoutMs int `yaml:"write-timeout-ms,omitempty" json:"write-timeout-ms,omitempty"`
+
+	// PoolTimeoutMs caps how long callers wait for a free connection from the
+	// pool. 0 uses the go-redis default (ReadTimeout + 1s).
+	PoolTimeoutMs int `yaml:"pool-timeout-ms,omitempty" json:"pool-timeout-ms,omitempty"`
+
+	// MaxRetries caps the number of in-client retries for transient errors.
+	// 0 uses the go-redis default (3); -1 disables retries.
+	MaxRetries int `yaml:"max-retries,omitempty" json:"max-retries,omitempty"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.

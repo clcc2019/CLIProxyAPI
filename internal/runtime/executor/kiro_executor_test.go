@@ -566,6 +566,7 @@ func TestKiroStreamToolUseEventFragmentsEmitToolUse(t *testing.T) {
 			[]byte(`{"stream":true}`),
 			[]byte(`{"conversationState":{}}`),
 			nil,
+			nil,
 		)
 	}()
 
@@ -1014,6 +1015,7 @@ func TestKiroWrapAuthScoped429(t *testing.T) {
 		wantScoped bool
 		wantStatus int
 	}{
+		{"402 monthly request count wrapped", statusErr{code: 402, msg: `{"message":"You have reached the limit.","reason":"MONTHLY_REQUEST_COUNT"}`}, true, 402},
 		{"429 quota wrapped", statusErr{code: 429, msg: "quota exceeded"}, true, 429},
 		{"429 usage limit wrapped", statusErr{code: 429, msg: `{"message":"AGENTIC_REQUEST usage limit reached"}`}, true, 429},
 		{"429 credits wrapped", statusErr{code: 429, msg: `{"message":"Kiro credits exhausted"}`}, true, 429},

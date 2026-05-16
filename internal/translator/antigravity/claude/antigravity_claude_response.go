@@ -176,15 +176,15 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						if partText := partTextResult.String(); partText != "" {
 							if params.ResponseType != 2 {
 								if params.ResponseType != 0 {
-									appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
+									appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON(params.ResponseIndex)))
 									params.ResponseIndex++
 								}
-								appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, params.ResponseIndex))
+								appendEvent("content_block_start", string(translatorcommon.ClaudeContentBlockStartThinkingJSON(params.ResponseIndex)))
 								params.ResponseType = 2
 								params.CurrentThinkingText.Reset()
 							}
 							params.CurrentThinkingText.WriteString(partText)
-							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex)), "delta.thinking", partText)
+							data := translatorcommon.ClaudeThinkingDeltaJSON(params.ResponseIndex, partText)
 							appendEvent("content_block_delta", string(data))
 						}
 
@@ -200,7 +200,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						params.HasContent = true
 					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
 						params.CurrentThinkingText.WriteString(partTextResult.String())
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex)), "delta.thinking", partTextResult.String())
+						data := translatorcommon.ClaudeThinkingDeltaJSON(params.ResponseIndex, partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						params.HasContent = true
 					} else {
@@ -212,13 +212,13 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
 								// output = output + "\n\n\n"
 							}
-							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
+							appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON(params.ResponseIndex)))
 							params.ResponseIndex++
 						}
 
 						// Start a new thinking content block
 						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, params.ResponseIndex))
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex)), "delta.thinking", partTextResult.String())
+						data := translatorcommon.ClaudeThinkingDeltaJSON(params.ResponseIndex, partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						params.ResponseType = 2 // Set state to thinking
 						params.HasContent = true
@@ -232,7 +232,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						// Process regular text content (user-visible output)
 						// Continue existing text block if already in content state
 						if params.ResponseType == 1 {
-							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partTextResult.String())
+							data := translatorcommon.ClaudeTextDeltaJSON(params.ResponseIndex, partTextResult.String())
 							appendEvent("content_block_delta", string(data))
 							params.HasContent = true
 						} else {
@@ -244,13 +244,13 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 									// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
 									// output = output + "\n\n\n"
 								}
-								appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
+								appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON(params.ResponseIndex)))
 								params.ResponseIndex++
 							}
 							if partTextResult.String() != "" {
 								// Start a new text content block
-								appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex))
-								data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partTextResult.String())
+								appendEvent("content_block_start", string(translatorcommon.ClaudeContentBlockStartTextJSON(params.ResponseIndex)))
+								data := translatorcommon.ClaudeTextDeltaJSON(params.ResponseIndex, partTextResult.String())
 								appendEvent("content_block_delta", string(data))
 								params.ResponseType = 1 // Set state to content
 								params.HasContent = true
@@ -267,7 +267,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				// Handle state transitions when switching to function calls
 				// Close any existing function call block first
 				if params.ResponseType == 3 {
-					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
+					appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON(params.ResponseIndex)))
 					params.ResponseIndex++
 					params.ResponseType = 0
 				}
@@ -281,7 +281,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 
 				// Close any other existing content block
 				if params.ResponseType != 0 {
-					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
+					appendEvent("content_block_stop", string(translatorcommon.ClaudeContentBlockStopJSON(params.ResponseIndex)))
 					params.ResponseIndex++
 				}
 
@@ -294,7 +294,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				appendEvent("content_block_start", string(data))
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+					data, _ = sjson.SetBytes(translatorcommon.ClaudeInputJSONDeltaJSON(params.ResponseIndex, ""), "delta.partial_json", fcArgsResult.Raw)
 					appendEvent("content_block_delta", string(data))
 				}
 				params.ResponseType = 3

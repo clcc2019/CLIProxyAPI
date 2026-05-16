@@ -5,11 +5,59 @@ package openai
 
 import (
 	"encoding/json"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
+
+// sseChunkBufPool reuses scratch buffers for the per-chunk OpenAI SSE
+// builders. Same trick as the Kiro Claude streaming path: a fresh
+// map[string]interface{} + reflection-based json.Marshal per chunk costs
+// ~10–20 allocations on the dominant text_delta path; the optimized form
+// drops to one alloc (the returned string).
+var sseChunkBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 256)
+		return &b
+	},
+}
+
+func acquireSSEChunkBuf() *[]byte {
+	bp := sseChunkBufPool.Get().(*[]byte)
+	*bp = (*bp)[:0]
+	return bp
+}
+
+func releaseSSEChunkBuf(bp *[]byte) {
+	if cap(*bp) > 64*1024 {
+		return
+	}
+	sseChunkBufPool.Put(bp)
+}
+
+// appendOpenAIJSONString writes s to dst as a JSON-quoted string. Defers to
+// encoding/json for correctness on edge cases (control chars, non-UTF-8) —
+// strconv.AppendQuote uses Go syntax which is not valid JSON.
+func appendOpenAIJSONString(dst []byte, s string) []byte {
+	encoded, _ := json.Marshal(s)
+	return append(dst, encoded...)
+}
+
+// appendChunkEnvelope writes the chunk header common to every per-chunk
+// builder up to (but not including) the choices array opener. Caller appends
+// `"choices":[...]` and the closing `}`.
+func appendChunkEnvelope(dst []byte, state *OpenAIStreamState) []byte {
+	dst = append(dst, "{\"id\":"...)
+	dst = appendOpenAIJSONString(dst, state.ResponseID)
+	dst = append(dst, ",\"object\":\"chat.completion.chunk\",\"created\":"...)
+	dst = strconv.AppendInt(dst, state.Created, 10)
+	dst = append(dst, ",\"model\":"...)
+	dst = appendOpenAIJSONString(dst, state.Model)
+	return dst
+}
 
 // OpenAIStreamState tracks the state of streaming response conversion
 type OpenAIStreamState struct {
@@ -41,22 +89,31 @@ func FormatSSEEvent(data []byte) string {
 	return string(data)
 }
 
-// BuildOpenAISSETextDelta creates an SSE event for text content delta
+// BuildOpenAISSETextDelta creates an SSE event for text content delta.
+// Hot path — called once per text chunk during streaming. Hand-built JSON +
+// pooled buffer; same optimization as the Kiro Claude streaming path.
 func BuildOpenAISSETextDelta(state *OpenAIStreamState, textDelta string) string {
-	delta := map[string]interface{}{
-		"content": textDelta,
-	}
+	bp := acquireSSEChunkBuf()
+	defer releaseSSEChunkBuf(bp)
+	buf := *bp
 
-	// Include role in first chunk
+	buf = appendChunkEnvelope(buf, state)
+	buf = append(buf, ",\"choices\":[{\"index\":0,\"delta\":{"...)
 	if !state.HasSentFirstChunk {
-		delta["role"] = "assistant"
+		buf = append(buf, "\"role\":\"assistant\",\"content\":"...)
+		buf = appendOpenAIJSONString(buf, textDelta)
 		state.HasSentFirstChunk = true
+	} else {
+		buf = append(buf, "\"content\":"...)
+		buf = appendOpenAIJSONString(buf, textDelta)
 	}
+	buf = append(buf, "},\"finish_reason\":null}]}"...)
 
-	chunk := buildBaseChunk(state, delta, nil)
-	result, _ := json.Marshal(chunk)
+	// One alloc here (the returned string copies the pooled buffer's content).
+	out := string(buf)
+	*bp = buf
 	state.ChunkIndex++
-	return FormatSSEEvent(result)
+	return out
 }
 
 // BuildOpenAISSEToolCallStart creates an SSE event for tool call start
@@ -106,12 +163,27 @@ func BuildOpenAISSEToolCallArgumentsDelta(state *OpenAIStreamState, argumentsDel
 	return FormatSSEEvent(result)
 }
 
-// BuildOpenAISSEFinish creates an SSE event with finish_reason
+// BuildOpenAISSEFinish creates an SSE event with finish_reason.
+// Called once per stream end. Optimized to share the same pooled-buffer path
+// as the per-chunk delta builders.
 func BuildOpenAISSEFinish(state *OpenAIStreamState, finishReason string) string {
-	chunk := buildBaseChunk(state, map[string]interface{}{}, &finishReason)
-	result, _ := json.Marshal(chunk)
+	bp := acquireSSEChunkBuf()
+	defer releaseSSEChunkBuf(bp)
+	buf := *bp
+
+	buf = appendChunkEnvelope(buf, state)
+	buf = append(buf, ",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":"...)
+	if finishReason != "" {
+		buf = appendOpenAIJSONString(buf, finishReason)
+	} else {
+		buf = append(buf, "null"...)
+	}
+	buf = append(buf, "}]}"...)
+
+	out := string(buf)
+	*bp = buf
 	state.ChunkIndex++
-	return FormatSSEEvent(result)
+	return out
 }
 
 // BuildOpenAISSEUsage creates an SSE event with usage information.
@@ -185,36 +257,47 @@ func buildBaseChunk(state *OpenAIStreamState, delta map[string]interface{}, fini
 }
 
 // BuildOpenAISSEReasoningDelta creates an SSE event for reasoning content delta
-// This is used for o1/o3 style models that expose reasoning tokens
+// This is used for o1/o3 style models that expose reasoning tokens.
+// Hot path on reasoning streams — same pooled-buffer optimization.
 func BuildOpenAISSEReasoningDelta(state *OpenAIStreamState, reasoningDelta string) string {
-	delta := map[string]interface{}{
-		"reasoning_content": reasoningDelta,
-	}
+	bp := acquireSSEChunkBuf()
+	defer releaseSSEChunkBuf(bp)
+	buf := *bp
 
-	// Include role in first chunk
+	buf = appendChunkEnvelope(buf, state)
+	buf = append(buf, ",\"choices\":[{\"index\":0,\"delta\":{"...)
 	if !state.HasSentFirstChunk {
-		delta["role"] = "assistant"
+		buf = append(buf, "\"role\":\"assistant\",\"reasoning_content\":"...)
+		buf = appendOpenAIJSONString(buf, reasoningDelta)
 		state.HasSentFirstChunk = true
+	} else {
+		buf = append(buf, "\"reasoning_content\":"...)
+		buf = appendOpenAIJSONString(buf, reasoningDelta)
 	}
+	buf = append(buf, "},\"finish_reason\":null}]}"...)
 
-	chunk := buildBaseChunk(state, delta, nil)
-	result, _ := json.Marshal(chunk)
+	out := string(buf)
+	*bp = buf
 	state.ChunkIndex++
-	return FormatSSEEvent(result)
+	return out
 }
 
-// BuildOpenAISSEFirstChunk creates the first chunk with role only
+// BuildOpenAISSEFirstChunk creates the first chunk with role only.
+// Called once per stream; optimized for consistency with the rest of the
+// pooled-buffer path.
 func BuildOpenAISSEFirstChunk(state *OpenAIStreamState) string {
-	delta := map[string]interface{}{
-		"role":    "assistant",
-		"content": "",
-	}
+	bp := acquireSSEChunkBuf()
+	defer releaseSSEChunkBuf(bp)
+	buf := *bp
+
+	buf = appendChunkEnvelope(buf, state)
+	buf = append(buf, ",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}"...)
 
 	state.HasSentFirstChunk = true
-	chunk := buildBaseChunk(state, delta, nil)
-	result, _ := json.Marshal(chunk)
+	out := string(buf)
+	*bp = buf
 	state.ChunkIndex++
-	return FormatSSEEvent(result)
+	return out
 }
 
 // ThinkingTagState tracks state for thinking tag detection in streaming

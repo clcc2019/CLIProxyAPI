@@ -11,11 +11,12 @@ import (
 )
 
 // ClientAPIKeyEntry describes one client-facing API key that can authenticate
-// requests sent to CLIProxyAPI. The key may optionally be restricted to a subset
-// of client-visible model IDs and usage quotas.
+// requests sent to CLIProxyAPI. The key may optionally be disabled or restricted
+// to a subset of client-visible model IDs and usage quotas.
 type ClientAPIKeyEntry struct {
 	APIKey         string            `yaml:"api-key" json:"api-key"`
 	Note           string            `yaml:"note,omitempty" json:"note,omitempty"`
+	Disabled       bool              `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	AllowedModels  []string          `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
 	ExcludedModels []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 	Quota          ClientAPIKeyQuota `yaml:"quota,omitempty" json:"quota,omitempty"`
@@ -135,7 +136,7 @@ func (keys ClientAPIKeys) MarshalYAML() (any, error) {
 		if entry.APIKey == "" {
 			continue
 		}
-		if entry.Note == "" && len(entry.AllowedModels) == 0 && len(entry.ExcludedModels) == 0 && !entry.Quota.HasLimits() {
+		if entry.Note == "" && !entry.Disabled && len(entry.AllowedModels) == 0 && len(entry.ExcludedModels) == 0 && !entry.Quota.HasLimits() {
 			out = append(out, entry.APIKey)
 			continue
 		}
@@ -144,6 +145,9 @@ func (keys ClientAPIKeys) MarshalYAML() (any, error) {
 		}
 		if entry.Note != "" {
 			item["note"] = entry.Note
+		}
+		if entry.Disabled {
+			item["disabled"] = true
 		}
 		if len(entry.AllowedModels) > 0 {
 			item["allowed-models"] = entry.AllowedModels
@@ -226,6 +230,7 @@ func (keys *ClientAPIKeys) UnmarshalJSON(data []byte) error {
 				entry.APIKey = strings.TrimSpace(fmt.Sprintf("%v", value))
 			}
 			entry.Note = extractClientAPIKeyNote(typed)
+			entry.Disabled = extractClientAPIKeyDisabled(typed)
 			entry.AllowedModels = extractClientAPIKeyModels(typed, "allowed-models", "allowedModels")
 			entry.ExcludedModels = extractClientAPIKeyModels(typed, "excluded-models", "excludedModels")
 			entry.Quota = extractClientAPIKeyQuota(typed)
@@ -236,6 +241,72 @@ func (keys *ClientAPIKeys) UnmarshalJSON(data []byte) error {
 	}
 	*keys = NormalizeClientAPIKeys(parsed)
 	return nil
+}
+
+func extractClientAPIKeyDisabled(record map[string]any) bool {
+	for _, name := range []string{"disabled", "disable", "isDisabled"} {
+		raw, ok := record[name]
+		if !ok {
+			continue
+		}
+		value, parsed := parseClientAPIKeyBool(raw)
+		return parsed && value
+	}
+	for _, name := range []string{"enabled", "enable", "isEnabled"} {
+		raw, ok := record[name]
+		if !ok {
+			continue
+		}
+		value, parsed := parseClientAPIKeyBool(raw)
+		return parsed && !value
+	}
+	return false
+}
+
+func parseClientAPIKeyBool(raw any) (bool, bool) {
+	switch typed := raw.(type) {
+	case bool:
+		return typed, true
+	case string:
+		normalized := strings.ToLower(strings.TrimSpace(typed))
+		switch normalized {
+		case "yes", "y", "on":
+			return true, true
+		case "no", "n", "off":
+			return false, true
+		}
+		parsed, err := strconv.ParseBool(normalized)
+		return parsed, err == nil
+	case int:
+		return typed != 0, true
+	case int8:
+		return typed != 0, true
+	case int16:
+		return typed != 0, true
+	case int32:
+		return typed != 0, true
+	case int64:
+		return typed != 0, true
+	case uint:
+		return typed != 0, true
+	case uint8:
+		return typed != 0, true
+	case uint16:
+		return typed != 0, true
+	case uint32:
+		return typed != 0, true
+	case uint64:
+		return typed != 0, true
+	case float32:
+		return typed != 0, true
+	case float64:
+		return typed != 0, true
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed != 0, err == nil
+	default:
+		return false, false
+	}
 }
 
 func extractClientAPIKeyModels(record map[string]any, names ...string) []string {
@@ -420,6 +491,7 @@ func NormalizeClientAPIKeys(entries ClientAPIKeys) ClientAPIKeys {
 			if current.Note == "" {
 				current.Note = entry.Note
 			}
+			current.Disabled = current.Disabled || entry.Disabled
 			current.AllowedModels = mergeModelPatternLists(current.AllowedModels, entry.AllowedModels)
 			current.ExcludedModels = mergeModelPatternLists(current.ExcludedModels, entry.ExcludedModels)
 			current.Quota = mergeClientAPIKeyQuota(current.Quota, entry.Quota)

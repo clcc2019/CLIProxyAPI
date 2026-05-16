@@ -16,13 +16,39 @@ import (
 )
 
 type staticAccessProvider struct {
-	result *sdkaccess.Result
+	result  *sdkaccess.Result
+	authErr *sdkaccess.AuthError
 }
 
 func (p staticAccessProvider) Identifier() string { return "static" }
 
 func (p staticAccessProvider) Authenticate(context.Context, *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+	if p.authErr != nil {
+		return nil, p.authErr
+	}
 	return p.result, nil
+}
+
+func TestAuthMiddlewareRejectsDisabledClientAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := sdkaccess.NewManager()
+	manager.SetProviders([]sdkaccess.Provider{staticAccessProvider{authErr: sdkaccess.NewDisabledCredentialError()}})
+
+	router := gin.New()
+	router.Use(AuthMiddleware(manager))
+	router.GET("/v1/models", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusTooManyRequests, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"error":"API key disabled"`) {
+		t.Fatalf("body = %q, want disabled error", resp.Body.String())
+	}
 }
 
 func TestAuthMiddlewareRejectsClientAPIKeyQuotaExceeded(t *testing.T) {

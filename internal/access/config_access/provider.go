@@ -93,6 +93,9 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			continue
 		}
 		if entry, ok := p.keys[candidate.value]; ok {
+			if entry.Disabled {
+				return nil, sdkaccess.NewDisabledCredentialError()
+			}
 			meta := map[string]string{
 				"source": candidate.source,
 			}

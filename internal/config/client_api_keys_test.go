@@ -18,6 +18,7 @@ api-keys:
   - " key-a "
   - api-key: "key-b"
     note: " Team B "
+    disabled: true
     allowed-models:
       - " GPT-5-* "
       - "gpt-5-*"
@@ -39,6 +40,7 @@ api-keys:
 		{
 			APIKey:         "key-b",
 			Note:           "Team B",
+			Disabled:       true,
 			AllowedModels:  []string{"gpt-5-*", "claude-*"},
 			ExcludedModels: []string{"*", "gpt-5-mini"},
 		},
@@ -54,6 +56,7 @@ func TestClientAPIKeysMarshalYAMLPreservesLegacyShape(t *testing.T) {
 		{
 			APIKey:         "key-b",
 			Note:           "Production",
+			Disabled:       true,
 			AllowedModels:  []string{"gpt-5-*"},
 			ExcludedModels: []string{"*-mini"},
 			Quota:          ClientAPIKeyQuota{DailyCost: 1.5, MonthlyCost: 30},
@@ -85,6 +88,9 @@ func TestClientAPIKeysMarshalYAMLPreservesLegacyShape(t *testing.T) {
 	if second["note"] != "Production" {
 		t.Fatalf("unexpected note: %#v", second["note"])
 	}
+	if second["disabled"] != true {
+		t.Fatalf("unexpected disabled: %#v", second["disabled"])
+	}
 	if !reflect.DeepEqual(second["allowed-models"], []string{"gpt-5-*"}) {
 		t.Fatalf("unexpected allowed-models: %#v", second["allowed-models"])
 	}
@@ -106,6 +112,7 @@ func TestClientAPIKeysUnmarshalJSONCompatibility(t *testing.T) {
 		{
 			"apiKey": "key-b",
 			"note": "Team B",
+			"disabled": true,
 			"allowedModels": ["GPT-5-*"],
 			"excluded-models": ["*-mini"]
 		}
@@ -118,10 +125,49 @@ func TestClientAPIKeysUnmarshalJSONCompatibility(t *testing.T) {
 
 	want := ClientAPIKeys{
 		{APIKey: "key-a"},
-		{APIKey: "key-b", Note: "Team B", AllowedModels: []string{"gpt-5-*"}, ExcludedModels: []string{"*-mini"}},
+		{APIKey: "key-b", Note: "Team B", Disabled: true, AllowedModels: []string{"gpt-5-*"}, ExcludedModels: []string{"*-mini"}},
 	}
 	if !reflect.DeepEqual(parsed, want) {
 		t.Fatalf("unexpected api keys: %#v", parsed)
+	}
+}
+
+func TestClientAPIKeysDisabledCompatibility(t *testing.T) {
+	type payload struct {
+		APIKeys ClientAPIKeys `yaml:"api-keys"`
+	}
+
+	input := `
+api-keys:
+  - api-key: "disabled-key"
+    disabled: true
+  - api-key: "enabled-key"
+    disabled: false
+`
+
+	var parsed payload
+	if err := yaml.Unmarshal([]byte(input), &parsed); err != nil {
+		t.Fatalf("yaml unmarshal failed: %v", err)
+	}
+
+	want := ClientAPIKeys{
+		{APIKey: "disabled-key", Disabled: true},
+		{APIKey: "enabled-key"},
+	}
+	if !reflect.DeepEqual(parsed.APIKeys, want) {
+		t.Fatalf("unexpected api keys: %#v", parsed.APIKeys)
+	}
+}
+
+func TestNormalizeClientAPIKeysMergesDisabled(t *testing.T) {
+	keys := NormalizeClientAPIKeys(ClientAPIKeys{
+		{APIKey: "merge-key"},
+		{APIKey: "merge-key", Disabled: true},
+	})
+
+	want := ClientAPIKeys{{APIKey: "merge-key", Disabled: true}}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("unexpected normalized keys: %#v", keys)
 	}
 }
 

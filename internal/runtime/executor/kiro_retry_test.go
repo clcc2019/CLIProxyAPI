@@ -18,6 +18,7 @@ var validKiroRetryTestPayload = []byte(`{"conversationState":{"conversationId":"
 func TestPermanentAuthErrorSatisfiesInterfaces(t *testing.T) {
 	var _ cliproxyauth.PermanentAuthError = (*kiroRefreshPermanentError)(nil)
 	var _ cliproxyauth.AuthScopedFailure = (*kiroAuthScopedQuotaError)(nil)
+	var _ cliproxyauth.CredentialFailoverFailure = (*kiroAuthScopedQuotaError)(nil)
 }
 
 func TestDoKiroRequestWithFallbackRetry_DoesNotReplayTransientFailure(t *testing.T) {
@@ -72,6 +73,40 @@ func TestDoKiroRequestWithFallbackRetry_DoesNotAuthScopeThrottling429(t *testing
 	}
 	if calls != 1 {
 		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+
+func TestDoKiroRequestWithFallbackRetry_RetriesMonthlyRequestCountThenFailover(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"message":"You have reached the limit.","reason":"MONTHLY_REQUEST_COUNT"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	exec := NewKiroExecutor(nil)
+	prepared := &kiroPreparedRequest{
+		firstPayload: validKiroRetryTestPayload,
+		endpoints: []kiroEndpointConfig{
+			{URL: server.URL, Origin: "AI_EDITOR", Name: "only"},
+		},
+	}
+
+	_, _, err := exec.doKiroRequestWithFallbackRetry(context.Background(), &cliproxyauth.Auth{ID: "monthly-limit-test"}, prepared, "token")
+	if err == nil {
+		t.Fatal("expected 402 error, got nil")
+	}
+	if calls != kiroMonthlyRequestCountSameAuthRetries+1 {
+		t.Fatalf("calls = %d, want %d", calls, kiroMonthlyRequestCountSameAuthRetries+1)
+	}
+	var scoped cliproxyauth.AuthScopedFailure
+	if !errors.As(err, &scoped) || !scoped.IsAuthScopedFailure() {
+		t.Fatalf("expected auth-scoped monthly limit error, got %T: %v", err, err)
+	}
+	var failover cliproxyauth.CredentialFailoverFailure
+	if !errors.As(err, &failover) || !failover.IsCredentialFailoverFailure() {
+		t.Fatalf("expected credential failover error, got %T: %v", err, err)
 	}
 }
 

@@ -42,13 +42,14 @@ type kiroStreamState struct {
 	ctx context.Context
 
 	// Wiring supplied by the executor.
-	executor     *KiroExecutor
-	out          chan<- cliproxyexecutor.StreamChunk
-	targetFormat sdktranslator.Format
-	model        string
-	originalReq  []byte
-	kiroReq      []byte
-	reporter     *helps.UsageReporter
+	executor        *KiroExecutor
+	out             chan<- cliproxyexecutor.StreamChunk
+	targetFormat    sdktranslator.Format
+	model           string
+	originalReq     []byte
+	kiroReq         []byte
+	reporter        *helps.UsageReporter
+	promptCachePlan *kiroPromptCachePlan
 
 	// Translator param carried across chunks (stateful translator SDK).
 	translatorParam any
@@ -266,14 +267,17 @@ func (s *kiroStreamState) flushTrailingToolUse() {
 	}
 }
 
-// handleReadError is the bail-out path for a frame-reader error. Records the
-// error for log persistence, notifies the usage reporter of a failure, and
-// forwards the error to the client via the StreamChunk channel. Uses the
-// ctx-aware sender so we don't deadlock when the client has disconnected
-// (which is often exactly why the read failed in the first place).
+// handleReadError is the bail-out path for a frame-reader error. It records
+// ordinary errors for log persistence, notifies the usage reporter of a
+// failure, and forwards the error to the client via the StreamChunk channel.
+// Uses the ctx-aware sender so we don't deadlock when the client has
+// disconnected (which is often exactly why the read failed in the first place).
 func (s *kiroStreamState) handleReadError(err error) {
-	helps.RecordAPIResponseError(s.ctx, s.executor.cfg, err)
-	if s.reporter != nil {
+	transientCapacity := isKiroTransientModelCapacity429Error(err)
+	if !transientCapacity {
+		helps.RecordAPIResponseError(s.ctx, s.executor.cfg, err)
+	}
+	if s.reporter != nil && !transientCapacity {
 		s.reporter.PublishFailureWithError(s.ctx, err)
 	}
 	s.streamFailed = true
@@ -283,9 +287,12 @@ func (s *kiroStreamState) handleReadError(err error) {
 // handleParseError mirrors handleReadError but for per-event parse errors
 // returned inside the parsedKiroEvent. Same semantics, same ctx-aware send.
 func (s *kiroStreamState) handleParseError(err error) {
-	helps.RecordAPIResponseError(s.ctx, s.executor.cfg, err)
-	log.Warnf("kiro: upstream event stream failed: %v", err)
-	if s.reporter != nil {
+	transientCapacity := isKiroTransientModelCapacity429Error(err)
+	if !transientCapacity {
+		helps.RecordAPIResponseError(s.ctx, s.executor.cfg, err)
+		log.Warnf("kiro: upstream event stream failed: %v", err)
+	}
+	if s.reporter != nil && !transientCapacity {
 		s.reporter.PublishFailureWithError(s.ctx, err)
 	}
 	s.streamFailed = true
@@ -317,6 +324,10 @@ func (s *kiroStreamState) finalize() {
 		}
 	}
 	s.estimateMissingUsage()
+	if applyKiroPromptCachePlan(&s.totalUsage, s.promptCachePlan) {
+		log.WithFields(kiroPromptCacheUsageLogKV(s.totalUsage, s.promptCachePlan)).Debug("kiro: usage augmented from prompt cache tracker (stream)")
+	}
+	markKiroPromptCachePlanSuccess(s.promptCachePlan)
 	s.emit(kiroclaude.BuildClaudeMessageDeltaEvent(s.stopReason, s.totalUsage))
 	s.emit(kiroclaude.BuildClaudeMessageStopOnlyEvent())
 	if s.reporter != nil {

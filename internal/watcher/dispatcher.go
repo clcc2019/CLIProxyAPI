@@ -221,10 +221,20 @@ func (w *Watcher) getAuthQueue() chan<- AuthUpdate {
 }
 
 func (w *Watcher) stopDispatch() {
-	if w.dispatchCancel != nil {
-		w.dispatchCancel()
-		w.dispatchCancel = nil
+	// Acquire locks in the same order as setAuthUpdateQueue/dispatchAuthUpdates
+	// (clientsMutex → dispatchMu) to avoid a circular wait if Stop and a reload
+	// race. Cancel + clear authQueue under clientsMutex; clear pending state
+	// under dispatchMu afterwards.
+	w.clientsMutex.Lock()
+	cancel := w.dispatchCancel
+	w.dispatchCancel = nil
+	w.authQueue = nil
+	w.clientsMutex.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
+
 	w.dispatchMu.Lock()
 	w.pendingOrder = nil
 	w.pendingUpdates = nil
@@ -232,9 +242,6 @@ func (w *Watcher) stopDispatch() {
 		w.dispatchCond.Broadcast()
 	}
 	w.dispatchMu.Unlock()
-	w.clientsMutex.Lock()
-	w.authQueue = nil
-	w.clientsMutex.Unlock()
 }
 
 func authEqual(a, b *coreauth.Auth) bool {

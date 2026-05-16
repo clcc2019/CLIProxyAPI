@@ -85,10 +85,15 @@ func DetailRetentionLimit() int {
 type RequestStatistics struct {
 	mu sync.RWMutex
 
-	totalRequests int64
-	successCount  int64
-	failureCount  int64
-	totalTokens   int64
+	// The four global counters are atomic so the snapshot path can read
+	// them without holding the lock. Writes still happen inside the lock
+	// so they're consistent with the corresponding map mutations, but
+	// concurrent readers (admin dashboards, persistence flushes) no
+	// longer block on per-counter reads.
+	totalRequests atomic.Int64
+	successCount  atomic.Int64
+	failureCount  atomic.Int64
+	totalTokens   atomic.Int64
 
 	apis map[string]*apiStats
 
@@ -248,13 +253,13 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.totalRequests++
+	s.totalRequests.Add(1)
 	if success {
-		s.successCount++
+		s.successCount.Add(1)
 	} else {
-		s.failureCount++
+		s.failureCount.Add(1)
 	}
-	s.totalTokens += totalTokens
+	s.totalTokens.Add(totalTokens)
 
 	stats, ok := s.apis[statsKey]
 	if !ok {
@@ -464,10 +469,10 @@ func (s *RequestStatistics) snapshotWithDetailsLocked(includeDetails bool) Stati
 		return result
 	}
 
-	result.TotalRequests = s.totalRequests
-	result.SuccessCount = s.successCount
-	result.FailureCount = s.failureCount
-	result.TotalTokens = s.totalTokens
+	result.TotalRequests = s.totalRequests.Load()
+	result.SuccessCount = s.successCount.Load()
+	result.FailureCount = s.failureCount.Load()
+	result.TotalTokens = s.totalTokens.Load()
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
 	for apiName, stats := range s.apis {
@@ -824,13 +829,13 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 		totalTokens = 0
 	}
 
-	s.totalRequests++
+	s.totalRequests.Add(1)
 	if detail.Failed {
-		s.failureCount++
+		s.failureCount.Add(1)
 	} else {
-		s.successCount++
+		s.successCount.Add(1)
 	}
-	s.totalTokens += totalTokens
+	s.totalTokens.Add(totalTokens)
 
 	s.updateAPIStats(stats, modelName, detail)
 	s.appendAggregateRecord(apiName, modelName, detail)

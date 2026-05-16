@@ -48,6 +48,7 @@ type CodexAuthInfo struct {
 	ChatgptUserID                  string          `json:"chatgpt_user_id"`
 	Groups                         []any           `json:"groups"`
 	Organizations                  []Organizations `json:"organizations"`
+	POID                           string          `json:"poid"`
 	UserID                         string          `json:"user_id"`
 }
 

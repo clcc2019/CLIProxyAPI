@@ -23,6 +23,10 @@ services:
       - "11451:11451"
     volumes:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
-      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
+      # Container now runs as the non-root cliproxy user (uid 10001) whose
+      # HOME is /CLIProxyAPI, so ~/.cli-proxy-api resolves there.
+      # Old layouts that bind to /root/.cli-proxy-api still work as long as the
+      # config sets `auth-dir` explicitly to that path.
+      - ${CLI_PROXY_AUTH_PATH:-./auths}:/CLIProxyAPI/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
     restart: unless-stopped

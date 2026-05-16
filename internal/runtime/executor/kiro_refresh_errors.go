@@ -177,13 +177,12 @@ func classifyKiroOAuthError(statusCode int, body []byte) error {
 	return nil
 }
 
-// kiroAuthScopedQuotaError wraps a 429 from Kiro's CodeWhisperer /
-// generateAssistantResponse endpoint to signal that the underlying
-// AGENTIC_REQUEST bucket is shared across every model on this auth. The
-// conductor treats the failure as auth-wide rather than model-specific,
-// which in turn lets session-affinity slide off the depleted credential
-// onto the next available one instead of scattering requests across
-// multiple auths by model.
+// kiroAuthScopedQuotaError wraps Kiro limit responses from the CodeWhisperer /
+// generateAssistantResponse endpoint to signal that the underlying quota is
+// shared across every model on this auth. The conductor treats the failure as
+// auth-wide rather than model-specific, which in turn lets session-affinity
+// slide off the depleted credential onto the next available one instead of
+// scattering requests across multiple auths by model.
 type kiroAuthScopedQuotaError struct {
 	inner statusErr
 }
@@ -192,6 +191,9 @@ func (e *kiroAuthScopedQuotaError) Error() string             { return e.inner.E
 func (e *kiroAuthScopedQuotaError) StatusCode() int           { return e.inner.StatusCode() }
 func (e *kiroAuthScopedQuotaError) Unwrap() error             { return e.inner }
 func (e *kiroAuthScopedQuotaError) IsAuthScopedFailure() bool { return true }
+func (e *kiroAuthScopedQuotaError) IsCredentialFailoverFailure() bool {
+	return isKiroMonthlyRequestCount402StatusErr(e.inner)
+}
 
 // RetryAfter is forwarded so the conductor's retry-hint parsing picks up
 // any Retry-After header that doKiroRequest attached to the underlying
@@ -200,11 +202,11 @@ func (e *kiroAuthScopedQuotaError) IsAuthScopedFailure() bool { return true }
 // and future-proofs the wrapping should one be added.
 func (e *kiroAuthScopedQuotaError) RetryAfter() *time.Duration { return e.inner.retryAfter }
 
-// wrapKiroAuthScoped upgrades a status error to signal an auth-scoped
-// failure when appropriate. Kiro can return 429 for both true plan quota
-// exhaustion and short lived throttling. Only the former should suspend the
-// whole auth; throttling should remain a normal statusErr so the conductor
-// applies model/request cooldown without blacking out every model on this auth.
+// wrapKiroAuthScoped upgrades a status error to signal an auth-scoped failure
+// when appropriate. Kiro can return 429 for both true plan quota exhaustion and
+// short-lived throttling. Only true limit responses should suspend the whole
+// auth; throttling should remain a normal statusErr so the conductor applies
+// request-level handling without blacking out every model on this auth.
 func wrapKiroAuthScoped(err error) error {
 	if err == nil {
 		return nil
@@ -213,13 +215,45 @@ func wrapKiroAuthScoped(err error) error {
 	if !errors.As(err, &se) {
 		return err
 	}
-	if se.code != 429 {
+	if isKiroMonthlyRequestCount402StatusErr(se) {
+		return &kiroAuthScopedQuotaError{inner: se}
+	}
+	if se.code != http.StatusTooManyRequests {
 		return err
 	}
 	if !isKiroQuotaExhausted429Message(se.msg) {
 		return err
 	}
 	return &kiroAuthScopedQuotaError{inner: se}
+}
+
+func isKiroMonthlyRequestCount402Error(err error) bool {
+	if err == nil {
+		return false
+	}
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var sc statusCoder
+	if !errors.As(err, &sc) || sc == nil || sc.StatusCode() != http.StatusPaymentRequired {
+		return false
+	}
+	return isKiroMonthlyRequestCount402Message(err.Error())
+}
+
+func isKiroMonthlyRequestCount402StatusErr(se statusErr) bool {
+	return se.code == http.StatusPaymentRequired && isKiroMonthlyRequestCount402Message(se.msg)
+}
+
+func isKiroMonthlyRequestCount402Message(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "monthly_request_count") {
+		return true
+	}
+	return strings.Contains(lower, "monthly") && strings.Contains(lower, "request") && strings.Contains(lower, "limit")
 }
 
 func isKiroQuotaExhausted429Message(message string) bool {

@@ -116,6 +116,72 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
+func TestReadyz(t *testing.T) {
+	server := newTestServer(t)
+
+	t.Run("not_ready_by_default", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("got %d, want 503; body=%s", rr.Code, rr.Body.String())
+		}
+		var resp struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("parse JSON: %v; body=%s", err, rr.Body.String())
+		}
+		if resp.Status != "not_ready" {
+			t.Fatalf("status=%q, want not_ready", resp.Status)
+		}
+	})
+
+	t.Run("ready_after_set", func(t *testing.T) {
+		server.SetReady(true)
+		t.Cleanup(func() { server.SetReady(false) })
+
+		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("got %d, want 200; body=%s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("HEAD_reflects_state", func(t *testing.T) {
+		// Not ready: HEAD returns 503.
+		req := httptest.NewRequest(http.MethodHead, "/readyz", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("HEAD not_ready got %d, want 503", rr.Code)
+		}
+
+		// Ready: HEAD returns 200.
+		server.SetReady(true)
+		t.Cleanup(func() { server.SetReady(false) })
+		req = httptest.NewRequest(http.MethodHead, "/readyz", nil)
+		rr = httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("HEAD ready got %d, want 200", rr.Code)
+		}
+	})
+
+	t.Run("healthz_unaffected_by_readyz", func(t *testing.T) {
+		// /healthz is liveness; it must keep returning 200 regardless of
+		// readiness state so orchestrators don't restart a still-bootstrapping
+		// pod or one that has flipped ready=false during graceful shutdown.
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("/healthz got %d while not ready, want 200", rr.Code)
+		}
+	})
+}
+
 func TestNewServer_ConfiguresInboundHTTPServerLimits(t *testing.T) {
 	server := newTestServer(t)
 
@@ -124,6 +190,9 @@ func TestNewServer_ConfiguresInboundHTTPServerLimits(t *testing.T) {
 	}
 	if server.server.ReadHeaderTimeout != inboundReadHeaderTimeout {
 		t.Fatalf("unexpected ReadHeaderTimeout: got %s want %s", server.server.ReadHeaderTimeout, inboundReadHeaderTimeout)
+	}
+	if server.server.ReadTimeout != inboundReadTimeout {
+		t.Fatalf("unexpected ReadTimeout: got %s want %s", server.server.ReadTimeout, inboundReadTimeout)
 	}
 	if server.server.IdleTimeout != inboundIdleTimeout {
 		t.Fatalf("unexpected IdleTimeout: got %s want %s", server.server.IdleTimeout, inboundIdleTimeout)

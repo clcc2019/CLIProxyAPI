@@ -1151,6 +1151,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			applyResultError(&result, errStream)
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
+			clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errStream)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
@@ -1676,6 +1677,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errExec)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -1755,6 +1757,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errExec)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -2063,6 +2066,19 @@ func publishSelectedAuthMetadata(meta map[string]any, authID string) {
 	if callback, ok := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {
 		callback(authID)
 	}
+}
+
+func clearSelectedAuthMetadataForCredentialFailover(provider string, meta map[string]any, authID string, err error) {
+	if len(meta) == 0 || !isCredentialFailoverFailure(err) {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(provider), "kiro") {
+		return
+	}
+	if selectedAuthIDFromMetadata(meta) != strings.TrimSpace(authID) {
+		return
+	}
+	delete(meta, cliproxyexecutor.SelectedAuthMetadataKey)
 }
 
 func rewriteModelForAuth(model string, auth *Auth) string {
@@ -2503,6 +2519,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	if shouldSkipFailureResultRecord(result) {
+		return
+	}
 	if m.markCleanModelSuccessResult(ctx, result) {
 		return
 	}
@@ -2721,6 +2740,39 @@ func (m *Manager) markCleanModelSuccessResult(ctx context.Context, result Result
 	m.enqueuePersistAuthID(ctx, persistAuthID)
 	m.hook.OnResult(ctx, result)
 	return true
+}
+
+func shouldSkipFailureResultRecord(result Result) bool {
+	if result.Success || result.Error == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(result.Provider), "kiro") {
+		return false
+	}
+	return isKiroTransientModelCapacityResultError(result.Error)
+}
+
+func isKiroTransientModelCapacityResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusTooManyRequests {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"insufficient_model_capacity",
+		"insufficient model capacity",
+		"experiencing high traffic",
+		"high traffic",
+		"please try again shortly",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func lookupModelState(auth *Auth, model string) *ModelState {

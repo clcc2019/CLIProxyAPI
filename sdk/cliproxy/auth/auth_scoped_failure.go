@@ -32,3 +32,22 @@ func isAuthScopedFailure(err error) bool {
 	}
 	return false
 }
+
+// CredentialFailoverFailure marks an executor error that should abandon the
+// currently selected credential for this request and try the next available
+// credential after executor-local retries have been exhausted.
+type CredentialFailoverFailure interface {
+	error
+	IsCredentialFailoverFailure() bool
+}
+
+func isCredentialFailoverFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var f CredentialFailoverFailure
+	if errors.As(err, &f) && f != nil {
+		return f.IsCredentialFailoverFailure()
+	}
+	return false
+}

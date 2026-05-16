@@ -57,6 +57,23 @@ type SDKConfig struct {
 	// ImageStreamKeepAliveSeconds controls how often image SSE streams emit ":" heartbeats while idle.
 	// <= 0 disables image stream keep-alives. Value is in seconds.
 	ImageStreamKeepAliveSeconds int `yaml:"image-stream-keepalive-seconds,omitempty" json:"image-stream-keepalive-seconds,omitempty"`
+
+	// Limits configures server-side resource limits and backpressure.
+	Limits LimitsConfig `yaml:"limits,omitempty" json:"limits,omitempty"`
+}
+
+// LimitsConfig configures server-side resource limits.
+type LimitsConfig struct {
+	// MaxInFlightRequests caps how many requests the proxy will serve concurrently.
+	// 0 (default) disables the limiter, preserving legacy behavior. When set,
+	// excess requests fail fast with HTTP 503 + Retry-After rather than
+	// queuing inside the proxy. A reasonable production value is 256–1024
+	// depending on upstream concurrency budget and available memory.
+	MaxInFlightRequests int `yaml:"max-in-flight-requests,omitempty" json:"max-in-flight-requests,omitempty"`
+
+	// RetryAfterSeconds is the value advertised in the Retry-After header on a
+	// 503 from the concurrency limiter. 0 disables the header.
+	RetryAfterSeconds int `yaml:"retry-after-seconds,omitempty" json:"retry-after-seconds,omitempty"`
 }
 
 // OAuthRefreshConfig controls background refresh scheduling for OAuth/file-backed auths.

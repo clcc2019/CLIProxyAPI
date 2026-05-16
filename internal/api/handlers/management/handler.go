@@ -52,6 +52,13 @@ type Handler struct {
 	// and collapses concurrent dashboard polls into a single upstream call.
 	// Lazily allocated under h.mu by kiroUsageHandlerCache.
 	kiroUsageCache *kiroUsageCache
+
+	// cleanupStop terminates the background attempt-cleanup goroutine on
+	// Close(). Without this, the goroutine and its ticker leak for the
+	// lifetime of the process even after the handler is replaced (e.g. in
+	// tests or future hot-reload paths).
+	cleanupStop chan struct{}
+	cleanupOnce sync.Once
 }
 
 // NewHandler creates a new management handler instance.
@@ -68,9 +75,24 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		cleanupStop:         make(chan struct{}),
 	}
 	h.startAttemptCleanup()
 	return h
+}
+
+// Close stops background goroutines owned by the handler. Safe to call
+// multiple times. Currently used by tests; production wiring may invoke it
+// from a future graceful-shutdown path.
+func (h *Handler) Close() {
+	if h == nil {
+		return
+	}
+	h.cleanupOnce.Do(func() {
+		if h.cleanupStop != nil {
+			close(h.cleanupStop)
+		}
+	})
 }
 
 // startAttemptCleanup launches a background goroutine that periodically
@@ -79,8 +101,13 @@ func (h *Handler) startAttemptCleanup() {
 	go func() {
 		ticker := time.NewTicker(attemptCleanupInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			h.purgeStaleAttempts()
+		for {
+			select {
+			case <-ticker.C:
+				h.purgeStaleAttempts()
+			case <-h.cleanupStop:
+				return
+			}
 		}
 	}()
 }

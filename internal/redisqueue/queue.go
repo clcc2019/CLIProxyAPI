@@ -83,13 +83,19 @@ func (q *queue) clear() {
 func (q *queue) enqueue(payload []byte) {
 	now := time.Now()
 
+	// Clone the payload before taking the mutex. The caller's buffer may be
+	// pooled or mutated after enqueue returns, so we need our own copy — but
+	// the allocation itself doesn't need the lock and was a measurable
+	// contention point on every persisted request.
+	cloned := append([]byte(nil), payload...)
+
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	q.pruneLocked(now)
 	q.items = append(q.items, queueItem{
 		enqueuedAt: now,
-		payload:    append([]byte(nil), payload...),
+		payload:    cloned,
 	})
 	q.maybeCompactLocked()
 }

@@ -73,6 +73,7 @@ auth-dir: "~/.cli-proxy-api"
 # api-keys:
 #   - "sk-client-unlimited"
 #   - api-key: "sk-client-limited"
+#     disabled: false
 #     allowed-models: ["gpt-*", "claude-*"]
 #     excluded-models: ["gpt-image-*"]
 #     quota:
@@ -125,6 +126,16 @@ redis:
   password: ""
   db: 0
   key-prefix: "cliproxyapi"
+  # Connection pool tuning. Defaults preserve go-redis behavior, which scales
+  # with runtime.GOMAXPROCS — too small in CPU-quota'd containers, too large
+  # on big hosts. Tune explicitly for production:
+  # pool-size: 64           # Default: 10 × GOMAXPROCS.
+  # min-idle-conns: 8       # Default: 0. Keeps a warm pool to avoid handshake spikes.
+  # dial-timeout-ms: 5000   # Default: 5000.
+  # read-timeout-ms: 3000   # Default: 3000. Caps blocking reads from a stalled Redis.
+  # write-timeout-ms: 3000  # Default: matches read-timeout.
+  # pool-timeout-ms: 4000   # Default: read-timeout + 1s. Caps wait for a free conn.
+  # max-retries: 3          # Default: 3. Set -1 to disable in-client retries.
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
@@ -205,6 +216,14 @@ image-stream-data-interval-timeout-seconds: 0
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
 #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+
+# Server-side resource limits and backpressure. Defaults preserve legacy
+# unlimited behavior. Set max-in-flight-requests in production to prevent a
+# single bad upstream or noisy tenant from exhausting goroutines / file
+# descriptors. Excess requests fail fast with HTTP 503 + Retry-After.
+# limits:
+#   max-in-flight-requests: 0   # Default: 0 (disabled). Try 256–1024 in prod.
+#   retry-after-seconds: 5      # Advertised on 503 responses; 0 omits the header.
 
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.

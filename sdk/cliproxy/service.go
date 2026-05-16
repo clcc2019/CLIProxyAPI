@@ -544,9 +544,13 @@ func (s *Service) Run(ctx context.Context) error {
 
 	usage.StartDefault(ctx)
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
+	// Build the shutdown context lazily so the 30s budget starts when shutdown
+	// actually runs, not when Run() begins. Using a context created up-front
+	// makes the deadline expire long before SIGTERM arrives, which would cause
+	// Shutdown() to abort in-flight requests immediately.
 	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			log.Errorf("service shutdown returned error: %v", err)
 		}
@@ -672,6 +676,12 @@ func (s *Service) Run(ctx context.Context) error {
 	time.Sleep(100 * time.Millisecond)
 	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
 
+	// Bootstrap is complete: auth manager loaded, executors rebound, server
+	// goroutine launched. Mark the proxy ready so /readyz starts returning 200.
+	// /healthz has been answering 200 since the listener bound, so liveness
+	// probes were never blocked by the auth load.
+	s.server.SetReady(true)
+
 	s.applyPprofConfig(s.cfg)
 
 	if s.hooks.OnAfterStart != nil {
@@ -778,6 +788,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() {
 		if ctx == nil {
 			ctx = context.Background()
+		}
+
+		// Flip readiness off first so orchestrators stop routing new traffic
+		// before any draining begins. /healthz keeps reporting OK while in-
+		// flight requests drain.
+		if s.server != nil {
+			s.server.SetReady(false)
 		}
 
 		// legacy refresh loop removed; only stopping core auth manager below

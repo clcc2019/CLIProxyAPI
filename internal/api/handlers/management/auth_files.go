@@ -51,7 +51,22 @@ const (
 	geminiCLIEndpoint      = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion       = "v1internal"
 	maxAuthFileUploadBytes = 2 << 20
+	codexAccountsCheckURL  = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
 )
+
+type codexSubscriptionCacheEntry struct {
+	info      codexAccountSubscriptionInfo
+	found     bool
+	expiresAt time.Time
+}
+
+type codexAccountSubscriptionInfo struct {
+	PlanType              string
+	Email                 string
+	SubscriptionExpiresAt string
+}
+
+var codexSubscriptionCache sync.Map
 
 type callbackForwarder struct {
 	provider string
@@ -357,6 +372,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	auths := h.authManager.List()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
+		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth)
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
 			files = append(files, entry)
 		}
@@ -447,6 +463,25 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				if err := json.Unmarshal(data, &metadata); err == nil {
 					if state, ok := authFileRuntimeState(metadata); ok {
 						applyAuthFileRuntimeStateEntry(fileData, state, true)
+					}
+					if strings.EqualFold(strings.TrimSpace(typeValue), "codex") {
+						auth := h.enrichCodexSubscriptionInfo(c.Request.Context(), &coreauth.Auth{
+							ID:       name,
+							Provider: typeValue,
+							FileName: name,
+							Metadata: metadata,
+							Attributes: map[string]string{
+								"path": full,
+							},
+						})
+						metadata = auth.Metadata
+						if until, ok := codexSubscriptionUntilValue(metadata); ok {
+							fileData["subscription_expires_at"] = until
+						}
+						if claims := extractCodexIDTokenClaims(auth); claims != nil {
+							fileData["id_token"] = claims
+							applyCodexSubscriptionFromClaims(fileData, claims)
+						}
 					}
 				}
 				if prefix := strings.TrimSpace(gjson.GetBytes(data, "prefix").String()); prefix != "" {
@@ -586,8 +621,12 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			log.WithError(err).Warnf("failed to stat auth file %s", path)
 		}
 	}
+	if until, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
+		entry["subscription_expires_at"] = until
+	}
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
+		applyCodexSubscriptionFromClaims(entry, claims)
 	}
 	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
 		entry["prefix"] = prefix
@@ -669,6 +708,446 @@ func boolFromGJSON(data []byte, keys ...string) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func codexSubscriptionUntilValue(metadata map[string]any) (any, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	for _, key := range []string{
+		"subscription_expires_at",
+		"subscriptionExpiresAt",
+		"chatgpt_subscription_active_until",
+		"chatgptSubscriptionActiveUntil",
+	} {
+		if value, ok := metadata[key]; ok {
+			if normalized, okNormalize := normalizeCodexSubscriptionUntilValue(value); okNormalize {
+				return normalized, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func normalizeCodexSubscriptionUntilValue(value any) (any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	switch v := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return nil, false
+		}
+		return trimmed, true
+	case json.Number:
+		trimmed := strings.TrimSpace(v.String())
+		if trimmed == "" {
+			return nil, false
+		}
+		return trimmed, true
+	case int:
+		return v, true
+	case int64:
+		return v, true
+	case float64:
+		return v, true
+	case time.Time:
+		if v.IsZero() {
+			return nil, false
+		}
+		return v.UTC().Format(time.RFC3339), true
+	default:
+		return nil, false
+	}
+}
+
+func applyCodexSubscriptionFromClaims(entry gin.H, claims gin.H) {
+	if entry == nil || len(claims) == 0 {
+		return
+	}
+	if current, ok := entry["subscription_expires_at"]; ok {
+		if _, okNormalize := normalizeCodexSubscriptionUntilValue(current); okNormalize {
+			return
+		}
+	}
+	for _, key := range []string{
+		"subscription_expires_at",
+		"subscriptionExpiresAt",
+		"chatgpt_subscription_active_until",
+		"chatgptSubscriptionActiveUntil",
+	} {
+		if value, ok := claims[key]; ok {
+			if normalized, okNormalize := normalizeCodexSubscriptionUntilValue(value); okNormalize {
+				entry["subscription_expires_at"] = normalized
+				return
+			}
+		}
+	}
+}
+
+func (h *Handler) enrichCodexSubscriptionInfo(ctx context.Context, auth *coreauth.Auth) *coreauth.Auth {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return auth
+	}
+	if _, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
+		return auth
+	}
+	accessToken := codexAuthMetadataString(auth.Metadata, "access_token", "accessToken")
+	if accessToken == "" {
+		accessToken = strings.TrimSpace(authAttribute(auth, "access_token"))
+	}
+	if accessToken == "" {
+		return auth
+	}
+
+	proxyURL := h.codexSubscriptionProxyURL(auth)
+	cacheKey := codexSubscriptionCacheKey(accessToken, proxyURL)
+	now := time.Now()
+	if cachedRaw, ok := codexSubscriptionCache.Load(cacheKey); ok {
+		cached, _ := cachedRaw.(codexSubscriptionCacheEntry)
+		if cached.expiresAt.After(now) {
+			if cached.found {
+				return applyCodexAccountSubscriptionInfo(auth, cached.info)
+			}
+			return auth
+		}
+		codexSubscriptionCache.Delete(cacheKey)
+	}
+
+	orgID := resolveCodexAccountCheckOrgID(auth, accessToken)
+	info, err := h.fetchCodexAccountSubscriptionInfo(ctx, accessToken, proxyURL, orgID)
+	if err != nil {
+		log.WithError(err).Debug("failed to fetch codex subscription info")
+		codexSubscriptionCache.Store(cacheKey, codexSubscriptionCacheEntry{found: false, expiresAt: now.Add(10 * time.Minute)})
+		return auth
+	}
+	if info == nil || !info.hasData() {
+		codexSubscriptionCache.Store(cacheKey, codexSubscriptionCacheEntry{found: false, expiresAt: now.Add(30 * time.Minute)})
+		return auth
+	}
+	codexSubscriptionCache.Store(cacheKey, codexSubscriptionCacheEntry{info: *info, found: true, expiresAt: now.Add(6 * time.Hour)})
+	return applyCodexAccountSubscriptionInfo(auth, *info)
+}
+
+func codexAuthMetadataString(metadata map[string]any, keys ...string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	for _, key := range keys {
+		if value, ok := metadata[key]; ok {
+			if str := strings.TrimSpace(valueAsString(value)); str != "" {
+				return str
+			}
+		}
+	}
+	for _, containerKey := range []string{"token", "tokens", "token_data", "tokenData"} {
+		container, ok := metadata[containerKey]
+		if !ok || container == nil {
+			continue
+		}
+		if nested, ok := container.(map[string]any); ok {
+			if str := codexAuthMetadataString(nested, keys...); str != "" {
+				return str
+			}
+		}
+	}
+	return ""
+}
+
+func codexSubscriptionCacheKey(accessToken, proxyURL string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(strings.TrimSpace(proxyURL)))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(strings.TrimSpace(accessToken)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (h *Handler) codexSubscriptionProxyURL(auth *coreauth.Auth) string {
+	if auth != nil {
+		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
+		if proxyURL := codexAuthMetadataString(auth.Metadata, "proxy_url", "proxy-url", "proxyUrl"); proxyURL != "" {
+			return proxyURL
+		}
+	}
+	if h != nil && h.cfg != nil {
+		return strings.TrimSpace(h.cfg.ProxyURL)
+	}
+	return ""
+}
+
+func applyCodexAccountSubscriptionInfo(auth *coreauth.Auth, info codexAccountSubscriptionInfo) *coreauth.Auth {
+	if auth == nil || !info.hasData() {
+		return auth
+	}
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	if info.SubscriptionExpiresAt != "" {
+		updated.Metadata["subscription_expires_at"] = info.SubscriptionExpiresAt
+	}
+	if info.PlanType != "" && strings.TrimSpace(valueAsString(updated.Metadata["plan_type"])) == "" {
+		updated.Metadata["plan_type"] = info.PlanType
+	}
+	if info.Email != "" && strings.TrimSpace(valueAsString(updated.Metadata["email"])) == "" {
+		updated.Metadata["email"] = info.Email
+	}
+	return updated
+}
+
+func (info codexAccountSubscriptionInfo) hasData() bool {
+	return strings.TrimSpace(info.PlanType) != "" || strings.TrimSpace(info.Email) != "" || strings.TrimSpace(info.SubscriptionExpiresAt) != ""
+}
+
+func resolveCodexAccountCheckOrgID(auth *coreauth.Auth, accessToken string) string {
+	if auth != nil {
+		for _, key := range []string{"organization_id", "organizationId", "org_id", "orgId", "poid"} {
+			if value := codexAuthMetadataString(auth.Metadata, key); value != "" {
+				return value
+			}
+		}
+	}
+	if claims := parseCodexJWTClaims(accessToken); claims != nil {
+		if poid := strings.TrimSpace(claims.CodexAuthInfo.POID); poid != "" {
+			return poid
+		}
+		if orgID := defaultCodexOrganizationID(claims); orgID != "" {
+			return orgID
+		}
+		if accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); accountID != "" {
+			return accountID
+		}
+	}
+	if auth != nil {
+		if idToken := codexAuthMetadataString(auth.Metadata, "id_token", "idToken"); idToken != "" {
+			if claims := parseCodexJWTClaims(idToken); claims != nil {
+				if poid := strings.TrimSpace(claims.CodexAuthInfo.POID); poid != "" {
+					return poid
+				}
+				if orgID := defaultCodexOrganizationID(claims); orgID != "" {
+					return orgID
+				}
+				if accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); accountID != "" {
+					return accountID
+				}
+			}
+		}
+		if accountID := codexAuthMetadataString(auth.Metadata, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"); accountID != "" {
+			return accountID
+		}
+	}
+	return ""
+}
+
+func parseCodexJWTClaims(token string) *codex.JWTClaims {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	claims, err := codex.ParseJWTToken(token)
+	if err != nil {
+		return nil
+	}
+	return claims
+}
+
+func defaultCodexOrganizationID(claims *codex.JWTClaims) string {
+	if claims == nil {
+		return ""
+	}
+	for _, org := range claims.CodexAuthInfo.Organizations {
+		if org.IsDefault && strings.TrimSpace(org.ID) != "" {
+			return strings.TrimSpace(org.ID)
+		}
+	}
+	for _, org := range claims.CodexAuthInfo.Organizations {
+		if strings.TrimSpace(org.ID) != "" {
+			return strings.TrimSpace(org.ID)
+		}
+	}
+	return ""
+}
+
+func (h *Handler) fetchCodexAccountSubscriptionInfo(ctx context.Context, accessToken, proxyURL, orgID string) (*codexAccountSubscriptionInfo, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, codexAccountsCheckURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	if h != nil && h.cfg != nil {
+		sdkCfg := h.cfg.SDKConfig
+		sdkCfg.ProxyURL = strings.TrimSpace(proxyURL)
+		client = util.SetProxy(&sdkCfg, client)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("codex account check failed with status %d: %s", resp.StatusCode, truncateForLog(string(body), 200))
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return parseCodexAccountSubscriptionInfo(result, orgID), nil
+}
+
+func parseCodexAccountSubscriptionInfo(result map[string]any, orgID string) *codexAccountSubscriptionInfo {
+	accounts, ok := result["accounts"].(map[string]any)
+	if !ok || len(accounts) == 0 {
+		return nil
+	}
+	orgID = strings.TrimSpace(orgID)
+	if orgID != "" {
+		if acct, ok := accountObject(accounts[orgID]); ok {
+			info := codexAccountSubscriptionInfoFromAccount(acct)
+			if info.hasData() {
+				return &info
+			}
+		}
+	}
+
+	var defaultInfo, paidInfo, anyInfo codexAccountSubscriptionInfo
+	for _, raw := range accounts {
+		acct, ok := accountObject(raw)
+		if !ok {
+			continue
+		}
+		info := codexAccountSubscriptionInfoFromAccount(acct)
+		if !info.hasData() {
+			continue
+		}
+		if !anyInfo.hasData() {
+			anyInfo = info
+		}
+		if isDefaultCodexAccount(acct) && !defaultInfo.hasData() {
+			defaultInfo = info
+		}
+		if !strings.EqualFold(strings.TrimSpace(info.PlanType), "free") && !paidInfo.hasData() {
+			paidInfo = info
+		}
+	}
+	switch {
+	case defaultInfo.hasData():
+		return &defaultInfo
+	case paidInfo.hasData():
+		return &paidInfo
+	case anyInfo.hasData():
+		return &anyInfo
+	default:
+		return nil
+	}
+}
+
+func accountObject(raw any) (map[string]any, bool) {
+	acct, ok := raw.(map[string]any)
+	return acct, ok
+}
+
+func codexAccountSubscriptionInfoFromAccount(acct map[string]any) codexAccountSubscriptionInfo {
+	return codexAccountSubscriptionInfo{
+		PlanType:              extractCodexAccountPlanType(acct),
+		Email:                 extractCodexAccountEmail(acct),
+		SubscriptionExpiresAt: extractCodexEntitlementExpiresAt(acct),
+	}
+}
+
+func extractCodexAccountPlanType(acct map[string]any) string {
+	if account, ok := acct["account"].(map[string]any); ok {
+		if planType := strings.TrimSpace(valueAsString(account["plan_type"])); planType != "" {
+			return planType
+		}
+		if planType := strings.TrimSpace(valueAsString(account["planType"])); planType != "" {
+			return planType
+		}
+	}
+	if entitlement, ok := acct["entitlement"].(map[string]any); ok {
+		if planType := strings.TrimSpace(valueAsString(entitlement["subscription_plan"])); planType != "" {
+			return planType
+		}
+		if planType := strings.TrimSpace(valueAsString(entitlement["subscriptionPlan"])); planType != "" {
+			return planType
+		}
+	}
+	return ""
+}
+
+func extractCodexAccountEmail(acct map[string]any) string {
+	if account, ok := acct["account"].(map[string]any); ok {
+		if email := strings.TrimSpace(valueAsString(account["email"])); email != "" {
+			return email
+		}
+	}
+	if user, ok := acct["user"].(map[string]any); ok {
+		if email := strings.TrimSpace(valueAsString(user["email"])); email != "" {
+			return email
+		}
+	}
+	return ""
+}
+
+func extractCodexEntitlementExpiresAt(acct map[string]any) string {
+	entitlement, ok := acct["entitlement"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"expires_at", "expiresAt"} {
+		if value, ok := normalizeCodexSubscriptionUntilValue(entitlement[key]); ok {
+			return strings.TrimSpace(valueAsString(value))
+		}
+	}
+	return ""
+}
+
+func isDefaultCodexAccount(acct map[string]any) bool {
+	account, ok := acct["account"].(map[string]any)
+	if !ok {
+		return false
+	}
+	value, ok := account["is_default"].(bool)
+	if !ok {
+		if camelValue, okCamel := account["isDefault"].(bool); okCamel {
+			return camelValue
+		}
+		return false
+	}
+	return value
+}
+
+func truncateForLog(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 func serializeAuthError(err *coreauth.Error) gin.H {
@@ -868,6 +1347,15 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if v := strings.TrimSpace(valueAsString(auth.Metadata["plan_type"])); v != "" {
 		result["plan_type"] = v
 	}
+	if v, ok := auth.Metadata["chatgpt_subscription_active_start"]; ok && v != nil {
+		result["chatgpt_subscription_active_start"] = v
+	}
+	if v, ok := auth.Metadata["chatgpt_subscription_active_until"]; ok && v != nil {
+		result["chatgpt_subscription_active_until"] = v
+	}
+	if v, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
+		result["subscription_expires_at"] = v
+	}
 
 	idTokenRaw, ok := auth.Metadata["id_token"].(string)
 	if !ok {
@@ -900,11 +1388,15 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 			result["plan_type"] = v
 		}
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
-		result["chatgpt_subscription_active_start"] = v
+	if _, ok := result["chatgpt_subscription_active_start"]; !ok {
+		if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+			result["chatgpt_subscription_active_start"] = v
+		}
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
-		result["chatgpt_subscription_active_until"] = v
+	if _, ok := result["chatgpt_subscription_active_until"]; !ok {
+		if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+			result["chatgpt_subscription_active_until"] = v
+		}
 	}
 
 	if len(result) == 0 {

@@ -180,10 +180,10 @@ func (s *RequestStatistics) restorePersistedState(state persistedStatisticsState
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.totalRequests = snapshot.TotalRequests
-	s.successCount = snapshot.SuccessCount
-	s.failureCount = snapshot.FailureCount
-	s.totalTokens = snapshot.TotalTokens
+	s.totalRequests.Store(snapshot.TotalRequests)
+	s.successCount.Store(snapshot.SuccessCount)
+	s.failureCount.Store(snapshot.FailureCount)
+	s.totalTokens.Store(snapshot.TotalTokens)
 
 	s.apis = make(map[string]*apiStats, len(snapshot.APIs))
 	for apiName, apiSnapshot := range snapshot.APIs {
