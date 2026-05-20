@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"io"
 	"time"
 
@@ -105,9 +106,16 @@ func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bo
 		}
 		if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
 			result.completedData = completed.data
+			return errCodexStopStream
 		}
 		return nil
 	})
+	if errors.Is(err, errCodexStopStream) {
+		return result, nil
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) && len(result.completedData) > 0 {
+		return result, nil
+	}
 	return result, err
 }
 

@@ -1,14 +1,17 @@
 package management
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -88,6 +91,134 @@ func TestCodexSubscriptionUntilValueAcceptsSubscriptionExpiresAt(t *testing.T) {
 	if got != "2026-06-01T00:00:00Z" {
 		t.Fatalf("codexSubscriptionUntilValue() = %#v", got)
 	}
+}
+
+func TestListAuthFiles_CodexSubscriptionDefaultUsesCache(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	clearCodexSubscriptionCacheForTest(t)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	accessToken := "cached-access-token"
+	auth := &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": accessToken,
+		},
+		Attributes: map[string]string{"path": "/tmp/codex.json"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	cacheKey := codexSubscriptionCacheKey(accessToken, "")
+	codexSubscriptionCache.Store(cacheKey, codexSubscriptionCacheEntry{
+		found:     true,
+		expiresAt: time.Now().Add(time.Hour),
+		info: codexAccountSubscriptionInfo{
+			PlanType:              "pro",
+			Email:                 "cached@example.com",
+			SubscriptionExpiresAt: "2026-06-01T00:00:00Z",
+		},
+	})
+	t.Cleanup(func() { codexSubscriptionCache.Delete(cacheKey) })
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	file := firstAuthFilePayload(t, rec.Body.Bytes())
+	if got := file["subscription_expires_at"]; got != "2026-06-01T00:00:00Z" {
+		t.Fatalf("subscription_expires_at = %#v", got)
+	}
+	if got := file["email"]; got != "cached@example.com" {
+		t.Fatalf("email = %#v, want cached@example.com", got)
+	}
+	claims, ok := file["id_token"].(map[string]any)
+	if !ok {
+		t.Fatalf("id_token = %#v, want object", file["id_token"])
+	}
+	if got := claims["plan_type"]; got != "pro" {
+		t.Fatalf("id_token.plan_type = %#v, want pro", got)
+	}
+}
+
+func TestListAuthFiles_CodexSubscriptionSkipIgnoresCache(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	clearCodexSubscriptionCacheForTest(t)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	accessToken := "skip-cache-token"
+	auth := &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": accessToken,
+		},
+		Attributes: map[string]string{"path": "/tmp/codex.json"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	cacheKey := codexSubscriptionCacheKey(accessToken, "")
+	codexSubscriptionCache.Store(cacheKey, codexSubscriptionCacheEntry{
+		found:     true,
+		expiresAt: time.Now().Add(time.Hour),
+		info: codexAccountSubscriptionInfo{
+			SubscriptionExpiresAt: "2026-06-01T00:00:00Z",
+		},
+	})
+	t.Cleanup(func() { codexSubscriptionCache.Delete(cacheKey) })
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?codex_subscription=skip", nil)
+
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	file := firstAuthFilePayload(t, rec.Body.Bytes())
+	if _, ok := file["subscription_expires_at"]; ok {
+		t.Fatalf("subscription_expires_at should be absent in skip mode, got %#v", file["subscription_expires_at"])
+	}
+}
+
+func clearCodexSubscriptionCacheForTest(t *testing.T) {
+	t.Helper()
+	codexSubscriptionCache.Range(func(key, _ any) bool {
+		codexSubscriptionCache.Delete(key)
+		return true
+	})
+}
+
+func firstAuthFilePayload(t *testing.T, data []byte) map[string]any {
+	t.Helper()
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode list payload: %v", err)
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(payload.Files))
+	}
+	return payload.Files[0]
 }
 
 func TestParseCodexAccountSubscriptionInfoMatchesOrgID(t *testing.T) {

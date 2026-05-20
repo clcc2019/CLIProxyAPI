@@ -118,3 +118,18 @@ func TestShouldTryNextKiroEndpoint_DoesNotFallback429(t *testing.T) {
 		t.Fatal("503 should still fall back to the next endpoint")
 	}
 }
+
+func TestShouldTryNextKiroEndpointFor_RuntimeForbiddenFallback(t *testing.T) {
+	runtimeEndpoint := kiroEndpointConfig{Name: "KiroRuntime"}
+	qEndpoint := kiroEndpointConfig{Name: "AmazonQ"}
+
+	if !shouldTryNextKiroEndpointFor(runtimeEndpoint, statusErr{code: http.StatusForbidden, msg: "runtime endpoint unavailable"}) {
+		t.Fatal("runtime 403 without credential signal should fall back to legacy endpoints")
+	}
+	if shouldTryNextKiroEndpointFor(qEndpoint, statusErr{code: http.StatusForbidden, msg: "runtime endpoint unavailable"}) {
+		t.Fatal("non-runtime 403 must not fall back")
+	}
+	if shouldTryNextKiroEndpointFor(runtimeEndpoint, statusErr{code: http.StatusForbidden, msg: "invalid bearer token"}) {
+		t.Fatal("runtime credential 403 must not be hidden by endpoint fallback")
+	}
+}

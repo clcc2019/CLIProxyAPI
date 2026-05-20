@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	kiroContentType   = "application/json"
+	kiroContentType   = "application/x-amz-json-1.0"
 	kiroAcceptStream  = "*/*"
 	kiroDefaultRegion = "us-east-1"
 	// kiroMaxFrameSize bounds a single event-stream frame (guards against
@@ -114,6 +114,14 @@ func buildKiroEndpointConfigs(region string) []kiroEndpointConfig {
 		region = kiroDefaultRegion
 	}
 	return []kiroEndpointConfig{
+		// Match Kiro IDE's current runtime host first; keep the legacy AWS
+		// endpoints as fallbacks for older account shapes and regional drift.
+		{
+			URL:       fmt.Sprintf("https://runtime.%s.kiro.dev/generateAssistantResponse", region),
+			Origin:    "AI_EDITOR",
+			AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+			Name:      "KiroRuntime",
+		},
 		{
 			URL:    fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", region),
 			Origin: "AI_EDITOR",
@@ -499,14 +507,14 @@ func (e *KiroExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 		return nil
 	}
 	accessToken, _ := kiroCredentials(auth)
-	if strings.TrimSpace(accessToken) != "" {
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	if strings.TrimSpace(accessToken) != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 	return nil
 }
 
@@ -626,7 +634,7 @@ func (e *KiroExecutor) doKiroRequestWithFallback(ctx context.Context, auth *clip
 			return httpResp, payload, nil
 		}
 		lastErr = err
-		if idx == len(prepared.endpoints)-1 || !shouldTryNextKiroEndpoint(err) {
+		if idx == len(prepared.endpoints)-1 || !shouldTryNextKiroEndpointFor(endpoint, err) {
 			// Kiro's AGENTIC_REQUEST quota is shared across models, but 429
 			// can also mean short-lived throttling. wrapKiroAuthScoped only
 			// upgrades clear quota/usage exhaustion responses to auth-wide
@@ -646,22 +654,14 @@ func (e *KiroExecutor) doKiroRequest(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Content-Type", kiroContentType)
-	httpReq.Header.Set("Accept", kiroAcceptStream)
-	if endpointConfig.AmzTarget != "" {
-		httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
-	}
-	httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
-	httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
-	httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
-	httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
-	applyKiroRuntimeIdentityHeaders(httpReq, auth)
-	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+	invocationID := uuid.New().String()
+	applyKiroUpstreamHeaders(httpReq, endpointConfig, auth, accessToken, invocationID)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	applyKiroUpstreamHeaders(httpReq, endpointConfig, auth, accessToken, invocationID)
 
 	authID, authLabel, authType, authValue := authLogInfo(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
@@ -702,6 +702,34 @@ func (e *KiroExecutor) doKiroRequest(ctx context.Context, auth *cliproxyauth.Aut
 	retryAfter := kiroRetryAfterFromHeaders(httpResp.Header, time.Now())
 	closeKiroResponseBody(httpResp)
 	return nil, statusErr{code: httpResp.StatusCode, msg: string(b), retryAfter: retryAfter}
+}
+
+func applyKiroUpstreamHeaders(req *http.Request, endpointConfig kiroEndpointConfig, auth *cliproxyauth.Auth, accessToken, invocationID string) {
+	if req == nil {
+		return
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	req.Host = ""
+	req.Header.Del("Host")
+	req.Header.Set("Content-Type", kiroContentType)
+	req.Header.Set("Accept", kiroAcceptStream)
+	if endpointConfig.AmzTarget != "" {
+		req.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
+	} else {
+		req.Header.Del("X-Amz-Target")
+	}
+	req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
+	if invocationID = strings.TrimSpace(invocationID); invocationID != "" {
+		req.Header.Set("Amz-Sdk-Invocation-Id", invocationID)
+	}
+	applyKiroRuntimeIdentityHeaders(req, auth)
+	if accessToken = strings.TrimSpace(accessToken); accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 }
 
 type kiroEventStreamMessage struct {
@@ -2024,6 +2052,8 @@ func sortKiroEndpointsByPreference(endpoints []kiroEndpointConfig, preference st
 	matchesPreference := func(endpoint kiroEndpointConfig) bool {
 		name := strings.ToLower(strings.TrimSpace(endpoint.Name))
 		switch preference {
+		case "runtime", "kiro", "kiro-runtime", "runtime-kiro", "runtime.kiro.dev":
+			return name == "kiroruntime"
 		case "q", "amazonq", "amazon-q":
 			return name == "amazonq"
 		case "codewhisperer", "code-whisperer", "ide", "kiro-ide":
@@ -2069,6 +2099,29 @@ func shouldTryNextKiroEndpoint(err error) bool {
 	default:
 		return false
 	}
+}
+
+func shouldTryNextKiroEndpointFor(endpoint kiroEndpointConfig, err error) bool {
+	return shouldTryNextKiroEndpoint(err) || shouldTryNextKiroRuntimeEndpoint(endpoint, err)
+}
+
+func shouldTryNextKiroRuntimeEndpoint(endpoint kiroEndpointConfig, err error) bool {
+	if !strings.EqualFold(strings.TrimSpace(endpoint.Name), "KiroRuntime") || err == nil {
+		return false
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(err, &status) || status.StatusCode() != http.StatusForbidden {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if isKiroInvalidBearerTokenMessage(message) ||
+		isKiroBadCredentialsMessage(message) ||
+		strings.Contains(message, "unauthor") ||
+		strings.Contains(message, "bearer") ||
+		strings.Contains(message, "access token") {
+		return false
+	}
+	return true
 }
 
 func (e *KiroExecutor) mapModelToKiro(model string) string {

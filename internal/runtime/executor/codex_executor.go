@@ -270,6 +270,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return err
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			completedStream := false
 
 			if eventData, ok := codexEventData(line); ok {
 				eventType := codexEventType(eventData)
@@ -306,6 +307,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					terminalFailureErr = errors.New(message)
 				}
 				if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
+					completedStream = true
 					if detail, ok := helps.ParseCodexUsage(completed.data); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -329,6 +331,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if len(chunks[i]) > 0 {
 					emittedPayload = true
 				}
+			}
+			if completedStream {
+				return errCodexStopStream
 			}
 			return nil
 		})

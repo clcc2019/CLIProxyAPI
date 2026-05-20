@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 type testBranchSpec struct {
@@ -239,6 +241,76 @@ func TestEnsureRepositoryResetsToRemoteDefaultWhenBranchUnset(t *testing.T) {
 	storeDefault.mu.Unlock()
 
 	assertRemoteBranchContents(t, remoteDir, "master", "local master update\n")
+}
+
+func TestCommitAndPushLockedPushesBeforeRunningGC(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+
+	workspaceDir := filepath.Join(root, "workspace")
+	updates := []string{
+		"local master update one\n",
+		"local master update two\n",
+	}
+	for _, contents := range updates {
+		if err := os.WriteFile(filepath.Join(workspaceDir, "branch.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatalf("write local master marker: %v", err)
+		}
+
+		store.lastGC = time.Now().Add(-gcInterval)
+		store.mu.Lock()
+		err := store.commitAndPushLocked("Update master marker", "branch.txt")
+		store.mu.Unlock()
+		if err != nil {
+			t.Fatalf("commitAndPushLocked with forced GC: %v", err)
+		}
+
+		assertRemoteBranchContents(t, remoteDir, "master", contents)
+	}
+}
+
+func TestGitTokenStoreSaveDisabledPersistsAndReadsFlag(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	auth := &cliproxyauth.Auth{
+		ID:       "disabled.json",
+		Provider: "test",
+		FileName: "disabled.json",
+		Metadata: map[string]any{"type": "test"},
+	}
+
+	if _, err := store.Save(ctx, auth); err != nil {
+		t.Fatalf("initial Save() error: %v", err)
+	}
+	auth.Disabled = true
+	if _, err := store.Save(ctx, auth); err != nil {
+		t.Fatalf("disabled Save() error: %v", err)
+	}
+
+	auths, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auths len = %d, want 1", len(auths))
+	}
+	if !auths[0].Disabled || auths[0].Status != cliproxyauth.StatusDisabled {
+		t.Fatalf("disabled/status = %v/%s, want true/%s", auths[0].Disabled, auths[0].Status, cliproxyauth.StatusDisabled)
+	}
 }
 
 func TestEnsureRepositoryFollowsRenamedRemoteDefaultBranchWhenAvailable(t *testing.T) {

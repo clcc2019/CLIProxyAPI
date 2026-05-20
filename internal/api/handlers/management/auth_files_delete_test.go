@@ -23,6 +23,8 @@ type statOnDeleteStore struct {
 	existed     bool
 }
 
+type failingDeleteStore struct{}
+
 func setupManagementDeleteTest(t *testing.T) {
 	t.Helper()
 	t.Setenv("MANAGEMENT_PASSWORD", "")
@@ -79,11 +81,10 @@ func assertFileMissing(t *testing.T, path string) {
 	}
 }
 
-func assertAuthDisabled(t *testing.T, manager *coreauth.Manager, id string) {
+func assertAuthRemoved(t *testing.T, manager *coreauth.Manager, id string) {
 	t.Helper()
-	auth, ok := manager.GetByID(id)
-	if !ok || auth == nil || !auth.Disabled || auth.Status != coreauth.StatusDisabled {
-		t.Fatalf("expected in-memory auth %q to be disabled after delete, got auth=%#v ok=%v", id, auth, ok)
+	if auth, ok := manager.GetByID(id); ok || auth != nil {
+		t.Fatalf("expected in-memory auth %q to be removed after delete, got auth=%#v ok=%v", id, auth, ok)
 	}
 }
 
@@ -120,6 +121,14 @@ func (s *statOnDeleteStore) Delete(_ context.Context, id string) error {
 	} else {
 		return fmt.Errorf("stat in delete: %w", err)
 	}
+}
+
+func (s *failingDeleteStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
+
+func (s *failingDeleteStore) Save(context.Context, *coreauth.Auth) (string, error) { return "", nil }
+
+func (s *failingDeleteStore) Delete(context.Context, string) error {
+	return fmt.Errorf("delete failed")
 }
 
 func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
@@ -225,7 +234,18 @@ func TestDeleteAuthFile_ByAuthIndexDoesNotRecreateKiroFile(t *testing.T) {
 	rec := performAuthDelete(t, h, "/v0/management/auth-files?auth_index="+url.QueryEscape(authIndex))
 	assertHTTPStatus(t, rec, http.StatusOK)
 	assertFileMissing(t, filePath)
-	assertAuthDisabled(t, manager, fileName)
+	assertAuthRemoved(t, manager, fileName)
+
+	staleRefreshResult := record.Clone()
+	staleRefreshResult.Metadata["access_token"] = "rotated-access-token"
+	staleRefreshResult.Metadata["refresh_token"] = "rotated-refresh-token"
+	staleRefreshResult.Status = coreauth.StatusActive
+	staleRefreshResult.Disabled = false
+	if _, errUpdate := manager.Update(context.Background(), staleRefreshResult); errUpdate != nil {
+		t.Fatalf("stale update after delete failed: %v", errUpdate)
+	}
+	assertFileMissing(t, filePath)
+	assertAuthRemoved(t, manager, fileName)
 }
 
 func TestDeleteAuthFile_StoreDeleteRunsBeforeLocalRemove(t *testing.T) {
@@ -249,6 +269,42 @@ func TestDeleteAuthFile_StoreDeleteRunsBeforeLocalRemove(t *testing.T) {
 	assertFileMissing(t, filePath)
 }
 
+func TestDeleteAuthFile_DeleteRecordFailureRestoresAuthState(t *testing.T) {
+	setupManagementDeleteTest(t)
+
+	authDir := t.TempDir()
+	fileName := "kiro-google-user-example-com.json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "kiro",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{"type": "kiro"},
+	}
+	if _, err := manager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	h := newAuthDeleteTestHandler(authDir, manager, &failingDeleteStore{})
+
+	rec := performAuthDelete(t, h, "/v0/management/auth-files?name="+url.QueryEscape(fileName))
+	assertHTTPStatus(t, rec, http.StatusInternalServerError)
+	if _, err := os.Stat(filePath); err != nil {
+		t.Fatalf("expected auth file to remain after delete failure, stat err: %v", err)
+	}
+	restored, ok := manager.GetByID(fileName)
+	if !ok || restored == nil {
+		t.Fatalf("expected auth %q to be restored after delete failure", fileName)
+	}
+	if restored.Disabled || restored.Status != coreauth.StatusActive {
+		t.Fatalf("restored disabled/status = %v/%s, want false/%s", restored.Disabled, restored.Status, coreauth.StatusActive)
+	}
+}
+
 func TestDeleteAuthFile_AcceptsFilenameBody(t *testing.T) {
 	setupManagementDeleteTest(t)
 
@@ -263,7 +319,7 @@ func TestDeleteAuthFile_AcceptsFilenameBody(t *testing.T) {
 	assertFileMissing(t, filePath)
 }
 
-func TestDeleteAuthFile_DisablesLegacyKiroIDWithoutJSONSuffix(t *testing.T) {
+func TestDeleteAuthFile_RemovesLegacyKiroIDWithoutJSONSuffix(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
@@ -289,7 +345,7 @@ func TestDeleteAuthFile_DisablesLegacyKiroIDWithoutJSONSuffix(t *testing.T) {
 	rec := performAuthDelete(t, h, "/v0/management/auth-files?name="+url.QueryEscape(fileName))
 	assertHTTPStatus(t, rec, http.StatusOK)
 	assertFileMissing(t, filePath)
-	assertAuthDisabled(t, manager, legacyID)
+	assertAuthRemoved(t, manager, legacyID)
 }
 
 func TestDeleteAuthFile_LegacyKiroRecordWithoutPathDeletesJSONFile(t *testing.T) {
@@ -316,7 +372,7 @@ func TestDeleteAuthFile_LegacyKiroRecordWithoutPathDeletesJSONFile(t *testing.T)
 	rec := performAuthDelete(t, h, "/v0/management/auth-files?name="+url.QueryEscape(legacyName))
 	assertHTTPStatus(t, rec, http.StatusOK)
 	assertFileMissing(t, filePath)
-	assertAuthDisabled(t, manager, legacyName)
+	assertAuthRemoved(t, manager, legacyName)
 }
 
 func TestListAuthFiles_HidesFileBackedAuthMissingOnDisk(t *testing.T) {
@@ -374,5 +430,5 @@ func TestDeleteAuthFile_ByAbsolutePathFromManagedAuth(t *testing.T) {
 	rec := performAuthDelete(t, h, "/v0/management/auth-files?path="+url.QueryEscape(filePath))
 	assertHTTPStatus(t, rec, http.StatusOK)
 	assertFileMissing(t, filePath)
-	assertAuthDisabled(t, manager, fileName)
+	assertAuthRemoved(t, manager, fileName)
 }

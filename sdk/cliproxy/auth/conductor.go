@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -171,6 +172,7 @@ type Manager struct {
 	hook              Hook
 	mu                sync.RWMutex
 	auths             map[string]*Auth
+	removedAuths      map[string]authRemovalTombstone
 	runtimeStates     map[string]AuthRuntimeState
 	scheduler         *authScheduler
 	// routeAwareSingleCache stores provider/model pairs proven safe for scheduler single-provider fast path.
@@ -218,6 +220,11 @@ type Manager struct {
 	persistIDs     map[string]struct{}
 }
 
+type authRemovalTombstone struct {
+	Path      string
+	RemovedAt time.Time
+}
+
 // NewManager constructs a manager with optional custom selector and hook.
 func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	if selector == nil {
@@ -233,6 +240,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		kiroSelector:     newKiroSelector(time.Hour),
 		hook:             hook,
 		auths:            make(map[string]*Auth),
+		removedAuths:     make(map[string]authRemovalTombstone),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
 		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
@@ -1403,6 +1411,10 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.EnsureIndex()
 	auth.ApplyRuntimeStateFromMetadata()
 	m.mu.Lock()
+	if m.shouldSuppressRemovedAuthUpsertLocked(auth) {
+		m.mu.Unlock()
+		return nil, nil
+	}
 	m.applyPersistedRuntimeStateLocked(auth)
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
@@ -1436,6 +1448,10 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		}
 		m.mu.Unlock()
 		return existingClone, nil
+	}
+	if !ok && m.shouldSuppressRemovedAuthUpsertLocked(auth) {
+		m.mu.Unlock()
+		return nil, nil
 	}
 	if ok && existing != nil {
 		if isRefreshUpdate(ctx) {
@@ -1476,6 +1492,152 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// Remove deletes an auth entry from the in-memory manager state. The backing
+// credential store is intentionally not touched here; callers that delete an
+// auth file or remote credential record must do that explicitly before or after
+// removing the runtime entry.
+func (m *Manager) Remove(ctx context.Context, id string) (*Auth, error) {
+	if m == nil {
+		return nil, nil
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var removed *Auth
+	var loop *authAutoRefreshLoop
+	var runtimeStore RuntimeStateStore
+	now := time.Now()
+	m.mu.Lock()
+	if existing := m.auths[id]; existing != nil {
+		removed = existing.Clone()
+		delete(m.auths, id)
+		if tombstone, ok := authRemovalTombstoneFor(removed, now); ok {
+			if m.removedAuths == nil {
+				m.removedAuths = make(map[string]authRemovalTombstone)
+			}
+			m.removedAuths[id] = tombstone
+		}
+	}
+	if m.runtimeStates != nil {
+		delete(m.runtimeStates, id)
+	}
+	poolAuthID := strings.ToLower(id)
+	for key := range m.modelPoolOffsets {
+		if authIDFromModelPoolOffsetKey(key) == poolAuthID {
+			delete(m.modelPoolOffsets, key)
+		}
+	}
+	loop = m.refreshLoop
+	runtimeStore = m.runtimeStateStore
+	m.mu.Unlock()
+
+	m.discardPendingPersistAuthID(id)
+	if loop != nil {
+		loop.remove(id)
+	}
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(id)
+	}
+	m.clearRouteAwareCaches()
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	registry.GetGlobalRegistry().UnregisterClient(id)
+
+	var runtimeErr error
+	if runtimeStore != nil && !shouldSkipPersist(ctx) {
+		if err := runtimeStore.Delete(ctx, id); err != nil {
+			runtimeErr = err
+		}
+	}
+
+	if removed != nil {
+		notification := removed.Clone()
+		notification.Disabled = true
+		notification.Status = StatusDisabled
+		if strings.TrimSpace(notification.StatusMessage) == "" {
+			notification.StatusMessage = "removed"
+		}
+		notification.UpdatedAt = now
+		m.hook.OnAuthUpdated(ctx, notification)
+	}
+	return removed, runtimeErr
+}
+
+func authIDFromModelPoolOffsetKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	if idx := strings.IndexByte(key, '|'); idx >= 0 {
+		return key[:idx]
+	}
+	return key
+}
+
+func (m *Manager) shouldSuppressRemovedAuthUpsertLocked(auth *Auth) bool {
+	if m == nil || auth == nil || strings.TrimSpace(auth.ID) == "" || len(m.removedAuths) == 0 {
+		return false
+	}
+	tombstone, ok := m.removedAuths[auth.ID]
+	if !ok {
+		return false
+	}
+	if authRestoresRemovedFile(auth, tombstone) {
+		delete(m.removedAuths, auth.ID)
+		return false
+	}
+	return true
+}
+
+func authRestoresRemovedFile(auth *Auth, tombstone authRemovalTombstone) bool {
+	path := authFilePathForRemoval(auth)
+	if path == "" {
+		path = strings.TrimSpace(tombstone.Path)
+	}
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if tombstone.RemovedAt.IsZero() {
+		return true
+	}
+	if info.ModTime().After(tombstone.RemovedAt) {
+		return true
+	}
+	return false
+}
+
+func authRemovalTombstoneFor(auth *Auth, now time.Time) (authRemovalTombstone, bool) {
+	if auth == nil || auth.ID == "" || authRuntimeOnly(auth) {
+		return authRemovalTombstone{}, false
+	}
+	path := authFilePathForRemoval(auth)
+	if path == "" {
+		return authRemovalTombstone{}, false
+	}
+	return authRemovalTombstone{Path: path, RemovedAt: now}, true
+}
+
+func authFilePathForRemoval(auth *Auth) string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes["path"])
+}
+
+func authRuntimeOnly(auth *Auth) bool {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
+}
+
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()
@@ -1489,6 +1651,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		return err
 	}
 	m.auths = make(map[string]*Auth, len(items))
+	m.removedAuths = make(map[string]authRemovalTombstone)
 	for _, auth := range items {
 		if auth == nil || auth.ID == "" {
 			continue
@@ -4519,6 +4682,21 @@ func (m *Manager) enqueuePersistAuthID(ctx context.Context, authID string) {
 	case wake <- struct{}{}:
 	default:
 	}
+}
+
+func (m *Manager) discardPendingPersistAuthID(authID string) {
+	if m == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	m.persistMu.Lock()
+	if m.persistIDs != nil {
+		delete(m.persistIDs, authID)
+	}
+	m.persistMu.Unlock()
 }
 
 func (m *Manager) startPersistLoopLocked() {

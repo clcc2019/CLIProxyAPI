@@ -81,6 +81,29 @@ var (
 	errAuthFileNotFound   = errors.New("auth file not found")
 )
 
+type codexSubscriptionListMode int
+
+const (
+	codexSubscriptionListCache codexSubscriptionListMode = iota
+	codexSubscriptionListRefresh
+	codexSubscriptionListSkip
+)
+
+func codexSubscriptionListModeFromRequest(c *gin.Context) codexSubscriptionListMode {
+	mode := strings.TrimSpace(firstNonEmptyQueryValue(c, "codex_subscription", "codexSubscription"))
+	if mode == "" {
+		return codexSubscriptionListCache
+	}
+	switch strings.ToLower(mode) {
+	case "refresh", "force", "fetch", "1", "true", "yes", "on":
+		return codexSubscriptionListRefresh
+	case "skip", "none", "off", "0", "false", "no":
+		return codexSubscriptionListSkip
+	default:
+		return codexSubscriptionListCache
+	}
+}
+
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
 	if len(meta) == 0 {
 		return time.Time{}, false
@@ -365,14 +388,15 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
 		return
 	}
+	codexSubscriptionMode := codexSubscriptionListModeFromRequest(c)
 	if h.authManager == nil {
-		h.listAuthFilesFromDisk(c)
+		h.listAuthFilesFromDisk(c, codexSubscriptionMode)
 		return
 	}
 	auths := h.authManager.List()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
-		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth)
+		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth, codexSubscriptionMode)
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
 			files = append(files, entry)
 		}
@@ -382,7 +406,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		nameJ, _ := files[j]["name"].(string)
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
-	c.JSON(200, gin.H{"files": files})
+	c.JSON(200, gin.H{"files": files, "total": len(files)})
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
@@ -434,7 +458,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 }
 
 // List auth files from disk when the auth manager is unavailable.
-func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
+func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode) {
 	entries, err := os.ReadDir(h.cfg.AuthDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
@@ -473,7 +497,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 							Attributes: map[string]string{
 								"path": full,
 							},
-						})
+						}, codexSubscriptionMode)
 						metadata = auth.Metadata
 						if until, ok := codexSubscriptionUntilValue(metadata); ok {
 							fileData["subscription_expires_at"] = until
@@ -528,7 +552,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			files = append(files, fileData)
 		}
 	}
-	c.JSON(200, gin.H{"files": files})
+	c.JSON(200, gin.H{"files": files, "total": len(files)})
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
@@ -786,11 +810,14 @@ func applyCodexSubscriptionFromClaims(entry gin.H, claims gin.H) {
 	}
 }
 
-func (h *Handler) enrichCodexSubscriptionInfo(ctx context.Context, auth *coreauth.Auth) *coreauth.Auth {
+func (h *Handler) enrichCodexSubscriptionInfo(ctx context.Context, auth *coreauth.Auth, mode codexSubscriptionListMode) *coreauth.Auth {
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return auth
 	}
 	if _, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
+		return auth
+	}
+	if mode == codexSubscriptionListSkip {
 		return auth
 	}
 	accessToken := codexAuthMetadataString(auth.Metadata, "access_token", "accessToken")
@@ -813,6 +840,9 @@ func (h *Handler) enrichCodexSubscriptionInfo(ctx context.Context, auth *coreaut
 			return auth
 		}
 		codexSubscriptionCache.Delete(cacheKey)
+	}
+	if mode == codexSubscriptionListCache {
+		return auth
 	}
 
 	orgID := resolveCodexAccountCheckOrgID(auth, accessToken)
@@ -1610,16 +1640,22 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					full = abs
 				}
 			}
+			removeID, restoreAuth := h.disableAuth(ctx, full)
+			if removeID == "" {
+				removeID = full
+			}
 			if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
+				h.restoreAuth(ctx, restoreAuth)
 				c.JSON(500, gin.H{"error": errDel.Error()})
 				return
 			}
 			if err = os.Remove(full); err != nil && !os.IsNotExist(err) {
+				h.restoreAuth(ctx, restoreAuth)
 				c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove file: %v", err)})
 				return
 			}
+			h.removeAuth(ctx, removeID)
 			deleted++
-			h.disableAuth(ctx, full)
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return

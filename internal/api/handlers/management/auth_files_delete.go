@@ -258,8 +258,18 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 	if deletedName == "" || deletedName == "." {
 		deletedName = filepath.Base(resolvedName)
 	}
+	removeID := targetID
+	if removeID == "" {
+		removeID = targetPath
+	}
+	suppressedID, restoreAuth := h.disableAuth(ctx, removeID)
+	if suppressedID != "" {
+		removeID = suppressedID
+	}
+
 	if targetAuth == nil {
 		if _, errStat := os.Stat(targetPath); errStat != nil {
+			h.restoreAuth(ctx, restoreAuth)
 			if os.IsNotExist(errStat) {
 				return deletedName, http.StatusNotFound, errAuthFileNotFound
 			}
@@ -267,22 +277,21 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 		}
 	}
 	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
+		h.restoreAuth(ctx, restoreAuth)
 		return deletedName, http.StatusInternalServerError, errDeleteRecord
 	}
 	if errRemove := os.Remove(targetPath); errRemove != nil {
 		if os.IsNotExist(errRemove) {
 			if targetAuth == nil {
+				h.restoreAuth(ctx, restoreAuth)
 				return deletedName, http.StatusNotFound, errAuthFileNotFound
 			}
 		} else {
+			h.restoreAuth(ctx, restoreAuth)
 			return deletedName, http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
 		}
 	}
-	if targetID != "" {
-		h.disableAuth(ctx, targetID)
-	} else {
-		h.disableAuth(ctx, targetPath)
-	}
+	h.removeAuth(ctx, removeID)
 	return deletedName, http.StatusOK, nil
 }
 
@@ -326,30 +335,33 @@ func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
 	return nil
 }
 
-func (h *Handler) disableAuth(ctx context.Context, id string) {
+func (h *Handler) disableAuth(ctx context.Context, id string) (string, *coreauth.Auth) {
 	if h == nil || h.authManager == nil {
-		return
+		return "", nil
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return
+		return "", nil
 	}
 	for _, variant := range authDeleteNameVariants(id) {
 		if auth, ok := h.authManager.GetByID(variant); ok {
+			original := auth.Clone()
 			h.markAuthRemoved(ctx, auth)
-			return
+			return auth.ID, original
 		}
 	}
 	authID := h.authIDForPath(id)
 	if authID == "" {
-		return
+		return "", nil
 	}
 	for _, variant := range authDeleteNameVariants(authID) {
 		if auth, ok := h.authManager.GetByID(variant); ok {
+			original := auth.Clone()
 			h.markAuthRemoved(ctx, auth)
-			return
+			return auth.ID, original
 		}
 	}
+	return "", nil
 }
 
 func (h *Handler) markAuthRemoved(ctx context.Context, auth *coreauth.Auth) {
@@ -361,6 +373,39 @@ func (h *Handler) markAuthRemoved(ctx context.Context, auth *coreauth.Auth) {
 	auth.StatusMessage = "removed via management API"
 	auth.UpdatedAt = time.Now()
 	_, _ = h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
+}
+
+func (h *Handler) restoreAuth(ctx context.Context, auth *coreauth.Auth) {
+	if h == nil || h.authManager == nil || auth == nil {
+		return
+	}
+	_, _ = h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
+}
+
+func (h *Handler) removeAuth(ctx context.Context, id string) {
+	if h == nil || h.authManager == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	for _, variant := range authDeleteNameVariants(id) {
+		if auth, ok := h.authManager.GetByID(variant); ok {
+			_, _ = h.authManager.Remove(ctx, auth.ID)
+			return
+		}
+	}
+	authID := h.authIDForPath(id)
+	if authID == "" {
+		return
+	}
+	for _, variant := range authDeleteNameVariants(authID) {
+		if auth, ok := h.authManager.GetByID(variant); ok {
+			_, _ = h.authManager.Remove(ctx, auth.ID)
+			return
+		}
+	}
 }
 
 func (h *Handler) deleteTokenRecord(ctx context.Context, path string) error {

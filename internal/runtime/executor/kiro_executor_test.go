@@ -64,6 +64,99 @@ func TestKiroUsageRequestPayloadPrefersActualGeneratePayload(t *testing.T) {
 	}
 }
 
+func TestBuildKiroEndpointConfigsPrefersRuntimeEndpoint(t *testing.T) {
+	endpoints := buildKiroEndpointConfigs("eu-central-1")
+	if len(endpoints) != 3 {
+		t.Fatalf("endpoints = %d, want 3", len(endpoints))
+	}
+	if got := endpoints[0].Name; got != "KiroRuntime" {
+		t.Fatalf("first endpoint = %q, want KiroRuntime", got)
+	}
+	if got := endpoints[0].URL; got != "https://runtime.eu-central-1.kiro.dev/generateAssistantResponse" {
+		t.Fatalf("runtime endpoint URL = %q", got)
+	}
+	if got := endpoints[0].AmzTarget; got != "AmazonCodeWhispererStreamingService.GenerateAssistantResponse" {
+		t.Fatalf("runtime X-Amz-Target = %q", got)
+	}
+
+	if got := sortKiroEndpointsByPreference(endpoints, "amazon-q")[0].Name; got != "AmazonQ" {
+		t.Fatalf("amazon-q preference first endpoint = %q", got)
+	}
+	if got := sortKiroEndpointsByPreference(endpoints, "runtime")[0].Name; got != "KiroRuntime" {
+		t.Fatalf("runtime preference first endpoint = %q", got)
+	}
+}
+
+func TestKiroCustomHeadersCannotOverrideProtectedUpstreamHeaders(t *testing.T) {
+	executor := NewKiroExecutor(nil)
+	rt := &kiroRoundTripRecorder{}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(rt))
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"header:Authorization":               "Bearer attacker",
+			"header:Host":                        "evil.example",
+			"header:Content-Type":                "text/plain",
+			"header:Accept":                      "text/plain",
+			"header:X-Amz-Target":                "Bad.Target",
+			"header:x-amzn-kiro-agent-mode":      "bad-mode",
+			"header:x-amzn-codewhisperer-optout": "false",
+			"header:Amz-Sdk-Request":             "attempt=9; max=9",
+			"header:Amz-Sdk-Invocation-Id":       "bad-invocation",
+			"header:User-Agent":                  "bad-agent",
+		},
+	}
+	payload := []byte(`{"conversationState":{"conversationId":"c","currentMessage":{"userInputMessage":{"content":"hi","modelId":"claude-sonnet-4.6","origin":"AI_EDITOR"}}}}`)
+	endpoint := kiroEndpointConfig{
+		URL:       "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+		Name:      "KiroRuntime",
+	}
+
+	resp, err := executor.doKiroRequest(ctx, auth, endpoint, payload, "real-token")
+	if err != nil {
+		t.Fatalf("doKiroRequest() error = %v", err)
+	}
+	defer closeKiroResponseBody(resp)
+	if len(rt.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(rt.requests))
+	}
+	req := rt.requests[0]
+	if got := req.Header.Get("Authorization"); got != "Bearer real-token" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := req.Host; got != "" {
+		t.Fatalf("Host override = %q, want empty", got)
+	}
+	if got := req.Header.Get("Host"); got != "" {
+		t.Fatalf("Host header = %q, want empty", got)
+	}
+	if got := req.Header.Get("Content-Type"); got != kiroContentType {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := req.Header.Get("Accept"); got != kiroAcceptStream {
+		t.Fatalf("Accept = %q", got)
+	}
+	if got := req.Header.Get("X-Amz-Target"); got != "AmazonCodeWhispererStreamingService.GenerateAssistantResponse" {
+		t.Fatalf("X-Amz-Target = %q", got)
+	}
+	if got := req.Header.Get("x-amzn-kiro-agent-mode"); got != kiroIDEAgentMode {
+		t.Fatalf("x-amzn-kiro-agent-mode = %q", got)
+	}
+	if got := req.Header.Get("x-amzn-codewhisperer-optout"); got != "true" {
+		t.Fatalf("x-amzn-codewhisperer-optout = %q", got)
+	}
+	if got := req.Header.Get("Amz-Sdk-Request"); got != "attempt=1; max=3" {
+		t.Fatalf("Amz-Sdk-Request = %q", got)
+	}
+	if got := req.Header.Get("Amz-Sdk-Invocation-Id"); got == "" || got == "bad-invocation" {
+		t.Fatalf("Amz-Sdk-Invocation-Id = %q", got)
+	}
+	if got := req.Header.Get("User-Agent"); got != kiroCLIUserAgent {
+		t.Fatalf("User-Agent = %q", got)
+	}
+}
+
 func TestBuildKiroPayloadForNativeKiroUsesCLIModelID(t *testing.T) {
 	body := []byte(`{
 		"user": {"local": true},

@@ -321,6 +321,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// immediately for API calls, rather than waiting for model registration to complete.
 	op := "register"
 	var err error
+	var applied *coreauth.Auth
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
 		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
@@ -331,9 +332,9 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 			}
 		}
 		op = "update"
-		_, err = s.coreManager.Update(ctx, auth)
+		applied, err = s.coreManager.Update(ctx, auth)
 	} else {
-		_, err = s.coreManager.Register(ctx, auth)
+		applied, err = s.coreManager.Register(ctx, auth)
 	}
 	if err != nil {
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
@@ -343,6 +344,11 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 			return
 		}
 		auth = current
+	} else if applied == nil {
+		GlobalModelRegistry().UnregisterClient(auth.ID)
+		return
+	} else {
+		auth = applied
 	}
 
 	// Register models after auth is updated in coreManager.
@@ -366,16 +372,13 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		return
 	}
 	GlobalModelRegistry().UnregisterClient(id)
-	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
-		existing.Disabled = true
-		existing.Status = coreauth.StatusDisabled
-		if _, err := s.coreManager.Update(ctx, existing); err != nil {
-			log.Errorf("failed to disable auth %s: %v", id, err)
-		}
-		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
-			executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
-			s.ensureExecutorsForAuth(existing)
-		}
+	removed, err := s.coreManager.Remove(ctx, id)
+	if err != nil {
+		log.Errorf("failed to remove auth %s: %v", id, err)
+	}
+	if removed != nil && strings.EqualFold(strings.TrimSpace(removed.Provider), "codex") {
+		executor.CloseCodexWebsocketSessionsForAuthID(removed.ID, "auth_removed")
+		s.ensureExecutorsForAuth(removed)
 	}
 }
 
@@ -1478,6 +1481,8 @@ func (s *Service) persistKiroResolvedProfileArn(ctx context.Context, auth *corea
 	current, ok := s.coreManager.GetByID(auth.ID)
 	if ok && current != nil {
 		auth = current
+	} else {
+		return
 	}
 	if existing := kiroAuthMetadataString(auth.Metadata, "profile_arn", "profileArn"); existing == profileArn {
 		if auth.Attributes == nil || strings.TrimSpace(auth.Attributes["profile_arn"]) == profileArn {
