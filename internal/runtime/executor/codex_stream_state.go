@@ -424,6 +424,49 @@ func patchCodexCompletedOutputWithItems(completedData []byte, items [][]byte) []
 	return patched
 }
 
+func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
+	itemResult := gjson.GetBytes(eventData, "item")
+	if !itemResult.Exists() || itemResult.Type != gjson.JSON {
+		return
+	}
+	itemBytes := []byte(itemResult.Raw)
+	outputIndexResult := gjson.GetBytes(eventData, "output_index")
+	if outputIndexResult.Exists() && outputItemsByIndex != nil {
+		outputItemsByIndex[outputIndexResult.Int()] = itemBytes
+		return
+	}
+	if outputItemsFallback != nil {
+		*outputItemsFallback = append(*outputItemsFallback, itemBytes)
+	}
+}
+
+func patchCodexCompletedOutput(completedData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
+	totalItems := len(outputItemsByIndex) + len(outputItemsFallback)
+	if totalItems == 0 {
+		return completedData
+	}
+	if len(outputItemsFallback) == 0 && len(outputItemsByIndex) == 1 {
+		for _, raw := range outputItemsByIndex {
+			return patchCodexCompletedOutputWithSingleItem(completedData, raw)
+		}
+	}
+	if len(outputItemsByIndex) == 0 {
+		return patchCodexCompletedOutputWithItems(completedData, outputItemsFallback)
+	}
+
+	items := make([][]byte, 0, totalItems)
+	indexes := make([]int64, 0, len(outputItemsByIndex))
+	for idx := range outputItemsByIndex {
+		indexes = append(indexes, idx)
+	}
+	sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
+	for _, idx := range indexes {
+		items = append(items, outputItemsByIndex[idx])
+	}
+	items = append(items, outputItemsFallback...)
+	return patchCodexCompletedOutputWithItems(completedData, items)
+}
+
 func buildCodexCompletedFunctionCallItem(itemID string, callID string, name string, args string) []byte {
 	buf := make([]byte, 0, len(itemID)+len(callID)+len(name)+len(args)+80)
 	buf = append(buf, `{"id":`...)

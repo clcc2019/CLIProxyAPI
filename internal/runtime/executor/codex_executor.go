@@ -9,16 +9,19 @@ import (
 	"sync"
 	"time"
 
-	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+const codexDefaultImageToolModel = "gpt-image-2"
 
 var errCodexStopStream = errors.New("codex executor: stop stream after terminal event")
 
@@ -71,6 +74,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeCodexInstructions(body)
+	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+		body = ensureImageGenerationTool(body, baseModel, auth)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, body, apiKey, true)
@@ -141,6 +148,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeCodexInstructions(body)
+	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+		body = ensureImageGenerationTool(body, baseModel, auth)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, body, apiKey, false)
@@ -208,6 +219,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeCodexInstructions(body)
+	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+		body = ensureImageGenerationTool(body, baseModel, auth)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, body, apiKey, true)
@@ -368,6 +383,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("codex executor: refresh called")
+	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	if auth == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
@@ -484,6 +502,74 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func normalizeCodexInstructions(body []byte) []byte {
+	instructions := gjson.GetBytes(body, "instructions")
+	if !instructions.Exists() || instructions.Type == gjson.Null {
+		body, _ = sjson.SetBytes(body, "instructions", "")
+	}
+	return body
+}
+
+var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
+var imageGenToolArrayJSON = []byte(`[{"type":"image_generation","output_format":"png"}]`)
+
+func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
+}
+
+func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) []byte {
+	if strings.HasSuffix(baseModel, "spark") {
+		return body
+	}
+	if isCodexFreePlanAuth(auth) {
+		return body
+	}
+
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		body, _ = sjson.SetRawBytes(body, "tools", imageGenToolArrayJSON)
+		return body
+	}
+	for _, t := range tools.Array() {
+		if t.Get("type").String() == "image_generation" {
+			return body
+		}
+	}
+	body, _ = sjson.SetRawBytes(body, "tools.-1", imageGenToolJSON)
+	return body
+}
+
+func publishCodexImageToolUsage(ctx context.Context, reporter *helps.UsageReporter, body []byte, completedData []byte) {
+	detail, ok := helps.ParseCodexImageToolUsage(completedData)
+	if !ok {
+		return
+	}
+	reporter.EnsurePublished(ctx)
+	reporter.PublishAdditionalModel(ctx, codexImageGenerationToolModel(body), detail)
+}
+
+func codexImageGenerationToolModel(body []byte) string {
+	tools := gjson.GetBytes(body, "tools")
+	if tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if tool.Get("type").String() != "image_generation" {
+				continue
+			}
+			if model := strings.TrimSpace(tool.Get("model").String()); model != "" {
+				return model
+			}
+			break
+		}
+	}
+	return codexDefaultImageToolModel
 }
 
 func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func configuredCredentialSelector(strategy string, sessionAffinity bool, sessionAffinityTTL string) coreauth.Selector {

@@ -69,7 +69,7 @@ func Parse(raw string) (Setting, error) {
 	parsedURL, errParse := url.Parse(normalized)
 	if errParse != nil {
 		setting.Mode = ModeInvalid
-		return setting, fmt.Errorf("parse proxy URL failed: %w", errParse)
+		return setting, fmt.Errorf("parse proxy URL failed")
 	}
 	if parsedURL.Scheme == "" || parsedURL.Host == "" {
 		setting.Mode = ModeInvalid
@@ -258,6 +258,28 @@ func proxyAuthorizationHeader(proxyURL *url.URL) string {
 	}
 	token := base64.StdEncoding.EncodeToString([]byte(auth.User + ":" + auth.Password))
 	return "Basic " + token
+}
+
+// Redact returns a log-safe proxy URL with credentials and path-like data removed.
+func Redact(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	parsedURL, errParse := url.Parse(normalizeProxyURLInput(trimmed))
+	if errParse != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return "<invalid proxy URL>"
+	}
+
+	redacted := &url.URL{
+		Scheme: parsedURL.Scheme,
+		Host:   parsedURL.Host,
+	}
+	if parsedURL.User != nil {
+		redacted.User = url.User("redacted")
+	}
+	return redacted.String()
 }
 
 func proxyAuthFromURL(proxyURL *url.URL) *proxy.Auth {

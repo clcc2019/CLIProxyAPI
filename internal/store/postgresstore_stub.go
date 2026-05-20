@@ -17,7 +17,7 @@ package store
 import (
 	"context"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // PostgresStoreConfig mirrors the real struct so cmd/server/config_loader.go

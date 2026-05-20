@@ -23,8 +23,8 @@ import (
 	"strings"
 	"sync"
 
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tiktoken-go/tokenizer"
 )

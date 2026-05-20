@@ -16,8 +16,8 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -331,6 +331,10 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 		}
 		cliproxyauth.ApplyCodexMetadataFromMetadata(auth)
 		cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+		if disabled, ok := metadata["disabled"].(bool); ok && disabled {
+			auth.Disabled = true
+			auth.Status = cliproxyauth.StatusDisabled
+		}
 		auths = append(auths, auth)
 	}
 	if err = rows.Err(); err != nil {

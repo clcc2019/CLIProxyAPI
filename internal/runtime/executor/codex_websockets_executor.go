@@ -18,15 +18,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -112,6 +112,9 @@ type codexWebsocketSession struct {
 
 	reuseKey  string
 	parkTimer *time.Timer
+
+	upstreamDisconnectOnce sync.Once
+	upstreamDisconnectCh   chan error
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
@@ -303,6 +306,22 @@ func (s *codexWebsocketSession) probeConn(conn *websocket.Conn) error {
 	s.touchActivity()
 	s.markProbe(time.Now())
 	return nil
+}
+
+func (s *codexWebsocketSession) notifyUpstreamDisconnect(err error) {
+	if s == nil {
+		return
+	}
+	s.upstreamDisconnectOnce.Do(func() {
+		if s.upstreamDisconnectCh == nil {
+			return
+		}
+		select {
+		case s.upstreamDisconnectCh <- err:
+		default:
+		}
+		close(s.upstreamDisconnectCh)
+	})
 }
 
 func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -1271,6 +1290,9 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 	// orthogonal to park/unpark traffic which now has its own lock.
 	store.sessionsMu.RLock()
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
+		if sess.upstreamDisconnectCh == nil {
+			sess.upstreamDisconnectCh = make(chan error, 1)
+		}
 		if reuseKey == "" || sess.reuseKey == reuseKey {
 			store.sessionsMu.RUnlock()
 			return sess
@@ -1283,6 +1305,9 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 		store.sessions = make(map[string]*codexWebsocketSession)
 	}
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
+		if sess.upstreamDisconnectCh == nil {
+			sess.upstreamDisconnectCh = make(chan error, 1)
+		}
 		if reuseKey != "" {
 			sess.reuseKey = reuseKey
 		}
@@ -1306,16 +1331,27 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 			store.parkedMu.Unlock()
 			sess.sessionID = sessionID
 			sess.reuseKey = reuseKey
+			if sess.upstreamDisconnectCh == nil {
+				sess.upstreamDisconnectCh = make(chan error, 1)
+			}
 			store.sessions[sessionID] = sess
 			store.sessionsMu.Unlock()
 			return sess
 		}
 		store.parkedMu.Unlock()
 	}
-	sess := &codexWebsocketSession{sessionID: sessionID, reuseKey: reuseKey}
+	sess := &codexWebsocketSession{sessionID: sessionID, reuseKey: reuseKey, upstreamDisconnectCh: make(chan error, 1)}
 	store.sessions[sessionID] = sess
 	store.sessionsMu.Unlock()
 	return sess
+}
+
+func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {
+	sess := e.getOrCreateSession(sessionID, "")
+	if sess == nil {
+		return nil
+	}
+	return sess.upstreamDisconnectCh
 }
 
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
@@ -1476,6 +1512,7 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 	sess.connMu.Unlock()
 
 	logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason, err)
+	sess.notifyUpstreamDisconnect(err)
 	if errClose := conn.Close(); errClose != nil {
 		log.Errorf("codex websockets executor: close websocket error: %v", errClose)
 	}

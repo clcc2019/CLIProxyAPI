@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -700,7 +700,11 @@ func (h *Handler) persistResolvedKiroProfileArn(ctx context.Context, auth *corea
 	}
 	updated.Attributes["profile_arn"] = profileArn
 	updated.UpdatedAt = time.Now().UTC()
-	if _, err := h.authManager.Update(coreauth.WithRefreshUpdate(ctx), updated); err != nil {
+	updateCtx := context.Background()
+	if ctx != nil {
+		updateCtx = context.WithoutCancel(ctx)
+	}
+	if _, err := h.authManager.Update(updateCtx, updated); err != nil {
 		return
 	}
 }

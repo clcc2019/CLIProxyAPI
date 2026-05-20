@@ -11,7 +11,7 @@ package store
 import (
 	"context"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // GitTokenStore is a no-op placeholder for the git-backed token store.

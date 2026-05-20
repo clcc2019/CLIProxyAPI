@@ -74,4 +74,14 @@ func BenchmarkGinLogrusLoggerDiscardedOutput(b *testing.B) {
 			b.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 		}
 	}
+
+}
+
+func TestIsAIAPIPathIncludesVideos(t *testing.T) {
+	if !isAIAPIPath("/v1/videos") {
+		t.Fatalf("expected /v1/videos to be treated as AI API path")
+	}
+	if !isAIAPIPath("/v1/videos/video_123") {
+		t.Fatalf("expected /v1/videos/video_123 to be treated as AI API path")
+	}
 }

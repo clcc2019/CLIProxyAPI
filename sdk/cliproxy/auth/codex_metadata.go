@@ -3,7 +3,7 @@ package auth
 import (
 	"strings"
 
-	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 )
 
 // ApplyCodexMetadataFromMetadata normalizes the minimal runtime fields needed

@@ -1,6 +1,6 @@
 package openai
 
-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 
 func compactOpenAIModelMaps(models []registry.OpenAIModelSummary) []map[string]any {
 	out := make([]map[string]any, 0, len(models))

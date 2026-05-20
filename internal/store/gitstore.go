@@ -20,7 +20,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // gcInterval defines minimum time between garbage collection runs.
@@ -509,6 +509,10 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 	}
 	cliproxyauth.ApplyCodexMetadataFromMetadata(auth)
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+	if disabled, ok := metadata["disabled"].(bool); ok && disabled {
+		auth.Disabled = true
+		auth.Status = cliproxyauth.StatusDisabled
+	}
 	return auth, nil
 }
 

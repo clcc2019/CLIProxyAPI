@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"testing"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestTranslateRequestWithOriginal_SkipsOriginalWithoutPayloadRules(t *testing.T) {

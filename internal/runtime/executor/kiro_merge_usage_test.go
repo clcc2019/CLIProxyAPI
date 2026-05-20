@@ -3,7 +3,7 @@ package executor
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 // TestMergeKiroUsageMaxSemantics locks in the fix for the usage-overwrite

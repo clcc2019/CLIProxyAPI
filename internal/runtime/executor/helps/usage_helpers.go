@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -72,7 +72,34 @@ func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false, nil)
 }
 
-func (r *UsageReporter) PublishFailure(ctx context.Context) {
+func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
+	record, ok := r.buildAdditionalModelRecord(model, detail)
+	if !ok {
+		return
+	}
+	usage.PublishRecord(ctx, record)
+}
+
+func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
+	if r == nil {
+		return usage.Record{}, false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return usage.Record{}, false
+	}
+	detail = normalizeUsageDetailTotal(detail)
+	if !hasNonZeroTokenUsage(detail) {
+		return usage.Record{}, false
+	}
+	return r.buildRecordForModel(model, detail, false, nil), true
+}
+
+func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
+	if len(errs) > 0 {
+		r.PublishFailureWithError(ctx, errs[0])
+		return
+	}
 	r.PublishFailureWithError(ctx, nil)
 }
 
@@ -101,15 +128,30 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
+	detail = normalizeUsageDetailTotal(detail)
+	r.once.Do(func() {
+		usage.PublishRecord(ctx, r.buildRecord(detail, failed, err))
+	})
+}
+
+func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
 	if detail.TotalTokens == 0 {
 		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 		if total > 0 {
 			detail.TotalTokens = total
 		}
 	}
-	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed, err))
-	})
+	return detail
+}
+
+func hasNonZeroTokenUsage(detail usage.Detail) bool {
+	return detail.InputTokens != 0 ||
+		detail.OutputTokens != 0 ||
+		detail.ReasoningTokens != 0 ||
+		detail.CachedTokens != 0 ||
+		detail.CacheReadTokens != 0 ||
+		detail.CacheCreationTokens != 0 ||
+		detail.TotalTokens != 0
 }
 
 // ensurePublished guarantees that a usage record is emitted exactly once.
@@ -129,9 +171,16 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, err error)
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed, ErrorMessage: usageErrorMessage(err)}
 	}
+	return r.buildRecordForModel(r.model, detail, failed, err)
+}
+
+func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, err error) usage.Record {
+	if r == nil {
+		return usage.Record{Model: model, Detail: detail, Failed: failed, ErrorMessage: usageErrorMessage(err)}
+	}
 	return usage.Record{
 		Provider:             r.provider,
-		Model:                r.model,
+		Model:                model,
 		Alias:                r.alias,
 		ModelReasoningEffort: r.modelReasoningEffort,
 		Source:               r.source,
@@ -257,7 +306,11 @@ func APIKeyFromContext(ctx context.Context) string {
 	if !ok || ginCtx == nil {
 		return ""
 	}
-	if v, exists := ginCtx.Get("apiKey"); exists {
+	for _, key := range []string{"userApiKey", "apiKey"} {
+		v, exists := ginCtx.Get(key)
+		if !exists {
+			continue
+		}
 		switch value := v.(type) {
 		case string:
 			return value
@@ -347,7 +400,7 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	detail := usage.Detail{
@@ -364,11 +417,38 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	return detail, true
 }
 
+func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
+	usageNode := gjson.ParseBytes(data).Get("response.tool_usage.image_gen")
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
+		return usage.Detail{}, false
+	}
+	return parseOpenAIStyleUsageNode(usageNode), true
+}
+
 func ParseOpenAIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}
 	}
+	return parseOpenAIStyleUsageNode(usageNode)
+}
+
+func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
+	if !usageNode.Exists() || !usageNode.IsObject() {
+		return false
+	}
+	return usageNode.Get("prompt_tokens").Exists() ||
+		usageNode.Get("input_tokens").Exists() ||
+		usageNode.Get("completion_tokens").Exists() ||
+		usageNode.Get("output_tokens").Exists() ||
+		usageNode.Get("total_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
+		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
+}
+
+func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	inputNode := usageNode.Get("prompt_tokens")
 	if !inputNode.Exists() {
 		inputNode = usageNode.Get("input_tokens")

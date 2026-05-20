@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestAuthenticateIncludesClientAPIKeyQuotaMetadata(t *testing.T) {

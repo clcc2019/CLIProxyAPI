@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestMaybeEnableCodexRequestCompression_EnabledForOAuth(t *testing.T) {

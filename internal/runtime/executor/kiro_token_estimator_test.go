@@ -3,8 +3,8 @@ package executor
 import (
 	"testing"
 
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 // TestKiroCountTextSmoke confirms the cl100k_base codec initialises and

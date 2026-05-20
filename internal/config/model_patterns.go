@@ -3,7 +3,7 @@ package config
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
 
 // NormalizeModelPatternList trims, lowercases, and deduplicates model patterns.

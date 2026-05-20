@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,8 +25,17 @@ type Record struct {
 	RequestedAt          time.Time
 	Latency              time.Duration
 	Failed               bool
+	Fail                 Failure
 	ErrorMessage         string
 	Detail               Detail
+	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
+	ResponseHeaders http.Header
+}
+
+// Failure holds HTTP failure metadata for an upstream request attempt.
+type Failure struct {
+	StatusCode int
+	Body       string
 }
 
 // Detail holds the token usage breakdown.
@@ -57,6 +67,7 @@ type Detail struct {
 	OutputTokens        int64
 	ReasoningTokens     int64
 	CachedTokens        int64
+	CacheReadTokens     int64
 	CacheCreationTokens int64
 	TotalTokens         int64
 }

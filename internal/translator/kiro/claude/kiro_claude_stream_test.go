@@ -175,7 +175,9 @@ func TestBuildClaudeStreamEvent_PreservesUTF8(t *testing.T) {
 
 // BenchmarkBuildClaudeStreamEvent quantifies the streaming hot path. Run
 // `go test -bench=BenchmarkBuildClaudeStreamEvent -benchmem
-//   ./internal/translator/kiro/claude/`
+//
+//	./internal/translator/kiro/claude/`
+//
 // to see allocation count per chunk; the optimized version should report
 // ~1 alloc/op (the returned []byte) versus ~6 allocs/op for the prior
 // reflection-marshal implementation.

@@ -30,5 +30,8 @@ func isPermanentRefreshError(err error) bool {
 	if errors.As(err, &p) && p != nil {
 		return p.IsPermanentAuthError()
 	}
+	if isUnauthorizedError(err) {
+		return true
+	}
 	return false
 }

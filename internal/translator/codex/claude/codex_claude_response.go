@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
 
@@ -157,7 +157,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			}
 			template = buildClaudeToolUseStart(
 				params.BlockIndex,
-				util.SanitizeClaudeToolID(itemResult.Get("call_id").String()),
+				shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(itemResult.Get("call_id").String())),
 				name,
 			)
 
@@ -367,7 +367,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 				if contentCount > 0 {
 					out = append(out, ',')
 				}
-				out = appendClaudeToolUseBlock(out, util.SanitizeClaudeToolID(item.Get("call_id").String()), name, inputRaw)
+				out = appendClaudeToolUseBlock(out, shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(item.Get("call_id").String())), name, inputRaw)
 				contentCount++
 			}
 			return true

@@ -14,12 +14,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -100,6 +100,32 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", connectionID, clientIP)
+	wsDone := make(chan struct{})
+	defer close(wsDone)
+	if h != nil && h.AuthManager != nil {
+		disconnectSessionID := headerExecutionSessionID
+		if disconnectSessionID == "" {
+			disconnectSessionID = fallbackExecutionSessionID
+		}
+		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
+			type upstreamDisconnectSubscriber interface {
+				UpstreamDisconnectChan(sessionID string) <-chan error
+			}
+			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
+				disconnectCh := subscriber.UpstreamDisconnectChan(disconnectSessionID)
+				if disconnectCh != nil {
+					go func() {
+						select {
+						case <-wsDone:
+							return
+						case <-disconnectCh:
+							_ = conn.Close()
+						}
+					}()
+				}
+			}
+		}
+	}
 	var wsTerminateErr error
 	wsTimelineLog := newResponsesWebsocketTimelineBuilder(h)
 	defer func() {
@@ -275,7 +301,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if authID == "" || h == nil || h.AuthManager == nil {
 					return
 				}
-				selectedAuth, ok := h.AuthManager.GetByID(authID)
+				selectedAuth, ok := responsesWebsocketSessionAuthByID(h, currentExecutionSessionID, authID)
 				if !ok || selectedAuth == nil {
 					return
 				}
@@ -294,6 +320,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		lastResponseOutput = completedOutput
 	}
+}
+
+func responsesWebsocketSessionAuthByID(h *OpenAIResponsesAPIHandler, sessionID, authID string) (*coreauth.Auth, bool) {
+	if h == nil || h.AuthManager == nil {
+		return nil, false
+	}
+	if auth, ok := h.AuthManager.GetExecutionSessionAuthByID(sessionID, authID); ok {
+		return auth, true
+	}
+	return h.AuthManager.GetByID(authID)
 }
 
 func websocketClientAddress(c *gin.Context) string {

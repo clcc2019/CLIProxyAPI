@@ -19,18 +19,18 @@ import (
 //     below. Keeping the snapshot type hand-maintained beats reflection: we
 //     trade one line of maintenance for a 50x speedup on hot-path exports.
 type codexMetricsState struct {
-	dedupeHit         atomic.Int64 // incremented when a non-stream request is served from an in-flight peer
-	dedupeMiss        atomic.Int64 // incremented when a non-stream request actually hit the upstream
-	memoBodyHit       atomic.Int64 // normalizeCodexFinalUpstreamBody cache hits
-	memoBodyMiss      atomic.Int64 // normalizeCodexFinalUpstreamBody cache misses
-	memoPromptHit     atomic.Int64 // prompt-cache resolution memo hits
-	memoPromptMiss    atomic.Int64 // prompt-cache resolution memo misses
-	wsUpstreamError   atomic.Int64 // readUpstreamLoop surfaced a terminal error to the consumer
-	wsUpstreamBinary  atomic.Int64 // readUpstreamLoop rejected an unexpected binary frame
-	wsActiveChMissing atomic.Int64 // readUpstreamLoop had a frame but no active consumer channel
+	dedupeHit          atomic.Int64 // incremented when a non-stream request is served from an in-flight peer
+	dedupeMiss         atomic.Int64 // incremented when a non-stream request actually hit the upstream
+	memoBodyHit        atomic.Int64 // normalizeCodexFinalUpstreamBody cache hits
+	memoBodyMiss       atomic.Int64 // normalizeCodexFinalUpstreamBody cache misses
+	memoPromptHit      atomic.Int64 // prompt-cache resolution memo hits
+	memoPromptMiss     atomic.Int64 // prompt-cache resolution memo misses
+	wsUpstreamError    atomic.Int64 // readUpstreamLoop surfaced a terminal error to the consumer
+	wsUpstreamBinary   atomic.Int64 // readUpstreamLoop rejected an unexpected binary frame
+	wsActiveChMissing  atomic.Int64 // readUpstreamLoop had a frame but no active consumer channel
 	terminalIncomplete atomic.Int64 // upstream sent response.incomplete
-	terminalFailed    atomic.Int64 // upstream sent response.failed
-	captureTruncated  atomic.Int64 // request-log capture dropped tail bytes over budget
+	terminalFailed     atomic.Int64 // upstream sent response.failed
+	captureTruncated   atomic.Int64 // request-log capture dropped tail bytes over budget
 }
 
 // codexMetrics is the process-wide singleton. The zero value is ready to use.

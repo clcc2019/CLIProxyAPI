@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestCodexFinalUpstreamBodyMemoSkipsOversizedEntry(t *testing.T) {

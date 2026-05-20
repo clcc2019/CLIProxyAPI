@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 var validKiroRetryTestPayload = []byte(`{"conversationState":{"conversationId":"c","currentMessage":{"userInputMessage":{"content":"hi","modelId":"auto","origin":"AI_EDITOR"}}}}`)

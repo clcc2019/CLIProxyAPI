@@ -11,9 +11,9 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	codexcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	codexcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

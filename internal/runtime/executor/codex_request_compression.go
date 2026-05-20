@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 const codexCompressionEnv = "CODEX_ENABLE_ZSTD_REQUEST_COMPRESSION"
