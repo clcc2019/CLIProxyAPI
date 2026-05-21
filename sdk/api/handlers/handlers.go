@@ -290,6 +290,17 @@ func hashClientPrincipal(principal string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	effort := thinking.ExtractReasoningEffort(rawJSON, handlerType, model)
+	if effort == "" {
+		return
+	}
+	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
+}
+
 func requestHeadersFromContext(ctx context.Context) http.Header {
 	if ctx == nil {
 		return nil
@@ -695,9 +706,10 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	if reqMeta == nil {
-		reqMeta = make(map[string]any, 1)
+		reqMeta = make(map[string]any, 2)
 	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	if PassthroughHeadersEnabled(h.Cfg) {
 		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
 	}
@@ -752,9 +764,10 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	if reqMeta == nil {
-		reqMeta = make(map[string]any, 1)
+		reqMeta = make(map[string]any, 2)
 	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	if PassthroughHeadersEnabled(h.Cfg) {
 		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
 	}
@@ -825,9 +838,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	if reqMeta == nil {
-		reqMeta = make(map[string]any, 1)
+		reqMeta = make(map[string]any, 2)
 	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	if PassthroughHeadersEnabled(h.Cfg) {
 		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
 	}

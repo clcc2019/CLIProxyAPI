@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"testing"
@@ -103,6 +104,26 @@ func TestParseCodexWebsocketErrorInfersUsageLimitStatus(t *testing.T) {
 	}
 	if rap, ok := err.(interface{ RetryAfter() *time.Duration }); !ok || rap.RetryAfter() == nil {
 		t.Fatalf("expected retryAfter to be inferred")
+	}
+}
+
+func assertCodexErrorCode(t *testing.T, raw string, wantType string, wantCode string) {
+	t.Helper()
+
+	var payload struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("error body is not valid JSON: %v; body=%s", err, raw)
+	}
+	if payload.Error.Type != wantType {
+		t.Fatalf("error.type = %q, want %q; body=%s", payload.Error.Type, wantType, raw)
+	}
+	if payload.Error.Code != wantCode {
+		t.Fatalf("error.code = %q, want %q; body=%s", payload.Error.Code, wantCode, raw)
 	}
 }
 

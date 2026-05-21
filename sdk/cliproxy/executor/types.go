@@ -21,6 +21,9 @@ const RequestContentTypeMetadataKey = "request_content_type"
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
+// ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
+const ReasoningEffortMetadataKey = "reasoning_effort"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"

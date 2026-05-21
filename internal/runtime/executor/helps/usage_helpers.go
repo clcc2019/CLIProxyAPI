@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -27,6 +28,7 @@ type UsageReporter struct {
 	apiKey               string
 	source               string
 	modelReasoningEffort string
+	reasoning            string
 	requestedAt          time.Time
 	once                 sync.Once
 }
@@ -45,6 +47,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:      resolveUsageAPIKey(auth, ctxAPIKey),
 		source:      resolveUsageSource(auth, ctxAPIKey),
 		authType:    resolveUsageAuthType(auth),
+		reasoning:   usage.ReasoningEffortFromContext(ctx),
 	}
 	if suffix := strings.TrimSpace(thinking.ParseSuffix(model).RawSuffix); suffix != "" {
 		reporter.modelReasoningEffort = normalizeReasoningEffortValue(suffix)
@@ -69,7 +72,7 @@ func (r *UsageReporter) CaptureModelReasoningEffort(payloads ...[]byte) {
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false, nil)
+	r.publishWithOutcome(ctx, detail, false, usage.Failure{}, nil)
 }
 
 func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
@@ -77,7 +80,7 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 	if !ok {
 		return
 	}
-	usage.PublishRecord(ctx, record)
+	r.publishRecord(ctx, record)
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -92,19 +95,19 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(model, detail, false, nil), true
+	return r.buildRecordForModel(model, detail, false, usage.Failure{}, nil), true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
+	var err error
 	if len(errs) > 0 {
-		r.PublishFailureWithError(ctx, errs[0])
-		return
+		err = errs[0]
 	}
-	r.PublishFailureWithError(ctx, nil)
+	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...), err)
 }
 
 func (r *UsageReporter) PublishFailureWithError(ctx context.Context, err error) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true, err)
+	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(err), err)
 }
 
 func (r *UsageReporter) PublishFailureWithUsage(ctx context.Context, detail usage.Detail) {
@@ -112,7 +115,7 @@ func (r *UsageReporter) PublishFailureWithUsage(ctx context.Context, detail usag
 }
 
 func (r *UsageReporter) PublishFailureWithUsageAndError(ctx context.Context, detail usage.Detail, err error) {
-	r.publishWithOutcome(ctx, detail, true, err)
+	r.publishWithOutcome(ctx, detail, true, failFromErrors(err), err)
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -124,13 +127,13 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 	}
 }
 
-func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, err error) {
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, fail usage.Failure, err error) {
 	if r == nil {
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed, err))
+		r.publishRecord(ctx, r.buildRecordWithFailure(detail, failed, fail, err))
 	})
 }
 
@@ -163,20 +166,33 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false, nil))
+		r.publishRecord(ctx, r.buildRecordWithFailure(usage.Detail{}, false, usage.Failure{}, nil))
 	})
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, err error) usage.Record {
-	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed, ErrorMessage: usageErrorMessage(err)}
-	}
-	return r.buildRecordForModel(r.model, detail, failed, err)
+func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
+	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	usage.PublishRecord(ctx, record)
 }
 
-func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, err error) usage.Record {
+func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, errs ...error) usage.Record {
+	var err error
+	if len(errs) > 0 {
+		err = errs[0]
+	}
+	return r.buildRecordWithFailure(detail, failed, failFromErrors(err), err)
+}
+
+func (r *UsageReporter) buildRecordWithFailure(detail usage.Detail, failed bool, fail usage.Failure, err error) usage.Record {
 	if r == nil {
-		return usage.Record{Model: model, Detail: detail, Failed: failed, ErrorMessage: usageErrorMessage(err)}
+		return usage.Record{Detail: detail, Failed: failed, Fail: fail, ErrorMessage: usageErrorMessage(err)}
+	}
+	return r.buildRecordForModel(r.model, detail, failed, fail, err)
+}
+
+func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure, err error) usage.Record {
+	if r == nil {
+		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, ErrorMessage: usageErrorMessage(err)}
 	}
 	return usage.Record{
 		Provider:             r.provider,
@@ -188,12 +204,29 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AuthID:               r.authID,
 		AuthIndex:            r.authIndex,
 		AuthType:             r.authType,
+		ReasoningEffort:      r.reasoning,
 		RequestedAt:          r.requestedAt,
 		Latency:              r.latency(),
 		Failed:               failed,
+		Fail:                 fail,
 		ErrorMessage:         usageErrorMessage(err),
 		Detail:               detail,
 	}
+}
+
+func failFromErrors(errs ...error) usage.Failure {
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		fail := usage.Failure{Body: strings.TrimSpace(err.Error())}
+		var se interface{ StatusCode() int }
+		if errors.As(err, &se) && se != nil {
+			fail.StatusCode = se.StatusCode()
+		}
+		return fail
+	}
+	return usage.Failure{}
 }
 
 const maxUsageErrorMessageLen = 2000

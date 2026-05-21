@@ -286,7 +286,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			completedStream := false
-
 			if eventData, ok := codexEventData(line); ok {
 				eventType := codexEventType(eventData)
 				if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
