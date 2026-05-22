@@ -371,45 +371,7 @@ func setNonEmptyKiroMetadata(metadata map[string]any, keyValues ...string) {
 }
 
 func RemoveEmptyKiroMetadataFields(metadata map[string]any) {
-	if metadata == nil {
-		return
-	}
-	for _, key := range []string{
-		"client_id",
-		"clientId",
-		"client_secret",
-		"clientSecret",
-		"client_id_hash",
-		"clientIdHash",
-		"email",
-		"region",
-		"start_url",
-		"startUrl",
-		"profile_arn",
-		"profileArn",
-		"auth_method",
-		"authMethod",
-		"provider",
-		"machine_id",
-		"machineId",
-		"device_id",
-		"deviceId",
-	} {
-		if value, ok := metadata[key]; ok && kiroMetadataValueEmpty(value) {
-			delete(metadata, key)
-		}
-	}
-}
-
-func kiroMetadataValueEmpty(value any) bool {
-	switch v := value.(type) {
-	case nil:
-		return true
-	case string:
-		return strings.TrimSpace(v) == ""
-	default:
-		return false
-	}
+	coreauth.RemoveEmptyKiroMetadataFields(metadata)
 }
 
 func kiroAuthIdentifier(tokenData *kiroauth.TokenData) string {

@@ -28,6 +28,8 @@ type CodexTokenStorage struct {
 	LastRefresh string `json:"last_refresh"`
 	// Email is the OpenAI account email address associated with this token.
 	Email string `json:"email"`
+	// PlanType is the ChatGPT/Codex account plan parsed from token claims.
+	PlanType string `json:"plan_type"`
 	// Type indicates the authentication provider type, always "codex" for this storage.
 	Type string `json:"type"`
 	// Expire is the timestamp when the current access token expires.

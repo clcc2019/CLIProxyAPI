@@ -6,11 +6,14 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"math/big"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -51,6 +54,134 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected 1 refresh attempt, got %d", got)
+	}
+}
+
+func TestRefreshTokensUsesOfficialJSONPayloadAndParsesAccessClaims(t *testing.T) {
+	t.Parallel()
+
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	accessToken := testCodexJWT(t, map[string]any{
+		"exp": expiresAt.Unix(),
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "account-123",
+			"chatgpt_plan_type":  "plus",
+		},
+		"https://api.openai.com/profile": map[string]any{
+			"email": "codex@example.com",
+		},
+	})
+
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodPost {
+					t.Fatalf("method = %s, want POST", req.Method)
+				}
+				if got := req.Header.Get("Content-Type"); got != "application/json" {
+					t.Fatalf("Content-Type = %q, want application/json", got)
+				}
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				var payload map[string]string
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("request body is not JSON: %v", err)
+				}
+				if payload["client_id"] != ClientID || payload["grant_type"] != "refresh_token" || payload["refresh_token"] != "old-refresh" {
+					t.Fatalf("unexpected refresh payload: %#v", payload)
+				}
+				if _, ok := payload["scope"]; ok {
+					t.Fatalf("refresh payload should not include scope: %#v", payload)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":` + strconv.Quote(accessToken) + `,"refresh_token":"new-refresh"}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	tokenData, err := auth.RefreshTokens(context.Background(), "old-refresh")
+	if err != nil {
+		t.Fatalf("RefreshTokens() error = %v", err)
+	}
+	if tokenData.IDToken != "" {
+		t.Fatalf("IDToken = %q, want empty when response omits id_token", tokenData.IDToken)
+	}
+	if tokenData.AccessToken != accessToken || tokenData.RefreshToken != "new-refresh" {
+		t.Fatalf("unexpected tokens: %+v", tokenData)
+	}
+	if tokenData.AccountID != "account-123" || tokenData.Email != "codex@example.com" || tokenData.PlanType != "plus" {
+		t.Fatalf("unexpected parsed claims: %+v", tokenData)
+	}
+	if tokenData.Expire != expiresAt.Format(time.RFC3339) {
+		t.Fatalf("Expire = %q, want %q", tokenData.Expire, expiresAt.Format(time.RFC3339))
+	}
+}
+
+func TestRefreshTokensPermanentErrorsExposeStatusAndMarker(t *testing.T) {
+	t.Parallel()
+
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"refresh_token_expired"}}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokens(context.Background(), "old-refresh")
+	if err == nil {
+		t.Fatal("RefreshTokens() expected error")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("error status = %T %v, want 401", err, err)
+	}
+	permanent, ok := err.(interface{ IsPermanentAuthError() bool })
+	if !ok || !permanent.IsPermanentAuthError() {
+		t.Fatalf("error does not mark permanent auth failure: %T %v", err, err)
+	}
+}
+
+func TestTokenStorageKeepsPlanAndPreservesMissingRefreshFields(t *testing.T) {
+	t.Parallel()
+
+	auth := &CodexAuth{}
+	storage := auth.CreateTokenStorage(&CodexAuthBundle{
+		TokenData: CodexTokenData{
+			IDToken:      "old-id-token",
+			AccessToken:  "old-access-token",
+			RefreshToken: "old-refresh-token",
+			AccountID:    "account-123",
+			Email:        "codex@example.com",
+			PlanType:     "plus",
+			Expire:       "2026-05-23T00:00:00Z",
+		},
+		LastRefresh: "2026-05-22T00:00:00Z",
+	})
+	if storage.PlanType != "plus" {
+		t.Fatalf("PlanType = %q, want plus", storage.PlanType)
+	}
+
+	auth.UpdateTokenStorage(storage, &CodexTokenData{
+		AccessToken: "new-access-token",
+		Expire:      "2026-05-24T00:00:00Z",
+	})
+	if storage.IDToken != "old-id-token" || storage.RefreshToken != "old-refresh-token" || storage.PlanType != "plus" {
+		t.Fatalf("optional fields were not preserved: %+v", storage)
+	}
+	if storage.AccessToken != "new-access-token" || storage.Expire != "2026-05-24T00:00:00Z" {
+		t.Fatalf("updated fields not applied: %+v", storage)
 	}
 }
 
@@ -200,4 +331,17 @@ func mustCreateTestCertificatePEM(t *testing.T) string {
 		Type:  "CERTIFICATE",
 		Bytes: der,
 	}))
+}
+
+func testCodexJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	encode := func(v any) string {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal jwt part: %v", err)
+		}
+		return base64.RawURLEncoding.EncodeToString(data)
+	}
+	return encode(map[string]any{"alg": "none", "typ": "JWT"}) + "." + encode(claims) + "." + base64.RawURLEncoding.EncodeToString([]byte("sig"))
 }

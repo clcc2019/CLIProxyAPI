@@ -214,12 +214,18 @@ func (a *XAIAuth) postTokenForm(ctx context.Context, tokenEndpoint string, form 
 			log.Errorf("xai token request: close response body error: %v", errClose)
 		}
 	}()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("xai token response: read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("xai token request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		oauthError, oauthDescription := parseTokenErrorBody(body)
+		return nil, &tokenRequestError{
+			statusCode:       resp.StatusCode,
+			body:             strings.TrimSpace(string(body)),
+			oauthError:       oauthError,
+			oauthDescription: oauthDescription,
+		}
 	}
 	var payload struct {
 		AccessToken  string `json:"access_token"`
@@ -245,6 +251,60 @@ func (a *XAIAuth) postTokenForm(ctx context.Context, tokenEndpoint string, form 
 		Email:        email,
 		Subject:      subject,
 	}, nil
+}
+
+type tokenRequestError struct {
+	statusCode       int
+	body             string
+	oauthError       string
+	oauthDescription string
+}
+
+func (e *tokenRequestError) Error() string {
+	if e == nil {
+		return ""
+	}
+	message := fmt.Sprintf("xai token request failed with status %d", e.statusCode)
+	if e.oauthError != "" {
+		message += ": " + e.oauthError
+		if e.oauthDescription != "" {
+			message += ": " + e.oauthDescription
+		}
+		return message
+	}
+	if e.body != "" {
+		message += ": " + e.body
+	}
+	return message
+}
+
+func (e *tokenRequestError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
+}
+
+func (e *tokenRequestError) IsPermanentAuthError() bool {
+	if e == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(e.oauthError)) {
+	case "invalid_grant", "invalid_client", "unauthorized_client":
+		return true
+	}
+	return e.statusCode == http.StatusUnauthorized
+}
+
+func parseTokenErrorBody(body []byte) (string, string) {
+	var payload struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(payload.Error), strings.TrimSpace(payload.ErrorDescription)
 }
 
 // CreateTokenStorage converts an auth bundle into persistable storage.

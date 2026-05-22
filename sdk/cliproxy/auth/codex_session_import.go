@@ -37,6 +37,9 @@ func NormalizeImportedAuthMetadata(metadata map[string]any) (map[string]any, boo
 	if planType != "" {
 		normalized["plan_type"] = planType
 	}
+	if subscriptionExpiresAt := importedOpenAISubscriptionExpiresAt(metadata); subscriptionExpiresAt != "" {
+		normalized["subscription_expires_at"] = subscriptionExpiresAt
+	}
 
 	for _, key := range []string{
 		"user_agent",
@@ -119,6 +122,28 @@ func isKiroSocialProvider(provider string) bool {
 	default:
 		return false
 	}
+}
+
+func importedOpenAISubscriptionExpiresAt(metadata map[string]any) string {
+	if value := firstMetadataString(metadata, "subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil"); value != "" {
+		return value
+	}
+	for _, candidate := range []struct {
+		container string
+		keys      []string
+	}{
+		{container: "account", keys: []string{"subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil", "subscription_active_until", "subscriptionActiveUntil"}},
+		{container: "entitlement", keys: []string{"subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil", "expires_at", "expiresAt", "current_period_end", "currentPeriodEnd", "period_end", "periodEnd"}},
+		{container: "subscription", keys: []string{"subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil", "expires_at", "expiresAt", "current_period_end", "currentPeriodEnd", "period_end", "periodEnd"}},
+		{container: "providerSpecificData", keys: []string{"subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil"}},
+	} {
+		for _, key := range candidate.keys {
+			if value := strings.TrimSpace(nestedMetadataString(metadata, candidate.container, key)); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
 }
 
 func firstMetadataString(metadata map[string]any, keys ...string) string {

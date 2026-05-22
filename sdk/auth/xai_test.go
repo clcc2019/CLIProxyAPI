@@ -1,6 +1,10 @@
 package auth
 
-import "testing"
+import (
+	"testing"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+)
 
 func TestXAIAuthenticatorProviderAndRefreshLead(t *testing.T) {
 	authenticator := NewXAIAuthenticator()
@@ -10,6 +14,13 @@ func TestXAIAuthenticatorProviderAndRefreshLead(t *testing.T) {
 	lead := authenticator.RefreshLead()
 	if lead == nil || *lead <= 0 {
 		t.Fatalf("RefreshLead() = %v, want positive duration", lead)
+	}
+}
+
+func TestXAIRefreshLeadIsRegistered(t *testing.T) {
+	lead := cliproxyauth.ProviderRefreshLead("xai", nil)
+	if lead == nil || *lead <= 0 {
+		t.Fatalf("ProviderRefreshLead(xai) = %v, want positive duration", lead)
 	}
 }
 

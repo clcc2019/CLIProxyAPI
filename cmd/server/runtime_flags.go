@@ -15,6 +15,7 @@ type runtimeFlags struct {
 	antigravityLogin   bool
 	kimiLogin          bool
 	kiroLogin          bool
+	xaiLogin           bool
 	kiroImport         bool
 	kiroRefresh        bool
 	tuiMode            bool
@@ -40,6 +41,7 @@ func parseRuntimeFlags() runtimeFlags {
 	flag.BoolVar(&flags.antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&flags.kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&flags.kiroLogin, "kiro-login", false, "Generate a local Kiro auth file using OAuth login")
+	flag.BoolVar(&flags.xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&flags.kiroImport, "kiro-import", false, "Import Kiro IDE authentication")
 	flag.BoolVar(&flags.kiroRefresh, "kiro-refresh", false, "Refresh local Kiro auth files using stored refresh tokens")
 	flag.StringVar(&flags.projectID, "project_id", "", "Project ID (Gemini only, not required)")

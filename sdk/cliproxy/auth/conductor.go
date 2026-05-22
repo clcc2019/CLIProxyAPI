@@ -3707,6 +3707,19 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+// ListManagementSummary returns lightweight auth snapshots for management list
+// views. It intentionally avoids copying full token-bearing metadata for every
+// credential while preserving the fields needed for filtering, sorting, and cards.
+func (m *Manager) ListManagementSummary() []*Auth {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	list := make([]*Auth, 0, len(m.auths))
+	for _, auth := range m.auths {
+		list = append(list, auth.CloneForManagementSummary())
+	}
+	return list
+}
+
 // AnyAvailableAuthForModel reports whether any matching auth is currently usable.
 func (m *Manager) AnyAvailableAuthForModel(providers []string, model string, predicate func(*Auth) bool) bool {
 	if m == nil || predicate == nil {

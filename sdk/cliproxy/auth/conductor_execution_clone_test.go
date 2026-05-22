@@ -197,6 +197,93 @@ func TestAuthCloneForScheduler_CodexRetainsExecutionFields(t *testing.T) {
 	}
 }
 
+func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
+	auth := &Auth{
+		ID:            "codex-auth",
+		Index:         "idx-1",
+		Provider:      "codex",
+		FileName:      "codex.json",
+		StatusMessage: "quota cached",
+		Success:       11,
+		Failed:        2,
+		Attributes: map[string]string{
+			"path":              "/tmp/codex.json",
+			"api_key":           "sk-test",
+			"base_url":          "https://chatgpt.com/backend-api/codex",
+			"header:X-Test":     "drop-me",
+			"header:User-Agent": "codex_vscode/1.0.0",
+		},
+		Metadata: map[string]any{
+			"email":                             "x@example.com",
+			"access_token":                      "large-access-token",
+			"id_token":                          "large-id-token",
+			"account_id":                        "acct-1",
+			"refresh_token":                     "refresh-token",
+			"plan_type":                         "plus",
+			"chatgpt_subscription_active_until": "2026-06-19T11:44:26Z",
+			"chatgpt_subscription_active_start": "2026-05-19T11:44:26Z",
+			"subscription_active_days":          3,
+			"websockets":                        true,
+			"token":                             map[string]any{"refresh_token": "nested-refresh", "access_token": "nested-access"},
+			"subscription":                      map[string]any{"current_period_end": "2026-06-19T11:44:26Z", "large_blob": "drop-me"},
+			runtimeStateMetadataKey:             map[string]any{"updated_at": "2026-05-20T00:00:00Z"},
+		},
+	}
+	now := time.Now()
+	auth.recordRecentRequest(now, true)
+	auth.recordRecentRequest(now, false)
+
+	cloned := auth.CloneForManagementSummary()
+	if cloned == nil {
+		t.Fatal("CloneForManagementSummary returned nil")
+	}
+	if cloned.StatusMessage != "quota cached" || cloned.Success != 11 || cloned.Failed != 2 {
+		t.Fatalf("management summary lost runtime counters: %#v", cloned)
+	}
+	var recentSuccess, recentFailed int64
+	for _, bucket := range cloned.RecentRequestsSnapshot(now) {
+		recentSuccess += bucket.Success
+		recentFailed += bucket.Failed
+	}
+	if recentSuccess != 1 || recentFailed != 1 {
+		t.Fatalf("management summary lost recent requests: success=%d failed=%d", recentSuccess, recentFailed)
+	}
+	if cloned.Attributes["path"] != "/tmp/codex.json" || cloned.Attributes["api_key"] != "sk-test" || cloned.Attributes["header:User-Agent"] == "" {
+		t.Fatalf("management summary attributes = %#v", cloned.Attributes)
+	}
+	if _, ok := cloned.Attributes["base_url"]; ok {
+		t.Fatalf("management summary kept base_url: %#v", cloned.Attributes)
+	}
+	if _, ok := cloned.Attributes["header:X-Test"]; ok {
+		t.Fatalf("management summary kept unrelated header: %#v", cloned.Attributes)
+	}
+	for _, key := range []string{"access_token", "id_token", "account_id"} {
+		if _, ok := cloned.Metadata[key]; ok {
+			t.Fatalf("management summary kept %s: %#v", key, cloned.Metadata)
+		}
+	}
+	if cloned.Metadata["refresh_token"] != "refresh-token" || cloned.Metadata["plan_type"] != "plus" {
+		t.Fatalf("management summary metadata = %#v", cloned.Metadata)
+	}
+	if nested, ok := cloned.Metadata["token"].(map[string]any); !ok || nested["refresh_token"] != "nested-refresh" || nested["access_token"] != nil {
+		t.Fatalf("management summary nested token = %#v", cloned.Metadata["token"])
+	}
+	if nested, ok := cloned.Metadata["subscription"].(map[string]any); !ok || nested["current_period_end"] == nil || nested["large_blob"] != nil {
+		t.Fatalf("management summary nested subscription = %#v", cloned.Metadata["subscription"])
+	}
+
+	cloned.Metadata["email"] = "mutated@example.com"
+	if auth.Metadata["email"] != "x@example.com" {
+		t.Fatal("CloneForManagementSummary should copy metadata map")
+	}
+	clonedToken := cloned.Metadata["token"].(map[string]any)
+	clonedToken["refresh_token"] = "mutated"
+	originalToken := auth.Metadata["token"].(map[string]any)
+	if originalToken["refresh_token"] != "nested-refresh" {
+		t.Fatal("CloneForManagementSummary should copy nested token map")
+	}
+}
+
 func BenchmarkCloneAuthForExecutionCodex(b *testing.B) {
 	auth := &Auth{
 		ID:         "codex-auth",

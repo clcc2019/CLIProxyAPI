@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -186,19 +185,16 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 
 	switch {
 	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["disabled"] = auth.Disabled
+		metadata := cliproxyauth.PrepareAuthFileMetadataForSave(auth)
 		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-			setter.SetMetadata(auth.Metadata)
+			setter.SetMetadata(metadata)
 		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
-		raw, errMarshal := json.Marshal(auth.Metadata)
+		metadata := cliproxyauth.PrepareAuthFileMetadataForSave(auth)
+		raw, errMarshal := json.Marshal(metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("object store: marshal metadata: %w", errMarshal)
 		}
@@ -571,55 +567,30 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	if len(data) == 0 {
 		return nil, nil
 	}
-	metadata := make(map[string]any)
-	if err = json.Unmarshal(data, &metadata); err != nil {
+	metadata, err := cliproxyauth.DecodeAuthFileMetadata(data)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
-	}
-	if normalized, changed := cliproxyauth.NormalizeImportedAuthMetadata(metadata); changed {
-		metadata = normalized
-	}
-	provider := strings.TrimSpace(valueAsString(metadata["type"]))
-	if provider == "" {
-		provider = "unknown"
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat auth file: %w", err)
 	}
-	rel, errRel := filepath.Rel(baseDir, path)
-	if errRel != nil {
-		rel = filepath.Base(path)
+	authID := ""
+	if baseDir != "" {
+		if rel, errRel := filepath.Rel(baseDir, path); errRel == nil {
+			authID = normalizeAuthID(rel)
+		}
 	}
-	rel = normalizeAuthID(rel)
-	attr := map[string]string{"path": path}
-	if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
-		attr["email"] = email
+	if authID == "" {
+		authID = normalizeAuthID(filepath.Base(path))
 	}
-	disabled, _ := metadata["disabled"].(bool)
-	status := cliproxyauth.StatusActive
-	if disabled {
-		status = cliproxyauth.StatusDisabled
-	}
-	auth := &cliproxyauth.Auth{
-		ID:               rel,
-		Provider:         provider,
-		FileName:         rel,
-		Label:            labelFor(metadata),
-		Status:           status,
-		Disabled:         disabled,
-		Attributes:       attr,
-		Metadata:         metadata,
-		CreatedAt:        info.ModTime(),
-		UpdatedAt:        info.ModTime(),
-		LastRefreshedAt:  time.Time{},
-		NextRefreshAfter: time.Time{},
-	}
-	cliproxyauth.ApplyCodexMetadataFromMetadata(auth)
-	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
-	if disabled, ok := metadata["disabled"].(bool); ok && disabled {
-		auth.Disabled = true
-		auth.Status = cliproxyauth.StatusDisabled
-	}
+	auth := cliproxyauth.NewAuthFromAuthFileMetadata(metadata, cliproxyauth.AuthFileProjectionOptions{
+		ID:        authID,
+		Path:      path,
+		FileName:  authID,
+		CreatedAt: info.ModTime(),
+		UpdatedAt: info.ModTime(),
+	})
 	return auth, nil
 }
 

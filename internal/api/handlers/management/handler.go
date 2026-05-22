@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -27,6 +28,12 @@ type attemptInfo struct {
 	lastActivity time.Time // track last activity for cleanup
 }
 
+type CacheStore interface {
+	LoadCache(ctx context.Context, namespace, key string) ([]byte, bool, error)
+	SaveCache(ctx context.Context, namespace, key string, data []byte, ttl time.Duration) error
+	DeleteCache(ctx context.Context, namespace, key string) error
+}
+
 // attemptCleanupInterval controls how often stale IP entries are purged
 const attemptCleanupInterval = 1 * time.Hour
 
@@ -43,6 +50,7 @@ type Handler struct {
 	authManager         *coreauth.Manager
 	usageStats          *usage.RequestStatistics
 	tokenStore          coreauth.Store
+	cacheStore          CacheStore
 	localPassword       string
 	allowRemoteOverride bool
 	envSecret           string
@@ -162,6 +170,15 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) {
 	}
 	h.mu.Lock()
 	h.usageStats = stats
+	h.mu.Unlock()
+}
+
+func (h *Handler) SetCacheStore(store CacheStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.cacheStore = store
 	h.mu.Unlock()
 }
 

@@ -185,7 +185,7 @@ func (h *Handler) GetKiroUsage(c *gin.Context) {
 	// previous call is already persisted, so we don't need to re-run the
 	// resolve path here.
 	if !opts.force && cache != nil {
-		if cached, ok := cache.load(auth.ID, time.Now()); ok {
+		if cached, ok := h.loadKiroUsageCache(c.Request.Context(), cache, auth.ID, time.Now()); ok {
 			c.JSON(http.StatusOK, cached)
 			return
 		}
@@ -209,9 +209,7 @@ func (h *Handler) GetKiroUsage(c *gin.Context) {
 			if refreshed != nil {
 				auth = refreshed
 			}
-			if cache != nil {
-				cache.invalidate(auth.ID)
-			}
+			h.invalidateKiroUsageCache(c.Request.Context(), cache, auth.ID)
 			usage, err = h.fetchKiroUsageWithCache(ctx, c.Request.Context(), auth, opts)
 		}
 	}
@@ -283,7 +281,7 @@ func (h *Handler) fetchKiroUsageWithCache(ctx context.Context, requestCtx contex
 	value, err, _ := cache.flights.Do(flightKey, func() (any, error) {
 		// Re-check cache inside the singleflight to coalesce stragglers.
 		if !opts.force && cache != nil {
-			if cached, ok := cache.load(auth.ID, time.Now()); ok {
+			if cached, ok := h.loadKiroUsageCache(requestCtx, cache, auth.ID, time.Now()); ok {
 				return result{usage: cached}, nil
 			}
 		}
@@ -291,9 +289,7 @@ func (h *Handler) fetchKiroUsageWithCache(ctx context.Context, requestCtx contex
 		if err != nil {
 			return result{err: err}, nil
 		}
-		if cache != nil && usage != nil && opts.ttl > 0 {
-			cache.store(auth.ID, usage, opts.ttl)
-		}
+		h.storeKiroUsageCache(requestCtx, cache, auth.ID, usage, opts.ttl)
 		return result{usage: usage}, nil
 	})
 	if err != nil {
@@ -385,26 +381,15 @@ func (h *Handler) readKiroUsageAuthFromDisk(_ context.Context, name string) (*co
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to read auth file: %w", err)
 	}
 
-	metadata := make(map[string]any)
-	if err := json.Unmarshal(data, &metadata); err != nil {
+	metadata, err := coreauth.DecodeAuthFileMetadata(data)
+	if err != nil {
 		return nil, http.StatusBadRequest, fmt.Errorf("invalid auth file json")
 	}
-	if normalized, changed := coreauth.NormalizeImportedAuthMetadata(metadata); changed {
-		metadata = normalized
-	}
-	provider := strings.TrimSpace(valueAsString(metadata["type"]))
-	if provider == "" {
-		provider = "unknown"
-	}
-	auth := &coreauth.Auth{
-		ID:         name,
-		FileName:   name,
-		Provider:   provider,
-		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"path": fullPath},
-		Metadata:   metadata,
-	}
-	coreauth.ApplyAuthFileOptionsFromMetadata(auth)
+	auth := coreauth.NewAuthFromAuthFileMetadata(metadata, coreauth.AuthFileProjectionOptions{
+		ID:       name,
+		Path:     fullPath,
+		FileName: name,
+	})
 	return auth, http.StatusOK, nil
 }
 
@@ -463,9 +448,7 @@ func (h *Handler) refreshKiroUsageAuth(ctx context.Context, auth *coreauth.Auth,
 	// On a successful refresh, drop any cached usage entry — the new
 	// access token may resolve to a different profile_arn or change the
 	// upstream view of the account, so the safer behaviour is to refetch.
-	if cache := h.kiroUsageHandlerCache(); cache != nil {
-		cache.invalidate(updated.ID)
-	}
+	h.invalidateKiroUsageCache(ctx, h.kiroUsageHandlerCache(), updated.ID)
 	if latest, ok := h.authManager.GetByID(updated.ID); ok && latest != nil {
 		return latest, http.StatusOK, nil
 	}

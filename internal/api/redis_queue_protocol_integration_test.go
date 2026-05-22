@@ -367,3 +367,26 @@ func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 		t.Fatalf("expected empty array for empty queue with count, got %#v", emptyItems)
 	}
 }
+
+func TestReadRedisCommandRejectsOversizedRESP(t *testing.T) {
+	t.Run("array length", func(t *testing.T) {
+		reader := bufio.NewReader(strings.NewReader(fmt.Sprintf("*%d\r\n", maxRedisRESPArrayLength+1)))
+		if _, err := readRedisCommand(reader); err == nil || !strings.Contains(err.Error(), "array length too large") {
+			t.Fatalf("readRedisCommand() error = %v, want array length limit", err)
+		}
+	})
+
+	t.Run("bulk length", func(t *testing.T) {
+		reader := bufio.NewReader(strings.NewReader(fmt.Sprintf("*1\r\n$%d\r\n", maxRedisRESPBulkStringBytes+1)))
+		if _, err := readRedisCommand(reader); err == nil || !strings.Contains(err.Error(), "bulk length too large") {
+			t.Fatalf("readRedisCommand() error = %v, want bulk length limit", err)
+		}
+	})
+
+	t.Run("line length", func(t *testing.T) {
+		reader := bufio.NewReader(strings.NewReader("*" + strings.Repeat("1", maxRedisRESPLineBytes) + "\r\n"))
+		if _, err := readRedisCommand(reader); err == nil || !strings.Contains(err.Error(), "line too long") {
+			t.Fatalf("readRedisCommand() error = %v, want line length limit", err)
+		}
+	})
+}

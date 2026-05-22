@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,14 +45,22 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort  = 54545
-	geminiCallbackPort     = 8085
-	codexCallbackPort      = 1455
-	geminiCLIEndpoint      = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion       = "v1internal"
-	maxAuthFileUploadBytes = 2 << 20
-	codexAccountsCheckURL  = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+	anthropicCallbackPort                = 54545
+	geminiCallbackPort                   = 8085
+	codexCallbackPort                    = 1455
+	geminiCLIEndpoint                    = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion                     = "v1internal"
+	maxAuthFileUploadBytes               = 2 << 20
+	maxAuthFilesListPageSize             = 200
+	authFilesCodexPageRefreshConcurrency = 4
+	authFileRuntimeStateJSONKey          = "cliproxy_runtime_state"
 )
+
+var codexAccountsCheckURL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+var codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
+
+const codexAccountsCheckUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+const codexUsageUserAgent = "codex_cli_rs/0.76.0"
 
 type codexSubscriptionCacheEntry struct {
 	info      codexAccountSubscriptionInfo
@@ -62,9 +69,10 @@ type codexSubscriptionCacheEntry struct {
 }
 
 type codexAccountSubscriptionInfo struct {
-	PlanType              string
-	Email                 string
-	SubscriptionExpiresAt string
+	PlanType                string
+	Email                   string
+	SubscriptionExpiresAt   string
+	SubscriptionActiveStart string
 }
 
 var codexSubscriptionCache sync.Map
@@ -103,6 +111,70 @@ func codexSubscriptionListModeFromRequest(c *gin.Context) codexSubscriptionListM
 	default:
 		return codexSubscriptionListCache
 	}
+}
+
+type authFilesListQuery struct {
+	Paginated    bool
+	Page         int
+	PageSize     int
+	Type         string
+	Search       string
+	Sort         string
+	Summary      bool
+	ProblemOnly  bool
+	DisabledOnly bool
+	PremiumOnly  bool
+}
+
+type authFileEntryBuildOptions struct {
+	Summary bool
+}
+
+func authFilesListQueryFromRequest(c *gin.Context) authFilesListQuery {
+	q := authFilesListQuery{
+		Page:     1,
+		PageSize: 0,
+		Type:     strings.ToLower(strings.TrimSpace(firstNonEmptyQueryValue(c, "type", "provider"))),
+		Search:   strings.TrimSpace(firstNonEmptyQueryValue(c, "q", "search")),
+		Sort:     strings.ToLower(strings.TrimSpace(firstNonEmptyQueryValue(c, "sort", "sort_mode", "sortMode"))),
+	}
+	if q.Sort == "" {
+		q.Sort = "default"
+	}
+	q.Summary = isTruthyQueryValue(firstNonEmptyQueryValue(c, "summary", "lite", "compact", "summary_only", "summaryOnly"))
+	if page := parsePositiveQueryInt(firstNonEmptyQueryValue(c, "page")); page > 0 {
+		q.Page = page
+	}
+	if pageSize := parsePositiveQueryInt(firstNonEmptyQueryValue(c, "page_size", "pageSize", "limit")); pageSize > 0 {
+		if pageSize > maxAuthFilesListPageSize {
+			pageSize = maxAuthFilesListPageSize
+		}
+		q.PageSize = pageSize
+		q.Paginated = true
+	}
+	q.ProblemOnly = isTruthyQueryValue(firstNonEmptyQueryValue(c, "problem", "problem_only", "problemOnly"))
+	q.DisabledOnly = isTruthyQueryValue(firstNonEmptyQueryValue(c, "disabled", "disabled_only", "disabledOnly"))
+	q.PremiumOnly = isTruthyQueryValue(firstNonEmptyQueryValue(c, "premium", "premium_only", "premiumOnly"))
+	return q
+}
+
+func parsePositiveQueryInt(raw string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
+}
+
+func (q authFilesListQuery) active() bool {
+	return q.Paginated || q.Type != "" || q.Search != "" || q.Sort != "default" || q.Summary || q.ProblemOnly || q.DisabledOnly || q.PremiumOnly
+}
+
+func (q authFilesListQuery) offset() int {
+	if !q.Paginated || q.Page <= 1 || q.PageSize <= 0 {
+		return 0
+	}
+	return (q.Page - 1) * q.PageSize
 }
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -153,7 +225,7 @@ func authFileRuntimeState(meta map[string]any) (coreauth.AuthRuntimeState, bool)
 	if len(meta) == 0 {
 		return coreauth.AuthRuntimeState{}, false
 	}
-	raw, ok := meta["cliproxy_runtime_state"]
+	raw, ok := meta[authFileRuntimeStateJSONKey]
 	if !ok || raw == nil {
 		return coreauth.AuthRuntimeState{}, false
 	}
@@ -390,15 +462,20 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	codexSubscriptionMode := codexSubscriptionListModeFromRequest(c)
+	listQuery := authFilesListQueryFromRequest(c)
 	if h.authManager == nil {
-		h.listAuthFilesFromDisk(c, codexSubscriptionMode)
+		h.listAuthFilesFromDisk(c, codexSubscriptionMode, listQuery)
+		return
+	}
+	if listQuery.active() {
+		h.listAuthFilesFromManager(c, codexSubscriptionMode, listQuery)
 		return
 	}
 	auths := h.authManager.List()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth, codexSubscriptionMode)
-		if entry := h.buildAuthFileEntry(auth); entry != nil {
+		if entry := h.buildAuthFileEntryWithOptions(auth, authFileEntryBuildOptions{}); entry != nil {
 			files = append(files, entry)
 		}
 	}
@@ -408,6 +485,52 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
 	c.JSON(200, gin.H{"files": files, "total": len(files)})
+}
+
+func (h *Handler) listAuthsForManagement(summary bool) []*coreauth.Auth {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	if summary {
+		return h.authManager.ListManagementSummary()
+	}
+	return h.authManager.List()
+}
+
+func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode, q authFilesListQuery) {
+	auths := h.listAuthsForManagement(q.Summary)
+	entrySubscriptionMode := codexSubscriptionMode
+	deferRefreshToPage := q.Paginated && codexSubscriptionMode == codexSubscriptionListRefresh
+	if deferRefreshToPage {
+		entrySubscriptionMode = codexSubscriptionListCache
+	}
+	displayEntries := make([]gin.H, 0, len(auths))
+	for _, auth := range auths {
+		if !authFileMatchesListDisplayQuery(auth, q) {
+			continue
+		}
+		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth, entrySubscriptionMode)
+		if entry := h.buildAuthFileEntryWithOptions(auth, authFileEntryBuildOptions{Summary: q.Summary}); entry != nil {
+			displayEntries = append(displayEntries, entry)
+		}
+	}
+	displayEntries = dedupeAuthFileEntries(displayEntries)
+	typeCounts := authFileEntryTypeCounts(displayEntries, authFilesListQuery{})
+
+	filtered := make([]gin.H, 0, len(displayEntries))
+	for _, entry := range displayEntries {
+		if authFileEntryMatchesListQuery(entry, q) {
+			filtered = append(filtered, entry)
+		}
+	}
+	sortAuthFileEntriesForList(filtered, q.Sort)
+	total := len(filtered)
+	q = clampAuthFilesListPage(q, total)
+	pageFiles := authFileEntryPageSlice(filtered, q)
+	if deferRefreshToPage {
+		pageFiles = h.refreshAuthFileEntryPageFromManager(c.Request.Context(), pageFiles, auths, authFileEntryBuildOptions{Summary: q.Summary})
+	}
+	c.JSON(200, authFilesListPayload(pageFiles, total, q, typeCounts))
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
@@ -458,12 +581,72 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	c.JSON(200, gin.H{"models": result})
 }
 
+// GetCodexUsage fetches Codex quota with the same ChatGPT backend flow used by
+// the official Codex client. Subscription expiry is not part of /wham/usage, so
+// locally known/JWT-derived subscription fields are merged into the response.
+func (h *Handler) GetCodexUsage(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+	auth, status, message := h.resolveCodexUsageAuth(c)
+	if status != http.StatusOK {
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+	if auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth file is not a Codex credential"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	auth = h.refreshCodexUsageAuthIfNeeded(ctx, auth)
+	var refreshedSubscription <-chan *coreauth.Auth
+	if mode := codexSubscriptionListModeFromRequest(c); mode == codexSubscriptionListRefresh {
+		ch := make(chan *coreauth.Auth, 1)
+		refreshedSubscription = ch
+		go func(authSnapshot *coreauth.Auth) {
+			ch <- h.enrichCodexSubscriptionInfo(ctx, authSnapshot, codexSubscriptionListRefresh)
+		}(auth)
+	}
+
+	payload, upstreamStatus, err := h.fetchCodexUsage(ctx, auth)
+	if err != nil {
+		if upstreamStatus > 0 {
+			c.JSON(upstreamStatus, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if refreshedSubscription != nil {
+		if updated := <-refreshedSubscription; updated != nil {
+			auth = updated
+		}
+	}
+	mergeCodexUsageLocalFields(payload, auth)
+	if entry := h.buildAuthFileEntry(auth); entry != nil {
+		payload["auth_file"] = entry
+		payload["authFile"] = entry
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
 // List auth files from disk when the auth manager is unavailable.
-func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode) {
+func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode, q authFilesListQuery) {
 	entries, err := os.ReadDir(h.cfg.AuthDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 		return
+	}
+	entrySubscriptionMode := codexSubscriptionMode
+	deferRefreshToPage := q.Paginated && codexSubscriptionMode == codexSubscriptionListRefresh
+	if deferRefreshToPage {
+		entrySubscriptionMode = codexSubscriptionListCache
 	}
 	files := make([]gin.H, 0)
 	for _, e := range entries {
@@ -491,8 +674,15 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 				}
 				var metadata map[string]any
 				if err := json.Unmarshal(data, &metadata); err == nil {
+					if authFileMetadataHasRefreshToken(metadata) {
+						fileData["has_refresh_token"] = true
+					}
 					if state, ok := authFileRuntimeState(metadata); ok {
-						applyAuthFileRuntimeStateEntry(fileData, state, true)
+						if q.Summary {
+							applyAuthFileRuntimeStateSummaryEntry(fileData, state, true)
+						} else {
+							applyAuthFileRuntimeStateEntry(fileData, state, true)
+						}
 					}
 					if strings.EqualFold(strings.TrimSpace(typeValue), "codex") {
 						auth := h.enrichCodexSubscriptionInfo(c.Request.Context(), &coreauth.Auth{
@@ -503,7 +693,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 							Attributes: map[string]string{
 								"path": full,
 							},
-						}, codexSubscriptionMode)
+						}, entrySubscriptionMode)
 						metadata = auth.Metadata
 						if until, ok := codexSubscriptionUntilValue(metadata); ok {
 							fileData["subscription_expires_at"] = until
@@ -558,10 +748,1098 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 			files = append(files, fileData)
 		}
 	}
-	c.JSON(200, gin.H{"files": files, "total": len(files)})
+	if !q.active() {
+		c.JSON(200, gin.H{"files": files, "total": len(files)})
+		return
+	}
+	typeCounts := authFileEntryTypeCounts(files, q)
+	filtered := make([]gin.H, 0, len(files))
+	for _, file := range files {
+		if authFileEntryMatchesListQuery(file, q) {
+			filtered = append(filtered, file)
+		}
+	}
+	sortAuthFileEntriesForList(filtered, q.Sort)
+	total := len(filtered)
+	q = clampAuthFilesListPage(q, total)
+	pageFiles := authFileEntryPageSlice(filtered, q)
+	if deferRefreshToPage {
+		pageFiles = h.refreshAuthFileEntryPageFromDisk(c.Request.Context(), pageFiles)
+	}
+	c.JSON(200, authFilesListPayload(pageFiles, total, q, typeCounts))
+}
+
+func authFilesListPayload(files []gin.H, total int, q authFilesListQuery, typeCounts map[string]int) gin.H {
+	payload := gin.H{"files": files, "total": total}
+	if q.Paginated {
+		payload["page"] = q.Page
+		payload["page_size"] = q.PageSize
+		payload["has_more"] = q.offset()+len(files) < total
+	}
+	if len(typeCounts) > 0 {
+		payload["type_counts"] = typeCounts
+	}
+	return payload
+}
+
+func clampAuthFilesListPage(q authFilesListQuery, total int) authFilesListQuery {
+	if !q.Paginated || q.PageSize <= 0 {
+		return q
+	}
+	totalPages := (total + q.PageSize - 1) / q.PageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if q.Page > totalPages {
+		q.Page = totalPages
+	}
+	return q
+}
+
+func (h *Handler) refreshAuthFileEntryPageFromManager(ctx context.Context, files []gin.H, auths []*coreauth.Auth, opts authFileEntryBuildOptions) []gin.H {
+	if h == nil || len(files) == 0 || len(auths) == 0 {
+		return files
+	}
+	type refreshTask struct {
+		index int
+		auth  *coreauth.Auth
+	}
+	authsByKey := make(map[string]*coreauth.Auth, len(auths)*3)
+	for _, auth := range auths {
+		for _, key := range authFileListAuthKeys(auth) {
+			if _, exists := authsByKey[key]; !exists {
+				authsByKey[key] = auth
+			}
+		}
+	}
+	refreshed := make([]gin.H, len(files))
+	copy(refreshed, files)
+	tasks := make([]refreshTask, 0, len(refreshed))
+	for i, entry := range refreshed {
+		auth := authsByKey[authFileEntryLookupKey(entry)]
+		if auth == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && !strings.EqualFold(authFileEntryString(entry, "type", "provider"), "codex") {
+			continue
+		}
+		tasks = append(tasks, refreshTask{index: i, auth: auth})
+	}
+	runAuthFilePageRefreshTasks(len(tasks), func(taskIndex int) {
+		task := tasks[taskIndex]
+		refreshAuth := task.auth
+		if h.authManager != nil && task.auth != nil && strings.TrimSpace(task.auth.ID) != "" {
+			if current, ok := h.authManager.GetByID(task.auth.ID); ok && current != nil {
+				refreshAuth = current
+			}
+		}
+		updated := h.enrichCodexSubscriptionInfo(ctx, refreshAuth, codexSubscriptionListRefresh)
+		if updatedEntry := h.buildAuthFileEntryWithOptions(updated, opts); updatedEntry != nil {
+			refreshed[task.index] = updatedEntry
+		}
+	})
+	return refreshed
+}
+
+func (h *Handler) refreshAuthFileEntryPageFromDisk(ctx context.Context, files []gin.H) []gin.H {
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" || len(files) == 0 {
+		return files
+	}
+	type refreshTask struct {
+		index int
+		entry gin.H
+	}
+	refreshed := make([]gin.H, len(files))
+	copy(refreshed, files)
+	tasks := make([]refreshTask, 0, len(refreshed))
+	for i, entry := range refreshed {
+		if !strings.EqualFold(authFileEntryString(entry, "type", "provider"), "codex") {
+			continue
+		}
+		tasks = append(tasks, refreshTask{index: i, entry: entry})
+	}
+	runAuthFilePageRefreshTasks(len(tasks), func(taskIndex int) {
+		task := tasks[taskIndex]
+		if updatedEntry := h.refreshAuthFileEntryFromDisk(ctx, task.entry); updatedEntry != nil {
+			refreshed[task.index] = updatedEntry
+		}
+	})
+	return refreshed
+}
+
+func runAuthFilePageRefreshTasks(total int, run func(index int)) {
+	if total <= 0 || run == nil {
+		return
+	}
+	workerCount := authFilesCodexPageRefreshConcurrency
+	if workerCount > total {
+		workerCount = total
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	tasks := make(chan int)
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range tasks {
+				run(index)
+			}
+		}()
+	}
+	for i := 0; i < total; i++ {
+		tasks <- i
+	}
+	close(tasks)
+	wg.Wait()
+}
+
+func (h *Handler) refreshAuthFileEntryFromDisk(ctx context.Context, entry gin.H) gin.H {
+	name := strings.TrimSpace(valueAsString(entry["name"]))
+	if name == "" || h == nil || h.cfg == nil {
+		return nil
+	}
+	path := filepath.Join(h.cfg.AuthDir, name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil
+	}
+	updated := h.enrichCodexSubscriptionInfo(ctx, &coreauth.Auth{
+		ID:       name,
+		Provider: "codex",
+		FileName: name,
+		Metadata: metadata,
+		Attributes: map[string]string{
+			"path": path,
+		},
+	}, codexSubscriptionListRefresh)
+	if updated == nil || len(updated.Metadata) == 0 {
+		return nil
+	}
+	updatedEntry := cloneGinH(entry)
+	if authFileMetadataHasRefreshToken(updated.Metadata) {
+		updatedEntry["has_refresh_token"] = true
+	}
+	if email := strings.TrimSpace(valueAsString(updated.Metadata["email"])); email != "" {
+		updatedEntry["email"] = email
+	}
+	if planType := strings.TrimSpace(valueAsString(updated.Metadata["plan_type"])); planType != "" {
+		updatedEntry["plan_type"] = planType
+	}
+	if until, ok := codexSubscriptionUntilValue(updated.Metadata); ok {
+		updatedEntry["subscription_expires_at"] = until
+	}
+	if claims := extractCodexIDTokenClaims(updated); claims != nil {
+		updatedEntry["id_token"] = claims
+		applyCodexSubscriptionFromClaims(updatedEntry, claims)
+	}
+	return updatedEntry
+}
+
+func (h *Handler) resolveCodexUsageAuth(c *gin.Context) (*coreauth.Auth, int, string) {
+	if c == nil {
+		return nil, http.StatusBadRequest, "request is required"
+	}
+	authIndex := strings.TrimSpace(firstNonEmptyQueryValue(c, "auth_index", "authIndex", "AuthIndex"))
+	if authIndex != "" {
+		if auth := h.authByIndex(authIndex); auth != nil {
+			return auth, http.StatusOK, ""
+		}
+	}
+
+	name := strings.TrimSpace(firstNonEmptyQueryValue(c, "name", "file", "filename", "fileName"))
+	if name == "" && authIndex == "" {
+		return nil, http.StatusBadRequest, "name or auth_index is required"
+	}
+	if name != "" {
+		if auth := h.authByName(name); auth != nil {
+			return auth, http.StatusOK, ""
+		}
+	}
+	if name == "" {
+		return nil, http.StatusNotFound, "auth file not found"
+	}
+	return h.codexUsageAuthFromDisk(name)
+}
+
+func (h *Handler) authByName(name string) *coreauth.Auth {
+	name = strings.TrimSpace(name)
+	if name == "" || h == nil || h.authManager == nil {
+		return nil
+	}
+	if auth, ok := h.authManager.GetByID(name); ok && auth != nil {
+		return auth
+	}
+	lookup := authFileListKey(name)
+	lookupBase := authFileListKey(filepath.Base(name))
+	for _, auth := range h.authManager.List() {
+		if auth == nil {
+			continue
+		}
+		for _, candidate := range []string{auth.ID, auth.FileName, filepath.Base(auth.FileName)} {
+			key := authFileListKey(candidate)
+			if key != "" && (key == lookup || key == lookupBase) {
+				return auth
+			}
+		}
+	}
+	return nil
+}
+
+func (h *Handler) codexUsageAuthFromDisk(name string) (*coreauth.Auth, int, string) {
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+		return nil, http.StatusNotFound, "auth file not found"
+	}
+	data, normalizedName, status, message := h.readAuthFileByName(name)
+	if status != http.StatusOK {
+		return nil, status, message
+	}
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, http.StatusBadRequest, fmt.Sprintf("invalid auth file JSON: %v", err)
+	}
+	provider := strings.TrimSpace(valueAsString(metadata["type"]))
+	if provider == "" {
+		provider = strings.TrimSpace(valueAsString(metadata["provider"]))
+	}
+	path := filepath.Join(h.cfg.AuthDir, normalizedName)
+	return &coreauth.Auth{
+		ID:       normalizedName,
+		Provider: provider,
+		FileName: normalizedName,
+		ProxyURL: codexAuthMetadataString(metadata, "proxy_url", "proxy-url", "proxyUrl"),
+		Metadata: metadata,
+		Attributes: map[string]string{
+			"path": path,
+		},
+	}, http.StatusOK, ""
+}
+
+func (h *Handler) refreshCodexUsageAuthIfNeeded(ctx context.Context, auth *coreauth.Auth) *coreauth.Auth {
+	if h == nil || h.authManager == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return auth
+	}
+	if !authFileHasRefreshToken(auth) {
+		return auth
+	}
+	accessToken := codexUsageAccessToken(auth)
+	shouldRefresh := accessToken == ""
+	if !shouldRefresh {
+		if expiresAt, ok := auth.ExpirationTime(); ok && !expiresAt.IsZero() {
+			shouldRefresh = time.Until(expiresAt) <= 2*time.Minute
+		}
+	}
+	if !shouldRefresh {
+		return auth
+	}
+	updated, err := h.authManager.RefreshAuth(ctx, auth)
+	if err != nil {
+		log.WithError(err).WithField("auth_id", auth.ID).Debug("failed to refresh codex auth before usage request")
+		return auth
+	}
+	if updated == nil {
+		return auth
+	}
+	return updated
+}
+
+func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin.H, int, error) {
+	accessToken := codexUsageAccessToken(auth)
+	if accessToken == "" {
+		return nil, 0, fmt.Errorf("codex access_token missing")
+	}
+	accountID := resolveCodexUsageAccountID(auth, accessToken)
+	if accountID == "" {
+		return nil, 0, fmt.Errorf("codex chatgpt account id missing")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, codexUsageURL, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("ChatGPT-Account-ID", accountID)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", codexUsageRequestUserAgent(h, auth))
+	if codexUsageFedramp(auth) {
+		req.Header.Set("X-OpenAI-Fedramp", "true")
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	if h != nil {
+		client.Transport = h.codexUsageTransport(auth)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, resp.StatusCode, fmt.Errorf("codex usage request failed with status %d: %s", resp.StatusCode, truncateForLog(string(body), 200))
+	}
+	payload := gin.H{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to decode codex usage response: %w", err)
+	}
+	return payload, resp.StatusCode, nil
+}
+
+func codexUsageAccessToken(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if token := codexAuthMetadataString(auth.Metadata, "access_token", "accessToken"); token != "" {
+		return token
+	}
+	return strings.TrimSpace(authAttribute(auth, "access_token"))
+}
+
+func resolveCodexUsageAccountID(auth *coreauth.Auth, accessToken string) string {
+	if auth != nil {
+		if accountID := codexAuthMetadataString(auth.Metadata, "chatgpt_account_id", "chatgptAccountId", "account_id", "accountId"); accountID != "" {
+			return accountID
+		}
+		for _, key := range []string{"chatgpt_account_id", "chatgptAccountId", "account_id", "accountId"} {
+			if value := strings.TrimSpace(authAttribute(auth, key)); value != "" {
+				return value
+			}
+		}
+		if idToken := codexAuthMetadataString(auth.Metadata, "id_token", "idToken"); idToken != "" {
+			if claims := parseCodexJWTClaims(idToken); claims != nil {
+				if accountID := strings.TrimSpace(claims.GetAccountID()); accountID != "" {
+					return accountID
+				}
+			}
+		}
+	}
+	if claims := parseCodexJWTClaims(accessToken); claims != nil {
+		return strings.TrimSpace(claims.GetAccountID())
+	}
+	return ""
+}
+
+func codexUsageRequestUserAgent(h *Handler, auth *coreauth.Auth) string {
+	if h != nil && h.cfg != nil {
+		if userAgent := strings.TrimSpace(h.cfg.CodexHeaderDefaults.UserAgent); userAgent != "" {
+			return userAgent
+		}
+	}
+	if userAgent := authFileUserAgent(auth); userAgent != "" {
+		return userAgent
+	}
+	return codexUsageUserAgent
+}
+
+func codexUsageFedramp(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	for _, key := range []string{"fedramp", "openai_fedramp", "x_openai_fedramp", "X-OpenAI-Fedramp"} {
+		if raw := strings.TrimSpace(authAttribute(auth, key)); raw != "" {
+			parsed, err := strconv.ParseBool(raw)
+			return err == nil && parsed
+		}
+		if auth.Metadata != nil {
+			if parsed, ok := boolLikeValue(auth.Metadata[key]); ok {
+				return parsed
+			}
+		}
+	}
+	return false
+}
+
+func boolLikeValue(value any) (bool, bool) {
+	switch v := value.(type) {
+	case bool:
+		return v, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		return parsed, err == nil
+	default:
+		return false, false
+	}
+}
+
+func mergeCodexUsageLocalFields(payload gin.H, auth *coreauth.Auth) {
+	if payload == nil || auth == nil {
+		return
+	}
+	accountID := resolveCodexUsageAccountID(auth, codexUsageAccessToken(auth))
+	setCodexUsageFieldIfMissing(payload, "account_id", accountID)
+	setCodexUsageFieldIfMissing(payload, "chatgpt_account_id", accountID)
+	setCodexUsageFieldIfMissing(payload, "email", authEmail(auth))
+	setCodexUsageFieldIfMissing(payload, "plan_type", codexUsagePlanType(auth))
+	if until, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
+		setCodexUsageFieldIfMissing(payload, "subscription_expires_at", until)
+		setCodexUsageFieldIfMissing(payload, "chatgpt_subscription_active_until", until)
+	}
+	if start, ok := codexSubscriptionDisplayActiveStartValue(auth.Metadata); ok {
+		setCodexUsageFieldIfMissing(payload, "chatgpt_subscription_active_start", start)
+		setCodexUsageFieldIfMissing(payload, "subscription_active_start", start)
+	}
+	if days, ok := codexSubscriptionDisplayActiveDaysValue(auth.Metadata); ok {
+		setCodexUsageFieldIfMissing(payload, "subscription_active_days", days)
+	}
+	mergeCodexUsageJWTFields(payload, codexAuthMetadataString(auth.Metadata, "id_token", "idToken"))
+	mergeCodexUsageJWTFields(payload, codexUsageAccessToken(auth))
+}
+
+func mergeCodexUsageJWTFields(payload gin.H, token string) {
+	claims := parseCodexJWTClaims(token)
+	if claims == nil {
+		return
+	}
+	setCodexUsageFieldIfMissing(payload, "account_id", strings.TrimSpace(claims.GetAccountID()))
+	setCodexUsageFieldIfMissing(payload, "chatgpt_account_id", strings.TrimSpace(claims.GetAccountID()))
+	setCodexUsageFieldIfMissing(payload, "email", codexClaimsEmail(claims))
+	setCodexUsageFieldIfMissing(payload, "plan_type", codexClaimsPlanType(claims))
+	setCodexUsageFieldIfMissing(payload, "chatgpt_plan_type", codexClaimsPlanType(claims))
+	if value, ok := normalizeCodexSubscriptionUntilValue(claims.CodexAuthInfo.ChatgptSubscriptionActiveStart); ok {
+		setCodexUsageFieldIfMissing(payload, "chatgpt_subscription_active_start", value)
+	}
+	if value, ok := normalizeCodexSubscriptionUntilValue(claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil); ok {
+		setCodexUsageFieldIfMissing(payload, "chatgpt_subscription_active_until", value)
+		setCodexUsageFieldIfMissing(payload, "subscription_expires_at", value)
+	}
+}
+
+func codexUsagePlanType(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if planType := codexAuthMetadataString(auth.Metadata, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType"); planType != "" {
+		return planType
+	}
+	for _, key := range []string{"plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType"} {
+		if value := strings.TrimSpace(authAttribute(auth, key)); value != "" {
+			return value
+		}
+	}
+	for _, token := range []string{codexAuthMetadataString(auth.Metadata, "id_token", "idToken"), codexUsageAccessToken(auth)} {
+		if claims := parseCodexJWTClaims(token); claims != nil {
+			if planType := codexClaimsPlanType(claims); planType != "" {
+				return planType
+			}
+		}
+	}
+	return ""
+}
+
+func codexUsageMetadataFirstValue(metadata map[string]any, keys ...string) any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	for _, key := range keys {
+		if value, ok := metadata[key]; ok && !authFilePreviewEmptyValue(value) {
+			return value
+		}
+	}
+	return nil
+}
+
+func setCodexUsageFieldIfMissing(payload gin.H, key string, value any) {
+	if payload == nil || key == "" || authFilePreviewEmptyValue(value) {
+		return
+	}
+	if existing, ok := payload[key]; ok && !authFilePreviewEmptyValue(existing) {
+		return
+	}
+	payload[key] = value
+}
+
+func cloneGinH(entry gin.H) gin.H {
+	if entry == nil {
+		return nil
+	}
+	cloned := make(gin.H, len(entry))
+	for key, value := range entry {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func authFileListAuthKeys(auth *coreauth.Auth) []string {
+	if auth == nil {
+		return nil
+	}
+	keys := make([]string, 0, 3)
+	for _, value := range []string{auth.ID, auth.FileName} {
+		key := authFileListKey(value)
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+		if base := filepath.Base(fileName); base != "." && base != string(filepath.Separator) {
+			if key := authFileListKey(base); key != "" {
+				keys = append(keys, key)
+			}
+		}
+	}
+	return keys
+}
+
+func authFileEntryLookupKey(entry gin.H) string {
+	for _, key := range []string{"id", "name", "file_name", "fileName"} {
+		if value := authFileListKey(valueAsString(entry[key])); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func authFileListKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func authFileEntryTypeCounts(files []gin.H, q authFilesListQuery) map[string]int {
+	counts := map[string]int{"all": 0}
+	for _, file := range files {
+		if !authFileEntryMatchesDisplayQuery(file, q) {
+			continue
+		}
+		counts["all"]++
+		provider := authFileEntryString(file, "type", "provider")
+		if provider != "" {
+			counts[provider]++
+		}
+	}
+	return counts
+}
+
+func dedupeAuthFileEntries(entries []gin.H) []gin.H {
+	if len(entries) <= 1 {
+		return entries
+	}
+	groups := make(map[string][]gin.H, len(entries))
+	order := make([]string, 0, len(entries))
+	ungrouped := make([]gin.H, 0)
+	for _, entry := range entries {
+		name := strings.ToLower(strings.TrimSpace(valueAsString(entry["name"])))
+		if name == "" {
+			ungrouped = append(ungrouped, entry)
+			continue
+		}
+		if _, ok := groups[name]; !ok {
+			order = append(order, name)
+		}
+		groups[name] = append(groups[name], entry)
+	}
+
+	out := make([]gin.H, 0, len(order)+len(ungrouped))
+	for _, name := range order {
+		out = append(out, mergeAuthFileEntryGroup(groups[name]))
+	}
+	out = append(out, ungrouped...)
+	return out
+}
+
+func mergeAuthFileEntryGroup(entries []gin.H) gin.H {
+	if len(entries) == 0 {
+		return nil
+	}
+	bestIndex := 0
+	for i := 1; i < len(entries); i++ {
+		if compareAuthFileEntryMergePriority(entries[i], entries[bestIndex]) < 0 {
+			bestIndex = i
+		}
+	}
+	merged := make(gin.H, len(entries[bestIndex]))
+	for key, value := range entries[bestIndex] {
+		merged[key] = value
+	}
+	for i, entry := range entries {
+		if i == bestIndex {
+			continue
+		}
+		for key, value := range entry {
+			if key == "recent_requests" {
+				if authFileRecentRequestsTotal(value) > authFileRecentRequestsTotal(merged[key]) {
+					merged[key] = value
+				}
+				continue
+			}
+			if !hasAuthFileEntryMeaningfulValue(merged[key]) && hasAuthFileEntryMeaningfulValue(value) {
+				merged[key] = value
+			}
+		}
+	}
+	return merged
+}
+
+func authFileRecentRequestsTotal(value any) int64 {
+	var total int64
+	switch buckets := value.(type) {
+	case []coreauth.RecentRequestBucket:
+		for _, bucket := range buckets {
+			total += bucket.Success + bucket.Failed
+		}
+	case []coreauth.RecentRequestState:
+		for _, bucket := range buckets {
+			total += bucket.Success + bucket.Failed
+		}
+	case []gin.H:
+		for _, bucket := range buckets {
+			total += authFileRecentRequestBucketTotal(bucket)
+		}
+	case []map[string]any:
+		for _, bucket := range buckets {
+			total += authFileRecentRequestBucketTotal(bucket)
+		}
+	case []any:
+		for _, bucket := range buckets {
+			total += authFileRecentRequestBucketTotal(bucket)
+		}
+	}
+	return total
+}
+
+func authFileRecentRequestBucketTotal(value any) int64 {
+	switch bucket := value.(type) {
+	case coreauth.RecentRequestBucket:
+		return bucket.Success + bucket.Failed
+	case coreauth.RecentRequestState:
+		return bucket.Success + bucket.Failed
+	case gin.H:
+		return authFileRecentRequestCountValue(bucket["success"]) + authFileRecentRequestCountValue(bucket["failed"]) + authFileRecentRequestCountValue(bucket["failure"])
+	case map[string]any:
+		return authFileRecentRequestCountValue(bucket["success"]) + authFileRecentRequestCountValue(bucket["failed"]) + authFileRecentRequestCountValue(bucket["failure"])
+	default:
+		return 0
+	}
+}
+
+func authFileRecentRequestCountValue(value any) int64 {
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case int32:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case float32:
+		return int64(v)
+	case json.Number:
+		parsed, _ := v.Int64()
+		return parsed
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func compareAuthFileEntryMergePriority(left, right gin.H) int {
+	if cmp := authFileEntryMergeScore(right) - authFileEntryMergeScore(left); cmp != 0 {
+		return cmp
+	}
+	if cmp := authFileEntryDateMs(right) - authFileEntryDateMs(left); cmp != 0 {
+		if cmp > 0 {
+			return 1
+		}
+		return -1
+	}
+	if cmp := authFileEntryMeaningfulFieldCount(right) - authFileEntryMeaningfulFieldCount(left); cmp != 0 {
+		return cmp
+	}
+	return 0
+}
+
+func authFileEntryMergeScore(entry gin.H) int {
+	score := 0
+	if authFileEntryString(entry, "source") == "file" {
+		score += 32
+	}
+	if strings.TrimSpace(valueAsString(entry["path"])) != "" {
+		score += 16
+	}
+	if !authFileEntryRuntimeOnly(entry) {
+		score += 8
+	}
+	if !authFileEntryDisabled(entry) {
+		score += 4
+	}
+	if authFileEntryDateMs(entry) > 0 {
+		score += 2
+	}
+	return score
+}
+
+func authFileEntryDateMs(entry gin.H) int64 {
+	for _, key := range []string{"modtime", "modified", "updated_at", "last_refresh", "lastRefresh", "last_refreshed_at", "runtime_updated_at"} {
+		if value, ok := entry[key]; ok {
+			if ms := authFileListTimestampMs(value); ms > 0 {
+				return ms
+			}
+		}
+	}
+	return 0
+}
+
+func authFileEntryMeaningfulFieldCount(entry gin.H) int {
+	count := 0
+	for _, value := range entry {
+		if hasAuthFileEntryMeaningfulValue(value) {
+			count++
+		}
+	}
+	return count
+}
+
+func hasAuthFileEntryMeaningfulValue(value any) bool {
+	if value == nil {
+		return false
+	}
+	if str, ok := value.(string); ok {
+		return strings.TrimSpace(str) != ""
+	}
+	if arr, ok := value.([]any); ok {
+		return len(arr) > 0
+	}
+	return true
+}
+
+func authFileMatchesListDisplayQuery(auth *coreauth.Auth, q authFilesListQuery) bool {
+	if auth == nil {
+		return false
+	}
+	if isRuntimeOnlyAuth(auth) && authFileListDisabled(auth) {
+		return false
+	}
+	if q.ProblemOnly && strings.TrimSpace(auth.StatusMessage) == "" {
+		return false
+	}
+	if q.DisabledOnly && !authFileListDisabled(auth) {
+		return false
+	}
+	return true
+}
+
+func authFileEntryMatchesListQuery(file gin.H, q authFilesListQuery) bool {
+	if !authFileEntryMatchesDisplayQuery(file, q) {
+		return false
+	}
+	provider := authFileEntryString(file, "type", "provider")
+	if q.Type != "" && provider != q.Type {
+		return false
+	}
+	return authFileMatchesSearch(q.Search, authFileEntryString(file, "name"), provider)
+}
+
+func authFileEntryMatchesDisplayQuery(file gin.H, q authFilesListQuery) bool {
+	if q.ProblemOnly && authFileEntryString(file, "status_message", "statusMessage") == "" {
+		return false
+	}
+	if q.DisabledOnly && !authFileEntryDisabled(file) {
+		return false
+	}
+	if q.PremiumOnly && !authFileEntryHasPremiumPlan(file) {
+		return false
+	}
+	return true
+}
+
+func authFileEntryHasPremiumPlan(file gin.H) bool {
+	planType := authFileEntryPlanType(file)
+	if planType != "" && planType != "free" {
+		return true
+	}
+	return authFileEntrySubscriptionExpiryMs(file) > 0
+}
+
+func authFileMatchesSearch(search string, values ...string) bool {
+	search = strings.ToLower(strings.TrimSpace(search))
+	if search == "" {
+		return true
+	}
+	for _, value := range values {
+		candidate := strings.ToLower(strings.TrimSpace(value))
+		if candidate == "" {
+			continue
+		}
+		if strings.Contains(search, "*") {
+			if wildcardTextMatch(search, candidate) {
+				return true
+			}
+			continue
+		}
+		if strings.Contains(candidate, search) {
+			return true
+		}
+	}
+	return false
+}
+
+func wildcardTextMatch(pattern, value string) bool {
+	parts := strings.Split(pattern, "*")
+	pos := 0
+	matchedAny := false
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(value[pos:], part)
+		if idx < 0 {
+			return false
+		}
+		matchedAny = true
+		pos += idx + len(part)
+	}
+	return matchedAny || pattern == "*"
+}
+
+func sortAuthFileEntriesForList(files []gin.H, sortMode string) {
+	sort.SliceStable(files, func(i, j int) bool {
+		return compareAuthFileEntriesForList(files[i], files[j], sortMode) < 0
+	})
+}
+
+func compareAuthFileEntriesForList(left, right gin.H, sortMode string) int {
+	if cmp := compareBoolLast(authFileEntryDisabled(left), authFileEntryDisabled(right)); cmp != 0 {
+		return cmp
+	}
+	switch sortMode {
+	case "az", "name":
+		return compareText(authFileEntryString(left, "name"), authFileEntryString(right, "name"))
+	case "priority":
+		if cmp := authFileEntryPriority(right) - authFileEntryPriority(left); cmp != 0 {
+			return cmp
+		}
+		return compareText(authFileEntryString(left, "name"), authFileEntryString(right, "name"))
+	case "subscription_expiry", "subscription-expiry", "subscription":
+		if cmp := compareAuthFileEntrySubscriptionExpiry(left, right); cmp != 0 {
+			return cmp
+		}
+		return compareText(authFileEntryString(left, "name"), authFileEntryString(right, "name"))
+	default:
+		if cmp := compareText(authFileEntryString(left, "type", "provider"), authFileEntryString(right, "type", "provider")); cmp != 0 {
+			return cmp
+		}
+		return compareText(authFileEntryString(left, "name"), authFileEntryString(right, "name"))
+	}
+}
+
+func authFileEntryPageSlice(files []gin.H, q authFilesListQuery) []gin.H {
+	if !q.Paginated || q.PageSize <= 0 {
+		return files
+	}
+	start := q.offset()
+	if start >= len(files) {
+		return []gin.H{}
+	}
+	end := start + q.PageSize
+	if end > len(files) {
+		end = len(files)
+	}
+	return files[start:end]
+}
+
+func authFileListDisabled(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	return auth.Disabled || auth.Status == coreauth.StatusDisabled
+}
+
+func authFileListTimestampMs(value any) int64 {
+	switch v := value.(type) {
+	case nil:
+		return 0
+	case int:
+		return normalizeAuthFileTimestampMs(int64(v))
+	case int64:
+		return normalizeAuthFileTimestampMs(v)
+	case float64:
+		return normalizeAuthFileTimestampMs(int64(v))
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return normalizeAuthFileTimestampMs(i)
+		}
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return 0
+		}
+		if parsed, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+			return normalizeAuthFileTimestampMs(parsed)
+		}
+		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsed.UnixMilli()
+		}
+		if parsed, err := time.Parse("2006-01-02", trimmed); err == nil {
+			return parsed.UnixMilli()
+		}
+	case time.Time:
+		if !v.IsZero() {
+			return v.UnixMilli()
+		}
+	}
+	return 0
+}
+
+func normalizeAuthFileTimestampMs(value int64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	if value < 1_000_000_000_000 {
+		return value * 1000
+	}
+	return value
+}
+
+func authFileEntryString(file gin.H, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := file[key]; ok {
+			if str := strings.TrimSpace(valueAsString(value)); str != "" {
+				return strings.ToLower(str)
+			}
+		}
+	}
+	return ""
+}
+
+func authFileEntryDisabled(file gin.H) bool {
+	if value, ok := file["disabled"]; ok {
+		if disabled, okBool := value.(bool); okBool {
+			return disabled
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(valueAsString(file["status"])), string(coreauth.StatusDisabled))
+}
+
+func authFileEntryRuntimeOnly(file gin.H) bool {
+	value := file["runtime_only"]
+	if value == nil {
+		value = file["runtimeOnly"]
+	}
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
+	default:
+		return false
+	}
+}
+
+func authFileEntryPriority(file gin.H) int {
+	return intFromAny(file["priority"])
+}
+
+func compareAuthFileEntrySubscriptionExpiry(left, right gin.H) int {
+	leftRank, leftExpiry := authFileEntrySubscriptionSortValue(left)
+	rightRank, rightExpiry := authFileEntrySubscriptionSortValue(right)
+	if leftRank != rightRank {
+		return leftRank - rightRank
+	}
+	if leftRank == 0 && leftExpiry != rightExpiry {
+		if leftExpiry < rightExpiry {
+			return -1
+		}
+		return 1
+	}
+	if cmp := compareText(authFileEntryString(left, "type", "provider"), authFileEntryString(right, "type", "provider")); cmp != 0 {
+		return cmp
+	}
+	return 0
+}
+
+func authFileEntrySubscriptionSortValue(file gin.H) (rank int, expiryMs int64) {
+	expiryMs = authFileEntrySubscriptionExpiryMs(file)
+	if expiryMs > 0 {
+		return 0, expiryMs
+	}
+	planType := authFileEntryPlanType(file)
+	if planType == "" || planType == "free" {
+		return 2, 0
+	}
+	return 1, 0
+}
+
+func authFileEntrySubscriptionExpiryMs(file gin.H) int64 {
+	for _, key := range []string{
+		"subscription_expires_at",
+		"subscriptionExpiresAt",
+		"chatgpt_subscription_active_until",
+		"chatgptSubscriptionActiveUntil",
+		"subscription_active_until",
+		"subscriptionActiveUntil",
+		"expires_at",
+		"expiresAt",
+		"current_period_end",
+		"currentPeriodEnd",
+		"period_end",
+		"periodEnd",
+	} {
+		if ms := authFileListTimestampMs(file[key]); ms > 0 {
+			return ms
+		}
+	}
+	return 0
+}
+
+func authFileEntryPlanType(file gin.H) string {
+	return authFileEntryString(file, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType")
+}
+
+func intFromAny(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		if parsed, err := v.Int64(); err == nil {
+			return int(parsed)
+		}
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func compareBoolLast(left, right bool) int {
+	if left == right {
+		return 0
+	}
+	if left {
+		return 1
+	}
+	return -1
+}
+
+func compareText(left, right string) int {
+	return strings.Compare(strings.ToLower(strings.TrimSpace(left)), strings.ToLower(strings.TrimSpace(right)))
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
+	return h.buildAuthFileEntryWithOptions(auth, authFileEntryBuildOptions{})
+}
+
+func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFileEntryBuildOptions) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -593,11 +1871,13 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"source":         "memory",
 		"size":           int64(0),
 	}
-	if serialized := serializeAuthError(auth.LastError); serialized != nil {
-		entry["last_error"] = serialized
-	}
-	if serialized := serializeModelStates(auth.ModelStates); len(serialized) > 0 {
-		entry["model_states"] = serialized
+	if !opts.Summary {
+		if serialized := serializeAuthError(auth.LastError); serialized != nil {
+			entry["last_error"] = serialized
+		}
+		if serialized := serializeModelStates(auth.ModelStates); len(serialized) > 0 {
+			entry["model_states"] = serialized
+		}
 	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
@@ -607,6 +1887,14 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if projectID := authProjectID(auth); projectID != "" {
 		entry["project_id"] = projectID
+	}
+	if authFileHasRefreshToken(auth) {
+		entry["has_refresh_token"] = true
+	}
+	if opts.Summary {
+		applyCodexSubscriptionSnapshotSummary(entry, auth)
+	} else {
+		applyCodexSubscriptionSnapshot(entry, auth)
 	}
 	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
 		if accountType != "" {
@@ -640,26 +1928,27 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if path != "" {
 		entry["path"] = path
 		entry["source"] = "file"
-		if info, err := os.Stat(path); err == nil {
-			entry["size"] = info.Size()
-			entry["modtime"] = info.ModTime()
-		} else if os.IsNotExist(err) {
-			// Hide file-backed credentials removed from disk but still lingering in memory.
-			removedByManagement := auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")
-			if !runtimeOnly && (h.isManagedAuthFilePath(path) || removedByManagement) {
-				return nil
+		if !opts.Summary {
+			if info, err := os.Stat(path); err == nil {
+				entry["size"] = info.Size()
+				entry["modtime"] = info.ModTime()
+			} else if os.IsNotExist(err) {
+				// Hide file-backed credentials removed from disk but still lingering in memory.
+				removedByManagement := auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")
+				if !runtimeOnly && (h.isManagedAuthFilePath(path) || removedByManagement) {
+					return nil
+				}
+				entry["source"] = "memory"
+			} else {
+				log.WithError(err).Warnf("failed to stat auth file %s", path)
 			}
-			entry["source"] = "memory"
-		} else {
-			log.WithError(err).Warnf("failed to stat auth file %s", path)
 		}
 	}
-	if until, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
-		entry["subscription_expires_at"] = until
-	}
-	if claims := extractCodexIDTokenClaims(auth); claims != nil {
-		entry["id_token"] = claims
-		applyCodexSubscriptionFromClaims(entry, claims)
+	if !opts.Summary {
+		if claims := extractCodexIDTokenClaims(auth); claims != nil {
+			entry["id_token"] = claims
+			applyCodexSubscriptionFromClaims(entry, claims)
+		}
 	}
 	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
 		entry["prefix"] = prefix
@@ -743,16 +2032,295 @@ func boolFromGJSON(data []byte, keys ...string) (bool, bool) {
 	return false, false
 }
 
+func authFileHasRefreshToken(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if authFileMetadataHasRefreshToken(auth.Metadata) {
+		return true
+	}
+	return strings.TrimSpace(authAttribute(auth, "refresh_token")) != "" || strings.TrimSpace(authAttribute(auth, "refreshToken")) != ""
+}
+
+func applyCodexSubscriptionSnapshot(entry gin.H, auth *coreauth.Auth) {
+	if entry == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	if planType := codexUsagePlanType(auth); planType != "" {
+		entry["plan_type"] = planType
+		entry["chatgpt_plan_type"] = planType
+	}
+	if until, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
+		entry["subscription_expires_at"] = until
+		entry["chatgpt_subscription_active_until"] = until
+	}
+	if start, ok := codexSubscriptionDisplayActiveStartValue(auth.Metadata); ok {
+		entry["chatgpt_subscription_active_start"] = start
+		entry["subscription_active_start"] = start
+	}
+	if days, ok := codexSubscriptionDisplayActiveDaysValue(auth.Metadata); ok {
+		entry["subscription_active_days"] = days
+	}
+}
+
+func applyCodexSubscriptionSnapshotSummary(entry gin.H, auth *coreauth.Auth) {
+	if entry == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	if planType := codexSubscriptionMetadataPlanType(auth.Metadata); planType != "" {
+		entry["plan_type"] = planType
+		entry["chatgpt_plan_type"] = planType
+	}
+	if until, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
+		entry["subscription_expires_at"] = until
+		entry["chatgpt_subscription_active_until"] = until
+	}
+	if start, ok := codexSubscriptionDisplayActiveStartValue(auth.Metadata); ok {
+		entry["chatgpt_subscription_active_start"] = start
+		entry["subscription_active_start"] = start
+	}
+	if days, ok := codexSubscriptionDisplayActiveDaysValue(auth.Metadata); ok {
+		entry["subscription_active_days"] = days
+	}
+}
+
+func codexSubscriptionMetadataPlanType(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	for _, key := range []string{"plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType"} {
+		if planType := strings.TrimSpace(valueAsString(metadata[key])); planType != "" {
+			return planType
+		}
+	}
+	return ""
+}
+
+func authFileMetadataHasRefreshToken(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	for _, key := range []string{"refresh_token", "refreshToken"} {
+		if value, ok := metadata[key]; ok && strings.TrimSpace(valueAsString(value)) != "" {
+			return true
+		}
+	}
+	for _, containerKey := range []string{"token", "tokens", "token_data", "tokenData"} {
+		container, ok := metadata[containerKey]
+		if !ok || container == nil {
+			continue
+		}
+		switch nested := container.(type) {
+		case map[string]any:
+			if authFileMetadataHasRefreshToken(nested) {
+				return true
+			}
+		case map[string]string:
+			if strings.TrimSpace(nested["refresh_token"]) != "" || strings.TrimSpace(nested["refreshToken"]) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func codexSubscriptionUntilValue(metadata map[string]any) (any, bool) {
 	if len(metadata) == 0 {
 		return nil, false
 	}
-	for _, key := range []string{
+	if value, ok := codexSubscriptionUntilValueFromKeys(metadata, []string{
 		"subscription_expires_at",
 		"subscriptionExpiresAt",
 		"chatgpt_subscription_active_until",
 		"chatgptSubscriptionActiveUntil",
+	}); ok {
+		return value, true
+	}
+
+	for _, candidate := range []struct {
+		container string
+		keys      []string
+	}{
+		{container: "account", keys: []string{"subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil", "subscription_active_until", "subscriptionActiveUntil"}},
+		{container: "entitlement", keys: []string{"subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil", "expires_at", "expiresAt", "current_period_end", "currentPeriodEnd", "period_end", "periodEnd"}},
+		{container: "subscription", keys: []string{"subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil", "expires_at", "expiresAt", "current_period_end", "currentPeriodEnd", "period_end", "periodEnd"}},
+		{container: "providerSpecificData", keys: []string{"subscription_expires_at", "subscriptionExpiresAt", "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil"}},
 	} {
+		nested, ok := metadata[candidate.container].(map[string]any)
+		if !ok || len(nested) == 0 {
+			continue
+		}
+		if value, ok := codexSubscriptionUntilValueFromKeys(nested, candidate.keys); ok {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func codexSubscriptionActiveStartValue(metadata map[string]any) (any, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	if value, ok := codexSubscriptionUntilValueFromKeys(metadata, codexSubscriptionActiveStartKeys()); ok {
+		return value, true
+	}
+
+	for _, candidate := range []struct {
+		container string
+		keys      []string
+	}{
+		{container: "account", keys: codexSubscriptionActiveStartKeys()},
+		{container: "entitlement", keys: codexSubscriptionActiveStartKeys()},
+		{container: "subscription", keys: codexSubscriptionActiveStartKeys()},
+		{container: "providerSpecificData", keys: codexSubscriptionActiveStartKeys()},
+	} {
+		nested, ok := metadata[candidate.container].(map[string]any)
+		if !ok || len(nested) == 0 {
+			continue
+		}
+		if value, ok := codexSubscriptionUntilValueFromKeys(nested, candidate.keys); ok {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func codexSubscriptionActiveStartKeys() []string {
+	return []string{
+		"chatgpt_subscription_active_start",
+		"chatgptSubscriptionActiveStart",
+		"subscription_active_start",
+		"subscriptionActiveStart",
+		"subscription_started_at",
+		"subscriptionStartedAt",
+		"subscription_start_date",
+		"subscriptionStartDate",
+		"current_period_start",
+		"currentPeriodStart",
+		"period_start",
+		"periodStart",
+		"started_at",
+		"startedAt",
+		"starts_at",
+		"startsAt",
+	}
+}
+
+func codexSubscriptionActiveDaysValue(metadata map[string]any) (int, bool) {
+	for _, key := range []string{"subscription_active_days", "subscriptionActiveDays"} {
+		if days, ok := normalizeNonNegativeInt(metadata[key]); ok {
+			return days, true
+		}
+	}
+	start, ok := codexSubscriptionActiveStartValue(metadata)
+	if !ok {
+		return 0, false
+	}
+	startMs := authFileListTimestampMs(start)
+	if startMs <= 0 {
+		return 0, false
+	}
+	days := int(time.Since(time.UnixMilli(startMs)).Hours() / 24)
+	if days < 0 {
+		days = 0
+	}
+	return days, true
+}
+
+func codexSubscriptionDisplayActiveStartValue(metadata map[string]any) (any, bool) {
+	if start, ok := codexSubscriptionActiveStartValue(metadata); ok {
+		return start, true
+	}
+	if until, ok := codexSubscriptionUntilValue(metadata); ok {
+		return deriveCodexSubscriptionActiveStartFromUntilValue(until)
+	}
+	return nil, false
+}
+
+func codexSubscriptionDisplayActiveDaysValue(metadata map[string]any) (int, bool) {
+	if days, ok := codexSubscriptionActiveDaysValue(metadata); ok {
+		return days, true
+	}
+	start, ok := codexSubscriptionDisplayActiveStartValue(metadata)
+	if !ok {
+		return 0, false
+	}
+	startMs := authFileListTimestampMs(start)
+	if startMs <= 0 {
+		return 0, false
+	}
+	days := int(time.Since(time.UnixMilli(startMs)).Hours() / 24)
+	if days < 0 {
+		days = 0
+	}
+	return days, true
+}
+
+func deriveCodexSubscriptionActiveStartFromUntilValue(value any) (string, bool) {
+	untilMs := authFileListTimestampMs(value)
+	if untilMs <= 0 {
+		return "", false
+	}
+	until := time.UnixMilli(untilMs).UTC()
+	start := addMonthsClampedUTC(until, -1)
+	if !start.Before(until) {
+		return "", false
+	}
+	return start.Format(time.RFC3339), true
+}
+
+func addMonthsClampedUTC(t time.Time, months int) time.Time {
+	t = t.UTC()
+	year, month, day := t.Date()
+	monthIndex := int(month) - 1 + months
+	targetYear := year + monthIndex/12
+	targetMonthIndex := monthIndex % 12
+	if targetMonthIndex < 0 {
+		targetMonthIndex += 12
+		targetYear--
+	}
+	targetMonth := time.Month(targetMonthIndex + 1)
+	lastDay := time.Date(targetYear, targetMonth+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	hour, minute, second := t.Clock()
+	return time.Date(targetYear, targetMonth, day, hour, minute, second, t.Nanosecond(), time.UTC)
+}
+
+func normalizeNonNegativeInt(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, v >= 0
+	case int64:
+		if v < 0 {
+			return 0, false
+		}
+		return int(v), true
+	case float64:
+		if v < 0 {
+			return 0, false
+		}
+		return int(v), true
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil || parsed < 0 {
+			return 0, false
+		}
+		return int(parsed), true
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || parsed < 0 {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
+}
+
+func codexSubscriptionUntilValueFromKeys(metadata map[string]any, keys []string) (any, bool) {
+	for _, key := range keys {
 		if value, ok := metadata[key]; ok {
 			if normalized, okNormalize := normalizeCodexSubscriptionUntilValue(value); okNormalize {
 				return normalized, true
@@ -823,8 +2391,15 @@ func (h *Handler) enrichCodexSubscriptionInfo(ctx context.Context, auth *coreaut
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return auth
 	}
-	if _, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
-		return auth
+	if until, ok := codexSubscriptionUntilValue(auth.Metadata); ok {
+		updated, changed := ensureCodexSubscriptionSnapshotMetadata(auth, until)
+		if mode == codexSubscriptionListRefresh && changed {
+			h.persistCodexSubscriptionBackfill(ctx, updated)
+		}
+		if mode != codexSubscriptionListRefresh || codexSubscriptionHasActiveDuration(updated.Metadata) {
+			return updated
+		}
+		auth = updated
 	}
 	if mode == codexSubscriptionListSkip {
 		return auth
@@ -833,24 +2408,21 @@ func (h *Handler) enrichCodexSubscriptionInfo(ctx context.Context, auth *coreaut
 	if accessToken == "" {
 		accessToken = strings.TrimSpace(authAttribute(auth, "access_token"))
 	}
-	if accessToken == "" {
-		return auth
-	}
-
 	proxyURL := h.codexSubscriptionProxyURL(auth)
-	cacheKey := codexSubscriptionCacheKey(accessToken, proxyURL)
+	cacheKey := ""
+	if accessToken != "" {
+		cacheKey = codexSubscriptionCacheKey(accessToken, proxyURL)
+	}
 	now := time.Now()
-	if cachedRaw, ok := codexSubscriptionCache.Load(cacheKey); ok {
-		cached, _ := cachedRaw.(codexSubscriptionCacheEntry)
-		if cached.expiresAt.After(now) {
+	if mode != codexSubscriptionListRefresh {
+		if cached, ok := h.loadCodexSubscriptionCache(ctx, auth, cacheKey, now); ok {
 			if cached.found {
 				return applyCodexAccountSubscriptionInfo(auth, cached.info)
 			}
 			return auth
 		}
-		codexSubscriptionCache.Delete(cacheKey)
 	}
-	if mode == codexSubscriptionListCache {
+	if mode == codexSubscriptionListCache || accessToken == "" {
 		return auth
 	}
 
@@ -858,15 +2430,248 @@ func (h *Handler) enrichCodexSubscriptionInfo(ctx context.Context, auth *coreaut
 	info, err := h.fetchCodexAccountSubscriptionInfo(ctx, accessToken, proxyURL, orgID)
 	if err != nil {
 		log.WithError(err).Debug("failed to fetch codex subscription info")
-		codexSubscriptionCache.Store(cacheKey, codexSubscriptionCacheEntry{found: false, expiresAt: now.Add(10 * time.Minute)})
+		h.storeCodexSubscriptionCache(ctx, auth, cacheKey, codexSubscriptionCacheEntry{found: false, expiresAt: now.Add(10 * time.Minute)})
 		return auth
 	}
 	if info == nil || !info.hasData() {
-		codexSubscriptionCache.Store(cacheKey, codexSubscriptionCacheEntry{found: false, expiresAt: now.Add(30 * time.Minute)})
+		h.storeCodexSubscriptionCache(ctx, auth, cacheKey, codexSubscriptionCacheEntry{found: false, expiresAt: now.Add(30 * time.Minute)})
 		return auth
 	}
-	codexSubscriptionCache.Store(cacheKey, codexSubscriptionCacheEntry{info: *info, found: true, expiresAt: now.Add(6 * time.Hour)})
-	return applyCodexAccountSubscriptionInfo(auth, *info)
+	h.storeCodexSubscriptionCache(ctx, auth, cacheKey, codexSubscriptionCacheEntry{info: *info, found: true, expiresAt: now.Add(6 * time.Hour)})
+	updated := applyCodexAccountSubscriptionInfo(auth, *info)
+	if mode == codexSubscriptionListRefresh && codexSubscriptionBackfillShouldPersist(auth, updated) {
+		h.persistCodexSubscriptionBackfill(ctx, updated)
+	}
+	return updated
+}
+
+func codexSubscriptionHasActiveDuration(metadata map[string]any) bool {
+	if _, ok := codexSubscriptionActiveDaysValue(metadata); ok {
+		return true
+	}
+	_, ok := codexSubscriptionActiveStartValue(metadata)
+	return ok
+}
+
+func ensureCodexSubscriptionSnapshotMetadata(auth *coreauth.Auth, value any) (*coreauth.Auth, bool) {
+	if auth == nil {
+		return auth, false
+	}
+	normalized, ok := normalizeCodexSubscriptionUntilValue(value)
+	if !ok {
+		return auth, false
+	}
+	normalizedString := strings.TrimSpace(valueAsString(normalized))
+	if normalizedString == "" {
+		return auth, false
+	}
+	changed := false
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	for _, key := range []string{"subscription_expires_at", "chatgpt_subscription_active_until"} {
+		if existing, ok := normalizeCodexSubscriptionUntilValue(updated.Metadata[key]); !ok || strings.TrimSpace(valueAsString(existing)) != normalizedString {
+			updated.Metadata[key] = normalizedString
+			changed = true
+		}
+	}
+	if start, ok := codexSubscriptionActiveStartValue(auth.Metadata); ok {
+		startString := strings.TrimSpace(valueAsString(start))
+		if startString != "" {
+			for _, key := range []string{"chatgpt_subscription_active_start", "subscription_active_start"} {
+				if existing, ok := normalizeCodexSubscriptionUntilValue(updated.Metadata[key]); !ok || strings.TrimSpace(valueAsString(existing)) != startString {
+					updated.Metadata[key] = startString
+					changed = true
+				}
+			}
+		}
+	}
+	return updated, changed
+}
+
+func codexSubscriptionBackfillShouldPersist(original, updated *coreauth.Auth) bool {
+	if updated == nil || len(updated.Metadata) == 0 {
+		return false
+	}
+	if value, ok := normalizeCodexSubscriptionUntilValue(updated.Metadata["subscription_expires_at"]); ok {
+		updatedValue := strings.TrimSpace(valueAsString(value))
+		if updatedValue != "" {
+			if original == nil || len(original.Metadata) == 0 {
+				return true
+			}
+			if existing, okExisting := normalizeCodexSubscriptionUntilValue(original.Metadata["subscription_expires_at"]); !okExisting || strings.TrimSpace(valueAsString(existing)) != updatedValue {
+				return true
+			}
+		}
+	}
+	if value, ok := codexSubscriptionActiveStartValue(updated.Metadata); ok {
+		updatedValue := strings.TrimSpace(valueAsString(value))
+		if updatedValue != "" {
+			if original == nil || len(original.Metadata) == 0 {
+				return true
+			}
+			if existing, okExisting := codexSubscriptionActiveStartValue(original.Metadata); !okExisting || strings.TrimSpace(valueAsString(existing)) != updatedValue {
+				return true
+			}
+		}
+	}
+	for _, key := range []string{"plan_type", "chatgpt_plan_type"} {
+		updatedValue := strings.TrimSpace(valueAsString(updated.Metadata[key]))
+		if updatedValue == "" {
+			continue
+		}
+		if original == nil || !strings.EqualFold(strings.TrimSpace(valueAsString(original.Metadata[key])), updatedValue) {
+			return true
+		}
+	}
+	if updatedValue := strings.TrimSpace(valueAsString(updated.Metadata["email"])); updatedValue != "" {
+		if original == nil || strings.TrimSpace(valueAsString(original.Metadata["email"])) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) persistCodexSubscriptionBackfill(ctx context.Context, auth *coreauth.Auth) {
+	if h == nil || auth == nil || !codexSubscriptionBackfillHasPersistableData(auth.Metadata) {
+		return
+	}
+	persistCtx := context.Background()
+	if ctx != nil {
+		persistCtx = context.WithoutCancel(ctx)
+	}
+	if h.authManager != nil && strings.TrimSpace(auth.ID) != "" {
+		if updated, err := h.authManager.Update(persistCtx, auth); err != nil {
+			log.WithError(err).WithField("auth_id", auth.ID).Warn("failed to persist codex subscription info")
+		} else if updated != nil {
+			auth = updated
+		}
+	}
+	path := resolveCodexSubscriptionBackfillPath(h, auth)
+	if path == "" {
+		return
+	}
+	if err := persistCodexSubscriptionBackfillFile(path, auth.Metadata); err != nil {
+		log.WithError(err).WithField("path", path).Warn("failed to persist codex subscription info")
+	}
+}
+
+func codexSubscriptionBackfillHasPersistableData(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	if value, ok := normalizeCodexSubscriptionUntilValue(metadata["subscription_expires_at"]); ok && strings.TrimSpace(valueAsString(value)) != "" {
+		return true
+	}
+	if value, ok := codexSubscriptionActiveStartValue(metadata); ok && strings.TrimSpace(valueAsString(value)) != "" {
+		return true
+	}
+	for _, key := range []string{"plan_type", "chatgpt_plan_type", "email"} {
+		if strings.TrimSpace(valueAsString(metadata[key])) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveCodexSubscriptionBackfillPath(h *Handler, auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
+			return path
+		}
+	}
+	authDir := ""
+	if h != nil && h.cfg != nil {
+		authDir = strings.TrimSpace(h.cfg.AuthDir)
+	}
+	for _, candidate := range []string{auth.FileName, auth.ID} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if filepath.IsAbs(candidate) || authDir == "" {
+			return candidate
+		}
+		return filepath.Join(authDir, candidate)
+	}
+	return ""
+}
+
+func persistCodexSubscriptionBackfillFile(path string, metadata map[string]any) error {
+	path = strings.TrimSpace(path)
+	if path == "" || len(metadata) == 0 {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read auth file: %w", err)
+	}
+	doc := make(map[string]any)
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("invalid auth file: %w", err)
+	}
+	if !applyCodexSubscriptionBackfillDocument(doc, metadata) {
+		return nil
+	}
+	updated, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode auth file: %w", err)
+	}
+	updated = append(updated, '\n')
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		return fmt.Errorf("failed to write auth file: %w", err)
+	}
+	return nil
+}
+
+func applyCodexSubscriptionBackfillDocument(doc map[string]any, metadata map[string]any) bool {
+	if doc == nil || len(metadata) == 0 {
+		return false
+	}
+	changed := false
+	if value, ok := normalizeCodexSubscriptionUntilValue(metadata["subscription_expires_at"]); ok {
+		normalized := strings.TrimSpace(valueAsString(value))
+		if normalized != "" {
+			for _, key := range []string{"subscription_expires_at", "chatgpt_subscription_active_until"} {
+				if existing, okExisting := normalizeCodexSubscriptionUntilValue(doc[key]); !okExisting || strings.TrimSpace(valueAsString(existing)) != normalized {
+					doc[key] = normalized
+					changed = true
+				}
+			}
+		}
+	}
+	if value, ok := codexSubscriptionActiveStartValue(metadata); ok {
+		normalized := strings.TrimSpace(valueAsString(value))
+		if normalized != "" {
+			for _, key := range []string{"chatgpt_subscription_active_start", "subscription_active_start"} {
+				if existing, okExisting := normalizeCodexSubscriptionUntilValue(doc[key]); !okExisting || strings.TrimSpace(valueAsString(existing)) != normalized {
+					doc[key] = normalized
+					changed = true
+				}
+			}
+		}
+	}
+	for _, key := range []string{"plan_type", "chatgpt_plan_type"} {
+		value := strings.TrimSpace(valueAsString(metadata[key]))
+		if value == "" || strings.EqualFold(strings.TrimSpace(valueAsString(doc[key])), value) {
+			continue
+		}
+		doc[key] = value
+		changed = true
+	}
+	value := strings.TrimSpace(valueAsString(metadata["email"]))
+	if value != "" && strings.TrimSpace(valueAsString(doc["email"])) == "" {
+		doc["email"] = value
+		changed = true
+	}
+	return changed
 }
 
 func codexAuthMetadataString(metadata map[string]any, keys ...string) string {
@@ -903,18 +2708,47 @@ func codexSubscriptionCacheKey(accessToken, proxyURL string) string {
 }
 
 func (h *Handler) codexSubscriptionProxyURL(auth *coreauth.Auth) string {
+	globalProxy := ""
+	if h != nil && h.cfg != nil {
+		globalProxy = strings.TrimSpace(h.cfg.ProxyURL)
+	}
 	if auth != nil {
 		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			if codexProxySettingIsDirect(proxyURL) && globalProxy != "" {
+				return globalProxy
+			}
 			return proxyURL
 		}
 		if proxyURL := codexAuthMetadataString(auth.Metadata, "proxy_url", "proxy-url", "proxyUrl"); proxyURL != "" {
+			if codexProxySettingIsDirect(proxyURL) && globalProxy != "" {
+				return globalProxy
+			}
 			return proxyURL
 		}
 	}
-	if h != nil && h.cfg != nil {
-		return strings.TrimSpace(h.cfg.ProxyURL)
+	return globalProxy
+}
+
+func codexProxySettingIsDirect(proxyURL string) bool {
+	switch strings.ToLower(strings.TrimSpace(proxyURL)) {
+	case "none", "direct":
+		return true
+	default:
+		return false
 	}
-	return ""
+}
+
+func (h *Handler) codexUsageTransport(auth *coreauth.Auth) http.RoundTripper {
+	if h == nil {
+		return nil
+	}
+	proxyURL := h.codexSubscriptionProxyURL(auth)
+	if auth == nil || proxyURL == strings.TrimSpace(auth.ProxyURL) {
+		return h.apiCallTransport(auth)
+	}
+	updated := auth.Clone()
+	updated.ProxyURL = proxyURL
+	return h.apiCallTransport(updated)
 }
 
 func applyCodexAccountSubscriptionInfo(auth *coreauth.Auth, info codexAccountSubscriptionInfo) *coreauth.Auth {
@@ -927,9 +2761,15 @@ func applyCodexAccountSubscriptionInfo(auth *coreauth.Auth, info codexAccountSub
 	}
 	if info.SubscriptionExpiresAt != "" {
 		updated.Metadata["subscription_expires_at"] = info.SubscriptionExpiresAt
+		updated.Metadata["chatgpt_subscription_active_until"] = info.SubscriptionExpiresAt
 	}
-	if info.PlanType != "" && strings.TrimSpace(valueAsString(updated.Metadata["plan_type"])) == "" {
+	if info.SubscriptionActiveStart != "" {
+		updated.Metadata["chatgpt_subscription_active_start"] = info.SubscriptionActiveStart
+		updated.Metadata["subscription_active_start"] = info.SubscriptionActiveStart
+	}
+	if info.PlanType != "" {
 		updated.Metadata["plan_type"] = info.PlanType
+		updated.Metadata["chatgpt_plan_type"] = info.PlanType
 	}
 	if info.Email != "" && strings.TrimSpace(valueAsString(updated.Metadata["email"])) == "" {
 		updated.Metadata["email"] = info.Email
@@ -938,7 +2778,10 @@ func applyCodexAccountSubscriptionInfo(auth *coreauth.Auth, info codexAccountSub
 }
 
 func (info codexAccountSubscriptionInfo) hasData() bool {
-	return strings.TrimSpace(info.PlanType) != "" || strings.TrimSpace(info.Email) != "" || strings.TrimSpace(info.SubscriptionExpiresAt) != ""
+	return strings.TrimSpace(info.PlanType) != "" ||
+		strings.TrimSpace(info.Email) != "" ||
+		strings.TrimSpace(info.SubscriptionExpiresAt) != "" ||
+		strings.TrimSpace(info.SubscriptionActiveStart) != ""
 }
 
 func resolveCodexAccountCheckOrgID(auth *coreauth.Auth, accessToken string) string {
@@ -1029,6 +2872,7 @@ func (h *Handler) fetchCodexAccountSubscriptionInfo(ctx context.Context, accessT
 	req.Header.Set("Origin", "https://chatgpt.com")
 	req.Header.Set("Referer", "https://chatgpt.com/")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", codexAccountsCheckUserAgent)
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
@@ -1114,9 +2958,10 @@ func accountObject(raw any) (map[string]any, bool) {
 
 func codexAccountSubscriptionInfoFromAccount(acct map[string]any) codexAccountSubscriptionInfo {
 	return codexAccountSubscriptionInfo{
-		PlanType:              extractCodexAccountPlanType(acct),
-		Email:                 extractCodexAccountEmail(acct),
-		SubscriptionExpiresAt: extractCodexEntitlementExpiresAt(acct),
+		PlanType:                extractCodexAccountPlanType(acct),
+		Email:                   extractCodexAccountEmail(acct),
+		SubscriptionExpiresAt:   extractCodexEntitlementExpiresAt(acct),
+		SubscriptionActiveStart: extractCodexEntitlementActiveStart(acct),
 	}
 }
 
@@ -1155,12 +3000,40 @@ func extractCodexAccountEmail(acct map[string]any) string {
 }
 
 func extractCodexEntitlementExpiresAt(acct map[string]any) string {
-	entitlement, ok := acct["entitlement"].(map[string]any)
-	if !ok {
-		return ""
+	keys := []string{"expires_at", "expiresAt", "subscription_expires_at", "subscriptionExpiresAt", "current_period_end", "currentPeriodEnd", "period_end", "periodEnd"}
+	for _, container := range []string{"entitlement", "subscription", "account"} {
+		nested, ok := acct[container].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range keys {
+			if value, ok := normalizeCodexSubscriptionUntilValue(nested[key]); ok {
+				return strings.TrimSpace(valueAsString(value))
+			}
+		}
 	}
-	for _, key := range []string{"expires_at", "expiresAt"} {
-		if value, ok := normalizeCodexSubscriptionUntilValue(entitlement[key]); ok {
+	for _, key := range keys {
+		if value, ok := normalizeCodexSubscriptionUntilValue(acct[key]); ok {
+			return strings.TrimSpace(valueAsString(value))
+		}
+	}
+	return ""
+}
+
+func extractCodexEntitlementActiveStart(acct map[string]any) string {
+	for _, container := range []string{"entitlement", "subscription", "account"} {
+		nested, ok := acct[container].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range codexSubscriptionActiveStartKeys() {
+			if value, ok := normalizeCodexSubscriptionUntilValue(nested[key]); ok {
+				return strings.TrimSpace(valueAsString(value))
+			}
+		}
+	}
+	for _, key := range codexSubscriptionActiveStartKeys() {
+		if value, ok := normalizeCodexSubscriptionUntilValue(acct[key]); ok {
 			return strings.TrimSpace(valueAsString(value))
 		}
 	}
@@ -1262,6 +3135,87 @@ func applyAuthFileRuntimeStateEntry(entry gin.H, state coreauth.AuthRuntimeState
 			"auth_scope":      state.Quota.AuthScope,
 		})
 	}
+}
+
+func applyAuthFileRuntimeStateSummaryEntry(entry gin.H, state coreauth.AuthRuntimeState, overwrite bool) {
+	if entry == nil {
+		return
+	}
+	set := func(key string, value any) {
+		if overwrite {
+			entry[key] = value
+			return
+		}
+		if _, exists := entry[key]; !exists {
+			entry[key] = value
+		}
+	}
+	if state.Status != "" {
+		set("status", state.Status)
+	}
+	if state.StatusMessage != "" {
+		set("status_message", state.StatusMessage)
+	}
+	if state.Unavailable {
+		set("unavailable", true)
+	}
+	if state.Success != 0 {
+		set("success", state.Success)
+	}
+	if state.Failed != 0 {
+		set("failed", state.Failed)
+	}
+	if recent := authFileRecentRequestsFromRuntimeState(state, time.Now()); len(recent) > 0 {
+		set("recent_requests", recent)
+	}
+	if !state.NextRetryAfter.IsZero() {
+		set("next_retry_after", state.NextRetryAfter.UTC())
+	}
+	if !state.UpdatedAt.IsZero() {
+		set("runtime_updated_at", state.UpdatedAt.UTC())
+	}
+	if !state.SavedAt.IsZero() {
+		set("runtime_saved_at", state.SavedAt.UTC())
+	}
+}
+
+func authFileRecentRequestsFromRuntimeState(state coreauth.AuthRuntimeState, now time.Time) []coreauth.RecentRequestBucket {
+	const (
+		bucketSeconds int64 = 10 * 60
+		bucketCount         = 20
+	)
+	if len(state.RecentRequests) == 0 {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	byBucket := make(map[int64]coreauth.RecentRequestState, len(state.RecentRequests))
+	for _, item := range state.RecentRequests {
+		if item.BucketID == 0 && item.Success == 0 && item.Failed == 0 {
+			continue
+		}
+		byBucket[item.BucketID] = item
+	}
+	if len(byBucket) == 0 {
+		return nil
+	}
+	currentBucketID := now.Unix() / bucketSeconds
+	out := make([]coreauth.RecentRequestBucket, 0, bucketCount)
+	for i := bucketCount - 1; i >= 0; i-- {
+		bucketID := currentBucketID - int64(i)
+		start := time.Unix(bucketID*bucketSeconds, 0).In(time.Local)
+		end := start.Add(time.Duration(bucketSeconds) * time.Second)
+		entry := coreauth.RecentRequestBucket{
+			Time: start.Format("15:04") + "-" + end.Format("15:04"),
+		}
+		if item, ok := byBucket[bucketID]; ok {
+			entry.Success = item.Success
+			entry.Failed = item.Failed
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func serializeModelStates(states map[string]*coreauth.ModelState) map[string]gin.H {
@@ -1526,29 +3480,278 @@ func normalizeOptionalAuthFileName(name string) (string, error) {
 	return name, nil
 }
 
-// Download single auth file by name
-func (h *Handler) DownloadAuthFile(c *gin.Context) {
-	name := strings.TrimSpace(c.Query("name"))
+func (h *Handler) readAuthFileByName(name string) ([]byte, string, int, string) {
+	name = strings.TrimSpace(name)
 	if isUnsafeAuthFileName(name) {
-		c.JSON(400, gin.H{"error": "invalid name"})
-		return
+		return nil, "", http.StatusBadRequest, "invalid name"
 	}
 	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		c.JSON(400, gin.H{"error": "name must end with .json"})
-		return
+		return nil, "", http.StatusBadRequest, "name must end with .json"
 	}
 	full := filepath.Join(h.cfg.AuthDir, name)
 	data, err := os.ReadFile(full)
 	if err != nil {
 		if os.IsNotExist(err) {
-			c.JSON(404, gin.H{"error": "file not found"})
-		} else {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+			return nil, "", http.StatusNotFound, "file not found"
 		}
+		return nil, "", http.StatusInternalServerError, fmt.Sprintf("failed to read file: %v", err)
+	}
+	return data, name, http.StatusOK, ""
+}
+
+func authFilePreviewJSON(data []byte) ([]byte, error) {
+	doc := make(map[string]any)
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	if isCodexAuthFilePreviewSource(doc) {
+		preview, err := json.MarshalIndent(buildCodexAuthFilePreview(doc), "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return append(preview, '\n'), nil
+	}
+	delete(doc, authFileRuntimeStateJSONKey)
+	preview, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(preview, '\n'), nil
+}
+
+type codexAuthFilePreview struct {
+	Type                           string `json:"type"`
+	AccountID                      string `json:"account_id,omitempty"`
+	ChatGPTAccountID               string `json:"chatgpt_account_id,omitempty"`
+	Email                          string `json:"email,omitempty"`
+	Name                           string `json:"name,omitempty"`
+	PlanType                       string `json:"plan_type,omitempty"`
+	ChatGPTPlanType                string `json:"chatgpt_plan_type,omitempty"`
+	IDToken                        string `json:"id_token,omitempty"`
+	IDTokenSynthetic               *bool  `json:"id_token_synthetic,omitempty"`
+	AccessToken                    string `json:"access_token,omitempty"`
+	RefreshToken                   string `json:"refresh_token"`
+	SessionToken                   string `json:"session_token,omitempty"`
+	LastRefresh                    any    `json:"last_refresh,omitempty"`
+	Expired                        any    `json:"expired,omitempty"`
+	SubscriptionExpiresAt          any    `json:"subscription_expires_at,omitempty"`
+	ChatGPTSubscriptionActiveStart any    `json:"chatgpt_subscription_active_start,omitempty"`
+	ChatGPTSubscriptionActiveUntil any    `json:"chatgpt_subscription_active_until,omitempty"`
+	Disabled                       *bool  `json:"disabled,omitempty"`
+}
+
+func isCodexAuthFilePreviewSource(doc map[string]any) bool {
+	if len(doc) == 0 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(valueAsString(doc["type"])), "codex") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(valueAsString(doc["provider"])), "codex") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(valueAsString(doc["authProvider"])), "openai")
+}
+
+func buildCodexAuthFilePreview(doc map[string]any) codexAuthFilePreview {
+	idToken := authFilePreviewMetadataString(doc, "id_token", "idToken")
+	claims := parseCodexJWTClaims(idToken)
+
+	accountID := authFilePreviewFirstNonEmptyString(
+		authFilePreviewMetadataString(doc, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"),
+		authFilePreviewNestedString(doc, "account", "id"),
+		authFilePreviewNestedString(doc, "providerSpecificData", "chatgpt_account_id"),
+		authFilePreviewNestedString(doc, "providerSpecificData", "chatgptAccountId"),
+		authFilePreviewNestedString(doc, "credentials", "chatgpt_account_id"),
+		codexClaimsAccountID(claims),
+	)
+	planType := authFilePreviewFirstNonEmptyString(
+		authFilePreviewMetadataString(doc, "plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType"),
+		authFilePreviewNestedString(doc, "account", "plan_type"),
+		authFilePreviewNestedString(doc, "account", "planType"),
+		authFilePreviewNestedString(doc, "providerSpecificData", "chatgpt_plan_type"),
+		authFilePreviewNestedString(doc, "providerSpecificData", "chatgptPlanType"),
+		authFilePreviewNestedString(doc, "credentials", "plan_type"),
+		codexClaimsPlanType(claims),
+	)
+	email := authFilePreviewFirstNonEmptyString(
+		authFilePreviewMetadataString(doc, "email"),
+		authFilePreviewNestedString(doc, "user", "email"),
+		authFilePreviewNestedString(doc, "credentials", "email"),
+		authFilePreviewNestedString(doc, "providerSpecificData", "email"),
+		codexClaimsEmail(claims),
+	)
+	subscriptionExpiresAt := authFilePreviewSubscriptionExpiresAt(doc, claims)
+
+	preview := codexAuthFilePreview{
+		Type:                           "codex",
+		AccountID:                      accountID,
+		ChatGPTAccountID:               accountID,
+		Email:                          email,
+		Name:                           authFilePreviewFirstNonEmptyString(authFilePreviewMetadataString(doc, "name"), email),
+		PlanType:                       planType,
+		ChatGPTPlanType:                planType,
+		IDToken:                        idToken,
+		IDTokenSynthetic:               authFilePreviewBoolPtr(doc["id_token_synthetic"]),
+		AccessToken:                    authFilePreviewMetadataString(doc, "access_token", "accessToken"),
+		RefreshToken:                   authFilePreviewMetadataString(doc, "refresh_token", "refreshToken"),
+		SessionToken:                   authFilePreviewMetadataString(doc, "session_token", "sessionToken"),
+		LastRefresh:                    authFilePreviewFirstValue(doc, append([]string{}, lastRefreshKeys...)...),
+		Expired:                        authFilePreviewFirstValue(doc, "expired", "expire", "expires_at", "expiresAt", "expiry", "expires"),
+		SubscriptionExpiresAt:          subscriptionExpiresAt,
+		ChatGPTSubscriptionActiveStart: authFilePreviewSubscriptionActiveStart(doc, claims, subscriptionExpiresAt),
+		ChatGPTSubscriptionActiveUntil: authFilePreviewFirstValue(doc, "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil"),
+	}
+	if disabled := authFilePreviewBoolPtr(doc["disabled"]); disabled != nil && *disabled {
+		preview.Disabled = disabled
+	}
+	return preview
+}
+
+func authFilePreviewMetadataString(metadata map[string]any, keys ...string) string {
+	return codexAuthMetadataString(metadata, keys...)
+}
+
+func authFilePreviewNestedString(metadata map[string]any, outerKey, innerKey string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	raw, ok := metadata[outerKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	nested, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(valueAsString(nested[innerKey]))
+}
+
+func authFilePreviewFirstValue(metadata map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := metadata[key]; ok && !authFilePreviewEmptyValue(value) {
+			return value
+		}
+	}
+	for _, containerKey := range []string{"token", "tokens", "token_data", "tokenData", "credentials"} {
+		container, ok := metadata[containerKey]
+		if !ok || container == nil {
+			continue
+		}
+		if nested, ok := container.(map[string]any); ok {
+			if value := authFilePreviewFirstValue(nested, keys...); !authFilePreviewEmptyValue(value) {
+				return value
+			}
+		}
+	}
+	return nil
+}
+
+func authFilePreviewSubscriptionExpiresAt(metadata map[string]any, claims *codex.JWTClaims) any {
+	if value, ok := codexSubscriptionUntilValue(metadata); ok {
+		return value
+	}
+	if claims == nil {
+		return nil
+	}
+	if value, ok := normalizeCodexSubscriptionUntilValue(claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil); ok {
+		return value
+	}
+	return nil
+}
+
+func authFilePreviewSubscriptionActiveStart(metadata map[string]any, claims *codex.JWTClaims, subscriptionExpiresAt any) any {
+	if value := authFilePreviewFirstValue(metadata, "chatgpt_subscription_active_start", "chatgptSubscriptionActiveStart", "subscription_active_start", "subscriptionActiveStart", "current_period_start", "currentPeriodStart", "period_start", "periodStart", "started_at", "startedAt"); !authFilePreviewEmptyValue(value) {
+		return value
+	}
+	if claims != nil {
+		if value, ok := normalizeCodexSubscriptionUntilValue(claims.CodexAuthInfo.ChatgptSubscriptionActiveStart); ok {
+			return value
+		}
+	}
+	if value, ok := deriveCodexSubscriptionActiveStartFromUntilValue(subscriptionExpiresAt); ok {
+		return value
+	}
+	return nil
+}
+
+func authFilePreviewEmptyValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	if str, ok := value.(string); ok {
+		return strings.TrimSpace(str) == ""
+	}
+	return false
+}
+
+func authFilePreviewBoolPtr(value any) *bool {
+	switch v := value.(type) {
+	case bool:
+		return &v
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err == nil {
+			return &parsed
+		}
+	}
+	return nil
+}
+
+func authFilePreviewFirstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func codexClaimsEmail(claims *codex.JWTClaims) string {
+	if claims == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.GetUserEmail())
+}
+
+func codexClaimsAccountID(claims *codex.JWTClaims) string {
+	if claims == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.GetAccountID())
+}
+
+func codexClaimsPlanType(claims *codex.JWTClaims) string {
+	if claims == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+}
+
+// Download single auth file by name.
+func (h *Handler) DownloadAuthFile(c *gin.Context) {
+	data, name, status, message := h.readAuthFileByName(c.Query("name"))
+	if status != http.StatusOK {
+		c.JSON(status, gin.H{"error": message})
 		return
 	}
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", name))
-	c.Data(200, "application/json", data)
+	c.Data(http.StatusOK, "application/json", data)
+}
+
+// PreviewAuthFile returns an auth file JSON view with internal runtime metadata omitted.
+func (h *Handler) PreviewAuthFile(c *gin.Context) {
+	data, _, status, message := h.readAuthFileByName(c.Query("name"))
+	if status != http.StatusOK {
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+	preview, err := authFilePreviewJSON(data)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid auth file JSON: %v", err)})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", preview)
 }
 
 // Upload auth file: multipart or raw JSON with ?name=
@@ -1818,9 +4021,9 @@ func (h *Handler) authIDForPath(path string) string {
 			path = abs
 		}
 	}
-	id := path
+	authDir := ""
 	if h != nil && h.cfg != nil {
-		authDir := strings.TrimSpace(h.cfg.AuthDir)
+		authDir = strings.TrimSpace(h.cfg.AuthDir)
 		if resolvedAuthDir, errResolve := util.ResolveAuthDir(authDir); errResolve == nil && resolvedAuthDir != "" {
 			authDir = resolvedAuthDir
 		}
@@ -1831,16 +4034,9 @@ func (h *Handler) authIDForPath(path string) string {
 					authDir = abs
 				}
 			}
-			if rel, errRel := filepath.Rel(authDir, path); errRel == nil && rel != "" {
-				id = rel
-			}
 		}
 	}
-	// On Windows, normalize ID casing to avoid duplicate auth entries caused by case-insensitive paths.
-	if runtime.GOOS == "windows" {
-		id = strings.ToLower(id)
-	}
-	return id
+	return coreauth.AuthFileIDForPath(path, authDir)
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
@@ -1873,34 +4069,22 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if err := json.Unmarshal(normalizedData, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", err)
 	}
-	provider, _ := metadata["type"].(string)
-	if provider == "" {
-		provider = "unknown"
-	}
-	label := provider
-	if email, ok := metadata["email"].(string); ok && email != "" {
-		label = email
-	}
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)
 
 	authID := h.authIDForPath(path)
 	if authID == "" {
 		authID = path
 	}
-	attr := map[string]string{
-		"path":   path,
-		"source": path,
-	}
-	auth := &coreauth.Auth{
-		ID:         authID,
-		Provider:   provider,
-		FileName:   filepath.Base(path),
-		Label:      label,
-		Status:     coreauth.StatusActive,
-		Attributes: attr,
-		Metadata:   metadata,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+	now := time.Now()
+	auth := coreauth.NewAuthFromAuthFileMetadata(metadata, coreauth.AuthFileProjectionOptions{
+		ID:                     authID,
+		Path:                   path,
+		FileName:               filepath.Base(path),
+		IncludeSourceAttribute: true,
+		Now:                    now,
+	})
+	if auth.Label == "" {
+		auth.Label = auth.Provider
 	}
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
@@ -1915,9 +4099,6 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 			auth.Runtime = existing.Runtime
 		}
 	}
-	coreauth.ApplyAuthFileOptionsFromMetadata(auth)
-	coreauth.ApplyCodexMetadataFromMetadata(auth)
-	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
 }
 

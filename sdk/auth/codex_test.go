@@ -109,3 +109,30 @@ func TestBuildAuthRecordDerivesUserAgentFromConfiguredOriginator(t *testing.T) {
 		t.Fatalf("Attributes[header:User-Agent] = %q, want codex_vscode/ prefix", got)
 	}
 }
+
+func TestBuildAuthRecordPersistsPlanTypeFromTokenData(t *testing.T) {
+	authenticator := NewCodexAuthenticator()
+	authSvc := &codex.CodexAuth{}
+	bundle := &codex.CodexAuthBundle{
+		TokenData: codex.CodexTokenData{
+			Email:        "codex@example.com",
+			AccessToken:  "access-token",
+			RefreshToken: "refresh-token",
+			AccountID:    "account-123",
+			PlanType:     "plus",
+		},
+		LastRefresh: "2026-03-31T00:00:00Z",
+	}
+
+	record, err := authenticator.buildAuthRecord(authSvc, bundle, nil)
+	if err != nil {
+		t.Fatalf("buildAuthRecord() error = %v", err)
+	}
+
+	if got, _ := record.Metadata["plan_type"].(string); got != "plus" {
+		t.Fatalf("Metadata[plan_type] = %q, want plus", got)
+	}
+	if got := record.Attributes["plan_type"]; got != "plus" {
+		t.Fatalf("Attributes[plan_type] = %q, want plus", got)
+	}
+}

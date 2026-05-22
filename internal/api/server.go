@@ -69,6 +69,7 @@ type serverOptionConfig struct {
 	engineConfigurator   func(*gin.Engine)
 	routerConfigurator   func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
 	requestLoggerFactory func(*config.Config, string) logging.RequestLogger
+	managementCacheStore managementHandlers.CacheStore
 	localPassword        string
 	keepAliveEnabled     bool
 	keepAliveTimeout     time.Duration
@@ -138,6 +139,12 @@ func WithRequestLoggerFactory(factory func(*config.Config, string) logging.Reque
 func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.postAuthHook = hook
+	}
+}
+
+func WithManagementCacheStore(store managementHandlers.CacheStore) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.managementCacheStore = store
 	}
 }
 
@@ -322,6 +329,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	if optionState.managementCacheStore != nil {
+		s.mgmt.SetCacheStore(optionState.managementCacheStore)
+	}
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -790,8 +800,10 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
+		mgmt.GET("/auth-files/codex-usage", s.mgmt.GetCodexUsage)
 		mgmt.GET("/auth-files/kiro-usage", s.mgmt.GetKiroUsage)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
+		mgmt.GET("/auth-files/preview", s.mgmt.PreviewAuthFile)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)

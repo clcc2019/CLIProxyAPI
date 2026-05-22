@@ -1,4 +1,4 @@
-//go:build has_redis
+//go:build !no_redis
 
 package redisstate
 

@@ -71,6 +71,62 @@ func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
 	}
 }
 
+func TestListAuthFiles_IncludesRefreshTokenPresenceFromManager(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "codex.json")
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","refresh_token":"refresh-token"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+	record := &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{
+			"type":          "codex",
+			"refresh_token": "refresh-token",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	entry := firstAuthFileEntry(t, h)
+	if got := entry["has_refresh_token"]; got != true {
+		t.Fatalf("expected has_refresh_token true, got %#v", got)
+	}
+	if _, ok := entry["refresh_token"]; ok {
+		t.Fatalf("list entry must not expose refresh_token: %#v", entry["refresh_token"])
+	}
+}
+
+func TestListAuthFilesFromDisk_IncludesRefreshTokenPresence(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "gemini.json")
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"gemini","token":{"refresh_token":"refresh-token"}}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	entry := firstAuthFileEntry(t, h)
+	if got := entry["has_refresh_token"]; got != true {
+		t.Fatalf("expected has_refresh_token true, got %#v", got)
+	}
+	if _, ok := entry["refresh_token"]; ok {
+		t.Fatalf("list entry must not expose refresh_token: %#v", entry["refresh_token"])
+	}
+}
+
 func firstAuthFileEntry(t *testing.T, h *Handler) map[string]any {
 	t.Helper()
 

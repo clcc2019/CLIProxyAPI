@@ -9,10 +9,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -60,7 +58,6 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cleanupAuthMetadataBeforeSave(auth.Metadata)
 
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
@@ -73,19 +70,16 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 
 	switch {
 	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["disabled"] = auth.Disabled
+		metadata := cliproxyauth.PrepareAuthFileMetadataForSave(auth)
 		if setter, ok := auth.Storage.(metadataSetter); ok {
-			setter.SetMetadata(auth.Metadata)
+			setter.SetMetadata(metadata)
 		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
-		raw, errMarshal := json.Marshal(auth.Metadata)
+		metadata := cliproxyauth.PrepareAuthFileMetadataForSave(auth)
+		raw, errMarshal := json.Marshal(metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
@@ -125,28 +119,6 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	}
 
 	return path, nil
-}
-
-func cleanupAuthMetadataBeforeSave(metadata map[string]any) {
-	if strings.EqualFold(authMetadataString(metadata, "type"), "kiro") {
-		RemoveEmptyKiroMetadataFields(metadata)
-	}
-}
-
-func authMetadataString(metadata map[string]any, key string) string {
-	if len(metadata) == 0 {
-		return ""
-	}
-	value, ok := metadata[key]
-	if !ok {
-		return ""
-	}
-	switch v := value.(type) {
-	case string:
-		return strings.TrimSpace(v)
-	default:
-		return strings.TrimSpace(fmt.Sprint(v))
-	}
 }
 
 // List enumerates all auth JSON files under the configured directory.
@@ -216,12 +188,9 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if len(data) == 0 {
 		return nil, nil
 	}
-	metadata := make(map[string]any)
-	if err = json.Unmarshal(data, &metadata); err != nil {
+	metadata, err := cliproxyauth.DecodeAuthFileMetadata(data)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
-	}
-	if normalized, changed := cliproxyauth.NormalizeImportedAuthMetadata(metadata); changed {
-		metadata = normalized
 	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
@@ -261,47 +230,13 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
-	id := s.idFor(path, baseDir)
-	disabled, _ := metadata["disabled"].(bool)
-	status := cliproxyauth.StatusActive
-	if disabled {
-		status = cliproxyauth.StatusDisabled
-	}
-	auth := &cliproxyauth.Auth{
-		ID:               id,
-		Provider:         provider,
-		FileName:         id,
-		Label:            s.labelFor(metadata),
-		Status:           status,
-		Disabled:         disabled,
-		Attributes:       map[string]string{"path": path},
-		Metadata:         metadata,
-		CreatedAt:        info.ModTime(),
-		UpdatedAt:        info.ModTime(),
-		LastRefreshedAt:  time.Time{},
-		NextRefreshAfter: time.Time{},
-	}
-	if email, ok := metadata["email"].(string); ok && email != "" {
-		auth.Attributes["email"] = email
-	}
-	cliproxyauth.ApplyAuthFileOptionsFromMetadata(auth)
-	cliproxyauth.ApplyCodexMetadataFromMetadata(auth)
-	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+	auth := cliproxyauth.NewAuthFromAuthFileMetadata(metadata, cliproxyauth.AuthFileProjectionOptions{
+		Path:      path,
+		BaseDir:   baseDir,
+		CreatedAt: info.ModTime(),
+		UpdatedAt: info.ModTime(),
+	})
 	return auth, nil
-}
-
-func (s *FileTokenStore) idFor(path, baseDir string) string {
-	id := path
-	if baseDir != "" {
-		if rel, errRel := filepath.Rel(baseDir, path); errRel == nil && rel != "" {
-			id = rel
-		}
-	}
-	// On Windows, normalize ID casing to avoid duplicate auth entries caused by case-insensitive paths.
-	if runtime.GOOS == "windows" {
-		id = strings.ToLower(id)
-	}
-	return id
 }
 
 func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {
@@ -333,22 +268,6 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
 	return filepath.Join(dir, auth.ID), nil
-}
-
-func (s *FileTokenStore) labelFor(metadata map[string]any) string {
-	if metadata == nil {
-		return ""
-	}
-	if v, ok := metadata["label"].(string); ok && v != "" {
-		return v
-	}
-	if v, ok := metadata["email"].(string); ok && v != "" {
-		return v
-	}
-	if project, ok := metadata["project_id"].(string); ok && project != "" {
-		return project
-	}
-	return ""
 }
 
 func (s *FileTokenStore) baseDirSnapshot() string {

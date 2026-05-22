@@ -5,6 +5,7 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,11 +34,20 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const kiroModelCacheTTL = 6 * time.Hour
+const (
+	kiroModelCacheTTL       = 6 * time.Hour
+	kiroModelCacheNamespace = "kiro_models"
+	kiroModelCacheTimeout   = 2 * time.Second
+)
 
 type kiroModelCacheEntry struct {
 	models    []*ModelInfo
 	fetchedAt time.Time
+}
+
+type kiroModelCacheWire struct {
+	Models    []*ModelInfo `json:"models,omitempty"`
+	FetchedAt time.Time    `json:"fetched_at"`
 }
 
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
@@ -153,12 +163,8 @@ func (s *Service) syncCoreAutoRefresh() {
 	if s == nil || s.coreManager == nil {
 		return
 	}
-	interval := 15 * time.Minute
-	if s.coreManager.StartAutoRefresh(context.Background(), interval) {
-		log.Infof("core auth auto-refresh started (interval=%s)", interval)
-		return
-	}
-	log.Info("core auth auto-refresh disabled")
+	s.coreManager.StopAutoRefresh()
+	log.Info("core auth auto-refresh disabled; credentials refresh only from explicit management actions")
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -405,6 +411,10 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 
 func (s *Service) configureRedisState(ctx context.Context) error {
 	if s == nil || s.cfg == nil || !s.cfg.Redis.Enabled {
+		return nil
+	}
+	if !redisstate.Available() {
+		log.Warn("redis state storage configured but this binary was built with no_redis; continuing without redis persistence")
 		return nil
 	}
 	store, err := redisstate.New(ctx, s.cfg.Redis)
@@ -661,6 +671,7 @@ func (s *Service) registerHomeExecutors() {
 	s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, "", s.wsGateway))
 	s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("openai-compatibility", s.cfg))
 }
 
@@ -889,7 +900,11 @@ func (s *Service) Run(ctx context.Context) error {
 	// legacy clients removed; no caches to refresh
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	serverOptions := append([]api.ServerOption(nil), s.serverOptions...)
+	if s.redisState != nil {
+		serverOptions = append(serverOptions, api.WithManagementCacheStore(s.redisState))
+	}
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, serverOptions...)
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
@@ -1272,6 +1287,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "kiro":
 		models = s.fetchKiroModels(a)
 		models = applyExcludedModels(models, excluded)
+	case "xai":
+		models = registry.GetXAIModels()
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -1592,12 +1610,6 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if refreshed, err := s.refreshKiroAuthForModelFetch(ctx, a, false); err != nil {
-		log.Warnf("kiro: failed to refresh auth before fetching model list: %v", err)
-	} else if refreshed != nil {
-		a = refreshed
-	}
-
 	tokenData := extractKiroTokenData(a)
 	if tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" {
 		log.Debug("kiro: no access token available; no models will be registered for this auth")
@@ -1606,18 +1618,6 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 
 	modelClient := s.newKiroModelClient(ctx, a)
 	apiModels, err := modelClient.ListAvailableModels(ctx, tokenData)
-	if err != nil && kiroauth.IsUnauthorizedStatusError(err) {
-		if refreshed, refreshErr := s.refreshKiroAuthForModelFetch(ctx, a, true); refreshErr != nil {
-			log.Warnf("kiro: model list auth failed and token refresh failed: %v", refreshErr)
-		} else if refreshed != nil {
-			a = refreshed
-			tokenData = extractKiroTokenData(a)
-			if tokenData != nil && strings.TrimSpace(tokenData.AccessToken) != "" {
-				modelClient = s.newKiroModelClient(ctx, a)
-				apiModels, err = modelClient.ListAvailableModels(ctx, tokenData)
-			}
-		}
-	}
 	if err != nil {
 		if cached, ok := s.cachedKiroModels(a); ok {
 			log.Warnf("kiro: failed to fetch dynamic model list: %v; using cached catalog with %d models", err, len(cached))
@@ -1664,28 +1664,96 @@ func (s *Service) cachedKiroModels(a *coreauth.Auth) ([]*ModelInfo, bool) {
 	s.kiroModelCacheMu.RLock()
 	entry, ok := s.kiroModelCache[a.ID]
 	s.kiroModelCacheMu.RUnlock()
-	if !ok || len(entry.models) == 0 {
-		return nil, false
+	if ok && len(entry.models) > 0 {
+		if time.Since(entry.fetchedAt) <= kiroModelCacheTTL {
+			return cloneKiroModelInfos(entry.models), true
+		}
+		s.kiroModelCacheMu.Lock()
+		delete(s.kiroModelCache, a.ID)
+		s.kiroModelCacheMu.Unlock()
 	}
-	if time.Since(entry.fetchedAt) > kiroModelCacheTTL {
-		return nil, false
+	if models, ok := s.loadKiroModelCacheFromRedis(a); ok {
+		return models, true
 	}
-	return cloneKiroModelInfos(entry.models), true
+	return nil, false
 }
 
 func (s *Service) storeKiroModelCache(a *coreauth.Auth, models []*ModelInfo) {
 	if s == nil || a == nil || strings.TrimSpace(a.ID) == "" || len(models) == 0 {
 		return
 	}
+	fetchedAt := time.Now()
 	s.kiroModelCacheMu.Lock()
 	if s.kiroModelCache == nil {
 		s.kiroModelCache = make(map[string]kiroModelCacheEntry)
 	}
 	s.kiroModelCache[a.ID] = kiroModelCacheEntry{
 		models:    cloneKiroModelInfos(models),
-		fetchedAt: time.Now(),
+		fetchedAt: fetchedAt,
 	}
 	s.kiroModelCacheMu.Unlock()
+	s.storeKiroModelCacheToRedis(a, models, fetchedAt)
+}
+
+func (s *Service) loadKiroModelCacheFromRedis(a *coreauth.Auth) ([]*ModelInfo, bool) {
+	if s == nil || s.redisState == nil || a == nil || strings.TrimSpace(a.ID) == "" {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), kiroModelCacheTimeout)
+	defer cancel()
+	data, ok, err := s.redisState.LoadCache(ctx, kiroModelCacheNamespace, a.ID)
+	if err != nil {
+		log.Debugf("kiro: failed to load model cache from redis: %v", err)
+		return nil, false
+	}
+	if !ok || len(data) == 0 {
+		return nil, false
+	}
+	var wire kiroModelCacheWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		log.Debugf("kiro: failed to decode redis model cache: %v", err)
+		s.deleteKiroModelCacheFromRedis(a.ID)
+		return nil, false
+	}
+	if len(wire.Models) == 0 || wire.FetchedAt.IsZero() || time.Since(wire.FetchedAt) > kiroModelCacheTTL {
+		s.deleteKiroModelCacheFromRedis(a.ID)
+		return nil, false
+	}
+	models := cloneKiroModelInfos(wire.Models)
+	s.kiroModelCacheMu.Lock()
+	if s.kiroModelCache == nil {
+		s.kiroModelCache = make(map[string]kiroModelCacheEntry)
+	}
+	s.kiroModelCache[a.ID] = kiroModelCacheEntry{models: cloneKiroModelInfos(models), fetchedAt: wire.FetchedAt}
+	s.kiroModelCacheMu.Unlock()
+	return models, true
+}
+
+func (s *Service) storeKiroModelCacheToRedis(a *coreauth.Auth, models []*ModelInfo, fetchedAt time.Time) {
+	if s == nil || s.redisState == nil || a == nil || strings.TrimSpace(a.ID) == "" || len(models) == 0 {
+		return
+	}
+	data, err := json.Marshal(kiroModelCacheWire{Models: cloneKiroModelInfos(models), FetchedAt: fetchedAt})
+	if err != nil {
+		log.Debugf("kiro: failed to encode model cache: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), kiroModelCacheTimeout)
+	defer cancel()
+	if err := s.redisState.SaveCache(ctx, kiroModelCacheNamespace, a.ID, data, kiroModelCacheTTL); err != nil {
+		log.Debugf("kiro: failed to save model cache to redis: %v", err)
+	}
+}
+
+func (s *Service) deleteKiroModelCacheFromRedis(authID string) {
+	if s == nil || s.redisState == nil || strings.TrimSpace(authID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), kiroModelCacheTimeout)
+	defer cancel()
+	if err := s.redisState.DeleteCache(ctx, kiroModelCacheNamespace, authID); err != nil {
+		log.Debugf("kiro: failed to delete model cache from redis: %v", err)
+	}
 }
 
 func cloneKiroModelInfos(models []*ModelInfo) []*ModelInfo {
@@ -1699,16 +1767,6 @@ func cloneKiroModelInfos(models []*ModelInfo) []*ModelInfo {
 		}
 	}
 	return out
-}
-
-func (s *Service) refreshKiroAuthForModelFetch(ctx context.Context, auth *coreauth.Auth, force bool) (*coreauth.Auth, error) {
-	if s == nil || s.coreManager == nil || auth == nil {
-		return auth, nil
-	}
-	if force {
-		return s.coreManager.RefreshAuth(ctx, auth)
-	}
-	return s.coreManager.RefreshAuthIfNeeded(ctx, auth)
 }
 
 func (s *Service) persistKiroResolvedProfileArn(ctx context.Context, auth *coreauth.Auth, profileArn string) {

@@ -216,19 +216,16 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 
 	switch {
 	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["disabled"] = auth.Disabled
+		metadata := cliproxyauth.PrepareAuthFileMetadataForSave(auth)
 		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-			setter.SetMetadata(auth.Metadata)
+			setter.SetMetadata(metadata)
 		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
-		raw, errMarshal := json.Marshal(auth.Metadata)
+		metadata := cliproxyauth.PrepareAuthFileMetadataForSave(auth)
+		raw, errMarshal := json.Marshal(metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
 		}
@@ -294,47 +291,19 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			log.WithError(errPath).Warnf("postgres store: skipping auth %s outside spool", id)
 			continue
 		}
-		metadata := make(map[string]any)
-		if err = json.Unmarshal([]byte(payload), &metadata); err != nil {
-			log.WithError(err).Warnf("postgres store: skipping auth %s with invalid json", id)
+		metadata, errDecode := cliproxyauth.DecodeAuthFileMetadata([]byte(payload))
+		if errDecode != nil {
+			log.WithError(errDecode).Warnf("postgres store: skipping auth %s with invalid json", id)
 			continue
 		}
-		if normalized, changed := cliproxyauth.NormalizeImportedAuthMetadata(metadata); changed {
-			metadata = normalized
-		}
-		provider := strings.TrimSpace(valueAsString(metadata["type"]))
-		if provider == "" {
-			provider = "unknown"
-		}
-		attr := map[string]string{"path": path}
-		if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
-			attr["email"] = email
-		}
-		disabled, _ := metadata["disabled"].(bool)
-		status := cliproxyauth.StatusActive
-		if disabled {
-			status = cliproxyauth.StatusDisabled
-		}
-		auth := &cliproxyauth.Auth{
-			ID:               normalizeAuthID(id),
-			Provider:         provider,
-			FileName:         normalizeAuthID(id),
-			Label:            labelFor(metadata),
-			Status:           status,
-			Disabled:         disabled,
-			Attributes:       attr,
-			Metadata:         metadata,
-			CreatedAt:        createdAt,
-			UpdatedAt:        updatedAt,
-			LastRefreshedAt:  time.Time{},
-			NextRefreshAfter: time.Time{},
-		}
-		cliproxyauth.ApplyCodexMetadataFromMetadata(auth)
-		cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
-		if disabled, ok := metadata["disabled"].(bool); ok && disabled {
-			auth.Disabled = true
-			auth.Status = cliproxyauth.StatusDisabled
-		}
+		normalizedID := normalizeAuthID(id)
+		auth := cliproxyauth.NewAuthFromAuthFileMetadata(metadata, cliproxyauth.AuthFileProjectionOptions{
+			ID:        normalizedID,
+			Path:      path,
+			FileName:  normalizedID,
+			CreatedAt: createdAt,
+			UpdatedAt: updatedAt,
+		})
 		auths = append(auths, auth)
 	}
 	if err = rows.Err(); err != nil {

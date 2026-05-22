@@ -1,12 +1,9 @@
 package synthesizer
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -70,105 +67,41 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	now := ctx.Now
 	cfg := ctx.Config
-	var metadata map[string]any
-	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+	metadata, errDecode := coreauth.DecodeAuthFileMetadata(data)
+	if errDecode != nil {
 		return nil
-	}
-	if normalized, changed := coreauth.NormalizeImportedAuthMetadata(metadata); changed {
-		metadata = normalized
 	}
 	t, _ := metadata["type"].(string)
 	if t == "" {
 		return nil
 	}
-	provider := strings.ToLower(t)
-	if provider == "gemini" {
-		provider = "gemini-cli"
-	}
-	label := provider
-	if email, _ := metadata["email"].(string); email != "" {
-		label = email
-	}
-	// Use relative path under authDir as ID to stay consistent with the file-based token store.
-	id := fullPath
-	if strings.TrimSpace(ctx.AuthDir) != "" {
-		if rel, errRel := filepath.Rel(ctx.AuthDir, fullPath); errRel == nil && rel != "" {
-			id = rel
+	providerMapper := func(provider string) string {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "gemini" {
+			return "gemini-cli"
 		}
-	}
-	if runtime.GOOS == "windows" {
-		id = strings.ToLower(id)
-	}
-
-	proxyURL := ""
-	if p, ok := metadata["proxy_url"].(string); ok {
-		proxyURL = p
-	}
-
-	prefix := ""
-	if rawPrefix, ok := metadata["prefix"].(string); ok {
-		trimmed := strings.TrimSpace(rawPrefix)
-		trimmed = strings.Trim(trimmed, "/")
-		if trimmed != "" && !strings.Contains(trimmed, "/") {
-			prefix = trimmed
-		}
-	}
-
-	disabled, _ := metadata["disabled"].(bool)
-	status := coreauth.StatusActive
-	if disabled {
-		status = coreauth.StatusDisabled
+		return provider
 	}
 
 	// Read per-account excluded models from the OAuth JSON file.
 	perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
 
-	a := &coreauth.Auth{
-		ID:       id,
-		Provider: provider,
-		Label:    label,
-		Prefix:   prefix,
-		Status:   status,
-		Disabled: disabled,
-		Attributes: map[string]string{
-			"source": fullPath,
-			"path":   fullPath,
-		},
-		ProxyURL:  proxyURL,
-		Metadata:  metadata,
-		CreatedAt: now,
-		UpdatedAt: now,
+	a := coreauth.NewAuthFromAuthFileMetadata(metadata, coreauth.AuthFileProjectionOptions{
+		Path:                   fullPath,
+		BaseDir:                ctx.AuthDir,
+		IncludeSourceAttribute: true,
+		CreatedAt:              now,
+		UpdatedAt:              now,
+		ProviderMapper:         providerMapper,
+	})
+	if a.Label == "" {
+		a.Label = a.Provider
 	}
-	// Read priority from auth file.
-	if rawPriority, ok := metadata["priority"]; ok {
-		switch v := rawPriority.(type) {
-		case float64:
-			a.Attributes["priority"] = strconv.Itoa(int(v))
-		case string:
-			priority := strings.TrimSpace(v)
-			if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
-				a.Attributes["priority"] = priority
-			}
-		}
-	}
-	// Read note from auth file.
-	if rawNote, ok := metadata["note"]; ok {
-		if note, isStr := rawNote.(string); isStr {
-			if trimmed := strings.TrimSpace(note); trimmed != "" {
-				a.Attributes["note"] = trimmed
-			}
-		}
-	}
-	coreauth.ApplyCustomHeadersFromMetadata(a)
-	if provider == "kiro" {
-		applyKiroMachineIDAttribute(a.Attributes, metadata, id)
+	if a.Provider == "kiro" {
+		applyKiroMachineIDAttribute(a.Attributes, metadata, a.ID)
 	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
-	if provider == "codex" {
-		applyFileAuthUserAgent(a.Attributes, metadata)
-		coreauth.ApplyCodexMetadataFromMetadata(a)
-	}
-	if provider == "gemini-cli" {
+	if a.Provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
 			for _, v := range virtuals {
 				ApplyAuthExcludedModelsMeta(v, cfg, perAccountExcluded, "oauth")
@@ -195,24 +128,6 @@ func applyKiroMachineIDAttribute(attrs map[string]string, metadata map[string]an
 	if strings.TrimSpace(fallbackSeed) != "" {
 		attrs["machine_id_seed"] = fallbackSeed
 	}
-}
-
-// applyFileAuthUserAgent maps an auth-file-level user_agent field to the
-// request header attribute used by Codex.
-func applyFileAuthUserAgent(attrs map[string]string, metadata map[string]any) {
-	if attrs == nil || len(metadata) == 0 {
-		return
-	}
-	userAgent := ""
-	if raw, ok := metadata["user_agent"].(string); ok {
-		userAgent = strings.TrimSpace(raw)
-	} else if raw, ok := metadata["user-agent"].(string); ok {
-		userAgent = strings.TrimSpace(raw)
-	}
-	if userAgent == "" {
-		return
-	}
-	attrs["header:User-Agent"] = userAgent
 }
 
 // SynthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.

@@ -113,8 +113,9 @@ func TestNormalizeImportedAuthMetadata_ConvertsOpenAISessionExport(t *testing.T)
 			"email": "codex@example.com",
 		},
 		"account": map[string]any{
-			"id":       "acct_123",
-			"planType": "plus",
+			"id":                    "acct_123",
+			"planType":              "plus",
+			"subscriptionExpiresAt": "2026-07-01T00:00:00Z",
 		},
 	}
 
@@ -136,6 +137,9 @@ func TestNormalizeImportedAuthMetadata_ConvertsOpenAISessionExport(t *testing.T)
 	}
 	if got := normalized["plan_type"]; got != "plus" {
 		t.Fatalf("plan_type = %#v, want %q", got, "plus")
+	}
+	if got := normalized["subscription_expires_at"]; got != "2026-07-01T00:00:00Z" {
+		t.Fatalf("subscription_expires_at = %#v, want %q", got, "2026-07-01T00:00:00Z")
 	}
 	if _, ok := normalized["sessionToken"]; ok {
 		t.Fatal("sessionToken should not be preserved in normalized auth metadata")

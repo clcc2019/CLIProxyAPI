@@ -15,6 +15,7 @@ func init() {
 	registerRefreshLead("antigravity", func() Authenticator { return NewAntigravityAuthenticator() })
 	registerRefreshLead("kimi", func() Authenticator { return NewKimiAuthenticator() })
 	registerRefreshLead("kiro", func() Authenticator { return NewKiroAuthenticator() })
+	registerRefreshLead("xai", func() Authenticator { return NewXAIAuthenticator() })
 	cliproxyauth.RegisterDefaultAutoRefreshProviderWithInterval("kiro", func() time.Duration {
 		return time.Duration(kiroauth.RandomRefreshIntervalSeconds()) * time.Second
 	})

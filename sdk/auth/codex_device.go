@@ -257,15 +257,26 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 		return nil, fmt.Errorf("codex token storage missing account information")
 	}
 
-	planType := ""
+	planType := strings.TrimSpace(tokenStorage.PlanType)
 	hashAccountID := ""
+	if accountID := strings.TrimSpace(tokenStorage.AccountID); accountID != "" {
+		digest := sha256.Sum256([]byte(accountID))
+		hashAccountID = hex.EncodeToString(digest[:])[:8]
+	}
 	if tokenStorage.IDToken != "" {
 		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-			accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)
-			if accountID != "" {
-				digest := sha256.Sum256([]byte(accountID))
-				hashAccountID = hex.EncodeToString(digest[:])[:8]
+			if planType == "" {
+				planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			}
+			if hashAccountID == "" {
+				accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)
+				if accountID == "" {
+					accountID = strings.TrimSpace(tokenStorage.AccountID)
+				}
+				if accountID != "" {
+					digest := sha256.Sum256([]byte(accountID))
+					hashAccountID = hex.EncodeToString(digest[:])[:8]
+				}
 			}
 		}
 	}

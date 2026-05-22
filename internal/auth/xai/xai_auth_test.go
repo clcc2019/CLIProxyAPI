@@ -3,6 +3,7 @@ package xai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -47,6 +48,29 @@ func TestBuildAuthorizeURLIncludesXAIRequiredParameters(t *testing.T) {
 		if got := query.Get(key); got != value {
 			t.Fatalf("%s = %q, want %q", key, got, value)
 		}
+	}
+}
+
+func TestRefreshTokensInvalidGrantIsPermanent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"expired"}`))
+	}))
+	defer server.Close()
+
+	auth := NewXAIAuth(nil)
+	_, err := auth.RefreshTokens(context.Background(), "old-refresh", server.URL)
+	if err == nil {
+		t.Fatal("expected invalid_grant refresh to fail")
+	}
+	var permanent interface{ IsPermanentAuthError() bool }
+	if !errors.As(err, &permanent) || !permanent.IsPermanentAuthError() {
+		t.Fatalf("expected permanent auth error, got %T: %v", err, err)
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(err, &status) || status.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %T: %v", http.StatusBadRequest, err, err)
 	}
 }
 

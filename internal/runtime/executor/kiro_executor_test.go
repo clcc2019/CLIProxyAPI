@@ -417,8 +417,10 @@ func TestKiroRequestTimeIntervalRefreshFailureUsesCurrentToken(t *testing.T) {
 	}
 }
 
-func TestKiroRequestTimeRequiredRefreshFailureReturnsError(t *testing.T) {
+func TestKiroRequestTimeDoesNotRefreshExpiredToken(t *testing.T) {
+	var hits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
 		http.Error(w, "refresh rejected", http.StatusUnauthorized)
 	}))
 	defer server.Close()
@@ -441,8 +443,15 @@ func TestKiroRequestTimeRequiredRefreshFailureReturnsError(t *testing.T) {
 		},
 	}
 
-	if _, _, _, err := NewKiroExecutor(nil).refreshIfKiroTokenExpiring(context.Background(), auth, "old-access", ""); err == nil {
-		t.Fatal("expected required refresh failure to return error")
+	_, accessToken, _, err := NewKiroExecutor(nil).refreshIfKiroTokenExpiring(context.Background(), auth, "old-access", "")
+	if err != nil {
+		t.Fatalf("refreshIfKiroTokenExpiring() error = %v, want nil", err)
+	}
+	if accessToken != "old-access" {
+		t.Fatalf("accessToken = %q, want old-access", accessToken)
+	}
+	if hits != 0 {
+		t.Fatalf("refresh endpoint hits = %d, want 0", hits)
 	}
 }
 

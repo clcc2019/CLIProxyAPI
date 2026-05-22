@@ -1,9 +1,8 @@
-//go:build has_redis
+//go:build !no_redis
 
-// Package redisstate provides a Redis-backed state store. Excluded from
-// the default binary via the `has_redis` build tag. The companion
-// store_stub.go provides a no-op implementation of the public surface when
-// the tag is absent so the rest of the codebase stays compilable.
+// Package redisstate provides a Redis-backed state store. Redis is compiled
+// into the default binary; use the no_redis build tag only for explicitly
+// size-constrained builds that do not need Redis persistence.
 package redisstate
 
 import (
@@ -28,6 +27,8 @@ type Store struct {
 	keyPrefix string
 	addr      string
 }
+
+func Available() bool { return true }
 
 func New(ctx context.Context, cfg config.RedisConfig) (*Store, error) {
 	if !cfg.Enabled {
@@ -144,6 +145,49 @@ func (s *Store) SaveUsageState(ctx context.Context, data []byte) error {
 	return s.client.Set(ctx, s.key("usage", "statistics"), data, 0).Err()
 }
 
+func (s *Store) LoadCache(ctx context.Context, namespace, cacheKey string) ([]byte, bool, error) {
+	if s == nil || s.client == nil {
+		return nil, false, nil
+	}
+	key := s.cacheKey(namespace, cacheKey)
+	if key == "" {
+		return nil, false, nil
+	}
+	data, err := s.client.Get(ctx, key).Bytes()
+	if err == redis.Nil {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+func (s *Store) SaveCache(ctx context.Context, namespace, cacheKey string, data []byte, ttl time.Duration) error {
+	if s == nil || s.client == nil || len(data) == 0 {
+		return nil
+	}
+	key := s.cacheKey(namespace, cacheKey)
+	if key == "" {
+		return nil
+	}
+	if ttl < 0 {
+		ttl = 0
+	}
+	return s.client.Set(ctx, key, data, ttl).Err()
+}
+
+func (s *Store) DeleteCache(ctx context.Context, namespace, cacheKey string) error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	key := s.cacheKey(namespace, cacheKey)
+	if key == "" {
+		return nil
+	}
+	return s.client.Del(ctx, key).Err()
+}
+
 func (s *Store) Load(ctx context.Context) (map[string]coreauth.AuthRuntimeState, error) {
 	out := make(map[string]coreauth.AuthRuntimeState)
 	if s == nil || s.client == nil {
@@ -191,6 +235,15 @@ func (s *Store) Delete(ctx context.Context, authID string) error {
 		return nil
 	}
 	return s.client.HDel(ctx, s.key("auth", "runtime"), authID).Err()
+}
+
+func (s *Store) cacheKey(namespace, cacheKey string) string {
+	namespace = strings.Trim(strings.TrimSpace(namespace), ":")
+	cacheKey = strings.Trim(strings.TrimSpace(cacheKey), ":")
+	if namespace == "" || cacheKey == "" {
+		return ""
+	}
+	return s.key("cache", namespace, cacheKey)
 }
 
 func (s *Store) key(parts ...string) string {

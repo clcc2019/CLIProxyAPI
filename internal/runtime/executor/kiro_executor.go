@@ -24,7 +24,6 @@ import (
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -156,23 +155,6 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	httpResp, actualPayload, err := e.doKiroRequestWithFallbackRetry(ctx, auth, prepared, accessToken)
 	if err != nil {
-		if isUnauthorizedStatusErr(err) {
-			refreshed, refreshErr := cliproxyauth.CoordinatedRefresh(ctx, auth, e.Refresh)
-			if refreshErr != nil {
-				if isKiroRefreshPermanent(refreshErr) {
-					log.Warnf("kiro executor: refresh failed permanently for auth=%s after 401, returning permanent error: %v", auth.ID, refreshErr)
-				}
-				return resp, refreshErr
-			} else if refreshed != nil {
-				auth = refreshed
-				cliproxyauth.PublishRefreshUpdate(ctx, auth)
-				accessToken, profileArn = kiroCredentials(auth)
-				prepared, err = e.buildRequestPayload(req, opts, auth, profileArn, false)
-				if err == nil {
-					httpResp, actualPayload, err = e.doKiroRequestWithFallback(ctx, auth, prepared, accessToken)
-				}
-			}
-		}
 		if err != nil {
 			return resp, err
 		}
@@ -233,23 +215,6 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	httpResp, actualPayload, err := e.doKiroRequestWithFallbackRetry(ctx, auth, prepared, accessToken)
 	if err != nil {
-		if isUnauthorizedStatusErr(err) {
-			refreshed, refreshErr := cliproxyauth.CoordinatedRefresh(ctx, auth, e.Refresh)
-			if refreshErr != nil {
-				if isKiroRefreshPermanent(refreshErr) {
-					log.Warnf("kiro executor: refresh failed permanently for auth=%s after 401 (stream), returning permanent error: %v", auth.ID, refreshErr)
-				}
-				return nil, refreshErr
-			} else if refreshed != nil {
-				auth = refreshed
-				cliproxyauth.PublishRefreshUpdate(ctx, auth)
-				accessToken, profileArn = kiroCredentials(auth)
-				prepared, err = e.buildRequestPayload(req, opts, auth, profileArn, true)
-				if err == nil {
-					httpResp, actualPayload, err = e.doKiroRequestWithFallback(ctx, auth, prepared, accessToken)
-				}
-			}
-		}
 		if err != nil {
 			return nil, err
 		}
@@ -268,35 +233,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *KiroExecutor) refreshIfKiroTokenExpiring(ctx context.Context, auth *cliproxyauth.Auth, accessToken, profileArn string) (*cliproxyauth.Auth, string, string, error) {
-	if auth == nil {
-		return auth, accessToken, profileArn, nil
-	}
-	shouldRefresh, required := kiroRefreshDecisionBeforeRequest(auth, time.Now().UTC())
-	if !shouldRefresh {
-		return auth, accessToken, profileArn, nil
-	}
-	refreshed, err := cliproxyauth.CoordinatedRefresh(ctx, auth, e.Refresh)
-	if err != nil {
-		// Permanent refresh failure must always be surfaced — the current
-		// access token might still be valid for a few more seconds, but
-		// continuing would only delay the inevitable failure and burn more
-		// upstream quota.
-		if isKiroRefreshPermanent(err) {
-			log.Warnf("kiro executor: permanent refresh failure for auth=%s (soft=%t): %v", auth.ID, !required, err)
-			return auth, accessToken, profileArn, err
-		}
-		if required {
-			return auth, accessToken, profileArn, err
-		}
-		log.Debugf("kiro executor: opportunistic refresh failed for auth=%s; continuing with current access token: %v", auth.ID, err)
-		return auth, accessToken, profileArn, nil
-	}
-	if refreshed == nil {
-		return auth, accessToken, profileArn, nil
-	}
-	cliproxyauth.PublishRefreshUpdate(ctx, refreshed)
-	accessToken, profileArn = kiroCredentials(refreshed)
-	return refreshed, accessToken, profileArn, nil
+	return auth, accessToken, profileArn, nil
 }
 
 func shouldRefreshKiroBeforeRequest(auth *cliproxyauth.Auth, now time.Time) bool {
@@ -380,7 +317,7 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		updated.Metadata["profile_arn"] = tokenData.ProfileArn
 		updated.Attributes["profile_arn"] = tokenData.ProfileArn
 	}
-	sdkauth.RemoveEmptyKiroMetadataFields(updated.Metadata)
+	cliproxyauth.RemoveEmptyKiroMetadataFields(updated.Metadata)
 	updated.UpdatedAt = now
 	updated.LastRefreshedAt = updated.UpdatedAt
 	updated.NextRefreshAfter = now.Add(time.Duration(refreshIntervalSeconds) * time.Second)

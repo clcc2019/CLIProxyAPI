@@ -80,7 +80,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, body, apiKey, true)
+	preparedBody := body
+	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
 	if err != nil {
 		return resp, err
 	}
@@ -89,6 +90,25 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	result, usageOwner, err := e.fetchCodexResponsesAggregate(ctx, auth, call.url, call.prepared, needResponseHeaders)
 	if err != nil {
 		return resp, err
+	}
+	if result.statusCode == http.StatusUnauthorized {
+		refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+		if refreshErr != nil {
+			return resp, refreshErr
+		}
+		if retried {
+			auth = refreshedAuth
+			apiKey, _ = codexCreds(auth)
+			call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
+			if err != nil {
+				return resp, err
+			}
+			helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
+			result, usageOwner, err = e.fetchCodexResponsesAggregate(ctx, auth, call.url, call.prepared, needResponseHeaders)
+			if err != nil {
+				return resp, err
+			}
+		}
 	}
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
@@ -154,7 +174,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, body, apiKey, false)
+	preparedBody := body
+	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, false)
 	if err != nil {
 		return resp, err
 	}
@@ -163,6 +184,25 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	result, usageOwner, err := e.fetchCodexNonStreamResponse(ctx, auth, call.url, call.prepared, needResponseHeaders)
 	if err != nil {
 		return resp, err
+	}
+	if result.statusCode == http.StatusUnauthorized {
+		refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+		if refreshErr != nil {
+			return resp, refreshErr
+		}
+		if retried {
+			auth = refreshedAuth
+			apiKey, _ = codexCreds(auth)
+			call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, false)
+			if err != nil {
+				return resp, err
+			}
+			helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
+			result, usageOwner, err = e.fetchCodexNonStreamResponse(ctx, auth, call.url, call.prepared, needResponseHeaders)
+			if err != nil {
+				return resp, err
+			}
+		}
 	}
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
@@ -225,7 +265,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, body, apiKey, true)
+	preparedBody := body
+	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
 	if err != nil {
 		return nil, err
 	}
@@ -248,11 +289,47 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
 		}
+		if httpResp.StatusCode == http.StatusUnauthorized {
+			refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			if refreshErr != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, refreshErr)
+				return nil, refreshErr
+			}
+			if retried {
+				auth = refreshedAuth
+				apiKey, _ = codexCreds(auth)
+				call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
+				if err != nil {
+					return nil, err
+				}
+				body = call.prepared.body
+				helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
+				httpResp, err = httpClient.Do(call.prepared.httpReq)
+				if err != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, err)
+					return nil, err
+				}
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
+				if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+					goto codexStreamResponseOK
+				}
+				data, readErr = helps.ReadErrorResponseBody(httpResp.Body)
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("codex executor: close response body error: %v", errClose)
+				}
+				if readErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+					return nil, readErr
+				}
+			}
+		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
 	}
+
+codexStreamResponseOK:
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
@@ -388,12 +465,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if auth == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
-	var refreshToken string
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
-			refreshToken = v
-		}
-	}
+	refreshToken := metadataString(auth.Metadata, "refresh_token", "refreshToken")
 	if refreshToken == "" {
 		return auth, nil
 	}
@@ -417,24 +489,53 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if td == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: refresh returned nil token data"}
 	}
+	applyCodexTokenDataToAuth(auth, td, time.Now().UTC())
+	return auth, nil
+}
+
+func applyCodexTokenDataToAuth(auth *cliproxyauth.Auth, td *codexauth.CodexTokenData, now time.Time) {
+	if auth == nil || td == nil {
+		return
+	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	auth.Metadata["id_token"] = td.IDToken
-	auth.Metadata["access_token"] = td.AccessToken
+	oldAccessToken := metadataString(auth.Metadata, "access_token", "accessToken")
+	if td.IDToken != "" {
+		auth.Metadata["id_token"] = td.IDToken
+	}
+	if td.AccessToken != "" {
+		auth.Metadata["access_token"] = td.AccessToken
+		if auth.Attributes != nil && oldAccessToken != "" && strings.TrimSpace(auth.Attributes["api_key"]) == oldAccessToken {
+			auth.Attributes["api_key"] = td.AccessToken
+		}
+	}
 	if td.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
 	if td.AccountID != "" {
 		auth.Metadata["account_id"] = td.AccountID
 	}
-	auth.Metadata["email"] = td.Email
-	// Use unified key in files
-	auth.Metadata["expired"] = td.Expire
+	if td.Email != "" {
+		auth.Metadata["email"] = td.Email
+	}
+	if td.PlanType != "" {
+		auth.Metadata["plan_type"] = td.PlanType
+		auth.Metadata["chatgpt_plan_type"] = td.PlanType
+		if auth.Attributes == nil {
+			auth.Attributes = map[string]string{}
+		}
+		auth.Attributes["plan_type"] = td.PlanType
+	}
+	if td.Expire != "" {
+		auth.Metadata["expired"] = td.Expire
+	}
 	auth.Metadata["type"] = "codex"
-	now := time.Now().Format(time.RFC3339)
-	auth.Metadata["last_refresh"] = now
-	return auth, nil
+	auth.Metadata["last_refresh"] = now.UTC().Format(time.RFC3339)
+}
+
+func (e *CodexExecutor) refreshCodexAuthAfterUnauthorized(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, bool, error) {
+	return auth, false, nil
 }
 
 func (e *CodexExecutor) codexAuthService(auth *cliproxyauth.Auth) *codexauth.CodexAuth {

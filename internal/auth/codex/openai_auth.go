@@ -5,6 +5,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -174,9 +175,31 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 
 	accountID := ""
 	email := ""
+	planType := ""
 	if claims != nil {
 		accountID = claims.GetAccountID()
 		email = claims.GetUserEmail()
+		planType = claims.GetPlanType()
+	}
+	expire := ""
+	if tokenResp.AccessToken != "" {
+		if accessClaims, errParseAccess := ParseJWTToken(tokenResp.AccessToken); errParseAccess == nil {
+			if accountID == "" {
+				accountID = accessClaims.GetAccountID()
+			}
+			if email == "" {
+				email = accessClaims.GetUserEmail()
+			}
+			if planType == "" {
+				planType = accessClaims.GetPlanType()
+			}
+			if exp, ok := accessClaims.ExpirationTime(); ok {
+				expire = exp.Format(time.RFC3339)
+			}
+		}
+	}
+	if expire == "" && tokenResp.ExpiresIn > 0 {
+		expire = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).UTC().Format(time.RFC3339)
 	}
 
 	// Create token data
@@ -186,7 +209,8 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		RefreshToken: tokenResp.RefreshToken,
 		AccountID:    accountID,
 		Email:        email,
-		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+		PlanType:     planType,
+		Expire:       expire,
 	}
 
 	// Create auth bundle
@@ -206,19 +230,21 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		return nil, fmt.Errorf("refresh token is required")
 	}
 
-	data := url.Values{
-		"client_id":     {ClientID},
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {refreshToken},
-		"scope":         {"openid profile email"},
+	requestBody, err := json.Marshal(codexRefreshTokenRequest{
+		ClientID:     ClientID,
+		GrantType:    "refresh_token",
+		RefreshToken: refreshToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode refresh request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := o.httpClient.Do(req)
@@ -234,43 +260,160 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		return nil, fmt.Errorf("failed to read refresh response: %w", err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, newCodexRefreshHTTPError(resp.StatusCode, body)
 	}
 
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		IDToken      string `json:"id_token"`
-		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
-	}
+	var tokenResp codexRefreshTokenResponse
 
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to parse refresh response: %w", err)
 	}
 
-	// Extract account ID from ID token
-	claims, err := ParseJWTToken(tokenResp.IDToken)
-	if err != nil {
-		log.Warnf("Failed to parse refreshed ID token: %v", err)
+	return codexTokenDataFromRefreshResponse(tokenResp, time.Now()), nil
+}
+
+type codexRefreshTokenRequest struct {
+	ClientID     string `json:"client_id"`
+	GrantType    string `json:"grant_type"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+type codexRefreshTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+func codexTokenDataFromRefreshResponse(tokenResp codexRefreshTokenResponse, now time.Time) *CodexTokenData {
+	data := &CodexTokenData{
+		IDToken:      strings.TrimSpace(tokenResp.IDToken),
+		AccessToken:  strings.TrimSpace(tokenResp.AccessToken),
+		RefreshToken: strings.TrimSpace(tokenResp.RefreshToken),
 	}
 
-	accountID := ""
-	email := ""
-	if claims != nil {
-		accountID = claims.GetAccountID()
-		email = claims.Email
+	for _, rawToken := range []string{data.IDToken, data.AccessToken} {
+		if rawToken == "" {
+			continue
+		}
+		claims, err := ParseJWTToken(rawToken)
+		if err != nil {
+			log.Warnf("Failed to parse refreshed Codex token claims: %v", err)
+			continue
+		}
+		if data.AccountID == "" {
+			data.AccountID = claims.GetAccountID()
+		}
+		if data.Email == "" {
+			data.Email = claims.GetUserEmail()
+		}
+		if data.PlanType == "" {
+			data.PlanType = claims.GetPlanType()
+		}
 	}
 
-	return &CodexTokenData{
-		IDToken:      tokenResp.IDToken,
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		AccountID:    accountID,
-		Email:        email,
-		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-	}, nil
+	if data.AccessToken != "" {
+		if claims, err := ParseJWTToken(data.AccessToken); err == nil {
+			if exp, ok := claims.ExpirationTime(); ok {
+				data.Expire = exp.Format(time.RFC3339)
+			}
+		}
+	}
+	if data.Expire == "" && tokenResp.ExpiresIn > 0 {
+		data.Expire = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).UTC().Format(time.RFC3339)
+	} else if data.Expire == "" && data.IDToken != "" {
+		if claims, err := ParseJWTToken(data.IDToken); err == nil {
+			if exp, ok := claims.ExpirationTime(); ok {
+				data.Expire = exp.Format(time.RFC3339)
+			}
+		}
+	}
+	return data
+}
+
+type CodexRefreshHTTPError struct {
+	StatusCodeValue int
+	Code            string
+	Body            string
+	Permanent       bool
+}
+
+func newCodexRefreshHTTPError(statusCode int, body []byte) *CodexRefreshHTTPError {
+	code := codexRefreshErrorCode(body)
+	return &CodexRefreshHTTPError{
+		StatusCodeValue: statusCode,
+		Code:            code,
+		Body:            strings.TrimSpace(string(body)),
+		Permanent:       codexRefreshErrorIsPermanent(statusCode, code),
+	}
+}
+
+func (e *CodexRefreshHTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Body != "" {
+		return fmt.Sprintf("token refresh failed with status %d: %s", e.StatusCodeValue, e.Body)
+	}
+	return fmt.Sprintf("token refresh failed with status %d", e.StatusCodeValue)
+}
+
+func (e *CodexRefreshHTTPError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCodeValue
+}
+
+func (e *CodexRefreshHTTPError) IsPermanentAuthError() bool {
+	return e != nil && e.Permanent
+}
+
+func codexRefreshErrorCode(body []byte) string {
+	var payload map[string]any
+	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	if code := strings.TrimSpace(valueAsStringForRefreshError(payload["code"])); code != "" {
+		return code
+	}
+	if raw, ok := payload["error"].(map[string]any); ok {
+		if code := strings.TrimSpace(valueAsStringForRefreshError(raw["code"])); code != "" {
+			return code
+		}
+		if typ := strings.TrimSpace(valueAsStringForRefreshError(raw["type"])); typ != "" {
+			return typ
+		}
+	}
+	if code := strings.TrimSpace(valueAsStringForRefreshError(payload["error"])); code != "" {
+		return code
+	}
+	return ""
+}
+
+func valueAsStringForRefreshError(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case fmt.Stringer:
+		return v.String()
+	default:
+		if value == nil {
+			return ""
+		}
+		return fmt.Sprint(value)
+	}
+}
+
+func codexRefreshErrorIsPermanent(statusCode int, code string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(code))
+	switch normalized {
+	case "refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated", "invalid_grant", "invalid_client":
+		return true
+	}
+	return statusCode == http.StatusUnauthorized
 }
 
 // CreateTokenStorage creates a new CodexTokenStorage from a CodexAuthBundle.
@@ -283,6 +426,7 @@ func (o *CodexAuth) CreateTokenStorage(bundle *CodexAuthBundle) *CodexTokenStora
 		AccountID:    bundle.TokenData.AccountID,
 		LastRefresh:  bundle.LastRefresh,
 		Email:        bundle.TokenData.Email,
+		PlanType:     bundle.TokenData.PlanType,
 		Expire:       bundle.TokenData.Expire,
 	}
 
@@ -322,18 +466,43 @@ func isNonRetryableRefreshErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	if permanent, ok := err.(interface{ IsPermanentAuthError() bool }); ok && permanent.IsPermanentAuthError() {
+		return true
+	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused")
+	return strings.Contains(raw, "refresh_token_reused") ||
+		strings.Contains(raw, "refresh_token_expired") ||
+		strings.Contains(raw, "refresh_token_invalidated") ||
+		strings.Contains(raw, "invalid_grant") ||
+		strings.Contains(raw, "invalid_client")
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
 // This is typically called after a successful token refresh to persist the new credentials.
 func (o *CodexAuth) UpdateTokenStorage(storage *CodexTokenStorage, tokenData *CodexTokenData) {
-	storage.IDToken = tokenData.IDToken
-	storage.AccessToken = tokenData.AccessToken
-	storage.RefreshToken = tokenData.RefreshToken
-	storage.AccountID = tokenData.AccountID
-	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.Email = tokenData.Email
-	storage.Expire = tokenData.Expire
+	if storage == nil || tokenData == nil {
+		return
+	}
+	if tokenData.IDToken != "" {
+		storage.IDToken = tokenData.IDToken
+	}
+	if tokenData.AccessToken != "" {
+		storage.AccessToken = tokenData.AccessToken
+	}
+	if tokenData.RefreshToken != "" {
+		storage.RefreshToken = tokenData.RefreshToken
+	}
+	if tokenData.AccountID != "" {
+		storage.AccountID = tokenData.AccountID
+	}
+	storage.LastRefresh = time.Now().UTC().Format(time.RFC3339)
+	if tokenData.Email != "" {
+		storage.Email = tokenData.Email
+	}
+	if tokenData.PlanType != "" {
+		storage.PlanType = tokenData.PlanType
+	}
+	if tokenData.Expire != "" {
+		storage.Expire = tokenData.Expire
+	}
 }

@@ -17,6 +17,7 @@ type JWTClaims struct {
 	AuthProvider  string        `json:"auth_provider"`
 	AuthTime      int           `json:"auth_time"`
 	Email         string        `json:"email"`
+	Profile       ProfileClaims `json:"https://api.openai.com/profile"`
 	EmailVerified bool          `json:"email_verified"`
 	Exp           int           `json:"exp"`
 	CodexAuthInfo CodexAuthInfo `json:"https://api.openai.com/auth"`
@@ -26,6 +27,12 @@ type JWTClaims struct {
 	Rat           int           `json:"rat"`
 	Sid           string        `json:"sid"`
 	Sub           string        `json:"sub"`
+}
+
+// ProfileClaims contains user profile values carried by access tokens.
+type ProfileClaims struct {
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
 }
 
 // Organizations defines the structure for organization details within the JWT claims.
@@ -93,11 +100,36 @@ func base64URLDecode(data string) ([]byte, error) {
 
 // GetUserEmail extracts the user's email address from the JWT claims.
 func (c *JWTClaims) GetUserEmail() string {
-	return c.Email
+	if c == nil {
+		return ""
+	}
+	if email := strings.TrimSpace(c.Email); email != "" {
+		return email
+	}
+	return strings.TrimSpace(c.Profile.Email)
 }
 
 // GetAccountID extracts the user's account ID (subject) from the JWT claims.
 // It retrieves the unique identifier for the user's ChatGPT account.
 func (c *JWTClaims) GetAccountID() string {
+	if c == nil {
+		return ""
+	}
 	return c.CodexAuthInfo.ChatgptAccountID
+}
+
+// GetPlanType extracts the ChatGPT plan type from token claims.
+func (c *JWTClaims) GetPlanType() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.CodexAuthInfo.ChatgptPlanType)
+}
+
+// ExpirationTime returns the JWT exp timestamp when present.
+func (c *JWTClaims) ExpirationTime() (time.Time, bool) {
+	if c == nil || c.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(c.Exp), 0).UTC(), true
 }

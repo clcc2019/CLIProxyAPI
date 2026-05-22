@@ -75,6 +75,17 @@ func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	}
 }
 
+func TestStaticModelDefinitionsByChannelSupportsXAI(t *testing.T) {
+	for _, channel := range []string{"xai", "x-ai", "grok"} {
+		t.Run(channel, func(t *testing.T) {
+			info := findModelInfo(GetStaticModelDefinitionsByChannel(channel), xaiBuiltinImageModelID)
+			if info == nil {
+				t.Fatalf("expected %s in static models for %s", xaiBuiltinImageModelID, channel)
+			}
+		})
+	}
+}
+
 func TestValidateModelsCatalogAllowsMissingSections(t *testing.T) {
 	data := validTestModelsCatalog()
 	data.XAI = nil

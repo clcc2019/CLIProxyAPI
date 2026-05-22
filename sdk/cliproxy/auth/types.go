@@ -510,6 +510,27 @@ func (a *Auth) CloneShallow() *Auth {
 	return &copyAuth
 }
 
+// CloneForManagementSummary copies only the fields needed by management list
+// summaries. Full auth metadata can contain large tokens, so summary endpoints
+// avoid cloning it for every row while still returning independent maps.
+func (a *Auth) CloneForManagementSummary() *Auth {
+	if a == nil {
+		return nil
+	}
+	mu := a.ensureRuntimeMu()
+	mu.Lock()
+	defer mu.Unlock()
+
+	copyAuth := a.cloneSnapshotBase()
+	copyAuth.StatusMessage = a.StatusMessage
+	copyAuth.Success = a.Success
+	copyAuth.Failed = a.Failed
+	copyAuth.recentRequests = cloneRecentRequestRing(a.recentRequests)
+	copyAuth.Attributes = cloneAuthAttributesForManagementSummary(a.Attributes)
+	copyAuth.Metadata = cloneAuthMetadataForManagementSummary(a.Metadata)
+	return &copyAuth
+}
+
 func (a *Auth) cloneSnapshotBase() Auth {
 	return Auth{
 		ID:               a.ID,
@@ -634,6 +655,46 @@ func cloneAuthAttributesForScheduler(src map[string]string) map[string]string {
 	return dst
 }
 
+func cloneAuthAttributesForManagementSummary(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, 16)
+	for _, key := range []string{
+		"path",
+		"runtime_only",
+		"email",
+		"account_email",
+		"project_id",
+		"projectId",
+		"refresh_token",
+		"refreshToken",
+		"plan_type",
+		"planType",
+		"chatgpt_plan_type",
+		"chatgptPlanType",
+		"last_refresh",
+		"lastRefresh",
+		"last_refreshed_at",
+		"lastRefreshedAt",
+		"priority",
+		"note",
+		"header:User-Agent",
+		"user_agent",
+		"user-agent",
+		"websockets",
+		"api_key",
+	} {
+		if value := src[key]; value != "" {
+			dst[key] = value
+		}
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
 func cloneAuthMetadataForScheduler(src map[string]any) map[string]any {
 	if len(src) == 0 {
 		return nil
@@ -643,6 +704,168 @@ func cloneAuthMetadataForScheduler(src map[string]any) map[string]any {
 		return nil
 	}
 	return map[string]any{"websockets": value}
+}
+
+func cloneAuthMetadataForManagementSummary(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]any, 24)
+	copyKeys := []string{
+		"email",
+		"project_id",
+		"projectId",
+		"refresh_token",
+		"refreshToken",
+		"plan_type",
+		"planType",
+		"chatgpt_plan_type",
+		"chatgptPlanType",
+		"subscription_expires_at",
+		"subscriptionExpiresAt",
+		"chatgpt_subscription_active_until",
+		"chatgptSubscriptionActiveUntil",
+		"subscription_active_until",
+		"subscriptionActiveUntil",
+		"subscription_active_days",
+		"subscriptionActiveDays",
+		"chatgpt_subscription_active_start",
+		"chatgptSubscriptionActiveStart",
+		"subscription_active_start",
+		"subscriptionActiveStart",
+		"subscription_started_at",
+		"subscriptionStartedAt",
+		"subscription_start_date",
+		"subscriptionStartDate",
+		"current_period_start",
+		"currentPeriodStart",
+		"period_start",
+		"periodStart",
+		"started_at",
+		"startedAt",
+		"starts_at",
+		"startsAt",
+		"prefix",
+		"proxy_url",
+		"priority",
+		"note",
+		"user_agent",
+		"user-agent",
+		"websockets",
+		"websocket",
+		"disable_cooling",
+		"disable-cooling",
+		"last_refresh",
+		"lastRefresh",
+		"last_refreshed_at",
+		"lastRefreshedAt",
+		"disabled",
+		runtimeStateMetadataKey,
+	}
+	for _, key := range copyKeys {
+		copyManagementSummaryMetadataValue(dst, src, key)
+	}
+
+	nestedSubscriptionKeys := []string{
+		"subscription_expires_at",
+		"subscriptionExpiresAt",
+		"chatgpt_subscription_active_until",
+		"chatgptSubscriptionActiveUntil",
+		"subscription_active_until",
+		"subscriptionActiveUntil",
+		"expires_at",
+		"expiresAt",
+		"current_period_end",
+		"currentPeriodEnd",
+		"period_end",
+		"periodEnd",
+		"subscription_active_days",
+		"subscriptionActiveDays",
+		"chatgpt_subscription_active_start",
+		"chatgptSubscriptionActiveStart",
+		"subscription_active_start",
+		"subscriptionActiveStart",
+		"subscription_started_at",
+		"subscriptionStartedAt",
+		"subscription_start_date",
+		"subscriptionStartDate",
+		"current_period_start",
+		"currentPeriodStart",
+		"period_start",
+		"periodStart",
+		"started_at",
+		"startedAt",
+		"starts_at",
+		"startsAt",
+	}
+	for _, containerKey := range []string{"account", "entitlement", "subscription", "providerSpecificData"} {
+		if nested := cloneSelectedManagementSummaryNestedMap(src[containerKey], nestedSubscriptionKeys); len(nested) > 0 {
+			dst[containerKey] = nested
+		}
+	}
+
+	for _, containerKey := range []string{"token", "tokens", "token_data", "tokenData"} {
+		if nested := cloneSelectedManagementSummaryNestedMap(src[containerKey], []string{"refresh_token", "refreshToken"}); len(nested) > 0 {
+			dst[containerKey] = nested
+		}
+	}
+
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+func copyManagementSummaryMetadataValue(dst map[string]any, src map[string]any, key string) {
+	value, ok := src[key]
+	if !ok || value == nil {
+		return
+	}
+	dst[key] = cloneManagementSummaryMetadataValue(value)
+}
+
+func cloneManagementSummaryMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		copyMap := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			copyMap[key] = nested
+		}
+		return copyMap
+	case map[string]string:
+		copyMap := make(map[string]string, len(typed))
+		for key, nested := range typed {
+			copyMap[key] = nested
+		}
+		return copyMap
+	default:
+		return value
+	}
+}
+
+func cloneSelectedManagementSummaryNestedMap(value any, keys []string) map[string]any {
+	if value == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(keys))
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if nested, ok := typed[key]; ok && nested != nil {
+				dst[key] = cloneManagementSummaryMetadataValue(nested)
+			}
+		}
+	case map[string]string:
+		for _, key := range keys {
+			if nested := strings.TrimSpace(typed[key]); nested != "" {
+				dst[key] = nested
+			}
+		}
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
 }
 
 func stableAuthIndex(seed string) string {

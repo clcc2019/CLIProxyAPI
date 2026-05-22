@@ -27,7 +27,7 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 	} else if _, exists := auth.Metadata["priority"]; exists && auth.Attributes != nil {
 		delete(auth.Attributes, "priority")
 	}
-	if note, ok := authFileMetadataString(auth.Metadata, "note"); ok {
+	if note, ok := authFileMetadataStrictString(auth.Metadata, "note"); ok {
 		if auth.Attributes == nil {
 			auth.Attributes = make(map[string]string)
 		}
@@ -36,6 +36,25 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 		} else {
 			auth.Attributes["note"] = note
 		}
+	}
+	if userAgent, ok := authFileMetadataFirstString(auth.Metadata, "user_agent", "user-agent", "userAgent"); ok {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		delete(auth.Attributes, "user_agent")
+		delete(auth.Attributes, "user-agent")
+		delete(auth.Attributes, "userAgent")
+		if userAgent == "" {
+			delete(auth.Attributes, "header:User-Agent")
+		} else {
+			auth.Attributes["header:User-Agent"] = userAgent
+		}
+	}
+	if websockets, ok := authFileMetadataFirstBool(auth.Metadata, "websockets", "websocket"); ok {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes["websockets"] = strconv.FormatBool(websockets)
 	}
 }
 
@@ -52,6 +71,53 @@ func authFileMetadataString(metadata map[string]any, key string) (string, bool) 
 		return strings.TrimSpace(v), true
 	default:
 		return strings.TrimSpace(fmt.Sprint(v)), true
+	}
+}
+
+func authFileMetadataFirstString(metadata map[string]any, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if value, ok := authFileMetadataStrictString(metadata, key); ok {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func authFileMetadataStrictString(metadata map[string]any, key string) (string, bool) {
+	if len(metadata) == 0 {
+		return "", false
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return "", ok
+	}
+	str, ok := value.(string)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(str), true
+}
+
+func authFileMetadataFirstBool(metadata map[string]any, keys ...string) (bool, bool) {
+	for _, key := range keys {
+		value, exists := metadata[key]
+		if !exists {
+			continue
+		}
+		return authFileMetadataBool(value)
+	}
+	return false, false
+}
+
+func authFileMetadataBool(value any) (bool, bool) {
+	switch v := value.(type) {
+	case bool:
+		return v, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		return parsed, err == nil
+	default:
+		return false, false
 	}
 }
 

@@ -80,6 +80,141 @@ func TestListAuthFilesFromDiskExposesRuntimeStateError(t *testing.T) {
 	}
 }
 
+func TestListAuthFiles_PaginatedManagerResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+
+	for _, item := range []struct {
+		id       string
+		name     string
+		provider string
+	}{
+		{id: "alpha.json", name: "alpha.json", provider: "codex"},
+		{id: "alpha-copy", name: "alpha.json", provider: "codex"},
+		{id: "bravo.json", name: "bravo.json", provider: "codex"},
+		{id: "charlie.json", name: "charlie.json", provider: "kiro"},
+	} {
+		path := filepath.Join(authDir, item.name)
+		if err := os.WriteFile(path, []byte(`{"type":"`+item.provider+`"}`), 0o600); err != nil {
+			t.Fatalf("write auth file %s: %v", item.name, err)
+		}
+		_, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID:       item.id,
+			FileName: item.name,
+			Provider: item.provider,
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"path": path,
+			},
+			Metadata: map[string]any{
+				"type": item.provider,
+			},
+		})
+		if err != nil {
+			t.Fatalf("register auth file %s: %v", item.name, err)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?page=2&page_size=1&type=codex&sort=az", nil)
+
+	h.ListAuthFiles(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Files      []map[string]any `json:"files"`
+		Total      int              `json:"total"`
+		Page       int              `json:"page"`
+		PageSize   int              `json:"page_size"`
+		TypeCounts map[string]int   `json:"type_counts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if body.Total != 2 || body.Page != 2 || body.PageSize != 1 {
+		t.Fatalf("pagination = total:%d page:%d size:%d", body.Total, body.Page, body.PageSize)
+	}
+	if len(body.Files) != 1 || body.Files[0]["name"] != "bravo.json" {
+		t.Fatalf("files = %#v, want bravo.json", body.Files)
+	}
+	if body.TypeCounts["all"] != 3 || body.TypeCounts["codex"] != 2 || body.TypeCounts["kiro"] != 1 {
+		t.Fatalf("type_counts = %#v", body.TypeCounts)
+	}
+}
+
+func TestListAuthFiles_PaginatedManagerSubscriptionExpirySortIsGlobal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+
+	items := []struct {
+		name      string
+		planType  string
+		expiresAt string
+	}{
+		{name: "alpha-no-expiry.json", planType: "plus"},
+		{name: "bravo-free.json", planType: "free"},
+		{name: "charlie-soon.json", planType: "plus", expiresAt: "2026-06-01T00:00:00Z"},
+		{name: "delta-late.json", planType: "plus", expiresAt: "2026-08-01T00:00:00Z"},
+	}
+	for _, item := range items {
+		path := filepath.Join(authDir, item.name)
+		if err := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); err != nil {
+			t.Fatalf("write auth file %s: %v", item.name, err)
+		}
+		metadata := map[string]any{
+			"type":      "codex",
+			"plan_type": item.planType,
+		}
+		if item.expiresAt != "" {
+			metadata["subscription_expires_at"] = item.expiresAt
+		}
+		_, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID:         item.name,
+			FileName:   item.name,
+			Provider:   "codex",
+			Status:     coreauth.StatusActive,
+			Metadata:   metadata,
+			Attributes: map[string]string{"path": path},
+		})
+		if err != nil {
+			t.Fatalf("register auth file %s: %v", item.name, err)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?page=1&page_size=2&sort=subscription_expiry&codex_subscription=skip", nil)
+
+	h.ListAuthFiles(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Files []map[string]any `json:"files"`
+		Total int              `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if body.Total != 4 || len(body.Files) != 2 {
+		t.Fatalf("payload = %#v, want total 4 and two files", body)
+	}
+	want := []string{"charlie-soon.json", "delta-late.json"}
+	for i, name := range want {
+		if got := body.Files[i]["name"]; got != name {
+			t.Fatalf("files[%d].name = %#v, want %s; files=%#v", i, got, name, body.Files)
+		}
+	}
+}
+
 func TestPatchAuthFileFieldsUpdatesUserAgent(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

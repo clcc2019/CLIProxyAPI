@@ -1,30 +1,31 @@
-//go:build !has_redis
+//go:build no_redis
 
 // Package redisstate — redis stub.
 //
-// The default slim build excludes the redis/go-redis driver (~2.1 MB of
-// binary size). This file keeps the public API surface stable so
-// sdk/cliproxy/service.go compiles whether or not Redis support is
-// included; `New` returns a not-compiled-in error so operators see a
-// clear message if they configured Redis but forgot the has_redis tag.
+// Only builds using the no_redis tag exclude the redis/go-redis driver.
+// This file keeps the public API surface stable for those explicitly
+// size-constrained builds.
 package redisstate
 
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-// Store is a no-op placeholder when `has_redis` is not set.
+// Store is a no-op placeholder for explicit no_redis builds.
 type Store struct{}
 
-// New always errors in the stub — callers see an actionable message and
-// the service continues in in-memory-state mode.
+func Available() bool { return false }
+
+// New always errors in the stub. Normal builds compile the real Redis store;
+// no_redis builds continue in in-memory-state mode.
 func New(_ context.Context, _ config.RedisConfig) (*Store, error) {
 	return nil, fmt.Errorf(
-		"redis state store is not compiled in; rebuild with -tags=has_redis (or the slim Makefile target) to enable it",
+		"redis state store is not compiled in because this binary was built with -tags=no_redis",
 	)
 }
 
@@ -34,6 +35,13 @@ func (s *Store) LoadUsageState(_ context.Context) ([]byte, bool, error) {
 	return nil, false, nil
 }
 func (s *Store) SaveUsageState(_ context.Context, _ []byte) error { return nil }
+func (s *Store) LoadCache(_ context.Context, _, _ string) ([]byte, bool, error) {
+	return nil, false, nil
+}
+func (s *Store) SaveCache(_ context.Context, _, _ string, _ []byte, _ time.Duration) error {
+	return nil
+}
+func (s *Store) DeleteCache(_ context.Context, _, _ string) error { return nil }
 func (s *Store) Load(_ context.Context) (map[string]coreauth.AuthRuntimeState, error) {
 	return nil, nil
 }

@@ -11,13 +11,13 @@
 #   has_postgres   include Postgres token store (pgx + ugorji)
 #   has_minio      include Minio/S3 object store
 #   has_git        include go-git gitstore
-#   has_redis      include Redis state/queue
+#   no_redis       exclude Redis state persistence from explicit minimal builds
 #   has_tui        include bubbletea / lipgloss dashboard
 #
 # Common combinations:
-#   tags=has_postgres,has_redis    Postgres + Redis, no Git/Minio/TUI
-#   tags=has_tui                   CLI dashboard only, no remote stores
-#   tags=""                        truly minimal (Kiro/Claude/Gemini only)
+#   tags=has_postgres              Postgres + default Redis, no Git/Minio/TUI
+#   tags=has_tui                   CLI dashboard + default Redis
+#   tags=no_redis                  explicitly disable Redis for smallest builds
 #
 # Version metadata is injected via -X ldflags from git state.
 
@@ -39,9 +39,9 @@ STRIP_LDFLAGS   := -s -w
 TRIMPATH        := -trimpath
 
 # Full backend tags for slim builds. Add/remove members via `TAGS=` override:
-#   make minimal TAGS=has_postgres,has_redis
-TAGS          ?= has_postgres,has_minio,has_git,has_redis,has_tui
-MINIMAL_TAGS  ?=
+#   make minimal TAGS=has_postgres
+TAGS          ?= has_postgres,has_minio,has_git,has_tui
+MINIMAL_TAGS  ?= no_redis
 
 .PHONY: help dev slim minimal compressed all-variants clean check-upx
 
@@ -52,7 +52,7 @@ help:
 	@echo "  make minimal     Stripped + no optional backends (~40 MB)"
 	@echo "  make compressed  minimal + UPX (~20 MB, needs upx)"
 	@echo ""
-	@echo "Override tags with TAGS=has_postgres,has_redis etc."
+	@echo "Override tags with TAGS=has_postgres,has_tui or MINIMAL_TAGS=no_redis etc."
 
 # Default: a plain debuggable build — includes every optional backend so
 # developers have the full feature surface locally. Release builds should

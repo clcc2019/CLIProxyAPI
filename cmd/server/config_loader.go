@@ -41,7 +41,7 @@ func loadConfigResult(flags runtimeFlags, ctx startupContext, settings storeSett
 }
 
 func isLocalAuthFileCommand(flags runtimeFlags) bool {
-	return flags.kiroLogin || flags.kiroImport || flags.kiroRefresh
+	return flags.kiroLogin || flags.xaiLogin || flags.kiroImport || flags.kiroRefresh
 }
 
 func loadPostgresConfig(ctx startupContext, settings storeSettings) (configLoadResult, error) {

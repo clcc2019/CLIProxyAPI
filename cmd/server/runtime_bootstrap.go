@@ -148,6 +148,8 @@ func dispatchCommand(flags runtimeFlags, state startupState) error {
 		cmd.DoKimiLogin(state.cfg, state.loginOptions)
 	case flags.kiroLogin:
 		cmd.DoKiroLogin(state.cfg, state.loginOptions)
+	case flags.xaiLogin:
+		cmd.DoXAILogin(state.cfg, state.loginOptions)
 	case flags.kiroImport:
 		cmd.DoKiroImport(state.cfg, state.loginOptions)
 	case flags.kiroRefresh:
