@@ -3520,24 +3520,33 @@ func authFilePreviewJSON(data []byte) ([]byte, error) {
 }
 
 type codexAuthFilePreview struct {
-	Type                           string `json:"type"`
-	AccountID                      string `json:"account_id,omitempty"`
-	ChatGPTAccountID               string `json:"chatgpt_account_id,omitempty"`
-	Email                          string `json:"email,omitempty"`
-	Name                           string `json:"name,omitempty"`
-	PlanType                       string `json:"plan_type,omitempty"`
-	ChatGPTPlanType                string `json:"chatgpt_plan_type,omitempty"`
-	IDToken                        string `json:"id_token,omitempty"`
-	IDTokenSynthetic               *bool  `json:"id_token_synthetic,omitempty"`
-	AccessToken                    string `json:"access_token,omitempty"`
-	RefreshToken                   string `json:"refresh_token"`
-	SessionToken                   string `json:"session_token,omitempty"`
-	LastRefresh                    any    `json:"last_refresh,omitempty"`
-	Expired                        any    `json:"expired,omitempty"`
-	SubscriptionExpiresAt          any    `json:"subscription_expires_at,omitempty"`
-	ChatGPTSubscriptionActiveStart any    `json:"chatgpt_subscription_active_start,omitempty"`
-	ChatGPTSubscriptionActiveUntil any    `json:"chatgpt_subscription_active_until,omitempty"`
-	Disabled                       *bool  `json:"disabled,omitempty"`
+	Type                           string            `json:"type"`
+	AccountID                      string            `json:"account_id,omitempty"`
+	ChatGPTAccountID               string            `json:"chatgpt_account_id,omitempty"`
+	Email                          string            `json:"email,omitempty"`
+	Name                           string            `json:"name,omitempty"`
+	PlanType                       string            `json:"plan_type,omitempty"`
+	ChatGPTPlanType                string            `json:"chatgpt_plan_type,omitempty"`
+	IDToken                        string            `json:"id_token,omitempty"`
+	IDTokenSynthetic               *bool             `json:"id_token_synthetic,omitempty"`
+	AccessToken                    string            `json:"access_token,omitempty"`
+	RefreshToken                   string            `json:"refresh_token"`
+	SessionToken                   string            `json:"session_token,omitempty"`
+	LastRefresh                    any               `json:"last_refresh,omitempty"`
+	Expired                        any               `json:"expired,omitempty"`
+	SubscriptionExpiresAt          any               `json:"subscription_expires_at,omitempty"`
+	ChatGPTSubscriptionActiveStart any               `json:"chatgpt_subscription_active_start,omitempty"`
+	ChatGPTSubscriptionActiveUntil any               `json:"chatgpt_subscription_active_until,omitempty"`
+	Prefix                         string            `json:"prefix,omitempty"`
+	ProxyURL                       string            `json:"proxy_url,omitempty"`
+	Priority                       any               `json:"priority,omitempty"`
+	Note                           string            `json:"note,omitempty"`
+	UserAgent                      string            `json:"user_agent,omitempty"`
+	ExcludedModels                 []string          `json:"excluded_models,omitempty"`
+	DisableCooling                 *bool             `json:"disable_cooling,omitempty"`
+	Websockets                     *bool             `json:"websockets,omitempty"`
+	Headers                        map[string]string `json:"headers,omitempty"`
+	Disabled                       *bool             `json:"disabled,omitempty"`
 }
 
 func isCodexAuthFilePreviewSource(doc map[string]any) bool {
@@ -3601,6 +3610,15 @@ func buildCodexAuthFilePreview(doc map[string]any) codexAuthFilePreview {
 		SubscriptionExpiresAt:          subscriptionExpiresAt,
 		ChatGPTSubscriptionActiveStart: authFilePreviewSubscriptionActiveStart(doc, claims, subscriptionExpiresAt),
 		ChatGPTSubscriptionActiveUntil: authFilePreviewFirstValue(doc, "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil"),
+		Prefix:                         authFilePreviewMetadataString(doc, "prefix"),
+		ProxyURL:                       authFilePreviewMetadataString(doc, "proxy_url", "proxy-url", "proxyUrl"),
+		Priority:                       authFilePreviewFirstValue(doc, "priority"),
+		Note:                           authFilePreviewMetadataString(doc, "note"),
+		UserAgent:                      authFilePreviewMetadataString(doc, "user_agent", "user-agent", "userAgent"),
+		ExcludedModels:                 extractExcludedModelsFromMetadata(doc),
+		DisableCooling:                 authFilePreviewOptionalBool(doc, "disable_cooling", "disable-cooling", "disableCooling"),
+		Websockets:                     authFilePreviewOptionalBool(doc, "websockets", "websocket"),
+		Headers:                        coreauth.ExtractCustomHeadersFromMetadata(doc),
 	}
 	if disabled := authFilePreviewBoolPtr(doc["disabled"]); disabled != nil && *disabled {
 		preview.Disabled = disabled
@@ -3693,6 +3711,19 @@ func authFilePreviewBoolPtr(value any) *bool {
 		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
 		if err == nil {
 			return &parsed
+		}
+	}
+	return nil
+}
+
+func authFilePreviewOptionalBool(metadata map[string]any, keys ...string) *bool {
+	for _, key := range keys {
+		value, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		if parsed := authFilePreviewBoolPtr(value); parsed != nil {
+			return parsed
 		}
 	}
 	return nil
