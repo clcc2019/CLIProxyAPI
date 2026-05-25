@@ -295,7 +295,15 @@ func hashCodexFinalUpstreamBodyMemoKey(baseModel string, opts codexFinalUpstream
 	var h maphash.Hash
 	h.SetSeed(codexMemoHashSeed)
 	_, _ = h.WriteString(baseModel)
-	_, _ = h.Write([]byte{byte(opts.requestKind), byte(opts.streamMode), boolToByte(opts.preservePreviousResponseID)})
+	_, _ = h.Write([]byte{
+		byte(opts.requestKind),
+		byte(opts.streamMode),
+		boolToByte(opts.preservePreviousResponseID),
+		boolToByte(opts.preserveGenerate),
+		boolToByte(opts.store),
+		boolToByte(opts.omitServiceTier),
+		boolToByte(opts.suppressDefaultInstructions),
+	})
 	_, _ = h.Write(input)
 	return h.Sum64()
 }

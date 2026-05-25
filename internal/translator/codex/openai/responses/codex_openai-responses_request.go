@@ -2,6 +2,7 @@ package responses
 
 import (
 	"fmt"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -25,6 +26,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	if toolChoice := gjson.GetBytes(rawJSON, "tool_choice"); !toolChoice.Exists() || toolChoice.Type == gjson.Null {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "tool_choice", "auto")
 	}
+	rawJSON = applyResponsesTextFormatCompatibility(rawJSON)
 	// Align with codex-rs: include "reasoning.encrypted_content" when the
 	// request carries a reasoning block; otherwise send an empty include array.
 	rawJSON = applyCodexIncludeField(rawJSON)
@@ -34,7 +36,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
 	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
-		if v.String() != "priority" {
+		if v.Type != gjson.String || strings.TrimSpace(v.String()) == "" {
 			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
 		}
 	}
@@ -50,6 +52,54 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 
 	return rawJSON
+}
+
+// applyResponsesTextFormatCompatibility maps legacy Chat Completions-style
+// response_format into the Responses API text.format shape used by codex-rs.
+// Native text.format wins so Responses clients can send the official form
+// without the proxy rewriting it.
+func applyResponsesTextFormatCompatibility(rawJSON []byte) []byte {
+	responseFormat := gjson.GetBytes(rawJSON, "response_format")
+	if !responseFormat.Exists() {
+		return rawJSON
+	}
+	deleteResponseFormat := func() []byte {
+		updated, err := sjson.DeleteBytes(rawJSON, "response_format")
+		if err != nil {
+			return rawJSON
+		}
+		return updated
+	}
+
+	textFormat := gjson.GetBytes(rawJSON, "text.format")
+	if textFormat.Exists() && textFormat.Type != gjson.Null {
+		return deleteResponseFormat()
+	}
+
+	switch strings.TrimSpace(responseFormat.Get("type").String()) {
+	case "text":
+		rawJSON, _ = sjson.SetBytes(rawJSON, "text.format.type", "text")
+	case "json_schema":
+		jsonSchema := responseFormat.Get("json_schema")
+		if !jsonSchema.Exists() || !jsonSchema.IsObject() {
+			return deleteResponseFormat()
+		}
+		schema := jsonSchema.Get("schema")
+		if !schema.Exists() || schema.Type == gjson.Null {
+			return deleteResponseFormat()
+		}
+		rawJSON, _ = sjson.SetBytes(rawJSON, "text.format.type", "json_schema")
+		if name := jsonSchema.Get("name"); name.Exists() && name.Type != gjson.Null {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "text.format.name", name.Value())
+		} else {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "text.format.name", "codex_output_schema")
+		}
+		if strict := jsonSchema.Get("strict"); strict.Exists() && strict.Type != gjson.Null {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "text.format.strict", strict.Value())
+		}
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "text.format.schema", []byte(schema.Raw))
+	}
+	return deleteResponseFormat()
 }
 
 // applyCodexIncludeField mirrors codex-rs behavior: the upstream client sends

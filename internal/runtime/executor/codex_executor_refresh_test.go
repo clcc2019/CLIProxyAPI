@@ -175,6 +175,84 @@ func TestCodexExecutorExecuteDoesNotRefreshAfterUnauthorized(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorExecuteRefreshesAfterUnauthorizedWithCoordinator(t *testing.T) {
+	t.Parallel()
+
+	var attempts int
+	var authorizationHeaders []string
+	rt := codexRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		authorizationHeaders = append(authorizationHeaders, req.Header.Get("Authorization"))
+		if attempts == 1 {
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"expired token"}}`)),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(codexCompletedAfterOutputItemDoneSSE)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(rt))
+
+	var refreshCalls int
+	ctx = cliproxyauth.WithRefreshCoordinator(ctx, func(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+		refreshCalls++
+		refreshed := auth.Clone()
+		if refreshed.Metadata == nil {
+			refreshed.Metadata = map[string]any{}
+		}
+		refreshed.Metadata["access_token"] = "new-access-token"
+		refreshed.Metadata["refresh_token"] = "new-refresh-token"
+		return refreshed, nil
+	})
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-1",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": "https://codex.test/backend-api/codex",
+		},
+		Metadata: map[string]any{
+			"type":          "codex",
+			"access_token":  "old-access-token",
+			"refresh_token": "refresh-token",
+		},
+	}
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","messages":[{"role":"user","content":"Say ok"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want 1", refreshCalls)
+	}
+	wantHeaders := []string{"Bearer old-access-token", "Bearer new-access-token"}
+	if len(authorizationHeaders) != len(wantHeaders) {
+		t.Fatalf("authorization headers = %#v, want %#v", authorizationHeaders, wantHeaders)
+	}
+	for i := range wantHeaders {
+		if authorizationHeaders[i] != wantHeaders[i] {
+			t.Fatalf("authorization headers = %#v, want %#v", authorizationHeaders, wantHeaders)
+		}
+	}
+}
+
 func assertMetadataValue(t *testing.T, metadata map[string]any, key string, want any) {
 	t.Helper()
 	if got := metadata[key]; got != want {

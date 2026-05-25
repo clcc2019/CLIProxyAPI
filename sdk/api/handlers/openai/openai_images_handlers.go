@@ -47,6 +47,7 @@ var (
 	imageGenerateStringToolFields = []string{"size", "quality", "background", "output_format", "moderation", "style"}
 	imageEditStringToolFields     = []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation", "style"}
 	imageNumberToolFields         = []string{"output_compression", "partial_images"}
+	errImageStreamNilChannels     = errors.New("image stream received nil data and error channels")
 )
 
 type imageCallResult struct {
@@ -1594,16 +1595,23 @@ func (h *OpenAIAPIHandler) streamImagesFromNative(c *gin.Context, rawPayload []b
 }
 
 func (h *OpenAIAPIHandler) forwardNativeImagesStream(c *gin.Context, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, writeEvent imageStreamEventWriter, timing *imageStreamTiming, writeKeepAlive func()) {
+	requestCtx := c.Request.Context()
 	var keepAliveC, dataIntervalC <-chan time.Time
 	if timing != nil {
 		keepAliveC = timing.keepAliveC
 		dataIntervalC = timing.dataIntervalC
 	}
+	if data == nil && errs == nil {
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+		emitImagesStreamError(writeEvent, errMsg)
+		cancel(errImageStreamNilChannels)
+		return
+	}
 
 	for {
 		select {
-		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
+		case <-requestCtx.Done():
+			cancel(requestCtx.Err())
 			return
 		case errMsg, ok := <-errs:
 			if ok && errMsg != nil {
@@ -1612,12 +1620,20 @@ func (h *OpenAIAPIHandler) forwardNativeImagesStream(c *gin.Context, cancel func
 				return
 			}
 			errs = nil
+			if data == nil {
+				errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+				emitImagesStreamError(writeEvent, errMsg)
+				cancel(errImageStreamNilChannels)
+				return
+			}
 		case chunk, ok := <-data:
 			if !ok {
 				cancel(nil)
 				return
 			}
-			timing.MarkData()
+			if timing != nil {
+				timing.MarkData()
+			}
 			writeNativeImagesStreamChunk(writeEvent, chunk)
 		case now := <-keepAliveC:
 			maybeWriteImageStreamKeepAlive(timing, now, writeKeepAlive)
@@ -1634,7 +1650,7 @@ func (h *OpenAIAPIHandler) forwardNativeImagesStream(c *gin.Context, cancel func
 }
 
 func writeNativeImagesStreamChunk(writeEvent imageStreamEventWriter, chunk []byte) {
-	if len(bytes.TrimSpace(chunk)) == 0 {
+	if writeEvent == nil || len(bytes.TrimSpace(chunk)) == 0 {
 		return
 	}
 	eventName := ""
@@ -1645,6 +1661,9 @@ func writeNativeImagesStreamChunk(writeEvent imageStreamEventWriter, chunk []byt
 }
 
 func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, *interfaces.ErrorMessage) {
+	if data == nil && errs == nil {
+		return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+	}
 	acc := &sseFrameAccumulator{}
 	state := newImageResponseCollectState()
 
@@ -1709,6 +1728,9 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 				return nil, errMsg
 			}
 			errs = nil
+			if data == nil {
+				return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+			}
 		case chunk, ok := <-data:
 			if !ok {
 				for _, frame := range acc.Flush() {
@@ -2017,6 +2039,13 @@ type imageStreamForwardOptions struct {
 }
 
 func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Context, opts imageStreamForwardOptions) {
+	requestCtx := c.Request.Context()
+	if opts.data == nil && opts.errs == nil {
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+		emitImagesStreamError(opts.writeEvent, errMsg)
+		opts.cancel(errImageStreamNilChannels)
+		return
+	}
 	acc := &sseFrameAccumulator{}
 	state := newImageResponseCollectState()
 
@@ -2044,8 +2073,8 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 
 	for {
 		select {
-		case <-c.Request.Context().Done():
-			opts.cancel(c.Request.Context().Err())
+		case <-requestCtx.Done():
+			opts.cancel(requestCtx.Err())
 			return
 		case errMsg, ok := <-opts.errs:
 			if ok && errMsg != nil {
@@ -2054,6 +2083,12 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 				return
 			}
 			opts.errs = nil
+			if opts.data == nil {
+				errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+				emitImagesStreamError(opts.writeEvent, errMsg)
+				opts.cancel(errImageStreamNilChannels)
+				return
+			}
 		case chunk, ok := <-opts.data:
 			if !ok {
 				for _, frame := range acc.Flush() {
@@ -2068,7 +2103,9 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 				opts.cancel(nil)
 				return
 			}
-			timing.MarkData()
+			if timing != nil {
+				timing.MarkData()
+			}
 			for _, frame := range acc.AddChunk(chunk) {
 				if processFrame(frame) {
 					opts.cancel(nil)
@@ -2171,7 +2208,7 @@ func writeImagesCompletedEventsFromResults(results []imageCallResult, usageRaw [
 }
 
 func emitImagesStreamError(writeEvent imageStreamEventWriter, errMsg *interfaces.ErrorMessage) {
-	if errMsg == nil {
+	if writeEvent == nil || errMsg == nil {
 		return
 	}
 	status := http.StatusInternalServerError

@@ -109,6 +109,11 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
+	// EnableRequestCompression controls zstd compression for Codex JSON requests.
+	// A nil value uses the built-in default, which stays enabled to match the
+	// official client unless a config file explicitly disables it.
+	EnableRequestCompression *bool `yaml:"enable-request-compression,omitempty" json:"enable-request-compression,omitempty"`
+
 	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
 	// When true (default), cached signatures are preferred and validated.
 	// When false, client signatures are used directly after normalization (bypass mode).
@@ -179,11 +184,14 @@ type ClaudeHeaderDefaults struct {
 // requests. UserAgent applies to both auth-file and codex-api-key HTTP/websocket
 // requests and overrides generated or credential-provided defaults when set.
 // BetaFeatures applies to both auth-file and codex-api-key Codex HTTP/websocket
-// requests when configured.
+// requests when configured. IncludeTimingMetrics mirrors the official runtime
+// metrics feature by sending x-responsesapi-include-timing-metrics on websocket
+// handshakes only when explicitly enabled.
 type CodexHeaderDefaults struct {
-	UserAgent      string `yaml:"user-agent" json:"user-agent"`
-	BetaFeatures   string `yaml:"beta-features" json:"beta-features"`
-	InstallationID string `yaml:"installation-id,omitempty" json:"installation-id,omitempty"`
+	UserAgent            string `yaml:"user-agent" json:"user-agent"`
+	BetaFeatures         string `yaml:"beta-features" json:"beta-features"`
+	InstallationID       string `yaml:"installation-id,omitempty" json:"installation-id,omitempty"`
+	IncludeTimingMetrics *bool  `yaml:"include-timing-metrics,omitempty" json:"include-timing-metrics,omitempty"`
 	// Originator overrides the default originator value sent in the
 	// "Originator" header for OAuth/ChatGPT Codex requests. When empty the
 	// proxy falls back to the CODEX_INTERNAL_ORIGINATOR_OVERRIDE environment

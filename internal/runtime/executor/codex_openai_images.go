@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -27,10 +26,12 @@ import (
 )
 
 const (
-	codexOpenAIImageSourceFormat = "openai-image"
-	codexImagesGenerationsPath   = "/v1/images/generations"
-	codexImagesEditsPath         = "/v1/images/edits"
-	codexOpenAIImagesMainModel   = "gpt-5.4-mini"
+	codexOpenAIImageSourceFormat    = "openai-image"
+	codexImagesGenerationsPath      = "/v1/images/generations"
+	codexImagesEditsPath            = "/v1/images/edits"
+	codexImagesVariationsPath       = "/v1/images/variations"
+	codexOpenAIImagesMainModel      = "gpt-5.4-mini"
+	codexOpenAIImageVariationPrompt = "Create a variation of the provided image."
 )
 
 type codexOpenAIImagePreparedRequest struct {
@@ -48,22 +49,46 @@ type codexImageCallResult struct {
 	Quality       string
 }
 
+var (
+	codexOpenAIImageGenerateStringToolFields = []string{"size", "quality", "background", "output_format", "moderation", "style"}
+	codexOpenAIImageEditStringToolFields     = []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation", "style"}
+	codexOpenAIImageNumberToolFields         = []string{"output_compression", "partial_images"}
+)
+
 func isCodexOpenAIImageRequest(opts cliproxyexecutor.Options) bool {
-	if !strings.EqualFold(strings.TrimSpace(opts.SourceFormat.String()), codexOpenAIImageSourceFormat) {
-		return false
-	}
-	return codexIsImagesEndpointPath(helps.PayloadRequestPath(opts))
+	_, ok := codexOpenAIImageEndpointPath(opts)
+	return ok
 }
 
-func codexIsImagesEndpointPath(path string) bool {
-	path = strings.TrimSpace(path)
-	if path == codexImagesGenerationsPath || path == codexImagesEditsPath {
-		return true
+func codexOpenAIImageEndpointPath(opts cliproxyexecutor.Options) (string, bool) {
+	switch strings.Trim(strings.TrimSpace(opts.Alt), "/") {
+	case "images/generations":
+		return codexImagesGenerationsPath, true
+	case "images/edits":
+		return codexImagesEditsPath, true
+	case "images/variations":
+		return codexImagesVariationsPath, true
 	}
-	return strings.HasSuffix(path, codexImagesGenerationsPath) || strings.HasSuffix(path, codexImagesEditsPath)
+	if !strings.EqualFold(strings.TrimSpace(opts.SourceFormat.String()), codexOpenAIImageSourceFormat) {
+		return "", false
+	}
+	path := helps.PayloadRequestPath(opts)
+	if strings.HasSuffix(path, codexImagesVariationsPath) || strings.HasSuffix(path, "/images/variations") {
+		return codexImagesVariationsPath, true
+	}
+	if strings.HasSuffix(path, codexImagesEditsPath) || strings.HasSuffix(path, "/images/edits") {
+		return codexImagesEditsPath, true
+	}
+	if strings.HasSuffix(path, codexImagesGenerationsPath) || strings.HasSuffix(path, "/images/generations") || strings.TrimSpace(path) == "" {
+		return codexImagesGenerationsPath, true
+	}
+	return "", false
 }
 
 func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	prepared, errPrepare := codexPrepareOpenAIImageRequest(req, opts)
 	if errPrepare != nil {
 		return resp, errPrepare
@@ -83,33 +108,43 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body)
-	if errCache != nil {
-		return resp, errCache
-	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
+	preparedBody := body
+	var data []byte
+	var responseHeaders http.Header
+	for {
+		call, httpResp, errDo := e.prepareAndDoCodexOpenAIImageHTTP(ctx, auth, req, opts, preparedBody, apiKey, url)
+		if errDo != nil {
+			return resp, errDo
+		}
+		body = call.prepared.body
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-		return resp, errDo
-	}
-	defer func() {
+		var errRead error
+		data, errRead = io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
-	}()
-
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	data, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-		return resp, errRead
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			return resp, errRead
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			responseHeaders = httpResp.Header.Clone()
+			break
+		}
+		if httpResp.StatusCode == http.StatusUnauthorized && !codexUnauthorizedRetryAlreadyUsed(ctx) {
+			refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			if refreshErr != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, refreshErr)
+				return resp, refreshErr
+			}
+			if retried {
+				ctx = contextWithCodexUnauthorizedRetryUsed(ctx)
+				auth = refreshedAuth
+				apiKey, _ = codexCreds(auth)
+				continue
+			}
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return resp, err
@@ -142,7 +177,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 			if errOutput != nil {
 				return resp, errOutput
 			}
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+			return cliproxyexecutor.Response{Payload: out, Headers: responseHeaders}, nil
 		}
 	}
 
@@ -151,6 +186,9 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 }
 
 func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	prepared, errPrepare := codexPrepareOpenAIImageRequest(req, opts)
 	if errPrepare != nil {
 		return nil, errPrepare
@@ -170,23 +208,21 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body)
-	if errCache != nil {
-		return nil, errCache
-	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
+	preparedBody := body
+	var httpResp *http.Response
+	for {
+		call, response, errDo := e.prepareAndDoCodexOpenAIImageHTTP(ctx, auth, req, opts, preparedBody, apiKey, url)
+		if errDo != nil {
+			return nil, errDo
+		}
+		body = call.prepared.body
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			httpResp = response
+			break
+		}
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-		return nil, errDo
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, errRead := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		data, errRead := io.ReadAll(response.Body)
+		if errClose := response.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 		if errRead != nil {
@@ -194,8 +230,21 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			return nil, errRead
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErr(httpResp.StatusCode, data)
+		if response.StatusCode == http.StatusUnauthorized && !codexUnauthorizedRetryAlreadyUsed(ctx) {
+			refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			if refreshErr != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, refreshErr)
+				return nil, refreshErr
+			}
+			if retried {
+				ctx = contextWithCodexUnauthorizedRetryUsed(ctx)
+				auth = refreshedAuth
+				apiKey, _ = codexCreds(auth)
+				continue
+			}
+		}
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", response.StatusCode, helps.SummarizeErrorBody(response.Header.Get("Content-Type"), data))
+		err = newCodexStatusErr(response.StatusCode, data)
 		return nil, err
 	}
 
@@ -272,9 +321,40 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			sendError(errScan)
+			return
 		}
+		terminalErr := statusErr{code: http.StatusGatewayTimeout, msg: "stream error: stream disconnected before completion"}
+		helps.RecordAPIResponseError(ctx, e.cfg, terminalErr)
+		reporter.PublishFailure(ctx, terminalErr)
+		sendError(terminalErr)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func (e *CodexExecutor) prepareAndDoCodexOpenAIImageHTTP(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	body []byte,
+	apiKey string,
+	url string,
+) (codexPreparedHTTPCall, *http.Response, error) {
+	finalOpts := codexDefaultFinalUpstreamBodyOptions(auth, url)
+	finalOpts.suppressDefaultInstructions = true
+	call, errCall := e.prepareCodexHTTPCallWithBaseModelAndFinalOptions(ctx, auth, sdktranslator.FromString(codexOpenAIImageSourceFormat), executionSessionIDFromOptions(opts), url, req, body, apiKey, true, codexOpenAIImagesMainModel, finalOpts)
+	if errCall != nil {
+		return codexPreparedHTTPCall{}, nil, errCall
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
+
+	httpResp, errDo := e.doCodexHTTPRequest(ctx, auth, call.prepared)
+	if errDo != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		return codexPreparedHTTPCall{}, nil, errDo
+	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	return call, httpResp, nil
 }
 
 func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {
@@ -297,37 +377,29 @@ func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexe
 	return normalizeCodexInstructions(out), nil
 }
 
-func recordCodexOpenAIImageRequest(ctx context.Context, cfg *config.Config, provider string, auth *cliproxyauth.Auth, url string, headers http.Header, body []byte) {
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   headers,
-		Body:      body,
-		Provider:  provider,
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-}
-
 func codexPrepareOpenAIImageRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (codexOpenAIImagePreparedRequest, error) {
-	path := helps.PayloadRequestPath(opts)
+	path, ok := codexOpenAIImageEndpointPath(opts)
+	if !ok {
+		path = helps.PayloadRequestPath(opts)
+	}
 	if strings.HasSuffix(path, codexImagesGenerationsPath) {
 		return codexPrepareOpenAIImageGenerationJSON(req.Payload, req.Model)
-	}
-	if !strings.HasSuffix(path, codexImagesEditsPath) {
-		return codexOpenAIImagePreparedRequest{}, fmt.Errorf("unsupported OpenAI image endpoint path %q", path)
 	}
 
 	contentType := codexImageContentType(opts.Headers)
 	mediaType, _, _ := mime.ParseMediaType(contentType)
+	if strings.HasSuffix(path, codexImagesVariationsPath) {
+		if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+			return codexPrepareOpenAIImageMultipart(req.Payload, req.Model, contentType, codexOpenAIImageMultipartOptions{
+				defaultPrompt: codexOpenAIImageVariationPrompt,
+				streamPrefix:  "image_variation",
+			})
+		}
+		return codexOpenAIImagePreparedRequest{}, fmt.Errorf("OpenAI image variations require multipart/form-data")
+	}
+	if !strings.HasSuffix(path, codexImagesEditsPath) {
+		return codexOpenAIImagePreparedRequest{}, fmt.Errorf("unsupported OpenAI image endpoint path %q", path)
+	}
 	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
 		return codexPrepareOpenAIImageEditMultipart(req.Payload, req.Model, contentType)
 	}
@@ -339,7 +411,7 @@ func codexPrepareOpenAIImageGenerationJSON(rawJSON []byte, routeModel string) (c
 		return codexOpenAIImagePreparedRequest{}, fmt.Errorf("invalid OpenAI image generation request JSON")
 	}
 	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
-	tool := codexBuildOpenAIImageTool(rawJSON, routeModel, "generate", []string{"size", "quality", "background", "output_format", "moderation"}, []string{"output_compression", "partial_images"})
+	tool := codexBuildOpenAIImageTool(rawJSON, routeModel, "generate", codexOpenAIImageGenerateStringToolFields, codexOpenAIImageNumberToolFields)
 	body := codexBuildImagesResponsesRequest(prompt, nil, tool)
 	return codexOpenAIImagePreparedRequest{
 		Body:           body,
@@ -362,7 +434,7 @@ func codexPrepareOpenAIImageEditJSON(rawJSON []byte, routeModel string) (codexOp
 			}
 		}
 	}
-	tool := codexBuildOpenAIImageTool(rawJSON, routeModel, "edit", []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"}, []string{"output_compression", "partial_images"})
+	tool := codexBuildOpenAIImageTool(rawJSON, routeModel, "edit", codexOpenAIImageEditStringToolFields, codexOpenAIImageNumberToolFields)
 	if mask := strings.TrimSpace(gjson.GetBytes(rawJSON, "mask.image_url").String()); mask != "" {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", mask)
 	}
@@ -374,7 +446,18 @@ func codexPrepareOpenAIImageEditJSON(rawJSON []byte, routeModel string) (codexOp
 	}, nil
 }
 
+type codexOpenAIImageMultipartOptions struct {
+	defaultPrompt string
+	streamPrefix  string
+}
+
 func codexPrepareOpenAIImageEditMultipart(rawBody []byte, routeModel string, contentType string) (codexOpenAIImagePreparedRequest, error) {
+	return codexPrepareOpenAIImageMultipart(rawBody, routeModel, contentType, codexOpenAIImageMultipartOptions{
+		streamPrefix: "image_edit",
+	})
+}
+
+func codexPrepareOpenAIImageMultipart(rawBody []byte, routeModel string, contentType string, opts codexOpenAIImageMultipartOptions) (codexOpenAIImagePreparedRequest, error) {
 	_, params, errMedia := mime.ParseMediaType(contentType)
 	if errMedia != nil {
 		return codexOpenAIImagePreparedRequest{}, fmt.Errorf("parse multipart content type failed: %w", errMedia)
@@ -395,15 +478,18 @@ func codexPrepareOpenAIImageEditMultipart(rawBody []byte, routeModel string, con
 	}()
 
 	prompt := strings.TrimSpace(codexFormValue(form, "prompt"))
+	if prompt == "" {
+		prompt = strings.TrimSpace(opts.defaultPrompt)
+	}
 	responseFormat := codexNormalizeImageResponseFormat(codexFormValue(form, "response_format"))
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
 	tool, _ = sjson.SetBytes(tool, "model", codexOpenAIImageToolModel(codexFormValue(form, "model"), routeModel))
-	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
+	for _, field := range codexOpenAIImageEditStringToolFields {
 		if value := strings.TrimSpace(codexFormValue(form, field)); value != "" {
 			tool, _ = sjson.SetBytes(tool, field, value)
 		}
 	}
-	for _, field := range []string{"output_compression", "partial_images"} {
+	for _, field := range codexOpenAIImageNumberToolFields {
 		if value := strings.TrimSpace(codexFormValue(form, field)); value != "" {
 			if parsed, errParse := strconv.ParseInt(value, 10, 64); errParse == nil {
 				tool, _ = sjson.SetBytes(tool, field, parsed)
@@ -431,8 +517,17 @@ func codexPrepareOpenAIImageEditMultipart(rawBody []byte, routeModel string, con
 	return codexOpenAIImagePreparedRequest{
 		Body:           body,
 		ResponseFormat: responseFormat,
-		StreamPrefix:   "image_edit",
+		StreamPrefix:   firstNonEmptyString(strings.TrimSpace(opts.streamPrefix), "image_edit"),
 	}, nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func codexImageContentType(headers http.Header) string {

@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 )
@@ -253,7 +254,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, modelName
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				if errMsg, okPendingErr := pendingClaudeStreamError(errChan); okPendingErr {
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
 					h.WriteErrorResponse(c, errMsg)
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
@@ -262,11 +263,9 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, modelName
 					}
 					return
 				}
-				// Stream closed without data? Send DONE or just headers.
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				flusher.Flush()
-				cliCancel(nil)
+				streamErr := fmt.Errorf("auth manager stream closed before sending payload")
+				h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: streamErr})
+				cliCancel(streamErr)
 				return
 			}
 
@@ -284,21 +283,6 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, modelName
 			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
 			return
 		}
-	}
-}
-
-func pendingClaudeStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
-	if errs == nil {
-		return nil, false
-	}
-	select {
-	case errMsg, ok := <-errs:
-		if !ok {
-			return nil, false
-		}
-		return errMsg, true
-	default:
-		return nil, false
 	}
 }
 
@@ -367,7 +351,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		status = msg.StatusCode
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
-		for key, values := range msg.Addon {
+		for key, values := range handlers.FilterUpstreamHeaders(msg.Addon) {
 			if len(values) == 0 {
 				continue
 			}
@@ -391,6 +375,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 }
 
 func claudeErrorDetailFromText(status int, errText string) (string, string) {
+	errText = string(util.RedactSensitiveLogBytes([]byte(errText)))
 	message := strings.TrimSpace(errText)
 	if message == "" {
 		message = http.StatusText(status)
@@ -451,6 +436,10 @@ func claudeErrorTypeFromStatus(status int) string {
 
 func appendClaudeAPIResponse(c *gin.Context, data []byte) {
 	if c == nil || len(data) == 0 {
+		return
+	}
+	data = util.RedactSensitiveLogBytes(data)
+	if len(data) == 0 {
 		return
 	}
 	if _, exists := c.Get("API_RESPONSE_TIMESTAMP"); !exists {

@@ -122,8 +122,8 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "prompt_cache_key").String(); got != "pc-1" {
 		t.Fatalf("prompt_cache_key = %q, want pc-1; body=%s", got, gotBody)
 	}
-	if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "priority" {
-		t.Fatalf("service_tier = %q, want priority; body=%s", got, gotBody)
+	if got := gjson.GetBytes(gotBody, "service_tier"); got.Exists() {
+		t.Fatalf("service_tier should be omitted for API-key responses/compact requests; got %s body=%s", got.Raw, gotBody)
 	}
 	if got := gjson.GetBytes(gotBody, "tools").IsArray(); !got {
 		t.Fatalf("tools should default to an empty array for compact: %s", gotBody)
@@ -131,8 +131,8 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "parallel_tool_calls").Bool(); !got {
 		t.Fatalf("parallel_tool_calls = false, want true; body=%s", gotBody)
 	}
-	if got := gjson.GetBytes(gotBody, "previous_response_id").String(); got != "resp_1" {
-		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, gotBody)
+	if got := gjson.GetBytes(gotBody, "previous_response_id"); got.Exists() {
+		t.Fatalf("previous_response_id should not be sent to responses/compact: %s", gotBody)
 	}
 	if got := gotHeaders.Get(codexHeaderTurnMetadata); got != "" {
 		t.Fatalf("%s should not be sent by default to responses/compact: %q", codexHeaderTurnMetadata, got)
@@ -148,6 +148,49 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	}
 	if got := gotHeaders.Get(codexHeaderInstallationID); got == "" {
 		t.Fatalf("%s should be present on responses/compact", codexHeaderInstallationID)
+	}
+}
+
+func TestCodexExecutorCompactPreservesServiceTierForOptedInChatGPTAuth(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":[]}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "oauth-token",
+		},
+		Metadata: map[string]any{
+			"access_token": "oauth-token",
+			"account_id":   "account-1",
+			cliproxyauth.AuthFileServiceTierPassthroughKey: true,
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"input":"hello",
+			"service_tier":"priority"
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority for opted-in ChatGPT auth; body=%s", got, gotBody)
 	}
 }
 

@@ -25,6 +25,27 @@ const codexDefaultImageToolModel = "gpt-image-2"
 
 var errCodexStopStream = errors.New("codex executor: stop stream after terminal event")
 
+type codexUnauthorizedRetryContextKey struct{}
+
+func codexStreamClosedBeforeCompletedErr() error {
+	return statusErr{code: http.StatusRequestTimeout, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+}
+
+func codexUnauthorizedRetryAlreadyUsed(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	used, _ := ctx.Value(codexUnauthorizedRetryContextKey{}).(bool)
+	return used
+}
+
+func contextWithCodexUnauthorizedRetryUsed(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, codexUnauthorizedRetryContextKey{}, true)
+}
+
 // CodexExecutor executes Codex requests and reuses per-proxy auth services for refresh flows.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type CodexExecutor struct {
@@ -43,6 +64,9 @@ func NewCodexExecutor(cfg *config.Config) *CodexExecutor { return &CodexExecutor
 func (e *CodexExecutor) Identifier() string { return "codex" }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if isCodexOpenAIImageRequest(opts) {
+		return e.executeOpenAIImage(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
@@ -135,7 +159,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		err = newCodexStatusErr(result.errorStatus, result.errorBody)
 		return resp, err
 	}
-	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+	err = codexStreamClosedBeforeCompletedErr()
 	return resp, err
 }
 
@@ -228,6 +252,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if isCodexOpenAIImageRequest(opts) {
+		return e.executeOpenAIImageStream(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
@@ -273,8 +300,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = call.prepared.body
 	helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
 
-	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(call.prepared.httpReq)
+	httpResp, err := e.doCodexHTTPRequest(ctx, auth, call.prepared)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -304,7 +330,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 				body = call.prepared.body
 				helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-				httpResp, err = httpClient.Do(call.prepared.httpReq)
+				httpResp, err = e.doCodexHTTPRequest(ctx, auth, call.prepared)
 				if err != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, err)
 					return nil, err
@@ -333,7 +359,10 @@ codexStreamResponseOK:
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
+		idleReader := newIdleTimeoutReadCloser(httpResp.Body, codexResponsesStreamIdleTimeout)
+		streamBody := idleReader
 		defer func() {
+			idleReader.StopTimer()
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
@@ -343,6 +372,7 @@ codexStreamResponseOK:
 		terminalFailure := false
 		var terminalFailureErr error
 		emittedPayload := false
+		completedStreamObserved := false
 		// pendingTerminalErr captures the terminal upstream error observed
 		// mid-stream (e.g. usage_limit_reached) so the downstream client is
 		// informed even when we had to stop reading after already sending
@@ -357,12 +387,12 @@ codexStreamResponseOK:
 				return false
 			}
 		}
-		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
+		errRead := helps.ReadStreamLines(streamBody, func(line []byte) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			completedStream := false
+			stopAfterForward := false
 			if eventData, ok := codexEventData(line); ok {
 				eventType := codexEventType(eventData)
 				if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
@@ -378,16 +408,14 @@ codexStreamResponseOK:
 				switch eventType {
 				case "response.incomplete":
 					// Mirror codex-rs: treat response.incomplete as a terminal
-					// failure for telemetry purposes, but keep forwarding the
-					// event to the downstream client so SDKs relying on it for
-					// signalling (rate limits, safety stops, etc.) still work.
-					reason := gjson.GetBytes(eventData, "response.incomplete_details.reason").String()
-					if reason == "" {
-						reason = "unknown"
-					}
+					// failure. Forward the event once, then stop reading instead
+					// of waiting for the upstream connection to close.
+					reason := codexResponseIncompleteReason(eventData)
 					log.Warnf("codex stream terminated with response.incomplete: reason=%s", reason)
 					terminalFailure = true
-					terminalFailureErr = errors.New("response.incomplete: reason=" + reason)
+					terminalFailureErr = codexResponseIncompleteEventErr(eventData)
+					pendingTerminalErr = terminalFailureErr
+					stopAfterForward = true
 				case "response.failed":
 					message := gjson.GetBytes(eventData, "response.error.message").String()
 					if message == "" {
@@ -398,7 +426,8 @@ codexStreamResponseOK:
 					terminalFailureErr = errors.New(message)
 				}
 				if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
-					completedStream = true
+					completedStreamObserved = true
+					stopAfterForward = true
 					if detail, ok := helps.ParseCodexUsage(completed.data); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -423,7 +452,7 @@ codexStreamResponseOK:
 					emittedPayload = true
 				}
 			}
-			if completedStream {
+			if stopAfterForward {
 				return errCodexStopStream
 			}
 			return nil
@@ -432,6 +461,11 @@ codexStreamResponseOK:
 			if errors.Is(errRead, errCodexStopStream) {
 				errRead = nil
 			}
+		}
+		if idleReader.TimedOut() && !completedStreamObserved && pendingTerminalErr == nil {
+			errRead = codexStreamIdleTimeoutErr()
+		} else if errRead != nil && idleReader.TimedOut() {
+			errRead = codexStreamIdleTimeoutErr()
 		}
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
@@ -445,6 +479,11 @@ codexStreamResponseOK:
 			helps.RecordAPIResponseError(ctx, e.cfg, pendingTerminalErr)
 			reporter.PublishFailureWithError(ctx, pendingTerminalErr)
 			_ = send(cliproxyexecutor.StreamChunk{Err: pendingTerminalErr})
+		} else if !completedStreamObserved && !terminalFailure {
+			closedErr := codexStreamClosedBeforeCompletedErr()
+			helps.RecordAPIResponseError(ctx, e.cfg, closedErr)
+			reporter.PublishFailureWithError(ctx, closedErr)
+			_ = send(cliproxyexecutor.StreamChunk{Err: closedErr})
 		} else if terminalFailure {
 			reporter.PublishFailureWithError(ctx, terminalFailureErr)
 		}
@@ -535,7 +574,30 @@ func applyCodexTokenDataToAuth(auth *cliproxyauth.Auth, td *codexauth.CodexToken
 }
 
 func (e *CodexExecutor) refreshCodexAuthAfterUnauthorized(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, bool, error) {
-	return auth, false, nil
+	if auth == nil || codexIsAPIKeyAuth(auth) {
+		return auth, false, nil
+	}
+	if metadataString(auth.Metadata, "refresh_token", "refreshToken") == "" {
+		return auth, false, nil
+	}
+	coord := cliproxyauth.RefreshCoordinatorFrom(ctx)
+	if coord == nil {
+		return auth, false, nil
+	}
+	previousToken, _ := codexCreds(auth)
+	refreshed, err := coord(ctx, auth)
+	if err != nil {
+		return nil, false, err
+	}
+	if refreshed == nil {
+		return auth, false, nil
+	}
+	nextToken, _ := codexCreds(refreshed)
+	if strings.TrimSpace(nextToken) == "" || strings.TrimSpace(nextToken) == strings.TrimSpace(previousToken) {
+		return refreshed, false, nil
+	}
+	log.Debugf("codex executor: retrying request after coordinated auth refresh")
+	return refreshed, true, nil
 }
 
 func (e *CodexExecutor) codexAuthService(auth *cliproxyauth.Auth) *codexauth.CodexAuth {
@@ -596,6 +658,11 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		apiKey = a.Attributes["api_key"]
 		baseURL = a.Attributes["base_url"]
 	}
+	if !codexIsAPIKeyAuth(a) {
+		if accessToken := metadataString(a.Metadata, "access_token", "accessToken"); accessToken != "" {
+			apiKey = accessToken
+		}
+	}
 	if apiKey == "" && a.Metadata != nil {
 		if v, ok := a.Metadata["access_token"].(string); ok {
 			apiKey = v
@@ -627,6 +694,9 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) []byte {
 	if strings.HasSuffix(baseModel, "spark") {
+		return body
+	}
+	if codexIsAPIKeyAuth(auth) {
 		return body
 	}
 	if isCodexFreePlanAuth(auth) {

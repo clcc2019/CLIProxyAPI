@@ -107,7 +107,7 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
 	if len(info.Body) > 0 {
-		writeLimitedBytes(builder, info.Body, maxLoggedAPIRequestBytes)
+		writeLimitedBytes(builder, util.RedactSensitiveLogBytes(info.Body), maxLoggedAPIRequestBytes)
 	} else {
 		builder.WriteString("<empty>")
 	}
@@ -206,7 +206,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		}
 		appendAttemptResponseText(ginCtx, attempt, separator)
 	}
-	appendAttemptResponseText(ginCtx, attempt, string(data))
+	appendAttemptResponseText(ginCtx, attempt, string(util.RedactSensitiveLogBytes(data)))
 	attempt.bodyHasContent = true
 	attempt.prevWasSSEEvent = currentChunkIsSSEEvent
 }
@@ -234,7 +234,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
 	if len(info.Body) > 0 {
-		writeLimitedBytes(builder, info.Body, maxLoggedAPIRequestBytes)
+		writeLimitedBytes(builder, util.RedactSensitiveLogBytes(info.Body), maxLoggedAPIRequestBytes)
 	} else {
 		builder.WriteString("<empty>")
 	}
@@ -320,7 +320,7 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
 	builder.WriteString("Event: api.websocket.response\n")
-	writeLimitedBytes(builder, data, maxLoggedAPIWebsocketTimelineBytes)
+	writeLimitedBytes(builder, util.RedactSensitiveLogBytes(data), maxLoggedAPIWebsocketTimelineBytes)
 	builder.WriteString("\n")
 
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))

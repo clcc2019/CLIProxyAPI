@@ -2,9 +2,13 @@ package logging
 
 import (
 	"bytes"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 )
 
 func TestFileRequestLoggerToggle(t *testing.T) {
@@ -58,6 +62,51 @@ func TestWriteRequestInfoWithBodyWritesInlineBody(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, `{"hello":"world"}`) {
 		t.Fatalf("log output missing request body: %q", logOutput)
+	}
+}
+
+func TestWriteAPIErrorResponsesRedactsSensitiveValues(t *testing.T) {
+	var output bytes.Buffer
+	err := writeAPIErrorResponses(&output, []*interfaces.ErrorMessage{{
+		StatusCode: http.StatusBadGateway,
+		Error:      errors.New("upstream failed Authorization: Bearer sk-secret-token access_token=access-secret visible"),
+	}})
+	if err != nil {
+		t.Fatalf("writeAPIErrorResponses error = %v", err)
+	}
+
+	logOutput := output.String()
+	for _, leaked := range []string{"sk-secret-token", "access-secret"} {
+		if strings.Contains(logOutput, leaked) {
+			t.Fatalf("API error log leaked %q: %s", leaked, logOutput)
+		}
+	}
+	if !strings.Contains(logOutput, "[REDACTED]") || !strings.Contains(logOutput, "visible") {
+		t.Fatalf("API error log missing redacted visible content: %s", logOutput)
+	}
+}
+
+func TestFormatLogContentRedactsAPIErrorResponses(t *testing.T) {
+	logger := NewFileRequestLogger(true, "", "", 10)
+	content := logger.formatLogContent(
+		"/v1/responses",
+		"POST",
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		http.StatusBadGateway,
+		nil,
+		[]*interfaces.ErrorMessage{{StatusCode: http.StatusBadGateway, Error: errors.New("api_key=sk-secret visible")}},
+	)
+	if strings.Contains(content, "sk-secret") {
+		t.Fatalf("formatted log leaked API key: %s", content)
+	}
+	if !strings.Contains(content, "api_key=[REDACTED]") || !strings.Contains(content, "visible") {
+		t.Fatalf("formatted log missing redacted visible content: %s", content)
 	}
 }
 

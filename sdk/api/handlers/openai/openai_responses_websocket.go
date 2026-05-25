@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,20 +29,24 @@ import (
 )
 
 const (
-	wsRequestTypeCreate  = "response.create"
-	wsRequestTypeAppend  = "response.append"
-	wsEventTypeError     = "error"
-	wsEventTypeCompleted = "response.completed"
-	wsDoneMarker         = "[DONE]"
-	wsTurnStateHeader    = "x-codex-turn-state"
-	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
+	wsRequestTypeCreate    = "response.create"
+	wsRequestTypeAppend    = "response.append"
+	wsRequestTypeProcessed = "response.processed"
+	wsEventTypeError       = "error"
+	wsEventTypeCompleted   = "response.completed"
+	wsDoneMarker           = "[DONE]"
+	wsTurnStateHeader      = "x-codex-turn-state"
+	wsTimelineBodyKey      = "WEBSOCKET_TIMELINE_OVERRIDE"
 
 	maxResponsesWebsocketTimelineBytes      = 1 << 20
 	maxResponsesWebsocketErrorTimelineBytes = 4 << 10
 	maxResponsesWebsocketInboundBytes       = 64 << 20
+	responsesWebsocketWriteTimeout          = 30 * time.Second
 )
 
 const responsesWebsocketTimelineTruncatedMarker = "\n...[websocket timeline truncated]...\n"
+
+var errResponsesWebsocketNilStreamChannels = errors.New("responses websocket forwarder received nil data and error channels")
 
 type websocketTimelineBuilder struct {
 	strings.Builder
@@ -74,11 +81,114 @@ var responsesWebsocketUpgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 	WriteBufferPool: &responsesWebsocketWriteBufferPool,
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		return responsesWebsocketOriginAllowed(r)
 	},
 }
 
 var responsesWebsocketWriteBufferPool sync.Pool
+
+func responsesWebsocketOriginAllowed(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsedOrigin, err := url.Parse(origin)
+	if err != nil || parsedOrigin == nil {
+		return false
+	}
+	originScheme := strings.ToLower(parsedOrigin.Scheme)
+	if originScheme != "http" && originScheme != "https" {
+		return false
+	}
+	if parsedOrigin.User != nil || parsedOrigin.Path != "" || parsedOrigin.RawQuery != "" || parsedOrigin.Fragment != "" || parsedOrigin.Opaque != "" {
+		return false
+	}
+	originHost, ok := parseWebsocketAuthority(parsedOrigin.Host)
+	if !ok {
+		return false
+	}
+	if websocketAuthorityMatchesOrigin(originHost, originScheme, r.Host) {
+		return true
+	}
+	return false
+}
+
+type websocketAuthority struct {
+	host string
+	port string
+}
+
+func websocketAuthorityMatchesOrigin(origin websocketAuthority, originScheme string, rawRequestHost string) bool {
+	requestHost, ok := parseWebsocketAuthority(rawRequestHost)
+	if !ok || requestHost.host != origin.host {
+		return false
+	}
+	originPort := origin.port
+	if originPort == "" {
+		originPort = defaultWebsocketOriginPort(originScheme)
+	}
+	if requestHost.port != "" {
+		return requestHost.port == originPort
+	}
+	return originPort != "" && originPort == defaultWebsocketOriginPort(originScheme)
+}
+
+func parseWebsocketAuthority(raw string) (websocketAuthority, bool) {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" || strings.Contains(raw, "@") {
+		return websocketAuthority{}, false
+	}
+	if host, port, err := net.SplitHostPort(raw); err == nil {
+		host = normalizeWebsocketAuthorityHost(host)
+		port = strings.TrimSpace(port)
+		if host == "" || !validWebsocketAuthorityPort(port) {
+			return websocketAuthority{}, false
+		}
+		return websocketAuthority{host: host, port: port}, true
+	}
+	host := normalizeWebsocketAuthorityHost(raw)
+	if host == "" {
+		return websocketAuthority{}, false
+	}
+	if strings.Count(host, ":") == 1 {
+		return websocketAuthority{}, false
+	}
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return websocketAuthority{}, false
+	}
+	return websocketAuthority{host: host}, true
+}
+
+func normalizeWebsocketAuthorityHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimSuffix(host, ".")
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	}
+	return host
+}
+
+func validWebsocketAuthorityPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	value, err := strconv.Atoi(port)
+	return err == nil && value > 0 && value <= 65535
+}
+
+func defaultWebsocketOriginPort(scheme string) string {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
 
 // ResponsesWebsocket handles websocket requests for /v1/responses.
 // It accepts `response.create` and `response.append` requests and streams
@@ -90,7 +200,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	}
 	conn.SetReadLimit(maxResponsesWebsocketInboundBytes)
 	connectionID := uuid.NewString()
-	fallbackExecutionSessionID := uuid.NewString()
+	generatedExecutionSessionID := uuid.NewString()
 	activeExecutionSessionID := ""
 	headerExecutionSessionID := responsesExplicitExecutionSessionID(c.Request, nil)
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
@@ -102,30 +212,80 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	log.Infof("responses websocket: client connected id=%s remote=%s", connectionID, clientIP)
 	wsDone := make(chan struct{})
 	defer close(wsDone)
+	var activeDisconnectSessionMu sync.RWMutex
+	activeDisconnectSessionID := ""
+	setActiveDisconnectSessionID := func(sessionID string) {
+		activeDisconnectSessionMu.Lock()
+		activeDisconnectSessionID = strings.TrimSpace(sessionID)
+		activeDisconnectSessionMu.Unlock()
+	}
+	getActiveDisconnectSessionID := func() string {
+		activeDisconnectSessionMu.RLock()
+		defer activeDisconnectSessionMu.RUnlock()
+		return activeDisconnectSessionID
+	}
+	type upstreamDisconnectSubscriber interface {
+		UpstreamDisconnectChanIfExists(sessionID string) <-chan error
+	}
+	type websocketDisconnectSubscription struct {
+		done chan struct{}
+	}
+	var subscribedDisconnectSessions sync.Map
+	subscribeUpstreamDisconnect := func(string) {}
 	if h != nil && h.AuthManager != nil {
-		disconnectSessionID := headerExecutionSessionID
-		if disconnectSessionID == "" {
-			disconnectSessionID = fallbackExecutionSessionID
-		}
 		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
-			type upstreamDisconnectSubscriber interface {
-				UpstreamDisconnectChan(sessionID string) <-chan error
-			}
 			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
-				disconnectCh := subscriber.UpstreamDisconnectChan(disconnectSessionID)
-				if disconnectCh != nil {
-					go func() {
+				subscribeUpstreamDisconnect = func(sessionID string) {
+					sessionID = strings.TrimSpace(sessionID)
+					if sessionID == "" {
+						return
+					}
+					subscription := &websocketDisconnectSubscription{done: make(chan struct{})}
+					for {
+						actual, loaded := subscribedDisconnectSessions.LoadOrStore(sessionID, subscription)
+						if !loaded {
+							break
+						}
+						existing, _ := actual.(*websocketDisconnectSubscription)
+						if existing == nil || existing.done == nil {
+							return
+						}
+						select {
+						case <-existing.done:
+							subscribedDisconnectSessions.Delete(sessionID)
+							continue
+						default:
+							return
+						}
+					}
+					disconnectCh := subscriber.UpstreamDisconnectChanIfExists(sessionID)
+					if disconnectCh == nil {
+						subscribedDisconnectSessions.Delete(sessionID)
+						close(subscription.done)
+						return
+					}
+					go func(subscribedSessionID string, disconnectCh <-chan error) {
+						defer close(subscription.done)
+						defer subscribedDisconnectSessions.Delete(subscribedSessionID)
 						select {
 						case <-wsDone:
 							return
 						case <-disconnectCh:
-							_ = conn.Close()
+							if getActiveDisconnectSessionID() == subscribedSessionID {
+								_ = conn.Close()
+							}
 						}
-					}()
+					}(sessionID, disconnectCh)
 				}
 			}
 		}
 	}
+	disconnectSessionID := headerExecutionSessionID
+	if disconnectSessionID == "" {
+		disconnectSessionID = generatedExecutionSessionID
+	}
+	setActiveDisconnectSessionID(disconnectSessionID)
+	subscribeUpstreamDisconnect(disconnectSessionID)
 	var wsTerminateErr error
 	wsTimelineLog := newResponsesWebsocketTimelineBuilder(h)
 	defer func() {
@@ -142,7 +302,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if headerExecutionSessionID != "" {
 					closeExecutionSessionID = headerExecutionSessionID
 				} else {
-					closeExecutionSessionID = fallbackExecutionSessionID
+					closeExecutionSessionID = generatedExecutionSessionID
 				}
 			}
 			h.AuthManager.CloseExecutionSession(closeExecutionSessionID)
@@ -181,6 +341,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// 	websocketPayloadPreview(payload),
 		// )
 		appendWebsocketTimelineEvent(&wsTimelineLog, "request", payload, time.Now())
+		if isResponsesWebsocketControlAck(payload) {
+			continue
+		}
 		replacesTranscript := shouldReplaceWebsocketTranscript(payload, gjson.GetBytes(payload, "input"))
 
 		currentExecutionSessionID := headerExecutionSessionID
@@ -191,7 +354,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if activeExecutionSessionID != "" {
 				currentExecutionSessionID = activeExecutionSessionID
 			} else {
-				currentExecutionSessionID = fallbackExecutionSessionID
+				currentExecutionSessionID = generatedExecutionSessionID
 			}
 		}
 		sessionChanged := activeExecutionSessionID != "" && activeExecutionSessionID != currentExecutionSessionID
@@ -250,6 +413,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		toolCachesReset := false
+		setActiveDisconnectSessionID(currentExecutionSessionID)
 		if sessionChanged {
 			if h != nil && h.AuthManager != nil {
 				h.AuthManager.ResetExecutionSession(activeExecutionSessionID)
@@ -311,6 +475,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			})
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+		subscribeUpstreamDisconnect(currentExecutionSessionID)
 
 		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey)
 		if errForward != nil {
@@ -320,6 +485,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		lastResponseOutput = completedOutput
 	}
+}
+
+func isResponsesWebsocketControlAck(payload []byte) bool {
+	return strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeProcessed
 }
 
 func responsesWebsocketSessionAuthByID(h *OpenAIResponsesAPIHandler, sessionID, authID string) (*coreauth.Auth, bool) {
@@ -925,20 +1094,36 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	completed := false
 	completedOutput := []byte("[]")
 	noticeFilter := newResponsesNoticeFilter()
+	requestCtx := c.Request.Context()
+	failNilStreamChannels := func() error {
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errResponsesWebsocketNilStreamChannels}
+		recordResponsesWebsocketAPIResponseError(h, c, errMsg)
+		_, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
+		cancel(errResponsesWebsocketNilStreamChannels)
+		if errWrite != nil {
+			return errWrite
+		}
+		return errResponsesWebsocketNilStreamChannels
+	}
+	if data == nil && errs == nil {
+		return completedOutput, failNilStreamChannels()
+	}
 
 	for {
 		select {
-		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
-			return completedOutput, c.Request.Context().Err()
+		case <-requestCtx.Done():
+			cancel(requestCtx.Err())
+			return completedOutput, requestCtx.Err()
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
+				if data == nil {
+					return completedOutput, failNilStreamChannels()
+				}
 				continue
 			}
 			if errMsg != nil {
-				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-				markAPIResponseTimestamp(c)
+				recordResponsesWebsocketAPIResponseError(h, c, errMsg)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
 				log.Infof(
 					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -971,8 +1156,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
-					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-					markAPIResponseTimestamp(c)
+					recordResponsesWebsocketAPIResponseError(h, c, errMsg)
 					errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
 					log.Infof(
 						"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -1112,7 +1296,7 @@ func writeResponsesWebsocketError(conn *websocket.Conn, wsTimelineLog *websocket
 	if errMsg != nil && errMsg.Addon != nil {
 		headers := []byte(`{}`)
 		hasHeaders := false
-		for key, values := range errMsg.Addon {
+		for key, values := range handlers.FilterUpstreamHeaders(errMsg.Addon) {
 			if len(values) == 0 {
 				continue
 			}
@@ -1171,6 +1355,7 @@ func appendWebsocketEvent(builder *websocketTimelineBuilder, eventType string, p
 	if websocketTimelineTruncated(builder) {
 		return
 	}
+	trimmedPayload = util.RedactSensitiveLogBytes(trimmedPayload)
 	if builder.Len() > 0 {
 		appendWebsocketTimelineText(builder, "\n")
 	}
@@ -1216,6 +1401,13 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
 
 func writeResponsesWebsocketPayload(conn *websocket.Conn, wsTimelineLog *websocketTimelineBuilder, payload []byte, timestamp time.Time) error {
 	appendWebsocketTimelineEvent(wsTimelineLog, "response", payload, timestamp)
+	if conn == nil {
+		return fmt.Errorf("responses websocket: downstream websocket conn is nil")
+	}
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	_ = conn.SetWriteDeadline(timestamp.Add(responsesWebsocketWriteTimeout))
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
@@ -1224,6 +1416,13 @@ func appendWebsocketTimelineDisconnect(builder *websocketTimelineBuilder, err er
 		return
 	}
 	appendWebsocketTimelineEvent(builder, "disconnect", []byte(err.Error()), timestamp)
+}
+
+func recordResponsesWebsocketAPIResponseError(h *OpenAIResponsesAPIHandler, c *gin.Context, errMsg *interfaces.ErrorMessage) {
+	if h != nil && c != nil && errMsg != nil {
+		h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+	}
+	markAPIResponseTimestamp(c)
 }
 
 func appendWebsocketTimelineEvent(builder *websocketTimelineBuilder, eventType string, payload []byte, timestamp time.Time) {
@@ -1240,6 +1439,7 @@ func appendWebsocketTimelineEvent(builder *websocketTimelineBuilder, eventType s
 	if websocketTimelineTruncated(builder) {
 		return
 	}
+	trimmedPayload = util.RedactSensitiveLogBytes(trimmedPayload)
 	if builder.Len() > 0 {
 		appendWebsocketTimelineText(builder, "\n")
 	}

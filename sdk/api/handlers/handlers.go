@@ -24,7 +24,6 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -116,7 +115,8 @@ func WithDisallowFreeAuth(ctx context.Context) context.Context {
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
-// If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
+// If errText is already valid JSON, it is returned after credential redaction to
+// preserve upstream error shape without leaking secrets.
 func BuildErrorResponseBody(status int, errText string) []byte {
 	if status <= 0 {
 		status = http.StatusInternalServerError
@@ -124,10 +124,11 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 	if strings.TrimSpace(errText) == "" {
 		errText = http.StatusText(status)
 	}
+	errText = string(util.RedactSensitiveLogBytes([]byte(errText)))
 
 	trimmed := strings.TrimSpace(errText)
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		return []byte(trimmed)
+		return util.RedactSensitiveLogBytes([]byte(trimmed))
 	}
 
 	errType := "invalid_request_error"
@@ -568,6 +569,10 @@ func appendLimitedAPIResponseBytes(c *gin.Context, builder *strings.Builder, dat
 	if c == nil || builder == nil || len(data) == 0 {
 		return
 	}
+	data = util.RedactSensitiveLogBytes(data)
+	if len(data) == 0 {
+		return
+	}
 	truncated := ginContextBool(c, apiResponseTruncatedContextKey)
 	if truncated {
 		return
@@ -738,12 +743,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 				status = code
 			}
 		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
+		addon := filteredErrorHeaders(err)
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
@@ -796,12 +796,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 				status = code
 			}
 		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
+		addon := filteredErrorHeaders(err)
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
@@ -871,13 +866,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 				status = code
 			}
 		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
+		addon := filteredErrorHeaders(err)
 		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		close(errChan)
+		return nil, nil, errChan
+	}
+	if streamResult == nil || streamResult.Chunks == nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		err := invalidStreamResultHandlerError("auth manager returned stream result without chunks")
+		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -900,7 +897,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
-		var bufferedBootstrap [][]byte
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -926,16 +922,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 			case dataChan <- chunk:
 				return true
 			}
-		}
-
-		flushBufferedBootstrap := func() bool {
-			for _, buffered := range bufferedBootstrap {
-				if okSendData := sendData(buffered); !okSendData {
-					return false
-				}
-			}
-			bufferedBootstrap = nil
-			return true
 		}
 
 		bootstrapEligible := func(err error) bool {
@@ -967,6 +953,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					chunk, ok = <-chunks
 				}
 				if !ok {
+					if !sentPayload {
+						streamErr := invalidStreamResultHandlerError("auth manager stream closed before sending payload")
+						_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: streamErr})
+					}
 					return
 				}
 				if chunk.Err != nil {
@@ -978,14 +968,18 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 							bootstrapRetries++
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 							if retryErr == nil {
-								if passthroughHeadersEnabled {
-									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+								if retryResult == nil || retryResult.Chunks == nil {
+									streamErr = invalidStreamResultHandlerError("auth manager returned retry stream result without chunks")
+								} else {
+									if passthroughHeadersEnabled {
+										replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+									}
+									chunks = retryResult.Chunks
+									continue outer
 								}
-								bufferedBootstrap = nil
-								chunks = retryResult.Chunks
-								continue outer
+							} else {
+								streamErr = enrichAuthSelectionError(retryErr, providers, normalizedModel)
 							}
-							streamErr = enrichAuthSelectionError(retryErr, providers, normalizedModel)
 						}
 					}
 
@@ -995,12 +989,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 							status = code
 						}
 					}
-					var addon http.Header
-					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
-						if hdr := he.Headers(); hdr != nil {
-							addon = hdr.Clone()
-						}
-					}
+					addon := filteredErrorHeaders(streamErr)
 					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
 					return
 				}
@@ -1008,15 +997,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					if handlerType == "openai-response" {
 						if err := validateSSEDataJSON(chunk.Payload); err != nil {
 							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
-							return
-						}
-						if !sentPayload && isOpenAIResponsesBootstrapChunk(chunk.Payload) {
-							bufferedBootstrap = append(bufferedBootstrap, cloneBytes(chunk.Payload))
-							continue
-						}
-					}
-					if !sentPayload && len(bufferedBootstrap) > 0 {
-						if okSendData := flushBufferedBootstrap(); !okSendData {
 							return
 						}
 					}
@@ -1069,124 +1049,6 @@ func validateSSEDataJSON(chunk []byte) error {
 	return nil
 }
 
-func isOpenAIResponsesBootstrapChunk(chunk []byte) bool {
-	sawData := false
-	for len(chunk) > 0 {
-		line := chunk
-		if idx := bytes.IndexByte(chunk, '\n'); idx >= 0 {
-			line = chunk[:idx]
-			chunk = chunk[idx+1:]
-		} else {
-			chunk = nil
-		}
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
-			continue
-		}
-		data := bytes.TrimSpace(line[5:])
-		if len(data) == 0 || bytes.Equal(data, sseDoneMarkerBytes) || !json.Valid(data) {
-			continue
-		}
-		sawData = true
-		if !isOpenAIResponsesBootstrapEvent(data) {
-			return false
-		}
-	}
-	return sawData
-}
-
-func isOpenAIResponsesBootstrapEvent(data []byte) bool {
-	switch strings.TrimSpace(gjson.GetBytes(data, "type").String()) {
-	case "response.created", "response.in_progress", "response.queued":
-		return true
-	case "response.output_item.added", "response.output_item.done":
-		return !openAIResponsesOutputItemHasMaterialContent(gjson.GetBytes(data, "item"))
-	case "response.content_part.added", "response.content_part.done",
-		"response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
-		return !openAIResponsesContentPartHasMaterialContent(gjson.GetBytes(data, "part"))
-	case "response.output_text.delta":
-		return strings.TrimSpace(gjson.GetBytes(data, "delta").String()) == ""
-	case "response.output_text.done":
-		return strings.TrimSpace(gjson.GetBytes(data, "text").String()) == ""
-	case "response.reasoning_summary_text.delta":
-		return strings.TrimSpace(gjson.GetBytes(data, "delta").String()) == ""
-	case "response.reasoning_summary_text.done":
-		return strings.TrimSpace(gjson.GetBytes(data, "text").String()) == ""
-	case "response.function_call_arguments.delta":
-		return strings.TrimSpace(gjson.GetBytes(data, "delta").String()) == ""
-	case "response.function_call_arguments.done":
-		return strings.TrimSpace(gjson.GetBytes(data, "arguments").String()) == ""
-	default:
-		return false
-	}
-}
-
-func openAIResponsesOutputItemHasMaterialContent(item gjson.Result) bool {
-	if !item.Exists() {
-		return false
-	}
-	switch strings.TrimSpace(item.Get("type").String()) {
-	case "message":
-		content := item.Get("content")
-		if !content.Exists() || !content.IsArray() {
-			return false
-		}
-		for _, part := range content.Array() {
-			if openAIResponsesContentPartHasMaterialContent(part) {
-				return true
-			}
-		}
-		return false
-	case "reasoning":
-		summary := item.Get("summary")
-		if !summary.Exists() || !summary.IsArray() {
-			return false
-		}
-		for _, part := range summary.Array() {
-			if openAIResponsesContentPartHasMaterialContent(part) {
-				return true
-			}
-		}
-		return false
-	case "function_call":
-		return strings.TrimSpace(item.Get("call_id").String()) != "" ||
-			strings.TrimSpace(item.Get("name").String()) != "" ||
-			strings.TrimSpace(item.Get("arguments").String()) != ""
-	case "function_call_output":
-		return strings.TrimSpace(item.Get("call_id").String()) != "" ||
-			strings.TrimSpace(item.Get("output").String()) != ""
-	default:
-		return openAIResponsesContentPartHasMaterialContent(item)
-	}
-}
-
-func openAIResponsesContentPartHasMaterialContent(part gjson.Result) bool {
-	if !part.Exists() {
-		return false
-	}
-	for _, candidate := range []string{
-		"text",
-		"delta",
-		"refusal",
-		"arguments",
-		"summary",
-		"output",
-		"url",
-		"file_id",
-		"image_url",
-		"image_url.url",
-		"input_image.image_url",
-		"partial_image_b64",
-		"image_b64",
-		"b64_json",
-	} {
-		if strings.TrimSpace(part.Get(candidate).String()) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func statusFromError(err error) int {
 	if err == nil {
 		return 0
@@ -1197,6 +1059,17 @@ func statusFromError(err error) int {
 		}
 	}
 	return 0
+}
+
+func filteredErrorHeaders(err error) http.Header {
+	if err == nil {
+		return nil
+	}
+	he, ok := err.(interface{ Headers() http.Header })
+	if !ok || he == nil {
+		return nil
+	}
+	return FilterUpstreamHeaders(he.Headers())
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
@@ -1291,6 +1164,10 @@ func replaceHeader(dst http.Header, src http.Header) {
 	}
 }
 
+func invalidStreamResultHandlerError(message string) error {
+	return &coreauth.Error{Code: "invalid_stream_result", Message: message, Retryable: true, HTTPStatus: http.StatusBadGateway}
+}
+
 func enrichAuthSelectionError(err error, providers []string, model string) error {
 	if err == nil {
 		return nil
@@ -1346,7 +1223,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		status = msg.StatusCode
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
-		for key, values := range msg.Addon {
+		for key, values := range FilterUpstreamHeaders(msg.Addon) {
 			if len(values) == 0 {
 				continue
 			}

@@ -219,13 +219,18 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Closed without data
-				if alt == "" {
-					setSSEHeaders()
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
 				}
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				flusher.Flush()
-				cliCancel(nil)
+				streamErr := fmt.Errorf("auth manager stream closed before sending payload")
+				h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: streamErr})
+				cliCancel(streamErr)
 				return
 			}
 

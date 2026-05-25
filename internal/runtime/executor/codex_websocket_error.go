@@ -8,6 +8,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const codexWebsocketConnectionLimitReachedCode = "websocket_connection_limit_reached"
+
 // statusErrWithHeaders decorates a statusErr with response headers that the
 // upstream websocket-level error carried. We keep the distinction because
 // callers that only care about status+body can keep using the naked
@@ -47,6 +49,18 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 		statusErr: err,
 		headers:   headers,
 	}, true
+}
+
+func codexWebsocketConnectionLimitReached(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	for _, path := range []string{"error.code", "code"} {
+		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, path).String()), codexWebsocketConnectionLimitReachedCode) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeCodexWebsocketErrorBody canonicalises the heterogeneous shapes

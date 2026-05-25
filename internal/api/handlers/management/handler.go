@@ -56,6 +56,11 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	// codexUsageCache memoises Codex /wham/usage responses with a short TTL
+	// and keeps a brief stale copy for transient ChatGPT backend 5xx spikes.
+	// Lazily allocated under h.mu by codexUsageHandlerCache.
+	codexUsageCache *codexUsageCache
+
 	// kiroUsageCache memoises kiro getUsageLimits responses with a short TTL
 	// and collapses concurrent dashboard polls into a single upstream call.
 	// Lazily allocated under h.mu by kiroUsageHandlerCache.

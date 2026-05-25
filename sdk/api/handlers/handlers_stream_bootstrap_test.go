@@ -13,7 +13,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 type failOnceStreamExecutor struct {
@@ -85,6 +84,8 @@ type payloadThenErrorStreamExecutor struct {
 	calls int
 }
 
+type emptyStreamExecutor struct{}
+
 func (e *payloadThenErrorStreamExecutor) Identifier() string { return "codex" }
 
 func (e *payloadThenErrorStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -130,6 +131,34 @@ func (e *payloadThenErrorStreamExecutor) Calls() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls
+}
+
+func (e *emptyStreamExecutor) Identifier() string { return "codex" }
+
+func (e *emptyStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *emptyStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	ch := make(chan coreexecutor.StreamChunk)
+	close(ch)
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *emptyStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *emptyStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *emptyStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
 }
 
 type authAwareStreamExecutor struct {
@@ -586,6 +615,54 @@ func TestExecuteStreamWithAuthManager_DoesNotRetryAfterFirstByte(t *testing.T) {
 	}
 }
 
+func TestExecuteStreamWithAuthManager_EmptyStreamReturnsError(t *testing.T) {
+	executor := &emptyStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	for chunk := range dataChan {
+		t.Fatalf("unexpected payload from empty stream: %q", chunk)
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected invalid stream error")
+	}
+	if gotErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; err=%T %v", gotErr.StatusCode, http.StatusBadGateway, gotErr.Error, gotErr.Error)
+	}
+	var authErr *coreauth.Error
+	if !errors.As(gotErr.Error, &authErr) || authErr == nil || authErr.Code != "empty_stream" {
+		t.Fatalf("error = %#v, want empty_stream", gotErr.Error)
+	}
+}
+
 func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError(t *testing.T) {
 	executor := &failOnceStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -882,7 +959,56 @@ func TestExecuteStreamWithAuthManager_AllowsSplitOpenAIResponsesSSEEventLines(t 
 	}
 }
 
-func TestExecuteStreamWithAuthManager_BuffersOpenAIResponsesBootstrapEventsForRetry(t *testing.T) {
+func TestExecuteStreamWithAuthManager_ForwardsOpenAIResponsesBootstrapByDefault(t *testing.T) {
+	executor := &responsesBootstrapThenErrorStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+
+	if executor.Calls() != 1 {
+		t.Fatalf("expected 1 stream attempt, got %d", executor.Calls())
+	}
+	if !strings.Contains(string(got), `"response.created"`) {
+		t.Fatalf("expected bootstrap event to be forwarded by default, got %q", string(got))
+	}
+	if gotErr == nil {
+		t.Fatal("expected terminal error after forwarded bootstrap event")
+	}
+}
+
+func TestExecuteStreamWithAuthManager_ForwardsOpenAIResponsesBootstrapWithRetriesEnabled(t *testing.T) {
 	executor := &responsesBootstrapThenErrorStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -928,24 +1054,25 @@ func TestExecuteStreamWithAuthManager_BuffersOpenAIResponsesBootstrapEventsForRe
 	for chunk := range dataChan {
 		got = append(got, chunk...)
 	}
+	var gotErr *interfaces.ErrorMessage
 	for msg := range errChan {
 		if msg != nil {
-			t.Fatalf("unexpected error: %+v", msg)
+			gotErr = msg
 		}
 	}
 
-	if executor.Calls() != 2 {
-		t.Fatalf("expected 2 stream attempts, got %d", executor.Calls())
+	if executor.Calls() != 1 {
+		t.Fatalf("expected 1 stream attempt after forwarding bootstrap bytes, got %d", executor.Calls())
 	}
-	if strings.Contains(string(got), `"response.created"`) {
-		t.Fatalf("unexpected buffered bootstrap event leakage: %q", string(got))
+	if !strings.Contains(string(got), `"response.created"`) {
+		t.Fatalf("expected bootstrap event to be forwarded with retries enabled, got %q", string(got))
 	}
-	if !strings.Contains(string(got), `"response.completed"`) {
-		t.Fatalf("expected successful retry payload, got %q", string(got))
+	if gotErr == nil {
+		t.Fatal("expected terminal error after forwarded bootstrap event")
 	}
 }
 
-func TestExecuteStreamWithAuthManager_BuffersOpenAIResponsesOutputItemBootstrapForRetry(t *testing.T) {
+func TestExecuteStreamWithAuthManager_ForwardsOpenAIResponsesOutputItemBootstrapWithRetriesEnabled(t *testing.T) {
 	executor := &responsesOutputItemBootstrapThenErrorStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -991,26 +1118,23 @@ func TestExecuteStreamWithAuthManager_BuffersOpenAIResponsesOutputItemBootstrapF
 	for chunk := range dataChan {
 		got = append(got, chunk...)
 	}
+	var gotErr *interfaces.ErrorMessage
 	for msg := range errChan {
 		if msg != nil {
-			t.Fatalf("unexpected error: %+v", msg)
+			gotErr = msg
 		}
 	}
 
-	if executor.Calls() != 2 {
-		t.Fatalf("expected 2 stream attempts, got %d", executor.Calls())
+	if executor.Calls() != 1 {
+		t.Fatalf("expected 1 stream attempt after forwarding bootstrap bytes, got %d", executor.Calls())
 	}
-	if strings.Contains(string(got), `"response.output_item.added"`) {
-		t.Fatalf("unexpected buffered output_item bootstrap event leakage: %q", string(got))
+	if !strings.Contains(string(got), `"response.created"`) {
+		t.Fatalf("expected response.created to be forwarded with retries enabled, got %q", string(got))
 	}
-	if !strings.Contains(string(got), `"response.completed"`) {
-		t.Fatalf("expected successful retry payload, got %q", string(got))
+	if !strings.Contains(string(got), `"response.output_item.added"`) {
+		t.Fatalf("expected output_item bootstrap event to be forwarded with retries enabled, got %q", string(got))
 	}
-}
-
-func TestOpenAIResponsesContentPartHasMaterialContentRecognizesInputImageURL(t *testing.T) {
-	part := gjson.Parse(`{"type":"input_image","image_url":"data:image/png;base64,AAA"}`)
-	if !openAIResponsesContentPartHasMaterialContent(part) {
-		t.Fatal("official input_image image_url should be treated as material content")
+	if gotErr == nil {
+		t.Fatal("expected terminal error after forwarded bootstrap events")
 	}
 }

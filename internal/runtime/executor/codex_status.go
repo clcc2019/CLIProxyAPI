@@ -66,6 +66,9 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 			continue
 		}
 		if strings.Contains(lower, "usage_limit_reached") ||
+			strings.Contains(lower, "usage_not_included") ||
+			strings.Contains(lower, "insufficient_quota") ||
+			strings.Contains(lower, "rate_limit_exceeded") ||
 			strings.Contains(lower, "you've hit your usage limit") ||
 			strings.Contains(lower, "upgrade to plus") ||
 			strings.Contains(lower, "continue using codex") {
@@ -75,11 +78,66 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 	return false
 }
 
+func isCodexUnauthorizedError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	candidates := []string{
+		gjson.GetBytes(errorBody, "error.type").String(),
+		gjson.GetBytes(errorBody, "type").String(),
+		gjson.GetBytes(errorBody, "error.code").String(),
+		gjson.GetBytes(errorBody, "code").String(),
+		gjson.GetBytes(errorBody, "error.message").String(),
+		gjson.GetBytes(errorBody, "message").String(),
+		string(errorBody),
+	}
+	for _, candidate := range candidates {
+		lower := strings.ToLower(strings.TrimSpace(candidate))
+		if lower == "" {
+			continue
+		}
+		if strings.Contains(lower, "authentication_error") ||
+			strings.Contains(lower, "unauthorized") ||
+			strings.Contains(lower, "invalid_api_key") ||
+			strings.Contains(lower, "invalid bearer") ||
+			strings.Contains(lower, "token has been invalidated") ||
+			(strings.Contains(lower, "authentication token") && strings.Contains(lower, "invalidated")) ||
+			strings.Contains(lower, "please try signing in again") ||
+			strings.Contains(lower, "sign in again") {
+			return true
+		}
+	}
+	return false
+}
+
 func codexStatusCode(statusCode int, body []byte) int {
+	if isCodexUnauthorizedError(body) {
+		return http.StatusUnauthorized
+	}
 	if isCodexUsageLimitError(body) || isCodexModelCapacityError(body) {
 		return http.StatusTooManyRequests
 	}
+	if statusCode <= 0 {
+		switch codexErrorCode(body) {
+		case "context_length_exceeded", "context_too_large", "invalid_prompt", "cyber_policy":
+			return http.StatusBadRequest
+		case "server_is_overloaded", "slow_down":
+			return http.StatusServiceUnavailable
+		}
+	}
 	return statusCode
+}
+
+func codexErrorCode(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	for _, path := range []string{"error.code", "code"} {
+		if code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String())); code != "" {
+			return code
+		}
+	}
+	return ""
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
@@ -215,6 +273,35 @@ func parseCodexStreamTerminalError(eventType string, eventData []byte) (statusEr
 	}
 }
 
+func codexStreamIdleTimeoutErr() statusErr {
+	return statusErr{code: http.StatusRequestTimeout, msg: "stream error: idle timeout waiting for SSE"}
+}
+
+func codexResponseIncompleteErr(reason string) statusErr {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unknown"
+	}
+	body := []byte(`{"error":{}}`)
+	body, _ = sjson.SetBytes(body, "error.message", "Incomplete response returned, reason: "+reason)
+	body, _ = sjson.SetBytes(body, "error.type", "incomplete_response")
+	body, _ = sjson.SetBytes(body, "error.code", "response_incomplete")
+	body, _ = sjson.SetBytes(body, "error.reason", reason)
+	return newCodexStatusErr(http.StatusBadGateway, body)
+}
+
+func codexResponseIncompleteEventErr(eventData []byte) statusErr {
+	return codexResponseIncompleteErr(codexResponseIncompleteReason(eventData))
+}
+
+func codexResponseIncompleteReason(eventData []byte) string {
+	reason := gjson.GetBytes(eventData, "response.incomplete_details.reason").String()
+	if strings.TrimSpace(reason) == "" {
+		return "unknown"
+	}
+	return reason
+}
+
 func codexTerminalStreamContextLengthErr(eventData []byte) (statusErr, bool) {
 	eventType := gjson.GetBytes(eventData, "type").String()
 	var body []byte
@@ -335,16 +422,23 @@ func normalizeCodexResponseFailedErrorBody(eventData []byte) []byte {
 		out, _ = sjson.SetBytes(out, "error.message", strings.TrimSpace(errNode.Raw))
 	}
 
+	code := codexErrorCode(out)
 	if strings.TrimSpace(gjson.GetBytes(out, "error.type").String()) == "" {
 		switch {
 		case isCodexUsageLimitError(out):
 			out, _ = sjson.SetBytes(out, "error.type", "usage_limit_reached")
+		case code == "invalid_prompt" || code == "cyber_policy":
+			out, _ = sjson.SetBytes(out, "error.type", "invalid_request_error")
 		default:
 			out, _ = sjson.SetBytes(out, "error.type", "server_error")
 		}
 	}
 	if strings.TrimSpace(gjson.GetBytes(out, "error.message").String()) == "" {
-		out, _ = sjson.SetBytes(out, "error.message", "response.failed")
+		if code == "cyber_policy" {
+			out, _ = sjson.SetBytes(out, "error.message", "This request has been flagged for possible cybersecurity risk.")
+		} else {
+			out, _ = sjson.SetBytes(out, "error.message", "response.failed")
+		}
 	}
 	return out
 }

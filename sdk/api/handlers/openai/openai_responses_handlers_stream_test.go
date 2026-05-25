@@ -1,18 +1,62 @@
 package openai
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
+
+type responsesFirstByteHTTPExecutor struct {
+	finish chan struct{}
+}
+
+func (e *responsesFirstByteHTTPExecutor) Identifier() string { return "firstbyte" }
+
+func (e *responsesFirstByteHTTPExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *responsesFirstByteHTTPExecutor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	chunks := make(chan coreexecutor.StreamChunk, 2)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp-first-byte"}}` + "\n\n")}
+	go func() {
+		defer close(chunks)
+		select {
+		case <-ctx.Done():
+			return
+		case <-e.finish:
+		}
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-first-byte","output":[]}}` + "\n\n")}
+	}()
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *responsesFirstByteHTTPExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *responsesFirstByteHTTPExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *responsesFirstByteHTTPExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
 
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
 	t.Helper()
@@ -31,6 +75,73 @@ func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *h
 	}
 
 	return h, recorder, c, flusher
+}
+
+func TestResponsesEndpointFlushesCreatedBeforeStreamCompletes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	executor := &responsesFirstByteHTTPExecutor{finish: make(chan struct{})}
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "firstbyte-auth", Provider: "firstbyte", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(): %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"test-model","stream":true,"input":"hello"}`))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext(): %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do() returned before first streaming byte: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+
+	lineCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		line, errRead := bufio.NewReader(resp.Body).ReadString('\n')
+		if errRead != nil {
+			errCh <- errRead
+			return
+		}
+		lineCh <- line
+	}()
+
+	select {
+	case line := <-lineCh:
+		if !strings.Contains(line, `"response.created"`) {
+			t.Fatalf("first line = %q, want response.created", line)
+		}
+	case errRead := <-errCh:
+		t.Fatalf("reading first SSE line: %v", errRead)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for response.created before upstream completion")
+	}
+
+	close(executor.finish)
 }
 
 func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {

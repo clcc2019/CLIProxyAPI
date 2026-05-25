@@ -324,7 +324,7 @@ image-stream-data-interval-timeout-seconds: 0
 # and codex-api-key Codex requests; `beta-features` only applies to websocket
 # requests for file-backed/OAuth Codex sessions.
 # codex-header-defaults:
-#   user-agent: "codex_cli_rs/0.118.0-alpha.4 (Linux; x86_64) xterm-256color"
+#   user-agent: "codex_cli_rs/0.134.0-alpha.3 (Linux; x86_64) xterm-256color"
 #   beta-features: "multi_agent"
 
 # OpenAI compatibility providers

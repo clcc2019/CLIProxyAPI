@@ -3,6 +3,7 @@ package executor
 import (
 	"errors"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -10,10 +11,14 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// codexResponsesStreamIdleTimeout mirrors the official Codex provider default:
+// a stream that produces no bytes for 5 minutes is treated as broken instead of
+// leaving the turn stuck in Working.
+const codexResponsesStreamIdleTimeout = 5 * time.Minute
+
 // codexResponsesAggregateIdleTimeout bounds how long the aggregate reader will
 // wait for a new byte from the upstream stream before force-closing the body.
-// 10 minutes matches the upstream heartbeat cadence plus generous slack.
-const codexResponsesAggregateIdleTimeout = 10 * time.Minute
+const codexResponsesAggregateIdleTimeout = codexResponsesStreamIdleTimeout
 
 // codexAggregateCapturedBodyMaxBytes caps the raw body we keep for request
 // logging. Declared as a var so tests can lower the budget and exercise the
@@ -76,9 +81,11 @@ func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bo
 			return nil
 		}
 		eventType := codexEventType(eventData)
+		terminalStreamErr := false
 		if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
 			result.errorStatus = terminalErr.code
 			result.errorBody = []byte(terminalErr.msg)
+			terminalStreamErr = true
 		}
 		// Single structured WARN per terminal event: pulls the three fields
 		// operators actually correlate on (eventType, incomplete reason,
@@ -87,11 +94,12 @@ func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bo
 		switch eventType {
 		case "response.incomplete":
 			codexMetrics.terminalIncomplete.Add(1)
-			reason := gjson.GetBytes(eventData, "response.incomplete_details.reason").String()
-			if reason == "" {
-				reason = "unknown"
-			}
+			reason := codexResponseIncompleteReason(eventData)
+			terminalErr := codexResponseIncompleteEventErr(eventData)
+			result.errorStatus = terminalErr.code
+			result.errorBody = []byte(terminalErr.msg)
 			log.Warnf("codex aggregate terminated event=response.incomplete reason=%s", reason)
+			return errCodexStopStream
 		case "response.failed":
 			codexMetrics.terminalFailed.Add(1)
 			message := gjson.GetBytes(eventData, "response.error.message").String()
@@ -104,6 +112,9 @@ func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bo
 			}
 			log.Warnf("codex aggregate terminated event=response.failed code=%s message=%s", code, message)
 		}
+		if terminalStreamErr {
+			return errCodexStopStream
+		}
 		if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
 			result.completedData = completed.data
 			return errCodexStopStream
@@ -112,6 +123,9 @@ func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bo
 	})
 	if errors.Is(err, errCodexStopStream) {
 		return result, nil
+	}
+	if idleReader != nil && idleReader.TimedOut() && len(result.completedData) == 0 {
+		return result, codexStreamIdleTimeoutErr()
 	}
 	if errors.Is(err, io.ErrUnexpectedEOF) && len(result.completedData) > 0 {
 		return result, nil
@@ -129,6 +143,7 @@ type idleTimeoutReadCloser struct {
 	io.ReadCloser
 	idleTimeout time.Duration
 	timer       *time.Timer
+	timedOut    atomic.Bool
 }
 
 func newIdleTimeoutReadCloser(body io.ReadCloser, idleTimeout time.Duration) *idleTimeoutReadCloser {
@@ -137,6 +152,7 @@ func newIdleTimeoutReadCloser(body io.ReadCloser, idleTimeout time.Duration) *id
 		idleTimeout: idleTimeout,
 	}
 	reader.timer = time.AfterFunc(idleTimeout, func() {
+		reader.timedOut.Store(true)
 		_ = body.Close()
 	})
 	return reader
@@ -174,4 +190,8 @@ func (r *idleTimeoutReadCloser) StopTimer() {
 	if r.timer != nil {
 		r.timer.Stop()
 	}
+}
+
+func (r *idleTimeoutReadCloser) TimedOut() bool {
+	return r != nil && r.timedOut.Load()
 }

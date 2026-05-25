@@ -87,6 +87,16 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	}
 }
 
+func TestNewCodexStatusErrTreatsInvalidatedTokenAsUnauthorized(t *testing.T) {
+	body := []byte(`{"error":{"message":"Your authentication token has been invalidated. Please try signing in again."}}`)
+
+	err := newCodexStatusErr(http.StatusInternalServerError, body)
+
+	if got := err.StatusCode(); got != http.StatusUnauthorized {
+		t.Fatalf("status code = %d, want %d", got, http.StatusUnauthorized)
+	}
+}
+
 func TestParseCodexWebsocketErrorInfersUsageLimitStatus(t *testing.T) {
 	payload := []byte(`{"type":"error","error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex.","resets_in_seconds":30}}`)
 

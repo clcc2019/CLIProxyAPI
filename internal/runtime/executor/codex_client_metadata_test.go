@@ -59,6 +59,29 @@ func TestCodexApplyHTTPClientMetadataHonorsExistingAPIKeyClientMetadata(t *testi
 	}
 }
 
+func TestCodexApplyHTTPClientMetadataKeepsOnlyStringMetadata(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[],"client_metadata":{"keep":"value","drop_number":123,"drop_object":{"x":"y"},"drop_null":null}}`)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+
+	got := codexApplyHTTPClientMetadata(body, req, auth, nil)
+
+	if value := gjson.GetBytes(got, "client_metadata.keep").String(); value != "value" {
+		t.Fatalf("client_metadata.keep = %q, want value; body=%s", value, got)
+	}
+	if id := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); id == "" {
+		t.Fatalf("client_metadata.x-codex-installation-id missing; body=%s", got)
+	}
+	for _, field := range []string{"drop_number", "drop_object", "drop_null"} {
+		if gjson.GetBytes(got, "client_metadata."+field).Exists() {
+			t.Fatalf("client_metadata.%s should be removed from string-only metadata map; body=%s", field, got)
+		}
+	}
+}
+
 func TestCodexApplyWebsocketClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	resetCodexWindowStateStore()
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)

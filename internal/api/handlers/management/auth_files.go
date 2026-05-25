@@ -58,9 +58,9 @@ const (
 
 var codexAccountsCheckURL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
 var codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
+var codexUsageUserAgent = misc.CodexCLIUserAgent
 
 const codexAccountsCheckUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-const codexUsageUserAgent = "codex_cli_rs/0.76.0"
 
 type codexSubscriptionCacheEntry struct {
 	info      codexAccountSubscriptionInfo
@@ -614,14 +614,19 @@ func (h *Handler) GetCodexUsage(c *gin.Context) {
 		}(auth)
 	}
 
-	payload, upstreamStatus, err := h.fetchCodexUsage(ctx, auth)
+	usageOpts := parseCodexUsageRequestOptions(c)
+	payload, upstreamStatus, err := h.fetchCodexUsageWithCache(ctx, auth, usageOpts)
 	if err != nil {
-		if upstreamStatus > 0 {
-			c.JSON(upstreamStatus, gin.H{"error": err.Error()})
+		if codexUsageTransientFailure(upstreamStatus, err) {
+			payload = codexUsageUnavailablePayload(err, upstreamStatus)
+		} else {
+			if upstreamStatus > 0 {
+				c.JSON(upstreamStatus, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
 	}
 	if refreshedSubscription != nil {
 		if updated := <-refreshedSubscription; updated != nil {
@@ -725,6 +730,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 				}
 				if disableCooling, ok := boolFromGJSON(data, "disable_cooling", "disable-cooling"); ok {
 					fileData["disable_cooling"] = disableCooling
+				}
+				if serviceTierPassthrough, ok := boolFromGJSON(data, coreauth.AuthFileServiceTierPassthroughKey, "service-tier-passthrough", "serviceTierPassthrough", "fast"); ok {
+					fileData[coreauth.AuthFileServiceTierPassthroughKey] = serviceTierPassthrough
+				} else if strings.EqualFold(strings.TrimSpace(typeValue), "codex") {
+					fileData[coreauth.AuthFileServiceTierPassthroughKey] = false
 				}
 				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
 					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
@@ -1064,7 +1074,31 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, codexUsageURL, nil)
+	client := &http.Client{Timeout: 20 * time.Second}
+	if h != nil {
+		client.Transport = h.codexUsageTransport(auth)
+	}
+	for attempt := 0; ; attempt++ {
+		payload, status, err := h.doCodexUsageRequest(requestCtx, client, auth, accessToken, accountID)
+		if err == nil {
+			return payload, status, nil
+		}
+		if attempt >= codexUsageMaxRequestRetries || !codexUsageShouldRetry(requestCtx, status, err) {
+			return nil, status, err
+		}
+		log.WithError(err).WithFields(log.Fields{
+			"attempt": attempt + 1,
+			"max":     codexUsageMaxRequestRetries,
+			"status":  status,
+		}).Debug("retrying codex usage request after transient failure")
+		if errSleep := codexUsageSleepBeforeRetry(requestCtx, attempt+1); errSleep != nil {
+			return nil, 0, errSleep
+		}
+	}
+}
+
+func (h *Handler) doCodexUsageRequest(ctx context.Context, client *http.Client, auth *coreauth.Auth, accessToken, accountID string) (gin.H, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexUsageURL, nil)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1075,10 +1109,8 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 	if codexUsageFedramp(auth) {
 		req.Header.Set("X-OpenAI-Fedramp", "true")
 	}
-
-	client := &http.Client{Timeout: 20 * time.Second}
-	if h != nil {
-		client.Transport = h.codexUsageTransport(auth)
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1268,9 +1300,46 @@ func cloneGinH(entry gin.H) gin.H {
 	}
 	cloned := make(gin.H, len(entry))
 	for key, value := range entry {
-		cloned[key] = value
+		cloned[key] = cloneGinValue(value)
 	}
 	return cloned
+}
+
+func cloneGinValue(value any) any {
+	switch v := value.(type) {
+	case gin.H:
+		return cloneGinH(v)
+	case map[string]any:
+		return cloneGinH(gin.H(v))
+	case map[string]string:
+		cloned := make(map[string]string, len(v))
+		for key, value := range v {
+			cloned[key] = value
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(v))
+		for i, value := range v {
+			cloned[i] = cloneGinValue(value)
+		}
+		return cloned
+	case []gin.H:
+		cloned := make([]gin.H, len(v))
+		for i, value := range v {
+			cloned[i] = cloneGinH(value)
+		}
+		return cloned
+	case []map[string]any:
+		cloned := make([]map[string]any, len(v))
+		for i, value := range v {
+			cloned[i] = cloneGinH(gin.H(value))
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), v...)
+	default:
+		return value
+	}
 }
 
 func authFileListAuthKeys(auth *coreauth.Auth) []string {
@@ -2004,6 +2073,9 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	}
 	if websockets, ok := authFileWebsockets(auth); ok {
 		entry["websockets"] = websockets
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		entry[coreauth.AuthFileServiceTierPassthroughKey] = auth.ServiceTierPassthrough()
 	}
 	if disableCooling, ok := auth.DisableCoolingOverride(); ok {
 		entry["disable_cooling"] = disableCooling
@@ -3520,33 +3592,31 @@ func authFilePreviewJSON(data []byte) ([]byte, error) {
 }
 
 type codexAuthFilePreview struct {
-	Type                           string            `json:"type"`
-	AccountID                      string            `json:"account_id,omitempty"`
-	ChatGPTAccountID               string            `json:"chatgpt_account_id,omitempty"`
-	Email                          string            `json:"email,omitempty"`
-	Name                           string            `json:"name,omitempty"`
-	PlanType                       string            `json:"plan_type,omitempty"`
-	ChatGPTPlanType                string            `json:"chatgpt_plan_type,omitempty"`
-	IDToken                        string            `json:"id_token,omitempty"`
-	IDTokenSynthetic               *bool             `json:"id_token_synthetic,omitempty"`
-	AccessToken                    string            `json:"access_token,omitempty"`
-	RefreshToken                   string            `json:"refresh_token"`
-	SessionToken                   string            `json:"session_token,omitempty"`
-	LastRefresh                    any               `json:"last_refresh,omitempty"`
-	Expired                        any               `json:"expired,omitempty"`
-	SubscriptionExpiresAt          any               `json:"subscription_expires_at,omitempty"`
-	ChatGPTSubscriptionActiveStart any               `json:"chatgpt_subscription_active_start,omitempty"`
-	ChatGPTSubscriptionActiveUntil any               `json:"chatgpt_subscription_active_until,omitempty"`
-	Prefix                         string            `json:"prefix,omitempty"`
-	ProxyURL                       string            `json:"proxy_url,omitempty"`
-	Priority                       any               `json:"priority,omitempty"`
-	Note                           string            `json:"note,omitempty"`
-	UserAgent                      string            `json:"user_agent,omitempty"`
-	ExcludedModels                 []string          `json:"excluded_models,omitempty"`
-	DisableCooling                 *bool             `json:"disable_cooling,omitempty"`
-	Websockets                     *bool             `json:"websockets,omitempty"`
-	Headers                        map[string]string `json:"headers,omitempty"`
-	Disabled                       *bool             `json:"disabled,omitempty"`
+	Type                           string   `json:"type"`
+	AccountID                      string   `json:"account_id,omitempty"`
+	ChatGPTAccountID               string   `json:"chatgpt_account_id,omitempty"`
+	Email                          string   `json:"email,omitempty"`
+	Name                           string   `json:"name,omitempty"`
+	PlanType                       string   `json:"plan_type,omitempty"`
+	ChatGPTPlanType                string   `json:"chatgpt_plan_type,omitempty"`
+	IDToken                        string   `json:"id_token,omitempty"`
+	IDTokenSynthetic               *bool    `json:"id_token_synthetic,omitempty"`
+	AccessToken                    string   `json:"access_token,omitempty"`
+	RefreshToken                   string   `json:"refresh_token"`
+	SessionToken                   string   `json:"session_token,omitempty"`
+	LastRefresh                    any      `json:"last_refresh,omitempty"`
+	Expired                        any      `json:"expired,omitempty"`
+	SubscriptionExpiresAt          any      `json:"subscription_expires_at,omitempty"`
+	ChatGPTSubscriptionActiveStart any      `json:"chatgpt_subscription_active_start,omitempty"`
+	ChatGPTSubscriptionActiveUntil any      `json:"chatgpt_subscription_active_until,omitempty"`
+	Priority                       any      `json:"priority,omitempty"`
+	Note                           string   `json:"note,omitempty"`
+	UserAgent                      string   `json:"user_agent,omitempty"`
+	ExcludedModels                 []string `json:"excluded_models,omitempty"`
+	DisableCooling                 *bool    `json:"disable_cooling,omitempty"`
+	Websockets                     *bool    `json:"websockets,omitempty"`
+	ServiceTierPassthrough         *bool    `json:"service_tier_passthrough,omitempty"`
+	Disabled                       *bool    `json:"disabled,omitempty"`
 }
 
 func isCodexAuthFilePreviewSource(doc map[string]any) bool {
@@ -3610,15 +3680,13 @@ func buildCodexAuthFilePreview(doc map[string]any) codexAuthFilePreview {
 		SubscriptionExpiresAt:          subscriptionExpiresAt,
 		ChatGPTSubscriptionActiveStart: authFilePreviewSubscriptionActiveStart(doc, claims, subscriptionExpiresAt),
 		ChatGPTSubscriptionActiveUntil: authFilePreviewFirstValue(doc, "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil"),
-		Prefix:                         authFilePreviewMetadataString(doc, "prefix"),
-		ProxyURL:                       authFilePreviewMetadataString(doc, "proxy_url", "proxy-url", "proxyUrl"),
 		Priority:                       authFilePreviewFirstValue(doc, "priority"),
 		Note:                           authFilePreviewMetadataString(doc, "note"),
 		UserAgent:                      authFilePreviewMetadataString(doc, "user_agent", "user-agent", "userAgent"),
 		ExcludedModels:                 extractExcludedModelsFromMetadata(doc),
 		DisableCooling:                 authFilePreviewOptionalBool(doc, "disable_cooling", "disable-cooling", "disableCooling"),
 		Websockets:                     authFilePreviewOptionalBool(doc, "websockets", "websocket"),
-		Headers:                        coreauth.ExtractCustomHeadersFromMetadata(doc),
+		ServiceTierPassthrough:         authFilePreviewOptionalBool(doc, coreauth.AuthFileServiceTierPassthroughKey, "service-tier-passthrough", "serviceTierPassthrough", "fast"),
 	}
 	if disabled := authFilePreviewBoolPtr(doc["disabled"]); disabled != nil && *disabled {
 		preview.Disabled = disabled
@@ -4164,23 +4232,27 @@ func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) err
 }
 
 type patchAuthFileFieldsRequest struct {
-	Name                 string            `json:"name"`
-	Prefix               *string           `json:"prefix"`
-	ProxyURL             *string           `json:"proxy_url"`
-	ProxyURLLegacy       *string           `json:"proxy-url"`
-	ProxyURLCamel        *string           `json:"proxyUrl"`
-	Headers              map[string]string `json:"headers"`
-	Priority             json.RawMessage   `json:"priority"`
-	Note                 *string           `json:"note"`
-	UserAgent            *string           `json:"user_agent"`
-	UserAgentCamel       *string           `json:"userAgent"`
-	ExcludedModels       *[]string         `json:"excluded_models"`
-	ExcludedModelsLegacy *[]string         `json:"excluded-models"`
-	ExcludedModelsCamel  *[]string         `json:"excludedModels"`
-	DisableCooling       json.RawMessage   `json:"disable_cooling"`
-	DisableCoolingLegacy json.RawMessage   `json:"disable-cooling"`
-	DisableCoolingCamel  json.RawMessage   `json:"disableCooling"`
-	Websockets           *bool             `json:"websockets"`
+	Name                         string            `json:"name"`
+	Prefix                       *string           `json:"prefix"`
+	ProxyURL                     *string           `json:"proxy_url"`
+	ProxyURLLegacy               *string           `json:"proxy-url"`
+	ProxyURLCamel                *string           `json:"proxyUrl"`
+	Headers                      map[string]string `json:"headers"`
+	Priority                     json.RawMessage   `json:"priority"`
+	Note                         *string           `json:"note"`
+	UserAgent                    *string           `json:"user_agent"`
+	UserAgentCamel               *string           `json:"userAgent"`
+	ExcludedModels               *[]string         `json:"excluded_models"`
+	ExcludedModelsLegacy         *[]string         `json:"excluded-models"`
+	ExcludedModelsCamel          *[]string         `json:"excludedModels"`
+	DisableCooling               json.RawMessage   `json:"disable_cooling"`
+	DisableCoolingLegacy         json.RawMessage   `json:"disable-cooling"`
+	DisableCoolingCamel          json.RawMessage   `json:"disableCooling"`
+	Websockets                   *bool             `json:"websockets"`
+	ServiceTierPassthrough       *bool             `json:"service_tier_passthrough"`
+	ServiceTierPassthroughLegacy *bool             `json:"service-tier-passthrough"`
+	ServiceTierPassthroughCamel  *bool             `json:"serviceTierPassthrough"`
+	Fast                         *bool             `json:"fast"`
 }
 
 func (req patchAuthFileFieldsRequest) resolvedProxyURL() *string {
@@ -4208,6 +4280,19 @@ func (req patchAuthFileFieldsRequest) resolvedExcludedModels() *[]string {
 		return req.ExcludedModelsLegacy
 	}
 	return req.ExcludedModelsCamel
+}
+
+func (req patchAuthFileFieldsRequest) resolvedServiceTierPassthrough() *bool {
+	if req.ServiceTierPassthrough != nil {
+		return req.ServiceTierPassthrough
+	}
+	if req.ServiceTierPassthroughLegacy != nil {
+		return req.ServiceTierPassthroughLegacy
+	}
+	if req.ServiceTierPassthroughCamel != nil {
+		return req.ServiceTierPassthroughCamel
+	}
+	return req.Fast
 }
 
 func resolvePatchAuthFilePath(targetAuth *coreauth.Auth, authDir, fallbackName string) string {
@@ -4338,6 +4423,12 @@ func applyPatchAuthFileDocument(
 	if req.Websockets != nil {
 		delete(doc, "websocket")
 		doc["websockets"] = *req.Websockets
+	}
+	if reqServiceTierPassthrough := req.resolvedServiceTierPassthrough(); reqServiceTierPassthrough != nil {
+		delete(doc, "service-tier-passthrough")
+		delete(doc, "serviceTierPassthrough")
+		delete(doc, "fast")
+		doc[coreauth.AuthFileServiceTierPassthroughKey] = *reqServiceTierPassthrough
 	}
 }
 
@@ -4514,6 +4605,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	reqProxyURL := req.resolvedProxyURL()
 	reqUserAgent := req.resolvedUserAgent()
 	reqExcludedModels := req.resolvedExcludedModels()
+	reqServiceTierPassthrough := req.resolvedServiceTierPassthrough()
 	disableCoolingRaw := req.DisableCooling
 	if len(disableCoolingRaw) == 0 {
 		disableCoolingRaw = req.DisableCoolingLegacy
@@ -4632,7 +4724,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if priorityPresent || req.Note != nil || reqUserAgent != nil || disableCoolingPresent || req.Websockets != nil {
+	if priorityPresent || req.Note != nil || reqUserAgent != nil || disableCoolingPresent || req.Websockets != nil || reqServiceTierPassthrough != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -4692,6 +4784,13 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			delete(targetAuth.Metadata, "websocket")
 			targetAuth.Metadata["websockets"] = *req.Websockets
 			targetAuth.Attributes["websockets"] = strconv.FormatBool(*req.Websockets)
+		}
+		if reqServiceTierPassthrough != nil {
+			delete(targetAuth.Metadata, "service-tier-passthrough")
+			delete(targetAuth.Metadata, "serviceTierPassthrough")
+			delete(targetAuth.Metadata, "fast")
+			targetAuth.Metadata[coreauth.AuthFileServiceTierPassthroughKey] = *reqServiceTierPassthrough
+			targetAuth.Attributes[coreauth.AuthFileServiceTierPassthroughKey] = strconv.FormatBool(*reqServiceTierPassthrough)
 		}
 		changed = true
 	}

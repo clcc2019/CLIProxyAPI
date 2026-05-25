@@ -66,6 +66,7 @@ func TestPreviewAuthFile_RemovesRuntimeState(t *testing.T) {
   "last_refresh": "2026-05-09T06:54:01Z",
   "expired": "2026-08-06T14:29:36Z",
   "disabled": true,
+  "service_tier_passthrough": true,
   "prefix": "team-a",
   "proxy_url": "http://proxy.example",
   "headers": {"X-Test": "value"},
@@ -113,6 +114,9 @@ func TestPreviewAuthFile_RemovesRuntimeState(t *testing.T) {
 	}
 	if got["subscription_expires_at"] != "2026-06-01T00:00:00Z" || got["disabled"] != true {
 		t.Fatalf("preview did not keep CPA status fields: %#v", got)
+	}
+	if got["service_tier_passthrough"] != true {
+		t.Fatalf("preview did not keep Codex service tier passthrough flag: %#v", got)
 	}
 	if got["chatgpt_subscription_active_start"] != "2026-05-01T00:00:00Z" {
 		t.Fatalf("preview did not derive Codex subscription active start: %#v", got)

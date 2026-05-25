@@ -18,6 +18,7 @@ const (
 	codexEventOutputItemAdded            = "response.output_item.added"
 	codexEventFunctionCallArgumentsDelta = "response.function_call_arguments.delta"
 	codexEventFunctionCallArgumentsDone  = "response.function_call_arguments.done"
+	codexEventCustomToolCallInputDelta   = "response.custom_tool_call_input.delta"
 	codexEventCompleted                  = "response.completed"
 )
 
@@ -25,6 +26,7 @@ type codexStreamFunctionCallState struct {
 	ItemID           string
 	CallID           string
 	Name             string
+	ItemType         string
 	Arguments        string
 	argumentsBuilder strings.Builder
 	OutputIndex      int64
@@ -117,8 +119,15 @@ func (s *codexStreamCompletionState) functionCallByItem(itemID string, outputInd
 
 func (s *codexStreamCompletionState) functionCallForEvent(eventData []byte) *codexStreamFunctionCallState {
 	itemID := strings.TrimSpace(gjson.GetBytes(eventData, "item_id").String())
-	outputIndex := gjson.GetBytes(eventData, "output_index").Int()
-	return s.functionCallByItem(itemID, outputIndex)
+	callID := strings.TrimSpace(gjson.GetBytes(eventData, "call_id").String())
+	outputIndex := codexStreamEventOutputIndex(eventData)
+	if state := s.functionCallByItem(itemID, outputIndex); state != nil {
+		return state
+	}
+	if key := codexStreamToolCallStateKey(itemID, callID); key != "" {
+		return s.functionCallsByItem[key]
+	}
+	return nil
 }
 
 func codexEventData(line []byte) ([]byte, bool) {
@@ -167,21 +176,27 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 		s.outputItemsFallback = append(s.outputItemsFallback, itemBytes)
 	case codexEventOutputItemAdded:
 		item := gjson.GetBytes(eventData, "item")
-		if !item.Exists() || item.Get("type").String() != "function_call" {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if !item.Exists() || (itemType != "function_call" && itemType != "custom_tool_call") {
 			return
 		}
-		outputIndex := gjson.GetBytes(eventData, "output_index").Int()
+		outputIndex := codexStreamEventOutputIndex(eventData)
 		itemID := strings.TrimSpace(item.Get("id").String())
-		if itemID == "" {
-			return
-		}
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		stateKey := codexStreamToolCallStateKey(itemID, callID)
 		state := s.functionCallByItem(itemID, outputIndex)
+		if state == nil && stateKey != "" {
+			state = s.functionCallsByItem[stateKey]
+		}
 		if state == nil {
 			state = &codexStreamFunctionCallState{
 				ItemID:      itemID,
 				OutputIndex: outputIndex,
 			}
-			s.functionCallsByItem[itemID] = state
+			if stateKey == "" {
+				return
+			}
+			s.functionCallsByItem[stateKey] = state
 			if outputIndex >= 0 {
 				if s.functionCallsByIndex == nil {
 					s.functionCallsByIndex = make(map[int64]*codexStreamFunctionCallState)
@@ -189,16 +204,30 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 				s.functionCallsByIndex[outputIndex] = state
 			}
 		}
-		if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+		if itemID != "" {
+			state.ItemID = itemID
+		}
+		if itemType != "" {
+			state.ItemType = itemType
+		}
+		if callID != "" {
 			state.CallID = callID
 		}
 		if name := strings.TrimSpace(item.Get("name").String()); name != "" {
 			state.Name = name
 		}
-	case codexEventFunctionCallArgumentsDelta:
+		if itemType == "custom_tool_call" {
+			if input := item.Get("input"); input.Exists() && input.Type == gjson.String && input.String() != "" {
+				state.setArguments(input.String())
+			}
+		}
+	case codexEventFunctionCallArgumentsDelta, codexEventCustomToolCallInputDelta:
 		state := s.functionCallForEvent(eventData)
 		if state == nil {
 			return
+		}
+		if eventType == codexEventCustomToolCallInputDelta {
+			state.ItemType = "custom_tool_call"
 		}
 		state.appendArgumentsDelta(gjson.GetBytes(eventData, "delta").String())
 	case codexEventFunctionCallArgumentsDone:
@@ -210,6 +239,22 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 			state.setArguments(arguments)
 		}
 	}
+}
+
+func codexStreamToolCallStateKey(itemID, callID string) string {
+	itemID = strings.TrimSpace(itemID)
+	if itemID != "" {
+		return itemID
+	}
+	return strings.TrimSpace(callID)
+}
+
+func codexStreamEventOutputIndex(eventData []byte) int64 {
+	outputIndex := gjson.GetBytes(eventData, "output_index")
+	if !outputIndex.Exists() {
+		return -1
+	}
+	return outputIndex.Int()
 }
 
 func (s *codexStreamCompletionState) processEventData(eventData []byte, patchCompleted bool) (codexCompletedStreamEvent, bool) {
@@ -317,14 +362,16 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 				args = "{}"
 			}
 			itemID := state.ItemID
-			if strings.TrimSpace(itemID) == "" {
+			if strings.TrimSpace(itemID) == "" && state.ItemType != "custom_tool_call" {
 				itemID = fmt.Sprintf("fc_%s", state.CallID)
 			}
 
-			item := buildCodexCompletedFunctionCallItem(itemID, state.CallID, state.Name, args)
+			item := buildCodexCompletedToolCallItem(itemID, state.CallID, state.Name, state.ItemType, args)
 			recovered = append(recovered, recoveredItem{outputIndex: state.OutputIndex, raw: item})
 			seenCallIDs[state.CallID] = struct{}{}
-			seenItemIDs[itemID] = struct{}{}
+			if itemID != "" {
+				seenItemIDs[itemID] = struct{}{}
+			}
 		}
 	}
 
@@ -468,11 +515,36 @@ func patchCodexCompletedOutput(completedData []byte, outputItemsByIndex map[int6
 }
 
 func buildCodexCompletedFunctionCallItem(itemID string, callID string, name string, args string) []byte {
+	return buildCodexCompletedToolCallItem(itemID, callID, name, "function_call", args)
+}
+
+func buildCodexCompletedToolCallItem(itemID string, callID string, name string, itemType string, args string) []byte {
+	if strings.TrimSpace(itemType) == "custom_tool_call" {
+		return buildCodexCompletedCustomToolCallItem(itemID, callID, name, args)
+	}
 	buf := make([]byte, 0, len(itemID)+len(callID)+len(name)+len(args)+80)
 	buf = append(buf, `{"id":`...)
 	buf = strconv.AppendQuote(buf, itemID)
 	buf = append(buf, `,"type":"function_call","status":"completed","arguments":`...)
 	buf = strconv.AppendQuote(buf, args)
+	buf = append(buf, `,"call_id":`...)
+	buf = strconv.AppendQuote(buf, callID)
+	buf = append(buf, `,"name":`...)
+	buf = strconv.AppendQuote(buf, name)
+	buf = append(buf, '}')
+	return buf
+}
+
+func buildCodexCompletedCustomToolCallItem(itemID string, callID string, name string, input string) []byte {
+	buf := make([]byte, 0, len(itemID)+len(callID)+len(name)+len(input)+70)
+	if strings.TrimSpace(itemID) != "" {
+		buf = append(buf, `{"id":`...)
+		buf = strconv.AppendQuote(buf, itemID)
+		buf = append(buf, `,"type":"custom_tool_call","input":`...)
+	} else {
+		buf = append(buf, `{"type":"custom_tool_call","input":`...)
+	}
+	buf = strconv.AppendQuote(buf, input)
 	buf = append(buf, `,"call_id":`...)
 	buf = strconv.AppendQuote(buf, callID)
 	buf = append(buf, `,"name":`...)

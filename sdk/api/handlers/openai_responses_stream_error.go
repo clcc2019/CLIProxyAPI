@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
 type openAIResponsesStreamErrorChunk struct {
@@ -50,6 +52,7 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 		sequenceNumber = 0
 	}
 
+	errText = string(util.RedactSensitiveLogBytes([]byte(errText)))
 	message := strings.TrimSpace(errText)
 	if message == "" {
 		message = http.StatusText(status)
@@ -94,26 +97,14 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	if strings.TrimSpace(code) == "" {
 		code = "unknown_error"
 	}
+	message = string(util.RedactSensitiveLogBytes([]byte(message)))
+	code = string(util.RedactSensitiveLogBytes([]byte(code)))
 
-	data, err := json.Marshal(openAIResponsesStreamErrorChunk{
+	data, _ := json.Marshal(openAIResponsesStreamErrorChunk{
 		Type:           "error",
 		Code:           code,
 		Message:        message,
 		SequenceNumber: sequenceNumber,
 	})
-	if err == nil {
-		return data
-	}
-
-	// Extremely defensive fallback.
-	data, _ = json.Marshal(openAIResponsesStreamErrorChunk{
-		Type:           "error",
-		Code:           "internal_server_error",
-		Message:        message,
-		SequenceNumber: sequenceNumber,
-	})
-	if len(data) > 0 {
-		return data
-	}
-	return []byte(`{"type":"error","code":"internal_server_error","message":"internal error","sequence_number":0}`)
+	return data
 }

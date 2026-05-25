@@ -7,6 +7,19 @@ import (
 	"strings"
 )
 
+const (
+	// AuthFileServiceTierPassthroughKey is the canonical auth-file field that
+	// lets Codex executors preserve a client-provided service_tier.
+	AuthFileServiceTierPassthroughKey = "service_tier_passthrough"
+)
+
+var authFileServiceTierPassthroughKeys = []string{
+	AuthFileServiceTierPassthroughKey,
+	"service-tier-passthrough",
+	"serviceTierPassthrough",
+	"fast",
+}
+
 // ApplyAuthFileOptionsFromMetadata maps editable auth-file fields from Metadata
 // onto the runtime Auth fields used by routing, scheduling, and HTTP clients.
 func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
@@ -55,6 +68,12 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 			auth.Attributes = make(map[string]string)
 		}
 		auth.Attributes["websockets"] = strconv.FormatBool(websockets)
+	}
+	if serviceTierPassthrough, ok := authFileMetadataFirstBool(auth.Metadata, authFileServiceTierPassthroughKeys...); ok {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes[AuthFileServiceTierPassthroughKey] = strconv.FormatBool(serviceTierPassthrough)
 	}
 }
 

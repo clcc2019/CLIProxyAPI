@@ -7,8 +7,82 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestMaybeEnableCodexRequestCompression_DefaultEnabledWithoutEnv(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "")
+
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"compress me"}]}]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+
+	if err := maybeEnableCodexRequestCompression(req, auth); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompression() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("Content-Encoding = %q, want zstd", got)
+	}
+}
+
+func TestMaybeEnableCodexRequestCompression_DisabledByConfig(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "")
+
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"do not compress me"}]}]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	disabled := false
+	cfg := &config.Config{EnableRequestCompression: &disabled}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+
+	if err := maybeEnableCodexRequestCompressionWithConfig(req, auth, cfg, body); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompressionWithConfig() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty", got)
+	}
+	gotBody, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(req.Body) error = %v", err)
+	}
+	if string(gotBody) != string(body) {
+		t.Fatalf("request body = %q, want %q", string(gotBody), string(body))
+	}
+}
+
+func TestMaybeEnableCodexRequestCompression_SkipsWithoutAuth(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
+
+	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	if err := maybeEnableCodexRequestCompression(req, nil); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompression() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty", got)
+	}
+}
 
 func TestMaybeEnableCodexRequestCompression_EnabledForOAuth(t *testing.T) {
 	t.Setenv(codexCompressionEnv, "1")
@@ -51,6 +125,35 @@ func TestMaybeEnableCodexRequestCompression_EnabledForOAuth(t *testing.T) {
 	}
 }
 
+func TestMaybeEnableCodexRequestCompression_EnabledForMirroredOAuthAccessToken(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
+
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"compress me"}]}]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key": "access-token",
+		},
+		Metadata: map[string]any{
+			"access_token": "access-token",
+			"account_id":   "acct_123",
+		},
+	}
+
+	if err := maybeEnableCodexRequestCompression(req, auth); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompression() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("Content-Encoding = %q, want zstd", got)
+	}
+}
+
 func TestMaybeEnableCodexRequestCompression_SkipsAPIKeyAuth(t *testing.T) {
 	t.Setenv(codexCompressionEnv, "1")
 
@@ -64,6 +167,36 @@ func TestMaybeEnableCodexRequestCompression_SkipsAPIKeyAuth(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider:   "codex",
 		Attributes: map[string]string{"api_key": "sk-test"},
+	}
+
+	if err := maybeEnableCodexRequestCompression(req, auth); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompression() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty", got)
+	}
+	gotBody, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(req.Body) error = %v", err)
+	}
+	if string(gotBody) != string(body) {
+		t.Fatalf("request body = %q, want %q", string(gotBody), string(body))
+	}
+}
+
+func TestMaybeEnableCodexRequestCompression_SkipsAzureResponses(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
+
+	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://example.openai.azure.com/openai/v1/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
 	}
 
 	if err := maybeEnableCodexRequestCompression(req, auth); err != nil {

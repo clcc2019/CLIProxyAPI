@@ -222,6 +222,57 @@ func TestCodexTerminalStreamContextLengthErrIgnoresOtherTerminalErrors(t *testin
 	}
 }
 
+func TestParseCodexStreamTerminalErrorMapsResponseFailedCodes(t *testing.T) {
+	tests := []struct {
+		name       string
+		errorJSON  string
+		wantStatus int
+		wantText   string
+	}{
+		{
+			name:       "invalid prompt",
+			errorJSON:  `{"code":"invalid_prompt","message":"Invalid prompt: blocked."}`,
+			wantStatus: http.StatusBadRequest,
+			wantText:   "Invalid prompt: blocked.",
+		},
+		{
+			name:       "cyber policy fallback",
+			errorJSON:  `{"code":"cyber_policy","message":"   "}`,
+			wantStatus: http.StatusBadRequest,
+			wantText:   "possible cybersecurity risk",
+		},
+		{
+			name:       "server overloaded",
+			errorJSON:  `{"code":"server_is_overloaded","message":"server overloaded"}`,
+			wantStatus: http.StatusServiceUnavailable,
+			wantText:   "server overloaded",
+		},
+		{
+			name:       "quota",
+			errorJSON:  `{"code":"insufficient_quota","message":"quota exceeded"}`,
+			wantStatus: http.StatusTooManyRequests,
+			wantText:   "quota exceeded",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := []byte(`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":` + tc.errorJSON + `}}`)
+
+			err, ok := parseCodexStreamTerminalError("response.failed", event)
+			if !ok {
+				t.Fatal("expected terminal error")
+			}
+			if got := statusCodeFromTestError(t, err); got != tc.wantStatus {
+				t.Fatalf("status code = %d, want %d; err=%v", got, tc.wantStatus, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("error %q should contain %q", err.Error(), tc.wantText)
+			}
+		})
+	}
+}
+
 func statusCodeFromTestError(t *testing.T, err error) int {
 	t.Helper()
 
@@ -329,6 +380,50 @@ func TestCodexExecutorExecuteStream_IgnoresUnexpectedEOFAfterCompleted(t *testin
 	gotContent := gjson.GetBytes(completed, "response.output.0.content.0.text").String()
 	if gotContent != "ok" {
 		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
+	}
+}
+
+func TestCodexExecutorExecuteStreamSurfacesEOFBeforeCompleted(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "https://codex.test/backend-api/codex",
+		"api_key":  "test",
+	}}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(codexRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(`data: {"type":"response.created","response":{"id":"resp_1"}}` + "\n\n")),
+			Request:    req,
+		}, nil
+	})))
+
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			break
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("expected stream error before response.completed")
+	}
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusRequestTimeout, streamErr)
+	}
+	if !strings.Contains(streamErr.Error(), "response.completed") {
+		t.Fatalf("error should mention response.completed, got %v", streamErr)
 	}
 }
 
@@ -481,6 +576,48 @@ func TestPatchCodexCompletedOutputRecoversFunctionCallDeltaArguments(t *testing.
 	}
 	if got := gjson.GetBytes(patched, "response.output.0.arguments").String(); got != `{"q":"hello"}` {
 		t.Fatalf("response.output.0.arguments = %q, want %q", got, `{"q":"hello"}`)
+	}
+}
+
+func TestPatchCodexCompletedOutputRecoversCustomToolCallInputDeltas(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":""}}`))
+	streamState.recordEvent([]byte(`{"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","call_id":"call_1","output_index":0,"delta":"*** Begin Patch\n"}`))
+	streamState.recordEvent([]byte(`{"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","call_id":"call_1","output_index":0,"delta":"*** End Patch"}`))
+
+	patched, recoveredCount := streamState.patchCompletedOutputIfEmpty([]byte(`{"response":{"output":[]}}`))
+	if recoveredCount != 1 {
+		t.Fatalf("recovered count = %d, want %d", recoveredCount, 1)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("response.output.0.type = %q, want %q; body=%s", got, "custom_tool_call", patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.input").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("response.output.0.input = %q; body=%s", got, patched)
+	}
+	if gjson.GetBytes(patched, "response.output.0.arguments").Exists() {
+		t.Fatalf("custom_tool_call should recover input, not arguments; body=%s", patched)
+	}
+}
+
+func TestPatchCodexCompletedOutputRecoversCustomToolCallByCallID(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_apply","name":"apply_patch","input":""}}`))
+	streamState.recordEvent([]byte(`{"type":"response.custom_tool_call_input.delta","call_id":"call_apply","delta":"*** Begin Patch\n"}`))
+	streamState.recordEvent([]byte(`{"type":"response.custom_tool_call_input.delta","call_id":"call_apply","delta":"+hello\n*** End Patch"}`))
+
+	patched, recoveredCount := streamState.patchCompletedOutputIfEmpty([]byte(`{"response":{"output":[]}}`))
+	if recoveredCount != 1 {
+		t.Fatalf("recovered count = %d, want %d", recoveredCount, 1)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("response.output.0.type = %q, want custom_tool_call; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.call_id").String(); got != "call_apply" {
+		t.Fatalf("response.output.0.call_id = %q, want call_apply; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.input").String(); got != "*** Begin Patch\n+hello\n*** End Patch" {
+		t.Fatalf("response.output.0.input = %q; body=%s", got, patched)
 	}
 }
 

@@ -4,10 +4,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 )
 
@@ -75,7 +77,30 @@ func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 	}
 }
 
-func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
+func TestWriteClaudeErrorResponseRedactsSensitiveMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadGateway,
+		Error:      errors.New(`{"error":{"message":"upstream failed Authorization: Bearer sk-secret-token","type":"api_error","access_token":"access-secret"}}`),
+	}
+
+	handler.WriteErrorResponse(c, msg)
+
+	body := recorder.Body.String()
+	for _, leaked := range []string{"sk-secret-token", "access-secret"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("Claude error response leaked %q: %s", leaked, body)
+		}
+	}
+	if !strings.Contains(body, "[REDACTED]") {
+		t.Fatalf("Claude error response missing redaction: %s", body)
+	}
+}
+
+func TestPendingStreamErrorUsesBufferedError(t *testing.T) {
 	wantErr := &interfaces.ErrorMessage{
 		StatusCode: http.StatusBadRequest,
 		Error:      errors.New(`{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","type":"invalid_request_error","code":"context_too_large"}}`),
@@ -84,7 +109,7 @@ func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	errs <- wantErr
 	close(errs)
 
-	gotErr, ok := pendingClaudeStreamError(errs)
+	gotErr, ok := handlers.PendingStreamError(errs)
 	if !ok {
 		t.Fatal("expected pending stream error")
 	}

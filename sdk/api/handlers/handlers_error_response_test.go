@@ -53,8 +53,13 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 		StatusCode: http.StatusTooManyRequests,
 		Error:      errors.New("rate limit"),
 		Addon: http.Header{
-			"Retry-After":  {"30"},
-			"X-Request-Id": {"new-1", "new-2"},
+			"Connection":        {"X-Secret-Hop"},
+			"Retry-After":       {"30"},
+			"Set-Cookie":        {"sid=secret"},
+			"Transfer-Encoding": {"chunked"},
+			"X-Litellm-Call-Id": {"gateway"},
+			"X-Request-Id":      {"new-1", "new-2"},
+			"X-Secret-Hop":      {"hop-secret"},
 		},
 	})
 
@@ -66,6 +71,31 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 	if got := recorder.Header().Values("X-Request-Id"); !reflect.DeepEqual(got, []string{"new-1", "new-2"}) {
 		t.Fatalf("X-Request-Id = %#v, want %#v", got, []string{"new-1", "new-2"})
+	}
+	for _, key := range []string{"Connection", "Set-Cookie", "Transfer-Encoding", "X-Litellm-Call-Id", "X-Secret-Hop"} {
+		if got := recorder.Header().Get(key); got != "" {
+			t.Fatalf("%s should be filtered, got %q", key, got)
+		}
+	}
+}
+
+func TestBuildErrorResponseBodyRedactsSensitiveJSON(t *testing.T) {
+	body := string(BuildErrorResponseBody(http.StatusBadGateway, `{"error":{"message":"failed","access_token":"secret-token","value":"visible"}}`))
+	if strings.Contains(body, "secret-token") {
+		t.Fatalf("error body leaked sensitive value: %s", body)
+	}
+	if !strings.Contains(body, "[REDACTED]") || !strings.Contains(body, "visible") {
+		t.Fatalf("error body missing redacted visible payload: %s", body)
+	}
+}
+
+func TestBuildErrorResponseBodyRedactsSensitivePlainText(t *testing.T) {
+	body := string(BuildErrorResponseBody(http.StatusBadGateway, "upstream failed Authorization: Bearer secret-token visible"))
+	if strings.Contains(body, "secret-token") {
+		t.Fatalf("error body leaked sensitive value: %s", body)
+	}
+	if !strings.Contains(body, "[REDACTED]") || !strings.Contains(body, "visible") {
+		t.Fatalf("error body missing redacted visible payload: %s", body)
 	}
 }
 

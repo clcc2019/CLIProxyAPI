@@ -229,10 +229,11 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
     "X-Old": "1",
     "X-Remove": "gone"
   },
-  "disable-cooling": true,
-  "excluded-models": ["old-model"],
-  "websocket": false
-}`
+	  "disable-cooling": true,
+	  "excluded-models": ["old-model"],
+	  "websocket": false,
+	  "fast": false
+	}`
 	if err := os.WriteFile(filePath, []byte(initial), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -249,7 +250,7 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	body := `{"name":"codex-auth.json","priority":0,"note":"new note","user_agent":"new-ua","headers":{"X-Old":"2","X-New":"3","X-Remove":""},"disable_cooling":false,"excluded_models":[" Model-B ","model-a","model-b"],"websockets":true}`
+	body := `{"name":"codex-auth.json","priority":0,"note":"new note","user_agent":"new-ua","headers":{"X-Old":"2","X-New":"3","X-Remove":""},"disable_cooling":false,"excluded_models":[" Model-B ","model-a","model-b"],"websockets":true,"service_tier_passthrough":true}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -280,6 +281,9 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	if got, ok := response.File["websockets"].(bool); !ok || !got {
 		t.Fatalf("response.file.websockets = %#v, want true", response.File["websockets"])
 	}
+	if got, ok := response.File["service_tier_passthrough"].(bool); !ok || !got {
+		t.Fatalf("response.file.service_tier_passthrough = %#v, want true", response.File["service_tier_passthrough"])
+	}
 
 	updated, ok := manager.GetByID(auth.ID)
 	if !ok || updated == nil {
@@ -296,6 +300,9 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	}
 	if got := updated.Attributes["websockets"]; got != "true" {
 		t.Fatalf("Attributes[websockets] = %q, want %q", got, "true")
+	}
+	if got := updated.Attributes[coreauth.AuthFileServiceTierPassthroughKey]; got != "true" {
+		t.Fatalf("Attributes[%s] = %q, want true", coreauth.AuthFileServiceTierPassthroughKey, got)
 	}
 	if got := updated.Attributes["excluded_models"]; got != "model-a,model-b" {
 		t.Fatalf("Attributes[excluded_models] = %q, want %q", got, "model-a,model-b")
@@ -343,6 +350,12 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	}
 	if _, ok := document["websocket"]; ok {
 		t.Fatal("file.websocket should be removed")
+	}
+	if got, ok := document["service_tier_passthrough"].(bool); !ok || !got {
+		t.Fatalf("file.service_tier_passthrough = %#v, want true", document["service_tier_passthrough"])
+	}
+	if _, ok := document["fast"]; ok {
+		t.Fatal("file.fast should be removed")
 	}
 	excludedModels, ok := document["excluded_models"].([]any)
 	if !ok {

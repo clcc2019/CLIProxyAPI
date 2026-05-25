@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -25,10 +26,16 @@ const (
 	codexFinalUpstreamCompact
 )
 
+const codexDefaultOutputSchemaTextFormatName = "codex_output_schema"
+
 type codexFinalUpstreamBodyOptions struct {
-	requestKind                codexFinalUpstreamRequestKind
-	streamMode                 codexStreamFieldMode
-	preservePreviousResponseID bool
+	requestKind                 codexFinalUpstreamRequestKind
+	streamMode                  codexStreamFieldMode
+	preservePreviousResponseID  bool
+	preserveGenerate            bool
+	store                       bool
+	omitServiceTier             bool
+	suppressDefaultInstructions bool
 }
 
 // codexFinalUpstreamRequestKindForURL classifies the request kind from the
@@ -51,22 +58,48 @@ func codexFinalUpstreamRequestKindForURL(rawURL string) codexFinalUpstreamReques
 	return codexFinalUpstreamResponses
 }
 
+func codexShouldStoreResponses(auth *cliproxyauth.Auth, upstreamURL string) bool {
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "azure") {
+		return true
+	}
+	return codexMatchesAzureResponsesBaseURL(upstreamURL)
+}
+
+func codexMatchesAzureResponsesBaseURL(rawURL string) bool {
+	lower := strings.ToLower(strings.TrimSpace(rawURL))
+	if lower == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"openai.azure.",
+		"cognitiveservices.azure.",
+		"aoai.azure.",
+		"azure-api.",
+		"azurefd.",
+		"windows.net/openai",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 var codexAllowedResponsesFinalUpstreamFields = map[string]struct{}{
-	"model":                  {},
-	"instructions":           {},
-	"input":                  {},
-	"tools":                  {},
-	"tool_choice":            {},
-	"parallel_tool_calls":    {},
-	"reasoning":              {},
-	"store":                  {},
-	"stream":                 {},
-	"include":                {},
-	"service_tier":           {},
-	"prompt_cache_key":       {},
-	"prompt_cache_retention": {},
-	"text":                   {},
-	"client_metadata":        {},
+	"model":               {},
+	"instructions":        {},
+	"input":               {},
+	"tools":               {},
+	"tool_choice":         {},
+	"parallel_tool_calls": {},
+	"reasoning":           {},
+	"store":               {},
+	"stream":              {},
+	"include":             {},
+	"service_tier":        {},
+	"prompt_cache_key":    {},
+	"text":                {},
+	"client_metadata":     {},
 }
 
 var codexAllowedCompactFinalUpstreamFields = map[string]struct{}{
@@ -94,15 +127,39 @@ func codexEnsureFinalUpstreamBodyDefaults(body []byte, opts codexFinalUpstreamBo
 			edits = append(edits, helps.SetRawJSONEdit(field, rawValue))
 		}
 	}
+	addArrayDefault := func(field string) {
+		current := gjson.GetBytes(body, field)
+		if !current.Exists() {
+			appendFields = append(appendFields, codexTopLevelRawField{field: field, rawValue: []byte("[]")})
+			return
+		}
+		if !current.IsArray() {
+			edits = append(edits, helps.SetRawJSONEdit(field, []byte("[]")))
+		}
+	}
+	addBoolDefault := func(field string, value bool) {
+		current := gjson.GetBytes(body, field)
+		rawValue := []byte("false")
+		if value {
+			rawValue = []byte("true")
+		}
+		if !current.Exists() {
+			appendFields = append(appendFields, codexTopLevelRawField{field: field, rawValue: rawValue})
+			return
+		}
+		if current.Type != gjson.True && current.Type != gjson.False {
+			edits = append(edits, helps.SetRawJSONEdit(field, rawValue))
+		}
+	}
 
 	switch opts.requestKind {
 	case codexFinalUpstreamCompact:
-		addDefault("tools", []byte("[]"))
-		addDefault("parallel_tool_calls", []byte("true"))
+		addArrayDefault("tools")
+		addBoolDefault("parallel_tool_calls", true)
 	default:
-		addDefault("tools", []byte("[]"))
+		addArrayDefault("tools")
 		addDefault("tool_choice", []byte(`"auto"`))
-		addDefault("parallel_tool_calls", []byte("true"))
+		addBoolDefault("parallel_tool_calls", true)
 		addDefault("include", []byte("[]"))
 	}
 	if len(appendFields) > 0 {
@@ -137,7 +194,14 @@ func pruneCodexFinalUpstreamBody(body []byte, opts codexFinalUpstreamBodyOptions
 		if field == "" {
 			return true
 		}
-		if field == "previous_response_id" && opts.preservePreviousResponseID {
+		if field == "previous_response_id" && opts.preservePreviousResponseID && opts.requestKind != codexFinalUpstreamCompact {
+			return true
+		}
+		if field == "generate" && opts.preserveGenerate && opts.requestKind != codexFinalUpstreamCompact {
+			return true
+		}
+		if field == "service_tier" && opts.omitServiceTier {
+			edits = append(edits, helps.DeleteJSONEdit(field))
 			return true
 		}
 		if _, ok := allowedFields[field]; ok {
@@ -150,6 +214,12 @@ func pruneCodexFinalUpstreamBody(body []byte, opts codexFinalUpstreamBodyOptions
 	instructions := gjson.GetBytes(body, "instructions")
 	if !instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && instructions.String() == "") {
 		edits = append(edits, helps.DeleteJSONEdit("instructions"))
+	}
+	for _, field := range []string{"service_tier", "prompt_cache_key"} {
+		value := gjson.GetBytes(body, field)
+		if value.Exists() && (value.Type != gjson.String || strings.TrimSpace(value.String()) == "") {
+			edits = append(edits, helps.DeleteJSONEdit(field))
+		}
 	}
 	if len(edits) == 0 {
 		return body
@@ -175,6 +245,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 
 	body = codexEnsureFinalUpstreamBodyDefaults(body, opts)
 	body = normalizeCodexFinalUpstreamTools(body)
+	body = normalizeCodexFinalUpstreamText(body)
 
 	// Resolve all four inspected fields in a single payload traversal so
 	// downstream branches can reuse the decoded Result values rather than
@@ -190,17 +261,21 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 		edits = append(edits, helps.SetJSONEdit("model", baseModel))
 	}
 	if opts.requestKind == codexFinalUpstreamResponses {
+		storeValue := []byte("false")
+		if opts.store {
+			storeValue = []byte("true")
+		}
 		if !store.Exists() {
-			if updated, ok := codexAppendTopLevelRawField(body, "store", []byte("false")); ok {
+			if updated, ok := codexAppendTopLevelRawField(body, "store", storeValue); ok {
 				body = updated
 			} else {
-				edits = append(edits, helps.SetRawJSONEdit("store", []byte("false")))
+				edits = append(edits, helps.SetRawJSONEdit("store", storeValue))
 			}
-		} else if store.Type != gjson.False {
-			edits = append(edits, helps.SetRawJSONEdit("store", []byte("false")))
+		} else if (!opts.store && store.Type != gjson.False) || (opts.store && store.Type != gjson.True) {
+			edits = append(edits, helps.SetRawJSONEdit("store", storeValue))
 		}
 	}
-	if !instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) == "") {
+	if !opts.suppressDefaultInstructions && (!instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) == "")) {
 		instructionText := codexDefaultInstructionsFromBody(body)
 		if !instructions.Exists() {
 			if updated, ok := codexAppendTopLevelStringField(body, "instructions", instructionText); ok {
@@ -241,13 +316,103 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 		body = helps.EditJSONBytes(body, edits...)
 	}
 	body = pruneCodexFinalUpstreamBody(body, opts)
+	body = codexEnsureReasoningEncryptedContentInclude(body, opts)
 	return body
+}
+
+func normalizeCodexFinalUpstreamText(body []byte) []byte {
+	format := gjson.GetBytes(body, "text.format")
+	if !format.IsObject() {
+		return body
+	}
+	formatType := format.Get("type")
+	if formatType.Type != gjson.String || strings.TrimSpace(formatType.String()) != "json_schema" {
+		return body
+	}
+	schema := format.Get("schema")
+	if !schema.Exists() || schema.Type == gjson.Null {
+		return body
+	}
+	name := format.Get("name")
+	if name.Type == gjson.String && strings.TrimSpace(name.String()) != "" {
+		return body
+	}
+	return helps.EditJSONBytes(body, helps.SetJSONEdit("text.format.name", codexDefaultOutputSchemaTextFormatName))
+}
+
+func codexEnsureReasoningEncryptedContentInclude(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
+	if opts.requestKind != codexFinalUpstreamResponses {
+		return body
+	}
+	requiredInclude := ""
+	reasoning := gjson.GetBytes(body, "reasoning")
+	if reasoning.Exists() && reasoning.Type != gjson.Null {
+		requiredInclude = "reasoning.encrypted_content"
+	}
+
+	include := gjson.GetBytes(body, "include")
+	rawInclude, changed := codexFinalIncludeStringsRaw(include, requiredInclude)
+	if !changed {
+		return body
+	}
+	if updated, err := helps.SetRawJSONBytes(body, "include", rawInclude); err == nil {
+		return updated
+	}
+	return body
+}
+
+func codexFinalIncludeStringsRaw(include gjson.Result, required string) ([]byte, bool) {
+	required = strings.TrimSpace(required)
+	if !include.Exists() && required == "" {
+		return []byte("[]"), false
+	}
+
+	seen := make(map[string]struct{})
+	items := make([][]byte, 0, 2)
+	changed := false
+	if include.Exists() && include.IsArray() {
+		include.ForEach(func(_, item gjson.Result) bool {
+			if item.Type != gjson.String {
+				changed = true
+				return true
+			}
+			value := strings.TrimSpace(item.String())
+			if value == "" {
+				changed = true
+				return true
+			}
+			if value != item.String() {
+				changed = true
+			}
+			if _, ok := seen[value]; ok {
+				changed = true
+				return true
+			}
+			seen[value] = struct{}{}
+			items = append(items, strconv.AppendQuote(nil, value))
+			return true
+		})
+	} else if include.Exists() {
+		changed = true
+	}
+
+	if required != "" {
+		if _, ok := seen[required]; !ok {
+			seen[required] = struct{}{}
+			items = append(items, strconv.AppendQuote(nil, required))
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	return codexRawJSONArray(items), true
 }
 
 func normalizeCodexFinalUpstreamTools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	if tools.IsArray() {
-		if rawTools, ok := normalizeCodexFinalUpstreamToolsArray(tools); ok {
+		if rawTools, changed := normalizeCodexFinalUpstreamToolsArray(tools); changed {
 			if updated, err := helps.SetRawJSONBytes(body, "tools", rawTools); err == nil {
 				body = updated
 			}
@@ -256,7 +421,7 @@ func normalizeCodexFinalUpstreamTools(body []byte) []byte {
 
 	toolChoice := gjson.GetBytes(body, "tool_choice")
 	if toolChoice.Exists() {
-		if rawChoice, ok := normalizeCodexFinalUpstreamToolChoice(toolChoice); ok {
+		if rawChoice, ok := normalizeCodexFinalUpstreamToolChoice(toolChoice); ok && !codexRawJSONEqual(rawChoice, []byte(toolChoice.Raw)) {
 			if updated, err := helps.SetRawJSONBytes(body, "tool_choice", rawChoice); err == nil {
 				body = updated
 			}
@@ -270,13 +435,22 @@ func normalizeCodexFinalUpstreamToolsArray(tools gjson.Result) ([]byte, bool) {
 		return nil, false
 	}
 
-	items := make([][]byte, 0, len(tools.Array()))
+	items := make([][]byte, 0)
+	changed := false
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if rawTool, keep := normalizeCodexFinalUpstreamTool(tool); keep {
+			if !codexRawJSONEqual(rawTool, []byte(tool.Raw)) {
+				changed = true
+			}
 			items = append(items, rawTool)
+		} else {
+			changed = true
 		}
 		return true
 	})
+	if !changed {
+		return nil, false
+	}
 
 	return codexRawJSONArray(items), true
 }
@@ -297,12 +471,16 @@ func normalizeCodexFinalUpstreamTool(tool gjson.Result) ([]byte, bool) {
 	switch toolType {
 	case "function":
 		return normalizeCodexFinalUpstreamFunctionTool(tool)
+	case "namespace":
+		return normalizeCodexFinalUpstreamNamespaceTool(tool)
+	case "tool_search":
+		return normalizeCodexFinalUpstreamTypedTool(tool, "tool_search"), true
+	case "custom":
+		return normalizeCodexFinalUpstreamNamedTypedTool(tool, "custom")
 	case "web_search":
 		return normalizeCodexFinalUpstreamWebSearchTool(tool), true
 	case "image_generation":
-		raw := []byte(tool.Raw)
-		raw, _ = helps.SetJSONBytes(raw, "type", "image_generation")
-		return raw, true
+		return normalizeCodexFinalUpstreamTypedTool(tool, "image_generation"), true
 	default:
 		if strings.TrimSpace(tool.Get("name").String()) == "" {
 			return nil, false
@@ -318,38 +496,73 @@ func normalizeCodexFinalUpstreamFunctionTool(tool gjson.Result) ([]byte, bool) {
 	}
 
 	raw := []byte(tool.Raw)
-	raw, _ = helps.SetJSONBytes(raw, "type", "function")
-	raw, _ = helps.SetJSONBytes(raw, "name", name)
+	raw = codexSetJSONStringIfDifferent(raw, tool.Get("type"), "type", "function")
+	raw = codexSetJSONStringIfDifferent(raw, tool.Get("name"), "name", name)
 	parameters := tool.Get("parameters")
 	if !parameters.Exists() || parameters.Type == gjson.Null {
 		if inputSchema := tool.Get("input_schema"); inputSchema.Exists() && inputSchema.Type != gjson.Null {
-			raw, _ = helps.SetRawJSONBytes(raw, "parameters", []byte(inputSchema.Raw))
+			raw = codexSetRawJSONIfDifferent(raw, parameters, "parameters", []byte(inputSchema.Raw))
 		} else {
-			raw, _ = helps.SetRawJSONBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))
+			raw = codexSetRawJSONIfDifferent(raw, parameters, "parameters", []byte(`{"type":"object","properties":{}}`))
 		}
 	}
-	if !tool.Get("strict").Exists() || tool.Get("strict").Type == gjson.Null {
-		raw, _ = helps.SetJSONBytes(raw, "strict", false)
+	if strict := tool.Get("strict"); !strict.Exists() || strict.Type == gjson.Null {
+		raw = codexSetRawJSONIfDifferent(raw, strict, "strict", []byte("false"))
 	}
-	raw, _ = helps.DeleteJSONBytes(raw, "input_schema")
-	raw, _ = helps.DeleteJSONBytes(raw, "parameters.$schema")
-	raw, _ = helps.DeleteJSONBytes(raw, "cache_control")
-	raw, _ = helps.DeleteJSONBytes(raw, "defer_loading")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("input_schema"), "input_schema")
+	raw = codexDeleteJSONIfExists(raw, gjson.GetBytes(raw, "parameters.$schema"), "parameters.$schema")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("cache_control"), "cache_control")
+	return raw, true
+}
+
+func normalizeCodexFinalUpstreamNamespaceTool(tool gjson.Result) ([]byte, bool) {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		return nil, false
+	}
+
+	raw := []byte(tool.Raw)
+	raw = codexSetJSONStringIfDifferent(raw, tool.Get("type"), "type", "namespace")
+	raw = codexSetJSONStringIfDifferent(raw, tool.Get("name"), "name", name)
+	if tools := tool.Get("tools"); tools.IsArray() {
+		if rawTools, changed := normalizeCodexFinalUpstreamToolsArray(tools); changed {
+			raw, _ = helps.SetRawJSONBytes(raw, "tools", rawTools)
+		}
+	}
+	raw = codexDeleteJSONIfExists(raw, tool.Get("input_schema"), "input_schema")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("parameters"), "parameters")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("cache_control"), "cache_control")
+	return raw, true
+}
+
+func normalizeCodexFinalUpstreamTypedTool(tool gjson.Result, toolType string) []byte {
+	raw := []byte(tool.Raw)
+	raw = codexSetJSONStringIfDifferent(raw, tool.Get("type"), "type", toolType)
+	raw = codexDeleteJSONIfExists(raw, tool.Get("cache_control"), "cache_control")
+	return raw
+}
+
+func normalizeCodexFinalUpstreamNamedTypedTool(tool gjson.Result, toolType string) ([]byte, bool) {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		return nil, false
+	}
+	raw := normalizeCodexFinalUpstreamTypedTool(tool, toolType)
+	raw = codexSetJSONStringIfDifferent(raw, tool.Get("name"), "name", name)
 	return raw, true
 }
 
 func normalizeCodexFinalUpstreamWebSearchTool(tool gjson.Result) []byte {
 	raw := []byte(tool.Raw)
-	raw, _ = helps.SetJSONBytes(raw, "type", "web_search")
+	raw = codexSetJSONStringIfDifferent(raw, tool.Get("type"), "type", "web_search")
 	if allowedDomains := tool.Get("allowed_domains"); allowedDomains.Exists() && allowedDomains.IsArray() && !tool.Get("filters.allowed_domains").Exists() {
 		raw, _ = helps.SetRawJSONBytes(raw, "filters.allowed_domains", []byte(allowedDomains.Raw))
 	}
-	raw, _ = helps.DeleteJSONBytes(raw, "name")
-	raw, _ = helps.DeleteJSONBytes(raw, "input_schema")
-	raw, _ = helps.DeleteJSONBytes(raw, "allowed_domains")
-	raw, _ = helps.DeleteJSONBytes(raw, "blocked_domains")
-	raw, _ = helps.DeleteJSONBytes(raw, "cache_control")
-	raw, _ = helps.DeleteJSONBytes(raw, "defer_loading")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("name"), "name")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("input_schema"), "input_schema")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("allowed_domains"), "allowed_domains")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("blocked_domains"), "blocked_domains")
+	raw = codexDeleteJSONIfExists(raw, tool.Get("cache_control"), "cache_control")
 	return raw
 }
 
@@ -394,17 +607,117 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 		return []byte(`{"type":"web_search"}`), true
 	case "image_generation":
 		return []byte(`{"type":"image_generation"}`), true
-	case "allowed_tools":
-		raw := []byte(toolChoice.Raw)
-		tools := toolChoice.Get("tools")
-		if tools.IsArray() {
-			if rawTools, ok := normalizeCodexFinalUpstreamToolsArray(tools); ok {
-				raw, _ = helps.SetRawJSONBytes(raw, "tools", rawTools)
-			}
+	case "custom":
+		name := strings.TrimSpace(toolChoice.Get("name").String())
+		if name == "" {
+			return []byte(`"auto"`), true
 		}
+		raw := []byte(`{"type":"custom"}`)
+		raw, _ = helps.SetJSONBytes(raw, "name", name)
 		return raw, true
+	case "allowed_tools":
+		return normalizeCodexFinalUpstreamAllowedToolsChoice(toolChoice), true
 	default:
 		return []byte(`"auto"`), true
+	}
+}
+
+func normalizeCodexFinalUpstreamAllowedToolsChoice(toolChoice gjson.Result) []byte {
+	mode := strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
+	switch mode {
+	case "required", "any":
+		mode = "required"
+	default:
+		mode = "auto"
+	}
+
+	rawTools := []byte("[]")
+	if tools := toolChoice.Get("tools"); tools.IsArray() {
+		rawTools = normalizeCodexFinalUpstreamAllowedToolRefsArray(tools)
+	}
+
+	raw := []byte(`{"type":"allowed_tools"}`)
+	raw, _ = helps.SetJSONBytes(raw, "mode", mode)
+	raw, _ = helps.SetRawJSONBytes(raw, "tools", rawTools)
+	return raw
+}
+
+func normalizeCodexFinalUpstreamAllowedToolRefsArray(tools gjson.Result) []byte {
+	items := make([][]byte, 0)
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if rawTool, keep := normalizeCodexFinalUpstreamAllowedToolRef(tool); keep {
+			items = append(items, rawTool)
+		}
+		return true
+	})
+	return codexRawJSONArray(items)
+}
+
+func normalizeCodexFinalUpstreamAllowedToolRef(tool gjson.Result) ([]byte, bool) {
+	if !tool.IsObject() {
+		return nil, false
+	}
+
+	toolType := normalizeCodexFinalUpstreamToolType(tool.Get("type").String())
+	if toolType == "" || toolType == "function" || toolType == "tool" {
+		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			name = strings.TrimSpace(tool.Get("function.name").String())
+		}
+		if name == "" {
+			return nil, false
+		}
+		raw := []byte(`{"type":"function"}`)
+		raw, _ = helps.SetJSONBytes(raw, "name", name)
+		return raw, true
+	}
+
+	switch toolType {
+	case "web_search":
+		return []byte(`{"type":"web_search"}`), true
+	case "image_generation":
+		return []byte(`{"type":"image_generation"}`), true
+	case "tool_search":
+		return []byte(`{"type":"tool_search"}`), true
+	case "custom":
+		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			return nil, false
+		}
+		raw := []byte(`{"type":"custom"}`)
+		raw, _ = helps.SetJSONBytes(raw, "name", name)
+		return raw, true
+	case "mcp":
+		serverLabel := strings.TrimSpace(tool.Get("server_label").String())
+		if serverLabel == "" {
+			return nil, false
+		}
+		raw := []byte(`{"type":"mcp"}`)
+		raw, _ = helps.SetJSONBytes(raw, "server_label", serverLabel)
+		if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+			raw, _ = helps.SetJSONBytes(raw, "name", name)
+		}
+		return raw, true
+	case "namespace":
+		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			return nil, false
+		}
+		raw := []byte(`{"type":"namespace"}`)
+		raw, _ = helps.SetJSONBytes(raw, "name", name)
+		return raw, true
+	case "file_search", "computer", "computer_use", "computer_use_preview", "code_interpreter", "shell", "apply_patch":
+		raw := []byte(`{}`)
+		raw, _ = helps.SetJSONBytes(raw, "type", toolType)
+		return raw, true
+	default:
+		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			return nil, false
+		}
+		raw := []byte(`{"type":"function"}`)
+		raw, _ = helps.SetJSONBytes(raw, "name", name)
+		return raw, true
 	}
 }
 
@@ -414,6 +727,8 @@ func normalizeCodexFinalUpstreamToolType(toolType string) string {
 		return ""
 	case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_20250305", "web_search_20260209":
 		return "web_search"
+	case "namespace", "tool_search", "custom", "image_generation", "function":
+		return strings.ToLower(strings.TrimSpace(toolType))
 	default:
 		return strings.ToLower(strings.TrimSpace(toolType))
 	}
@@ -434,6 +749,43 @@ func codexRawJSONArray(items [][]byte) []byte {
 	}
 	buf.WriteByte(']')
 	return buf.Bytes()
+}
+
+func codexRawJSONEqual(left, right []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(left), bytes.TrimSpace(right))
+}
+
+func codexSetJSONStringIfDifferent(raw []byte, current gjson.Result, path string, value string) []byte {
+	if current.Exists() && current.Type == gjson.String && current.String() == value {
+		return raw
+	}
+	updated, err := helps.SetJSONBytes(raw, path, value)
+	if err != nil {
+		return raw
+	}
+	return updated
+}
+
+func codexSetRawJSONIfDifferent(raw []byte, current gjson.Result, path string, value []byte) []byte {
+	if current.Exists() && codexRawJSONEqual([]byte(current.Raw), value) {
+		return raw
+	}
+	updated, err := helps.SetRawJSONBytes(raw, path, value)
+	if err != nil {
+		return raw
+	}
+	return updated
+}
+
+func codexDeleteJSONIfExists(raw []byte, current gjson.Result, path string) []byte {
+	if !current.Exists() {
+		return raw
+	}
+	updated, err := helps.DeleteJSONBytes(raw, path)
+	if err != nil {
+		return raw
+	}
+	return updated
 }
 
 func codexDefaultInstructionsFromBody(body []byte) string {

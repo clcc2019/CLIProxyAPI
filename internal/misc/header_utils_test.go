@@ -1,8 +1,12 @@
 package misc
 
 import (
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,6 +27,21 @@ func TestBuildCodexUserAgent_FallsBackToDefaultVersion(t *testing.T) {
 	pattern := regexp.MustCompile(`^codex_cli_rs/` + regexp.QuoteMeta(CodexCLIVersion) + ` \(`)
 	if !pattern.MatchString(got) {
 		t.Fatalf("empty version should fall back to CodexCLIVersion, got %q", got)
+	}
+}
+
+func TestCodexCLIVersionPinned(t *testing.T) {
+	const want = "0.134.0-alpha.3"
+	if CodexCLIVersion != want {
+		t.Fatalf("CodexCLIVersion = %q, want %q", CodexCLIVersion, want)
+	}
+}
+
+func TestCodexCLIVersionMeetsGpt55CatalogMinimum(t *testing.T) {
+	minVersion := codexCatalogMinimalClientVersion(t, "gpt-5.5")
+
+	if compareCodexSemver(t, CodexCLIVersion, minVersion) < 0 {
+		t.Fatalf("CodexCLIVersion = %q, below gpt-5.5 minimal_client_version %q", CodexCLIVersion, minVersion)
 	}
 }
 
@@ -150,6 +169,26 @@ func TestCodexLinuxOSDescriptorFallsBackToPrettyName(t *testing.T) {
 	}
 }
 
+func TestCodexDarwinProductVersion(t *testing.T) {
+	got := codexDarwinProductVersion(func() ([]byte, error) {
+		return []byte("14.6.1\n"), nil
+	})
+
+	if got != "14.6.1" {
+		t.Fatalf("codexDarwinProductVersion() = %q, want 14.6.1", got)
+	}
+}
+
+func TestCodexDarwinProductVersionRejectsUnexpectedOutput(t *testing.T) {
+	got := codexDarwinProductVersion(func() ([]byte, error) {
+		return []byte("bad version\n"), nil
+	})
+
+	if got != "" {
+		t.Fatalf("codexDarwinProductVersion() = %q, want empty", got)
+	}
+}
+
 func TestCodexCLIUserAgentWithOriginatorTrimsWhitespace(t *testing.T) {
 	got := CodexCLIUserAgentWithOriginator("  codex_vscode  ")
 
@@ -173,4 +212,75 @@ func TestCodexCLIUserAgentWithOriginatorUsesNormalizedCacheKey(t *testing.T) {
 	if left != right {
 		t.Fatalf("normalized originators should produce identical user agents: %q != %q", left, right)
 	}
+}
+
+func codexCatalogMinimalClientVersion(t *testing.T, slug string) string {
+	t.Helper()
+
+	type catalog struct {
+		Models []struct {
+			Slug                 string `json:"slug"`
+			MinimalClientVersion string `json:"minimal_client_version"`
+		} `json:"models"`
+	}
+
+	data, err := os.ReadFile(filepath.Join("..", "registry", "models", "codex_client_models.json"))
+	if err != nil {
+		t.Fatalf("read Codex model catalog: %v", err)
+	}
+
+	var parsed catalog
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse Codex model catalog: %v", err)
+	}
+
+	for _, model := range parsed.Models {
+		if model.Slug == slug {
+			if strings.TrimSpace(model.MinimalClientVersion) == "" {
+				t.Fatalf("%s missing minimal_client_version in Codex model catalog", slug)
+			}
+			return model.MinimalClientVersion
+		}
+	}
+	t.Fatalf("%s not found in Codex model catalog", slug)
+	return ""
+}
+
+func compareCodexSemver(t *testing.T, left, right string) int {
+	t.Helper()
+
+	leftParts := parseCodexSemver(t, left)
+	rightParts := parseCodexSemver(t, right)
+	for i := range leftParts {
+		if leftParts[i] > rightParts[i] {
+			return 1
+		}
+		if leftParts[i] < rightParts[i] {
+			return -1
+		}
+	}
+	return 0
+}
+
+func parseCodexSemver(t *testing.T, version string) [3]int {
+	t.Helper()
+
+	core := strings.TrimSpace(version)
+	if cut := strings.IndexAny(core, "-+"); cut >= 0 {
+		core = core[:cut]
+	}
+	fields := strings.Split(core, ".")
+	if len(fields) != 3 {
+		t.Fatalf("invalid Codex semver %q", version)
+	}
+
+	var parsed [3]int
+	for i, field := range fields {
+		value, err := strconv.Atoi(field)
+		if err != nil {
+			t.Fatalf("invalid Codex semver %q: %v", version, err)
+		}
+		parsed[i] = value
+	}
+	return parsed
 }

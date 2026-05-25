@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -195,6 +196,24 @@ func TestHashCodexFinalUpstreamBodyMemoKeyIsDeterministicAndDistinguishing(t *te
 	otherOpts.streamMode = codexStreamFieldDelete
 	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
 		t.Fatalf("different options produced same memo key")
+	}
+
+	otherOpts = opts
+	otherOpts.preserveGenerate = true
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
+		t.Fatalf("different preserveGenerate option produced same memo key")
+	}
+
+	otherOpts = opts
+	otherOpts.omitServiceTier = true
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
+		t.Fatalf("different omitServiceTier option produced same memo key")
+	}
+
+	otherOpts = opts
+	otherOpts.suppressDefaultInstructions = true
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
+		t.Fatalf("different suppressDefaultInstructions option produced same memo key")
 	}
 }
 
@@ -626,8 +645,13 @@ func TestPrepareCodexHTTPCallNormalizesFinalUpstreamBody(t *testing.T) {
 	rawJSON := []byte(`{
 		"model":"wrong-model",
 		"input":"hello",
+		"tools":"bad",
+		"parallel_tool_calls":"false",
+		"service_tier":123,
+		"prompt_cache_key":"",
 		"store":true,
 		"stream":false,
+		"generate":false,
 		"prompt_cache_retention":"24h",
 		"stream_options":{"include_usage":true},
 		"temperature":0.2,
@@ -660,16 +684,19 @@ func TestPrepareCodexHTTPCallNormalizesFinalUpstreamBody(t *testing.T) {
 	if got := gjson.GetBytes(body, "stream").Bool(); !got {
 		t.Fatalf("stream = false, want true; body=%s", body)
 	}
-	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
-		t.Fatalf("prompt_cache_retention = %q, want 24h; body=%s", got, body)
+	if got := gjson.GetBytes(body, "prompt_cache_retention"); got.Exists() {
+		t.Fatalf("prompt_cache_retention should be removed from final upstream body: %s", body)
 	}
 	for _, field := range []string{"stream_options", "temperature", "context_management"} {
 		if gjson.GetBytes(body, field).Exists() {
 			t.Fatalf("%s should be removed from final upstream body: %s", field, body)
 		}
 	}
-	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_1" {
-		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, body)
+	if got := gjson.GetBytes(body, "previous_response_id"); got.Exists() {
+		t.Fatalf("previous_response_id should be removed from HTTP Responses body: %s", body)
+	}
+	if got := gjson.GetBytes(body, "generate"); got.Exists() {
+		t.Fatalf("generate should be removed from HTTP Responses body: %s", body)
 	}
 	if got := gjson.GetBytes(body, "instructions").String(); got != "You are a helpful assistant." {
 		t.Fatalf("instructions = %q, want default instructions; body=%s", got, body)
@@ -686,8 +713,204 @@ func TestPrepareCodexHTTPCallNormalizesFinalUpstreamBody(t *testing.T) {
 	if got := gjson.GetBytes(body, "parallel_tool_calls").Bool(); !got {
 		t.Fatalf("parallel_tool_calls = false, want true; body=%s", body)
 	}
+	if got := gjson.GetBytes(body, "parallel_tool_calls"); got.Type != gjson.True {
+		t.Fatalf("parallel_tool_calls type = %v, want JSON true; body=%s", got.Type, body)
+	}
+	if got := gjson.GetBytes(body, "service_tier"); got.Exists() {
+		t.Fatalf("invalid service_tier should be removed from final upstream body: %s", body)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_key"); got.Exists() {
+		t.Fatalf("empty prompt_cache_key should be removed from final upstream body: %s", body)
+	}
 	if got := gjson.GetBytes(body, "include").IsArray(); !got {
 		t.Fatalf("include should default to an empty array: %s", body)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBodyDefaultsJsonSchemaTextFormatName(t *testing.T) {
+	body := []byte(`{
+		"model":"wrong-model",
+		"input":"hello",
+		"text":{
+			"format":{
+				"type":"json_schema",
+				"name":" ",
+				"strict":false,
+				"schema":{"type":"object","properties":{"answer":{"type":"string"}}}
+			},
+			"verbosity":"low"
+		}
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+
+	if got := gjson.GetBytes(gotBody, "text.format.name").String(); got != codexDefaultOutputSchemaTextFormatName {
+		t.Fatalf("text.format.name = %q, want %q; body=%s", got, codexDefaultOutputSchemaTextFormatName, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "text.format.strict"); got.Type != gjson.False {
+		t.Fatalf("text.format.strict should remain JSON false; got %s body=%s", got.Raw, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "text.format.schema.properties.answer.type").String(); got != "string" {
+		t.Fatalf("text.format.schema not preserved; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "text.verbosity").String(); got != "low" {
+		t.Fatalf("text.verbosity = %q, want low; body=%s", got, gotBody)
+	}
+}
+
+func TestPrepareCodexHTTPCallDropsServiceTierByDefault(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4"}
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"",
+		"https://example.com/responses",
+		req,
+		[]byte(`{"model":"gpt-5.4","input":"hello","service_tier":"priority"}`),
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+	if got := gjson.GetBytes(call.prepared.body, "service_tier"); got.Exists() {
+		t.Fatalf("service_tier should be omitted by default: %s", call.prepared.body)
+	}
+}
+
+func TestPrepareCodexHTTPCallPreservesServiceTierWhenAuthOptedIn(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{cliproxyauth.AuthFileServiceTierPassthroughKey: true},
+	}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4"}
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"",
+		"https://example.com/responses",
+		req,
+		[]byte(`{"model":"gpt-5.4","input":"hello","service_tier":"flex"}`),
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+	if got := gjson.GetBytes(call.prepared.body, "service_tier").String(); got != "flex" {
+		t.Fatalf("service_tier = %q, want flex; body=%s", got, call.prepared.body)
+	}
+}
+
+func TestPrepareCodexHTTPCallUsesStoreForAzureResponsesEndpoint(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","id":"msg_1","role":"user","content":[{"type":"input_text","text":"hello"}]}],"store":false}`),
+	}
+	rawJSON := []byte(`{"model":"gpt-5.4","input":[{"type":"message","id":"msg_1","role":"user","content":[{"type":"input_text","text":"hello"}]}],"store":false}`)
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"",
+		"https://example.openai.azure.com/openai/responses",
+		req,
+		rawJSON,
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+	if got := gjson.GetBytes(call.prepared.body, "store").Bool(); !got {
+		t.Fatalf("store = false, want true for Azure Responses endpoint; body=%s", call.prepared.body)
+	}
+	if got := gjson.GetBytes(call.prepared.body, "input.0.id").String(); got != "msg_1" {
+		t.Fatalf("input.0.id = %q, want msg_1; body=%s", got, call.prepared.body)
+	}
+}
+
+func TestPrepareCodexHTTPCallDoesNotCompressCompactRequests(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello"}`),
+	}
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"",
+		"https://example.com/responses/compact",
+		req,
+		req.Payload,
+		"oauth-token",
+		false,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+	if got := call.prepared.httpReq.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty for responses/compact", got)
+	}
+}
+
+func TestPrepareCodexHTTPCallIncludesEncryptedReasoningContentWhenReasoningRequested(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello","reasoning":{"effort":"high"},"include":[123,"file_search_call.results",{"bad":true},"file_search_call.results",""]}`),
+	}
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"",
+		"https://example.com/responses",
+		req,
+		req.Payload,
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(call.prepared.body, "include.#").Int(); got != 2 {
+		t.Fatalf("include length = %d, want 2; body=%s", got, call.prepared.body)
+	}
+	if got := gjson.GetBytes(call.prepared.body, `include.#(=="reasoning.encrypted_content")`).String(); got != "reasoning.encrypted_content" {
+		t.Fatalf("include missing reasoning.encrypted_content; body=%s", call.prepared.body)
+	}
+	if got := gjson.GetBytes(call.prepared.body, `include.#(=="file_search_call.results")`).String(); got != "file_search_call.results" {
+		t.Fatalf("include missing original value; body=%s", call.prepared.body)
+	}
+	for _, item := range gjson.GetBytes(call.prepared.body, "include").Array() {
+		if item.Type != gjson.String || strings.TrimSpace(item.String()) == "" {
+			t.Fatalf("include should contain only non-empty strings; body=%s", call.prepared.body)
+		}
 	}
 }
 

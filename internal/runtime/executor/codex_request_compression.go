@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -17,11 +18,15 @@ const codexCompressionEnv = "CODEX_ENABLE_ZSTD_REQUEST_COMPRESSION"
 var codexZstdEncoderPool sync.Pool
 
 func maybeEnableCodexRequestCompression(req *http.Request, auth *cliproxyauth.Auth) error {
-	return maybeEnableCodexRequestCompressionWithBody(req, auth, nil)
+	return maybeEnableCodexRequestCompressionWithConfig(req, auth, nil, nil)
 }
 
 func maybeEnableCodexRequestCompressionWithBody(req *http.Request, auth *cliproxyauth.Auth, body []byte) error {
-	if req == nil || codexIsAPIKeyAuth(auth) || !codexRequestCompressionEnabled() {
+	return maybeEnableCodexRequestCompressionWithConfig(req, auth, nil, body)
+}
+
+func maybeEnableCodexRequestCompressionWithConfig(req *http.Request, auth *cliproxyauth.Auth, cfg *config.Config, body []byte) error {
+	if req == nil || auth == nil || codexIsAPIKeyAuth(auth) || codexRequestCompressionSkipsTarget(req, auth) || !codexRequestCompressionEnabled(cfg) {
 		return nil
 	}
 	if encoding := strings.TrimSpace(req.Header.Get("Content-Encoding")); encoding != "" {
@@ -61,6 +66,13 @@ func maybeEnableCodexRequestCompressionWithBody(req *http.Request, auth *cliprox
 	return nil
 }
 
+func codexRequestCompressionSkipsTarget(req *http.Request, auth *cliproxyauth.Auth) bool {
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "azure") {
+		return true
+	}
+	return req != nil && req.URL != nil && codexMatchesAzureResponsesBaseURL(req.URL.String())
+}
+
 func compressCodexRequestBody(body []byte) ([]byte, error) {
 	var compressed bytes.Buffer
 	encoder, err := borrowCodexZstdEncoder(&compressed)
@@ -85,15 +97,21 @@ func borrowCodexZstdEncoder(w io.Writer) (*zstd.Encoder, error) {
 			return encoder, nil
 		}
 	}
-	return zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	return zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(3)))
 }
 
-func codexRequestCompressionEnabled() bool {
+func codexRequestCompressionEnabled(cfg *config.Config) bool {
+	if cfg != nil && cfg.EnableRequestCompression != nil {
+		return *cfg.EnableRequestCompression
+	}
+
 	value := strings.TrimSpace(os.Getenv(codexCompressionEnv))
 	switch strings.ToLower(value) {
-	case "1", "true", "yes", "on":
+	case "", "1", "true", "yes", "on":
 		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		return true
 	}
 }

@@ -64,22 +64,59 @@ func (e *CodexExecutor) prepareCodexHTTPCall(
 	token string,
 	stream bool,
 ) (codexPreparedHTTPCall, error) {
-	// Cache the inbound gin headers once so every helper invoked via this ctx
-	// (prompt-cache resolution, client metadata, installation-id fallback)
-	// shares a single context lookup instead of re-deriving the gin request on
-	// every call.
-	ctx = contextWithCachedCodexGinHeaders(ctx)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	return e.prepareCodexHTTPCallWithBaseModel(ctx, auth, from, executionSessionID, url, req, body, token, stream, baseModel)
+}
+
+func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModel(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	from sdktranslator.Format,
+	executionSessionID string,
+	url string,
+	req cliproxyexecutor.Request,
+	body []byte,
+	token string,
+	stream bool,
+	baseModel string,
+) (codexPreparedHTTPCall, error) {
+	return e.prepareCodexHTTPCallWithBaseModelAndFinalOptions(ctx, auth, from, executionSessionID, url, req, body, token, stream, baseModel, codexDefaultFinalUpstreamBodyOptions(auth, url))
+}
+
+func codexDefaultFinalUpstreamBodyOptions(auth *cliproxyauth.Auth, url string) codexFinalUpstreamBodyOptions {
 	requestKind := codexFinalUpstreamRequestKindForURL(url)
 	streamMode := codexStreamFieldTrue
 	if requestKind == codexFinalUpstreamCompact {
 		streamMode = codexStreamFieldDelete
 	}
-	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, codexFinalUpstreamBodyOptions{
-		requestKind:                requestKind,
-		streamMode:                 streamMode,
-		preservePreviousResponseID: true,
-	})
+	return codexFinalUpstreamBodyOptions{
+		requestKind:     requestKind,
+		streamMode:      streamMode,
+		store:           codexShouldStoreResponses(auth, url),
+		omitServiceTier: auth == nil || !auth.ServiceTierPassthrough(),
+	}
+}
+
+func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	from sdktranslator.Format,
+	executionSessionID string,
+	url string,
+	req cliproxyexecutor.Request,
+	body []byte,
+	token string,
+	stream bool,
+	baseModel string,
+	finalOpts codexFinalUpstreamBodyOptions,
+) (codexPreparedHTTPCall, error) {
+	// Cache the inbound gin headers once so every helper invoked via this ctx
+	// (prompt-cache resolution, client metadata, installation-id fallback)
+	// shares a single context lookup instead of re-deriving the gin request on
+	// every call.
+	ctx = contextWithCachedCodexGinHeaders(ctx)
+	requestKind := finalOpts.requestKind
+	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, finalOpts)
 	// Resolve gin headers once and reuse across subsequent helpers to avoid
 	// repeated context value lookups in the per-request hot path.
 	ginHeaders := codexGinHeadersFromContext(ctx)
@@ -96,8 +133,10 @@ func (e *CodexExecutor) prepareCodexHTTPCall(
 			prepared.httpReq.Header.Set(codexHeaderInstallationID, installationID)
 		}
 	}
-	if err := maybeEnableCodexRequestCompressionWithBody(prepared.httpReq, auth, prepared.body); err != nil {
-		return codexPreparedHTTPCall{}, fmt.Errorf("codex executor: request compression failed: %w", err)
+	if requestKind != codexFinalUpstreamCompact {
+		if err := maybeEnableCodexRequestCompressionWithConfig(prepared.httpReq, auth, e.cfg, prepared.body); err != nil {
+			return codexPreparedHTTPCall{}, fmt.Errorf("codex executor: request compression failed: %w", err)
+		}
 	}
 	return codexPreparedHTTPCall{
 		url:      url,

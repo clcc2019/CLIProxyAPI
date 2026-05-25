@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -42,6 +43,15 @@ func TestCodexLoginRequestUserAgentSkipsWebUIBrowserHeader(t *testing.T) {
 
 	if got := codexLoginRequestUserAgent(ctx); got != "" {
 		t.Fatalf("codexLoginRequestUserAgent() = %q, want empty", got)
+	}
+}
+
+func TestCodexUsageDefaultUserAgentUsesCurrentCodexFingerprint(t *testing.T) {
+	if got := codexUsageUserAgent; got != misc.CodexCLIUserAgent {
+		t.Fatalf("codexUsageUserAgent = %q, want %q", got, misc.CodexCLIUserAgent)
+	}
+	if !strings.Contains(codexUsageUserAgent, "/"+misc.CodexCLIVersion+" ") {
+		t.Fatalf("codexUsageUserAgent = %q, missing current Codex version %q", codexUsageUserAgent, misc.CodexCLIVersion)
 	}
 }
 
@@ -751,6 +761,175 @@ func TestGetCodexUsageDerivesAccountIDFromAccessTokenClaims(t *testing.T) {
 	}
 }
 
+func TestGetCodexUsageRetriesTransient502(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	withFastCodexUsageRetry(t)
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "temporary gateway failure", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"credits":{"balance":25},"rate_limit":null}`))
+	}))
+	t.Cleanup(server.Close)
+	originalURL := codexUsageURL
+	codexUsageURL = server.URL
+	t.Cleanup(func() { codexUsageURL = originalURL })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=codex.json", nil)
+
+	h.GetCodexUsage(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("usage calls = %d, want 2", got)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode usage payload: %v", err)
+	}
+	credits, _ := payload["credits"].(map[string]any)
+	if got := credits["balance"]; got != float64(25) {
+		t.Fatalf("credits.balance = %#v, want 25", got)
+	}
+}
+
+func TestGetCodexUsageUsesStaleCacheOnPersistent502(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	withFastCodexUsageRetry(t)
+
+	var fail atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			http.Error(w, "temporary gateway failure", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"credits":{"balance":99},"rate_limit":null}`))
+	}))
+	t.Cleanup(server.Close)
+	originalURL := codexUsageURL
+	codexUsageURL = server.URL
+	t.Cleanup(func() { codexUsageURL = originalURL })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	first := httptest.NewRecorder()
+	firstCtx, _ := gin.CreateTestContext(first)
+	firstCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=codex.json", nil)
+	h.GetCodexUsage(firstCtx)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d body=%s", first.Code, http.StatusOK, first.Body.String())
+	}
+
+	fail.Store(true)
+	second := httptest.NewRecorder()
+	secondCtx, _ := gin.CreateTestContext(second)
+	secondCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=codex.json&force=true", nil)
+	h.GetCodexUsage(secondCtx)
+
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want %d body=%s", second.Code, http.StatusOK, second.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode stale payload: %v", err)
+	}
+	if got := payload["codex_usage_stale"]; got != true {
+		t.Fatalf("codex_usage_stale = %#v, want true", got)
+	}
+	credits, _ := payload["credits"].(map[string]any)
+	if got := credits["balance"]; got != float64(99) {
+		t.Fatalf("credits.balance = %#v, want 99", got)
+	}
+}
+
+func TestGetCodexUsageReturnsUnavailablePayloadForPersistent502(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	withFastCodexUsageRetry(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporary gateway failure", http.StatusBadGateway)
+	}))
+	t.Cleanup(server.Close)
+	originalURL := codexUsageURL
+	codexUsageURL = server.URL
+	t.Cleanup(func() { codexUsageURL = originalURL })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=codex.json", nil)
+
+	h.GetCodexUsage(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode unavailable payload: %v", err)
+	}
+	if got := payload["codex_usage_unavailable"]; got != true {
+		t.Fatalf("codex_usage_unavailable = %#v, want true", got)
+	}
+	if got := payload["codex_usage_upstream_status"]; got != float64(http.StatusBadGateway) {
+		t.Fatalf("codex_usage_upstream_status = %#v, want %d", got, http.StatusBadGateway)
+	}
+}
+
 func TestGetCodexUsageRefreshUsesGlobalProxyWhenAuthProxyIsNone(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -863,6 +1042,18 @@ func clearCodexSubscriptionCacheForTest(t *testing.T) {
 	codexSubscriptionCache.Range(func(key, _ any) bool {
 		codexSubscriptionCache.Delete(key)
 		return true
+	})
+}
+
+func withFastCodexUsageRetry(t *testing.T) {
+	t.Helper()
+	originalMax := codexUsageMaxRequestRetries
+	originalDelay := codexUsageRetryBaseDelay
+	codexUsageMaxRequestRetries = 1
+	codexUsageRetryBaseDelay = time.Millisecond
+	t.Cleanup(func() {
+		codexUsageMaxRequestRetries = originalMax
+		codexUsageRetryBaseDelay = originalDelay
 	})
 }
 

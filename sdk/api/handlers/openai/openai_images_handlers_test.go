@@ -601,6 +601,29 @@ func TestCollectImagesFromResponsesStreamUsesOutputItemDoneFallback(t *testing.T
 	}
 }
 
+func TestCollectImagesFromResponsesStreamRejectsNilChannels(t *testing.T) {
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), nil, nil, "b64_json")
+	if out != nil {
+		t.Fatalf("output = %s, want nil", out)
+	}
+	if errMsg == nil || errMsg.StatusCode != http.StatusBadGateway || !errors.Is(errMsg.Error, errImageStreamNilChannels) {
+		t.Fatalf("error = %#v, want nil image stream channel 502", errMsg)
+	}
+}
+
+func TestCollectImagesFromResponsesStreamRejectsNilDataAfterErrorChannelCloses(t *testing.T) {
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), nil, errs, "b64_json")
+	if out != nil {
+		t.Fatalf("output = %s, want nil", out)
+	}
+	if errMsg == nil || errMsg.StatusCode != http.StatusBadGateway || !errors.Is(errMsg.Error, errImageStreamNilChannels) {
+		t.Fatalf("error = %#v, want nil image stream channel 502", errMsg)
+	}
+}
+
 func TestForwardNativeImagesStreamWritesKeepAlive(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -644,6 +667,58 @@ func TestForwardNativeImagesStreamWritesKeepAlive(t *testing.T) {
 		}
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("timed out waiting for stream shutdown")
+	}
+}
+
+func TestForwardNativeImagesStreamRejectsNilDataAfterErrorChannelCloses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/images/generations", nil)
+
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+
+	var eventName string
+	var canceledErr error
+	handler := &OpenAIAPIHandler{}
+	handler.forwardNativeImagesStream(
+		ginCtx,
+		func(err error) { canceledErr = err },
+		nil,
+		errs,
+		func(name string, _ []byte) { eventName = name },
+		nil,
+		nil,
+	)
+
+	if !errors.Is(canceledErr, errImageStreamNilChannels) {
+		t.Fatalf("cancel err = %v, want nil image stream channels", canceledErr)
+	}
+	if eventName != "error" {
+		t.Fatalf("event = %q, want error", eventName)
+	}
+}
+
+func TestForwardImagesStreamRejectsNilDataAndErrorChannels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/images/generations", nil)
+
+	var eventName string
+	var canceledErr error
+	handler := &OpenAIAPIHandler{}
+	handler.forwardImagesStream(context.Background(), ginCtx, imageStreamForwardOptions{
+		cancel:     func(err error) { canceledErr = err },
+		writeEvent: func(name string, _ []byte) { eventName = name },
+	})
+
+	if !errors.Is(canceledErr, errImageStreamNilChannels) {
+		t.Fatalf("cancel err = %v, want nil image stream channels", canceledErr)
+	}
+	if eventName != "error" {
+		t.Fatalf("event = %q, want error", eventName)
 	}
 }
 

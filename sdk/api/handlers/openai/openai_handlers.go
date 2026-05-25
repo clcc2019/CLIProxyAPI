@@ -441,12 +441,18 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, modelName str
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Stream closed without data? Send DONE or just headers.
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				handlers.WriteSSEDataFrame(c.Writer, []byte("[DONE]"))
-				flusher.Flush()
-				cliCancel(nil)
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
+				streamErr := fmt.Errorf("auth manager stream closed before sending payload")
+				h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: streamErr})
+				cliCancel(streamErr)
 				return
 			}
 
@@ -548,11 +554,18 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, mo
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				handlers.WriteSSEDataFrame(c.Writer, []byte("[DONE]"))
-				flusher.Flush()
-				cliCancel(nil)
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
+				streamErr := fmt.Errorf("auth manager stream closed before sending payload")
+				h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: streamErr})
+				cliCancel(streamErr)
 				return
 			}
 

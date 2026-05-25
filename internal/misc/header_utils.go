@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -20,10 +21,9 @@ const (
 	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
 
 	// CodexCLIVersion is the upstream-compatible Codex CLI version embedded in
-	// the User-Agent. Keep in sync with the upstream release the proxy aims to
-	// mimic; picking a slightly-behind release minimizes the risk of upstream
-	// rejecting unknown clients while still matching a real CLI build.
-	CodexCLIVersion = "0.118.0-alpha.4"
+	// the User-Agent and Version header. Keep this at or above the highest
+	// minimal_client_version in the Codex model catalog bundled with the proxy.
+	CodexCLIVersion = "0.134.0-alpha.3"
 
 	// CodexDefaultOriginator mirrors codex-rs's DEFAULT_ORIGINATOR. Changing this
 	// value will affect both the "Originator" header and the User-Agent token
@@ -235,6 +235,10 @@ func codexCLIOS() string {
 			}
 			codexCLIOSCached = "Linux"
 		case "darwin":
+			if version := codexDarwinProductVersion(runCodexDarwinProductVersionCommand); version != "" {
+				codexCLIOSCached = "Mac OS " + version
+				return
+			}
 			codexCLIOSCached = "Mac OS"
 		case "windows":
 			codexCLIOSCached = "Windows"
@@ -243,6 +247,31 @@ func codexCLIOS() string {
 		}
 	})
 	return codexCLIOSCached
+}
+
+func runCodexDarwinProductVersionCommand() ([]byte, error) {
+	return exec.Command("sw_vers", "-productVersion").Output()
+}
+
+func codexDarwinProductVersion(run func() ([]byte, error)) string {
+	if run == nil {
+		return ""
+	}
+	out, err := run()
+	if err != nil {
+		return ""
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return ""
+	}
+	for _, r := range version {
+		if (r >= '0' && r <= '9') || r == '.' {
+			continue
+		}
+		return ""
+	}
+	return version
 }
 
 func codexCLIArch() string {

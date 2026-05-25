@@ -116,3 +116,20 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 		t.Fatalf("expected no tools for free codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
+
+func TestEnsureImageGenerationTool_APIKeyAuthDoesNotInjectTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
+	apiKeyAuth := &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"api_key": "sk-test"},
+	}
+
+	result := ensureImageGenerationTool(body, "gpt-5.4", apiKeyAuth)
+
+	if string(result) != string(body) {
+		t.Fatalf("expected body to be unchanged, got %s", string(result))
+	}
+	if gjson.GetBytes(result, "tools").Exists() {
+		t.Fatalf("expected no tools for API-key codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}

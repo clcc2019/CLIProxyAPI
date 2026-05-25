@@ -257,22 +257,25 @@ func TestConvertOpenAIResponsesRequestToCodex_IncludeOnlyWithReasoning(t *testin
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToCodex_ServiceTierKeepsOnlyPriority(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToCodex_ServiceTierPreservesNonEmptyStrings(t *testing.T) {
 	cases := []struct {
-		tier       string
+		name       string
+		rawTier    string
 		wantExists bool
+		want       string
 	}{
-		{tier: "auto"},
-		{tier: "default"},
-		{tier: "flex"},
-		{tier: "priority", wantExists: true},
-		{tier: "scale"},
+		{name: "auto", rawTier: `"auto"`, wantExists: true, want: "auto"},
+		{name: "default", rawTier: `"default"`, wantExists: true, want: "default"},
+		{name: "flex", rawTier: `"flex"`, wantExists: true, want: "flex"},
+		{name: "priority", rawTier: `"priority"`, wantExists: true, want: "priority"},
+		{name: "empty", rawTier: `""`},
+		{name: "number", rawTier: `123`},
 	}
 	for _, tt := range cases {
-		t.Run(tt.tier, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			inputJSON := []byte(`{
 				"model": "gpt-5.2",
-				"service_tier": "` + tt.tier + `",
+				"service_tier": ` + tt.rawTier + `,
 				"input": [{"role":"user","content":"hi"}]
 			}`)
 			out := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
@@ -280,10 +283,83 @@ func TestConvertOpenAIResponsesRequestToCodex_ServiceTierKeepsOnlyPriority(t *te
 			if got.Exists() != tt.wantExists {
 				t.Fatalf("service_tier exists=%v, want %v; output=%s", got.Exists(), tt.wantExists, string(out))
 			}
-			if tt.wantExists && got.String() != tt.tier {
+			if tt.wantExists && got.String() != tt.want {
 				t.Fatalf("service_tier was changed to %q", got.String())
 			}
 		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_MapsResponseFormatToTextFormat(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [{"role":"user","content":"hi"}],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"strict": true,
+				"schema": {
+					"type": "object",
+					"properties": {"answer": {"type": "string"}},
+					"required": ["answer"]
+				}
+			}
+		},
+		"text": {"verbosity": "low"}
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+	if gjson.GetBytes(out, "response_format").Exists() {
+		t.Fatalf("response_format should be removed after compatibility mapping: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "text.format.type").String(); got != "json_schema" {
+		t.Fatalf("text.format.type = %q, want json_schema; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "text.format.name").String(); got != "codex_output_schema" {
+		t.Fatalf("text.format.name = %q, want codex_output_schema; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "text.format.strict").Bool(); !got {
+		t.Fatalf("text.format.strict = false, want true; output=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "text.format.schema.properties.answer.type").String(); got != "string" {
+		t.Fatalf("text.format.schema not preserved; output=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "text.verbosity").String(); got != "low" {
+		t.Fatalf("text.verbosity = %q, want low; output=%s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_TextFormatWinsOverResponseFormat(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [{"role":"user","content":"hi"}],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"name": "legacy",
+				"schema": {"type": "object"}
+			}
+		},
+		"text": {
+			"format": {
+				"type": "json_schema",
+				"name": "native",
+				"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+			}
+		}
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+
+	if gjson.GetBytes(out, "response_format").Exists() {
+		t.Fatalf("response_format should be removed when native text.format exists: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "text.format.name").String(); got != "native" {
+		t.Fatalf("text.format.name = %q, want native; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "text.format.schema.properties.ok.type").String(); got != "boolean" {
+		t.Fatalf("native text.format schema should win; output=%s", string(out))
 	}
 }
 

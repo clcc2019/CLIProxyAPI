@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -172,27 +173,15 @@ func codexSetClientMetadataStrings(body []byte, entries []codexClientMetadataEnt
 		return body
 	}
 	metadata := gjson.GetBytes(body, "client_metadata")
-	if metadata.Exists() && metadata.Type != gjson.Null && !metadata.IsObject() {
-		return body
-	}
 
-	metadataBody := []byte(`{}`)
+	metadataBody, existingKeys, changed := codexClientMetadataStringMapRaw(metadata)
 	// existingKeys captures the keys already present in the existing metadata
 	// object, so the loop below can skip them without parsing metadataBody
 	// once per entry. Only populated when we actually need to respect existing
 	// values (overwrite == false), otherwise existence checks are unnecessary.
-	var existingKeys map[string]struct{}
-	if metadata.Exists() && metadata.IsObject() {
-		metadataBody = []byte(metadata.Raw)
-		if !overwrite {
-			existingKeys = make(map[string]struct{}, len(entries))
-			metadata.ForEach(func(key, _ gjson.Result) bool {
-				existingKeys[key.String()] = struct{}{}
-				return true
-			})
-		}
+	if overwrite {
+		existingKeys = nil
 	}
-	changed := false
 	for _, entry := range entries {
 		key := strings.TrimSpace(entry.key)
 		value := strings.TrimSpace(entry.value)
@@ -227,6 +216,39 @@ func codexSetClientMetadataStrings(body []byte, entries []codexClientMetadataEnt
 		return body
 	}
 	return updated
+}
+
+func codexClientMetadataStringMapRaw(metadata gjson.Result) ([]byte, map[string]struct{}, bool) {
+	existingKeys := make(map[string]struct{})
+	if !metadata.Exists() || metadata.Type == gjson.Null {
+		return []byte(`{}`), existingKeys, false
+	}
+	if !metadata.IsObject() {
+		return []byte(`{}`), existingKeys, true
+	}
+
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	first := true
+	changed := false
+	metadata.ForEach(func(key, value gjson.Result) bool {
+		keyString := key.String()
+		if value.Type != gjson.String {
+			changed = true
+			return true
+		}
+		if !first {
+			buf.WriteByte(',')
+		}
+		buf.Write(strconv.AppendQuote(nil, keyString))
+		buf.WriteByte(':')
+		buf.Write(strconv.AppendQuote(nil, value.String()))
+		existingKeys[keyString] = struct{}{}
+		first = false
+		return true
+	})
+	buf.WriteByte('}')
+	return buf.Bytes(), existingKeys, changed
 }
 
 func codexResolvedInstallationID(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) string {

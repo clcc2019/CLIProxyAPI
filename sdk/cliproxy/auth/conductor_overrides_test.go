@@ -163,6 +163,8 @@ type authFallbackExecutor struct {
 	executeErrors     map[string]error
 	streamErrors      map[string]error
 	streamFirstErrors map[string]error
+	streamNilResults  map[string]bool
+	streamNilChunks   map[string]bool
 }
 
 func (e *authFallbackExecutor) Identifier() string {
@@ -185,10 +187,18 @@ func (e *authFallbackExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cl
 	e.streamCalls = append(e.streamCalls, auth.ID)
 	errDirect := e.streamErrors[auth.ID]
 	err := e.streamFirstErrors[auth.ID]
+	nilResult := e.streamNilResults[auth.ID]
+	nilChunks := e.streamNilChunks[auth.ID]
 	e.mu.Unlock()
 
 	if errDirect != nil {
 		return nil, errDirect
+	}
+	if nilResult {
+		return nil, nil
+	}
+	if nilChunks {
+		return &cliproxyexecutor.StreamResult{Headers: http.Header{"X-Auth": {auth.ID}}}, nil
 	}
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	if err != nil {
@@ -518,6 +528,172 @@ func TestManager_ExecuteStream_KiroMonthlyRequestCountFailsOverCredential(t *tes
 	}
 }
 
+func TestManagerExecuteStream_InvalidStreamResultReturnsErrorChunk(t *testing.T) {
+	testCases := []struct {
+		name      string
+		configure func(*authFallbackExecutor, string)
+	}{
+		{
+			name: "nil_result",
+			configure: func(executor *authFallbackExecutor, authID string) {
+				executor.streamNilResults = map[string]bool{authID: true}
+			},
+		},
+		{
+			name: "nil_chunks",
+			configure: func(executor *authFallbackExecutor, authID string) {
+				executor.streamNilChunks = map[string]bool{authID: true}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(0, 0, 0)
+			executor := &authFallbackExecutor{id: "codex"}
+			m.RegisterExecutor(executor)
+
+			model := "gpt-5-invalid-stream-result-" + tc.name
+			auth := &Auth{ID: "aa-invalid-stream-" + tc.name, Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+			tc.configure(executor, auth.ID)
+
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			if errExecute != nil {
+				t.Fatalf("execute stream error = %v, want error chunk", errExecute)
+			}
+			if streamResult == nil || streamResult.Chunks == nil {
+				t.Fatalf("stream result = %#v, want non-nil result and chunks", streamResult)
+			}
+
+			var chunk cliproxyexecutor.StreamChunk
+			select {
+			case got, ok := <-streamResult.Chunks:
+				if !ok {
+					t.Fatal("stream closed before error chunk")
+				}
+				chunk = got
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for invalid stream error chunk")
+			}
+
+			authErr, ok := chunk.Err.(*Error)
+			if !ok || authErr == nil {
+				t.Fatalf("chunk error = %#v, want *Error", chunk.Err)
+			}
+			if authErr.Code != "invalid_stream_result" || authErr.HTTPStatus != http.StatusBadGateway || !authErr.Retryable {
+				t.Fatalf("chunk error = %#v, want retryable invalid_stream_result 502", authErr)
+			}
+
+			select {
+			case _, ok := <-streamResult.Chunks:
+				if ok {
+					t.Fatal("expected stream to close after invalid stream error chunk")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for invalid stream to close")
+			}
+
+			updated, ok := m.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatal("expected auth to remain registered")
+			}
+			state := updated.ModelStates[model]
+			if state == nil || state.LastError == nil {
+				t.Fatalf("model state = %#v, want invalid stream error recorded", state)
+			}
+			if state.LastError.Code != "invalid_stream_result" || state.LastError.HTTPStatus != http.StatusBadGateway {
+				t.Fatalf("model last error = %#v, want invalid_stream_result 502", state.LastError)
+			}
+		})
+	}
+}
+
+func TestManagerExecuteStream_InvalidStreamResultFailsOverCredential(t *testing.T) {
+	testCases := []struct {
+		name      string
+		configure func(*authFallbackExecutor, string)
+	}{
+		{
+			name: "nil_result",
+			configure: func(executor *authFallbackExecutor, authID string) {
+				executor.streamNilResults = map[string]bool{authID: true}
+			},
+		},
+		{
+			name: "nil_chunks",
+			configure: func(executor *authFallbackExecutor, authID string) {
+				executor.streamNilChunks = map[string]bool{authID: true}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(0, 0, 0)
+			executor := &authFallbackExecutor{id: "codex"}
+			m.RegisterExecutor(executor)
+
+			model := "gpt-5-invalid-stream-failover-" + tc.name
+			badAuth := &Auth{ID: "aa-invalid-stream-failover-" + tc.name, Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+			goodAuth := &Auth{ID: "bb-valid-stream-failover-" + tc.name, Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+			tc.configure(executor, badAuth.ID)
+
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(badAuth.ID, badAuth.Provider, []*registry.ModelInfo{{ID: model}})
+			reg.RegisterClient(goodAuth.ID, goodAuth.Provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() {
+				reg.UnregisterClient(badAuth.ID)
+				reg.UnregisterClient(goodAuth.ID)
+			})
+
+			if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+				t.Fatalf("register bad auth: %v", errRegister)
+			}
+			if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+				t.Fatalf("register good auth: %v", errRegister)
+			}
+
+			streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			if errExecute != nil {
+				t.Fatalf("execute stream error = %v, want failover success", errExecute)
+			}
+			var payload []byte
+			for chunk := range streamResult.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream chunk error = %v, want success", chunk.Err)
+				}
+				payload = append(payload, chunk.Payload...)
+			}
+			if string(payload) != goodAuth.ID {
+				t.Fatalf("payload = %q, want %q", string(payload), goodAuth.ID)
+			}
+
+			got := executor.StreamCalls()
+			want := []string{badAuth.ID, goodAuth.ID}
+			if len(got) != len(want) {
+				t.Fatalf("stream calls = %v, want %v", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
+
 func newKiroCredentialStabilityTestManager(t *testing.T) (*Manager, *credentialRetryLimitExecutor) {
 	t.Helper()
 
@@ -693,6 +869,221 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 	if state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+}
+
+func TestManagerExecute_UnauthorizedSuspendsAuthFileAcrossModels(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"aa-invalid-token": &Error{
+				HTTPStatus: http.StatusUnauthorized,
+				Message:    "Your authentication token has been invalidated. Please try signing in again.",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	modelA := "gpt-5-invalid-auth-model-a"
+	modelB := "gpt-5-invalid-auth-model-b"
+	badAuth := &Auth{ID: "aa-invalid-token", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	goodAuth := &Auth{ID: "bb-valid-token", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "codex", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	reg.RegisterClient(goodAuth.ID, "codex", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	for _, model := range []string{modelA, modelB} {
+		resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute %s error = %v, want failover success", model, errExecute)
+		}
+		if string(resp.Payload) != goodAuth.ID {
+			t.Fatalf("execute %s payload = %q, want %q", model, string(resp.Payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if !updatedBad.Unavailable {
+		t.Fatal("expected 401 to suspend the whole auth file")
+	}
+	if updatedBad.LastError == nil || updatedBad.LastError.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("bad auth LastError = %#v, want 401", updatedBad.LastError)
+	}
+	if AuthAvailableForModel(updatedBad, modelB, time.Now()) {
+		t.Fatalf("expected unauthorized auth to be unavailable for unrelated model %q", modelB)
+	}
+}
+
+func TestManagerExecute_UnauthorizedIgnoresDisableCooling(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"aa-invalid-token-disable-cooling": &Error{
+				HTTPStatus: http.StatusUnauthorized,
+				Message:    "token invalid",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	modelA := "gpt-5-invalid-auth-disable-cooling-a"
+	modelB := "gpt-5-invalid-auth-disable-cooling-b"
+	badAuth := &Auth{
+		ID:       "aa-invalid-token-disable-cooling",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "disable_cooling": true},
+	}
+	goodAuth := &Auth{ID: "bb-valid-token-disable-cooling", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "codex", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	reg.RegisterClient(goodAuth.ID, "codex", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	for _, model := range []string{modelA, modelB} {
+		resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute %s error = %v, want failover success", model, errExecute)
+		}
+		if string(resp.Payload) != goodAuth.ID {
+			t.Fatalf("execute %s payload = %q, want %q", model, string(resp.Payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if !updatedBad.Unavailable || !updatedBad.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("expected 401 auth to stay cooled despite disable_cooling, unavailable=%v next=%v", updatedBad.Unavailable, updatedBad.NextRetryAfter)
+	}
+	if AuthAvailableForModel(updatedBad, modelB, time.Now()) {
+		t.Fatalf("expected unauthorized auth to be unavailable for unrelated model %q", modelB)
+	}
+}
+
+func TestManagerExecuteStream_UnauthorizedBootstrapSuspendsAuthFileAcrossModels(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		streamFirstErrors: map[string]error{
+			"aa-invalid-token-stream": &Error{
+				HTTPStatus: http.StatusUnauthorized,
+				Message:    "Your authentication token has been invalidated. Please try signing in again.",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	modelA := "gpt-5-invalid-auth-stream-model-a"
+	modelB := "gpt-5-invalid-auth-stream-model-b"
+	badAuth := &Auth{ID: "aa-invalid-token-stream", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	goodAuth := &Auth{ID: "bb-valid-token-stream", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "codex", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	reg.RegisterClient(goodAuth.ID, "codex", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	for _, model := range []string{modelA, modelB} {
+		streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute stream %s error = %v, want failover success", model, errExecute)
+		}
+		var payload []byte
+		for chunk := range streamResult.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("execute stream %s chunk error = %v, want success", model, chunk.Err)
+			}
+			payload = append(payload, chunk.Payload...)
+		}
+		if string(payload) != goodAuth.ID {
+			t.Fatalf("execute stream %s payload = %q, want %q", model, string(payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.StreamCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if !updatedBad.Unavailable {
+		t.Fatal("expected 401 to suspend the whole auth file")
+	}
+	if updatedBad.LastError == nil || updatedBad.LastError.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("bad auth LastError = %#v, want 401", updatedBad.LastError)
+	}
+	if AuthAvailableForModel(updatedBad, modelB, time.Now()) {
+		t.Fatalf("expected unauthorized auth to be unavailable for unrelated model %q", modelB)
 	}
 }
 

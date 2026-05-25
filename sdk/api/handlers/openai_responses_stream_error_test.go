@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -44,5 +45,22 @@ func TestBuildOpenAIResponsesStreamErrorChunkExtractsHTTPErrorBody(t *testing.T)
 	}
 	if payload["message"] != "oops" {
 		t.Fatalf("message = %v, want %q", payload["message"], "oops")
+	}
+}
+
+func TestBuildOpenAIResponsesStreamErrorChunkRedactsSensitiveMessage(t *testing.T) {
+	chunk := BuildOpenAIResponsesStreamErrorChunk(
+		http.StatusBadGateway,
+		`{"error":{"message":"upstream failed Authorization: Bearer sk-secret-token","access_token":"access-secret"}}`,
+		0,
+	)
+	text := string(chunk)
+	for _, leaked := range []string{"sk-secret-token", "access-secret"} {
+		if strings.Contains(text, leaked) {
+			t.Fatalf("stream error chunk leaked %q: %s", leaked, text)
+		}
+	}
+	if !strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("stream error chunk missing redaction: %s", text)
 	}
 }

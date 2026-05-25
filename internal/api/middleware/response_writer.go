@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -372,17 +373,17 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 		if len(value) == 0 {
 			return nil
 		}
-		return value
+		return util.RedactSensitiveLogBytes(value)
 	case string:
 		if len(value) == 0 {
 			return nil
 		}
-		return []byte(value)
+		return util.RedactSensitiveLogBytes([]byte(value))
 	case *strings.Builder:
 		if value == nil || value.Len() == 0 {
 			return nil
 		}
-		return []byte(value.String())
+		return util.RedactSensitiveLogBytes([]byte(value.String()))
 	}
 	return nil
 }
@@ -397,17 +398,17 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 		if len(value) == 0 {
 			return nil
 		}
-		return value
+		return util.RedactSensitiveLogBytes(value)
 	case string:
 		if len(value) == 0 {
 			return nil
 		}
-		return []byte(value)
+		return util.RedactSensitiveLogBytes([]byte(value))
 	case *strings.Builder:
 		if value == nil || value.Len() == 0 {
 			return nil
 		}
-		return []byte(value.String())
+		return util.RedactSensitiveLogBytes([]byte(value.String()))
 	}
 	return nil
 }
@@ -421,7 +422,7 @@ func (w *ResponseWriterWrapper) extractAPIWebsocketTimeline(c *gin.Context) []by
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return bytes.Clone(data)
+	return util.RedactSensitiveLogBytes(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
@@ -437,26 +438,26 @@ func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time
 
 func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 	if body := extractBodyOverride(c, requestBodyOverrideContextKey); len(body) > 0 {
-		return body
+		return util.RedactSensitiveLogBytes(body)
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		return w.requestInfo.Body
+		return util.RedactSensitiveLogBytes(w.requestInfo.Body)
 	}
 	return nil
 }
 
 func (w *ResponseWriterWrapper) extractResponseBody(c *gin.Context) []byte {
 	if body := extractBodyOverride(c, responseBodyOverrideContextKey); len(body) > 0 {
-		return body
+		return util.RedactSensitiveLogBytes(body)
 	}
 	if w.body == nil || w.body.Len() == 0 {
 		return nil
 	}
-	return bytes.Clone(w.body.Bytes())
+	return util.RedactSensitiveLogBytes(bytes.Clone(w.body.Bytes()))
 }
 
 func (w *ResponseWriterWrapper) extractWebsocketTimeline(c *gin.Context) []byte {
-	return extractBodyOverride(c, websocketTimelineOverrideContextKey)
+	return util.RedactSensitiveLogBytes(extractBodyOverride(c, websocketTimelineOverrideContextKey))
 }
 
 func extractBodyOverride(c *gin.Context, key string) []byte {

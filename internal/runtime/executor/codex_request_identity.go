@@ -29,7 +29,49 @@ func codexIsAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {
 		return false
 	}
-	return strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+	if apiKey == "" {
+		return false
+	}
+	if authKind := codexAuthKindHint(auth); authKind != "" {
+		switch authKind {
+		case "apikey", "api_key":
+			return true
+		case "oauth", "chatgpt", "chatgpt_auth_tokens", "agent_identity":
+			return false
+		}
+	}
+	if accessToken := strings.TrimSpace(metadataString(auth.Metadata, "access_token", "accessToken")); accessToken != "" && (apiKey == accessToken || codexMetadataHasOAuthIdentity(auth.Metadata)) {
+		return false
+	}
+	return true
+}
+
+func codexAuthKindHint(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if authKind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"])); authKind != "" {
+			return authKind
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(metadataString(auth.Metadata, "auth_kind", "authKind", "auth_mode", "authMode")))
+}
+
+func codexMetadataHasOAuthIdentity(metadata map[string]any) bool {
+	return metadataString(
+		metadata,
+		"account_id",
+		"accountId",
+		"chatgpt_account_id",
+		"chatgptAccountId",
+		"email",
+		"id_token",
+		"idToken",
+		"refresh_token",
+		"refreshToken",
+	) != ""
 }
 
 func codexResolvedUserAgent(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) string {
@@ -116,12 +158,18 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 	conversationID := firstNonEmptyHeaderValue(target, source, "Conversation_id")
 	threadID := firstNonEmptyHeaderValue(target, source, codexHeaderThreadID)
 	if threadID == "" {
+		threadID = firstNonEmptyHeaderValue(target, source, codexHeaderOfficialThreadID)
+	}
+	if threadID == "" {
 		threadID = firstNonEmptyHeaderValue(target, source, "X-Thread-ID")
 	}
 	if threadID == "" {
 		threadID = conversationID
 	}
 	sessionID := firstNonEmptyHeaderValue(target, source, "Session_id")
+	if sessionID == "" {
+		sessionID = firstNonEmptyHeaderValue(target, source, codexHeaderOfficialSessionID)
+	}
 	if sessionID == "" {
 		sessionID = firstNonEmptyHeaderValue(target, source, "X-Session-ID")
 	}
@@ -142,11 +190,13 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 		}
 	}
 	target.Set("Session_id", sessionID)
+	target.Set(codexHeaderOfficialSessionID, sessionID)
 	if threadID == "" {
 		threadID = sessionID
 	}
 	if threadID != "" {
 		target.Set(codexHeaderThreadID, threadID)
+		target.Set(codexHeaderOfficialThreadID, threadID)
 	}
 
 	requestID := firstNonEmptyHeaderValue(target, source, "X-Client-Request-Id")

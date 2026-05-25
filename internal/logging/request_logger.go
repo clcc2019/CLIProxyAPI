@@ -931,7 +931,7 @@ func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMe
 		}
 		trailingNewlines := 1
 		if apiResponseErrors[i].Error != nil {
-			errText := apiResponseErrors[i].Error.Error()
+			errText := string(util.RedactSensitiveLogBytes([]byte(apiResponseErrors[i].Error.Error())))
 			if _, errWrite := io.WriteString(w, errText); errWrite != nil {
 				return errWrite
 			}
@@ -1076,9 +1076,14 @@ func (l *FileRequestLogger) formatLogContent(url, method string, headers map[str
 	}
 
 	for i := 0; i < len(apiResponseErrors); i++ {
+		if apiResponseErrors[i] == nil {
+			continue
+		}
 		content.WriteString("=== API ERROR RESPONSE ===\n")
 		content.WriteString(fmt.Sprintf("HTTP Status: %d\n", apiResponseErrors[i].StatusCode))
-		content.WriteString(apiResponseErrors[i].Error.Error())
+		if apiResponseErrors[i].Error != nil {
+			content.Write(util.RedactSensitiveLogBytes([]byte(apiResponseErrors[i].Error.Error())))
+		}
 		content.WriteString("\n\n")
 	}
 

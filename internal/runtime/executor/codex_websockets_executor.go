@@ -5,17 +5,19 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -34,12 +36,15 @@ import (
 )
 
 const (
-	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
-	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
+	codexResponsesWebsocketBetaHeaderValue    = "responses_websockets=2026-02-06"
+	codexBetaFeatureResponseProcessed         = "responses_websocket_response_processed"
+	codexClientMetadataWSStreamRequestStartMS = "x-codex-ws-stream-request-start-ms"
+	codexResponsesWebsocketIdleTimeout        = 5 * time.Minute
 	// Rotate before the documented 60 minute upstream connection limit so the
 	// next turn opens a fresh socket instead of discovering the cap mid-chain.
 	codexResponsesWebsocketMaxLifetime  = 55 * time.Minute
 	codexResponsesWebsocketHandshakeTO  = 30 * time.Second
+	codexResponsesWebsocketWriteTO      = 30 * time.Second
 	codexResponsesWebsocketProbeIdle    = 45 * time.Second
 	codexResponsesWebsocketProbeWriteTO = 10 * time.Second
 	codexResponsesWebsocketReadBuffer   = 8
@@ -98,13 +103,23 @@ type codexWebsocketSession struct {
 
 	activeMu   sync.Mutex
 	activeCh   chan codexWebsocketRead
+	activeConn *websocket.Conn
 	activeDone <-chan struct{}
 	// activeClose closes the current activeDone channel exactly once. It is
 	// replaced on every setActive so callers holding a pre-activation copy of
 	// activeDone still observe cancellation of the old generation.
 	activeClose func()
 
-	readerConn *websocket.Conn
+	readerConn         *websocket.Conn
+	forceHTTPFallback  atomic.Bool
+	turnState          atomic.Value
+	turnStateScope     atomic.Value
+	lastRequest        []byte
+	lastRequestCmp     []byte
+	lastRequestInput   [][]byte
+	lastResponseID     string
+	lastResponseOutput []byte
+	lastResponseItems  [][]byte
 
 	lastActivityUnixNano atomic.Int64
 	lastProbeUnixNano    atomic.Int64
@@ -113,8 +128,8 @@ type codexWebsocketSession struct {
 	reuseKey  string
 	parkTimer *time.Timer
 
-	upstreamDisconnectOnce sync.Once
-	upstreamDisconnectCh   chan error
+	upstreamDisconnectMu sync.Mutex
+	upstreamDisconnectCh chan error
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
@@ -142,6 +157,7 @@ type codexPreparedWebsocketRequest struct {
 	sess               *codexWebsocketSession
 	sessionLocked      bool
 	reuseKey           string
+	httpFallback       bool
 }
 
 func (r *codexPreparedWebsocketRequest) unlockSession() {
@@ -152,7 +168,107 @@ func (r *codexPreparedWebsocketRequest) unlockSession() {
 	r.sessionLocked = false
 }
 
-func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
+func (s *codexWebsocketSession) httpFallbackActive() bool {
+	return s != nil && s.forceHTTPFallback.Load()
+}
+
+func (s *codexWebsocketSession) activateHTTPFallback() {
+	if s == nil {
+		return
+	}
+	s.forceHTTPFallback.Store(true)
+}
+
+func (s *codexWebsocketSession) currentTurnState() string {
+	if s == nil {
+		return ""
+	}
+	value := s.turnState.Load()
+	state, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(state)
+}
+
+func (s *codexWebsocketSession) currentTurnStateScope() string {
+	if s == nil {
+		return ""
+	}
+	value := s.turnStateScope.Load()
+	scope, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(scope)
+}
+
+func (s *codexWebsocketSession) setTurnStateScope(scope string) {
+	if s == nil {
+		return
+	}
+	scope = strings.TrimSpace(scope)
+	if scope == "" || s.currentTurnStateScope() == scope {
+		return
+	}
+	s.turnStateScope.Store(scope)
+	s.turnState.Store("")
+}
+
+func (s *codexWebsocketSession) applyTurnStateHeader(headers http.Header) {
+	if s == nil || headers == nil {
+		return
+	}
+	if strings.TrimSpace(headers.Get(codexHeaderTurnState)) != "" {
+		return
+	}
+	if state := s.currentTurnState(); state != "" {
+		headers.Set(codexHeaderTurnState, state)
+	}
+}
+
+func (s *codexWebsocketSession) rememberTurnStateHeader(headers http.Header) {
+	if s == nil || headers == nil {
+		return
+	}
+	state := strings.TrimSpace(headers.Get(codexHeaderTurnState))
+	if state == "" {
+		return
+	}
+	s.turnState.Store(state)
+}
+
+func (s *codexWebsocketSession) rememberLogicalRequest(body []byte) {
+	if s == nil {
+		return
+	}
+	request := bytes.Clone(bytes.TrimSpace(body))
+	s.lastRequest = request
+	s.lastResponseID = ""
+	s.lastResponseOutput = nil
+	s.lastResponseItems = nil
+	s.lastRequestCmp, _ = codexComparableRequestWithoutInput(request)
+	if inputItems, ok := codexRawArrayItems(gjson.GetBytes(request, "input")); ok {
+		s.lastRequestInput = inputItems
+	} else {
+		s.lastRequestInput = nil
+	}
+}
+
+func (s *codexWebsocketSession) rememberCompletedResponse(eventData []byte) {
+	if s == nil || len(bytes.TrimSpace(eventData)) == 0 {
+		return
+	}
+	s.lastResponseID = strings.TrimSpace(gjson.GetBytes(eventData, "response.id").String())
+	s.lastResponseOutput = codexCompletedResponseOutput(eventData)
+	if outputItems, ok := codexRawArrayItems(gjson.ParseBytes(s.lastResponseOutput)); ok {
+		s.lastResponseItems = outputItems
+	} else {
+		s.lastResponseItems = nil
+	}
+}
+
+func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead, conn *websocket.Conn) {
 	if s == nil {
 		return
 	}
@@ -163,6 +279,7 @@ func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 		s.activeDone = nil
 	}
 	s.activeCh = ch
+	s.activeConn = conn
 	if ch != nil {
 		done := make(chan struct{})
 		s.activeDone = done
@@ -180,6 +297,7 @@ func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 	s.activeMu.Lock()
 	if s.activeCh == ch {
 		s.activeCh = nil
+		s.activeConn = nil
 		if s.activeClose != nil {
 			s.activeClose()
 		}
@@ -187,6 +305,36 @@ func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 		s.activeDone = nil
 	}
 	s.activeMu.Unlock()
+}
+
+func (s *codexWebsocketSession) activeForConn(conn *websocket.Conn) (chan codexWebsocketRead, <-chan struct{}, bool) {
+	if s == nil || conn == nil {
+		return nil, nil, false
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if s.activeCh == nil || s.activeConn != conn {
+		return nil, nil, false
+	}
+	return s.activeCh, s.activeDone, true
+}
+
+func (s *codexWebsocketSession) activeOwnedByAnotherConn(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	return s.activeCh != nil && s.activeConn != nil && s.activeConn != conn
+}
+
+func (s *codexWebsocketSession) isCurrentConn(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conn == conn
 }
 
 func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
@@ -198,10 +346,12 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	now := time.Now()
+	_ = conn.SetWriteDeadline(now.Add(codexResponsesWebsocketWriteTO))
 	if err := conn.WriteMessage(msgType, payload); err != nil {
 		return err
 	}
-	s.touchActivity()
+	s.touchActivityAt(now)
 	return nil
 }
 
@@ -228,10 +378,17 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 }
 
 func (s *codexWebsocketSession) touchActivity() {
+	s.touchActivityAt(time.Now())
+}
+
+func (s *codexWebsocketSession) touchActivityAt(now time.Time) {
 	if s == nil {
 		return
 	}
-	s.lastActivityUnixNano.Store(time.Now().UnixNano())
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.lastActivityUnixNano.Store(now.UnixNano())
 }
 
 func (s *codexWebsocketSession) markProbe(now time.Time) {
@@ -300,11 +457,12 @@ func (s *codexWebsocketSession) probeConn(conn *websocket.Conn) error {
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(codexResponsesWebsocketProbeWriteTO)); err != nil {
+	now := time.Now()
+	if err := conn.WriteControl(websocket.PingMessage, nil, now.Add(codexResponsesWebsocketProbeWriteTO)); err != nil {
 		return err
 	}
-	s.touchActivity()
-	s.markProbe(time.Now())
+	s.touchActivityAt(now)
+	s.markProbe(now)
 	return nil
 }
 
@@ -312,21 +470,38 @@ func (s *codexWebsocketSession) notifyUpstreamDisconnect(err error) {
 	if s == nil {
 		return
 	}
-	s.upstreamDisconnectOnce.Do(func() {
-		if s.upstreamDisconnectCh == nil {
-			return
-		}
-		select {
-		case s.upstreamDisconnectCh <- err:
-		default:
-		}
-		close(s.upstreamDisconnectCh)
-	})
+	s.upstreamDisconnectMu.Lock()
+	ch := s.upstreamDisconnectCh
+	s.upstreamDisconnectCh = nil
+	s.upstreamDisconnectMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- err:
+	default:
+	}
+	close(ch)
+}
+
+func (s *codexWebsocketSession) upstreamDisconnectChan() <-chan error {
+	if s == nil {
+		return nil
+	}
+	s.upstreamDisconnectMu.Lock()
+	defer s.upstreamDisconnectMu.Unlock()
+	if s.upstreamDisconnectCh == nil {
+		s.upstreamDisconnectCh = make(chan error, 1)
+	}
+	return s.upstreamDisconnectCh
 }
 
 func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if isCodexOpenAIImageRequest(opts) {
+		return e.CodexExecutor.executeOpenAIImage(ctx, auth, req, opts)
 	}
 	if opts.Alt == "responses/compact" {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
@@ -358,11 +533,19 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeCodexInstructions(body)
+	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+		body = ensureImageGenerationTool(body, baseModel, auth)
+	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	prepared, err := e.prepareCodexWebsocketRequest(ctx, auth, req, opts, body, apiKey, httpURL)
 	if err != nil {
 		return resp, err
+	}
+	if prepared.httpFallback {
+		prepared.unlockSession()
+		return e.CodexExecutor.Execute(ctx, auth, req, opts)
 	}
 	defer prepared.unlockSession()
 	body = prepared.body
@@ -382,7 +565,19 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header, bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
+			e.activateSessionHTTPFallback(sess, nil, "upgrade_required", errDial)
+			prepared.unlockSession()
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
+		}
+		if respHS != nil && respHS.StatusCode == http.StatusUnauthorized && !codexUnauthorizedRetryAlreadyUsed(ctx) {
+			refreshedAuth, retried, refreshErr := e.CodexExecutor.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			if refreshErr != nil {
+				return resp, refreshErr
+			}
+			if retried {
+				prepared.unlockSession()
+				return e.Execute(contextWithCodexUnauthorizedRetryUsed(ctx), refreshedAuth, req, opts)
+			}
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			return resp, statusErrWithHeaders{
@@ -394,6 +589,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+	if sess != nil && respHS != nil {
+		sess.rememberTurnStateHeader(respHS.Header)
+	}
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
 		defer func() {
@@ -411,13 +609,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	var readCh chan codexWebsocketRead
 	if sess != nil {
 		readCh = make(chan codexWebsocketRead, codexResponsesWebsocketReadBuffer)
-		sess.setActive(readCh)
+		sess.setActive(readCh, conn)
 		defer sess.clearActive(readCh)
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		if sess != nil {
-			connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequest(ctx, auth, sess, conn, authID, wsURL, wsHeaders, wsReqLog, body, errSend)
+			connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequest(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, errSend)
 			if errRetry != nil {
 				return resp, errRetry
 			}
@@ -428,7 +626,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return resp, errSend
 		}
 	}
+	if sess != nil {
+		sess.rememberLogicalRequest(body)
+	}
 
+	streamState := newCodexStreamCompletionState()
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -457,6 +659,20 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
+			if sess != nil && codexWebsocketConnectionLimitReached(payload) {
+				connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "connection_limit", wsErr)
+				if errRetry != nil {
+					if sess != nil {
+						e.invalidateUpstreamConn(sess, conn, "upstream_error", errRetry)
+					}
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "connection_limit_retry", errRetry)
+					return resp, errRetry
+				}
+				conn = connRetry
+				wsReqBody = wsReqBodyRetry
+				streamState = newCodexStreamCompletionState()
+				continue
+			}
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 			}
@@ -466,22 +682,48 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
-		if eventType == "response.completed" {
+		if eventType == "response.incomplete" {
+			terminalErr := codexResponseIncompleteEventErr(payload)
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_incomplete", terminalErr)
+			return resp, terminalErr
+		}
+		if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_terminal", terminalErr)
+			return resp, terminalErr
+		}
+		if completed, ok := streamState.processEventDataWithType(eventType, payload, true); ok {
+			payload = completed.data
+			eventType = codexEventCompleted
+		}
+		if eventType == codexEventCompleted {
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
+			}
+			if sess != nil {
+				sess.rememberCompletedResponse(payload)
 			}
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
 			resp = cliproxyexecutor.Response{Payload: out}
+			if codexWebsocketShouldSendResponseProcessed(wsHeaders, wsReqBody) {
+				e.sendCodexWebsocketResponseProcessed(ctx, sess, conn, gjson.GetBytes(payload, "response.id").String())
+			}
 			return resp, nil
 		}
 	}
 }
 
 func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	log.Debugf("Executing Codex Websockets stream request with auth ID: %s, model: %s", auth.ID, req.Model)
+	logAuthID := ""
+	if auth != nil {
+		logAuthID = auth.ID
+	}
+	log.Debugf("Executing Codex Websockets stream request with auth ID: %s, model: %s", logAuthID, req.Model)
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if isCodexOpenAIImageRequest(opts) {
+		return e.CodexExecutor.executeOpenAIImageStream(ctx, auth, req, opts)
 	}
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
@@ -513,11 +755,19 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeCodexInstructions(body)
+	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+		body = ensureImageGenerationTool(body, baseModel, auth)
+	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	prepared, err := e.prepareCodexWebsocketRequest(ctx, auth, req, opts, body, apiKey, httpURL)
 	if err != nil {
 		return nil, err
+	}
+	if prepared.httpFallback {
+		prepared.unlockSession()
+		return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
 	body = prepared.body
 	wsReqBody := prepared.wsReqBody
@@ -540,9 +790,23 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header, bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
+			e.activateSessionHTTPFallback(sess, nil, "upgrade_required", errDial)
+			prepared.unlockSession()
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 		}
+		if respHS != nil && respHS.StatusCode == http.StatusUnauthorized && !codexUnauthorizedRetryAlreadyUsed(ctx) {
+			refreshedAuth, retried, refreshErr := e.CodexExecutor.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			if refreshErr != nil {
+				prepared.unlockSession()
+				return nil, refreshErr
+			}
+			if retried {
+				prepared.unlockSession()
+				return e.ExecuteStream(contextWithCodexUnauthorizedRetryUsed(ctx), refreshedAuth, req, opts)
+			}
+		}
 		if respHS != nil && respHS.StatusCode > 0 {
+			prepared.unlockSession()
 			return nil, statusErrWithHeaders{
 				statusErr: newCodexStatusErr(respHS.StatusCode, bodyErr),
 				headers:   respHS.Header.Clone(),
@@ -553,6 +817,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+	if sess != nil && respHS != nil {
+		sess.rememberTurnStateHeader(respHS.Header)
+	}
 
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
@@ -561,13 +828,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var readCh chan codexWebsocketRead
 	if sess != nil {
 		readCh = make(chan codexWebsocketRead, codexResponsesWebsocketReadBuffer)
-		sess.setActive(readCh)
+		sess.setActive(readCh, conn)
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		if sess != nil {
-			connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequest(ctx, auth, sess, conn, authID, wsURL, wsHeaders, wsReqLog, body, errSend)
+			connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequest(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, errSend)
 			if errRetry != nil {
 				sess.clearActive(readCh)
 				prepared.unlockSession()
@@ -582,6 +849,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			return nil, errSend
 		}
+	}
+	if sess != nil {
+		sess.rememberLogicalRequest(body)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
@@ -616,6 +886,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 
 		var param any
+		streamState := newCodexStreamCompletionState()
+		emittedPayload := false
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				terminateReason = "context_done"
@@ -661,6 +933,21 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 			if wsErr, ok := parseCodexWebsocketError(payload); ok {
+				if sess != nil && !emittedPayload && codexWebsocketConnectionLimitReached(payload) {
+					connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "connection_limit", wsErr)
+					if errRetry == nil {
+						conn = connRetry
+						wsReqBody = wsReqBodyRetry
+						streamState = newCodexStreamCompletionState()
+						continue
+					}
+					terminateReason = "connection_limit_retry_error"
+					terminateErr = errRetry
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "connection_limit_retry", errRetry)
+					reporter.PublishFailureWithError(ctx, errRetry)
+					_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
+					return
+				}
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
@@ -674,7 +961,22 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			payload = normalizeCodexWebsocketCompletion(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
-			if eventType == "response.completed" || eventType == "response.done" {
+			var terminalAfterForward error
+			if eventType == "response.incomplete" {
+				terminalAfterForward = codexResponseIncompleteEventErr(payload)
+			} else if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
+				terminateReason = "upstream_terminal"
+				terminateErr = terminalErr
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_terminal", terminalErr)
+				reporter.PublishFailureWithError(ctx, terminalErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
+				return
+			}
+			if completed, ok := streamState.processEventDataWithType(eventType, payload, true); ok {
+				payload = completed.data
+				eventType = codexEventCompleted
+			}
+			if eventType == codexEventCompleted || eventType == "response.done" {
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
@@ -688,8 +990,25 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					terminateErr = ctx.Err()
 					return
 				}
+				if len(chunks[i]) > 0 {
+					emittedPayload = true
+				}
 			}
-			if eventType == "response.completed" || eventType == "response.done" {
+			if terminalAfterForward != nil {
+				terminateReason = "upstream_incomplete"
+				terminateErr = terminalAfterForward
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_incomplete", terminalAfterForward)
+				reporter.PublishFailureWithError(ctx, terminalAfterForward)
+				_ = send(cliproxyexecutor.StreamChunk{Err: terminalAfterForward})
+				return
+			}
+			if eventType == codexEventCompleted || eventType == "response.done" {
+				if sess != nil {
+					sess.rememberCompletedResponse(payload)
+				}
+				if codexWebsocketShouldSendResponseProcessed(wsHeaders, wsReqBody) {
+					e.sendCodexWebsocketResponseProcessed(ctx, sess, conn, gjson.GetBytes(payload, "response.id").String())
+				}
 				return
 			}
 		}
@@ -721,14 +1040,21 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, codexFinalUpstreamBodyOptions{
 		requestKind:                codexFinalUpstreamResponses,
-		streamMode:                 codexStreamFieldDelete,
+		streamMode:                 codexStreamFieldTrue,
 		preservePreviousResponseID: true,
+		preserveGenerate:           true,
+		store:                      codexShouldStoreResponses(auth, httpURL),
+		omitServiceTier:            auth == nil || !auth.ServiceTierPassthrough(),
 	})
 
 	executionSessionID := executionSessionIDFromOptions(opts)
 	body, wsHeaders := e.applyCodexPromptCacheHeaders(ctx, opts.SourceFormat, executionSessionID, req, body)
+	if turnMetadata := codexExplicitWebsocketTurnMetadata(ctx, body); turnMetadata != "" && strings.TrimSpace(wsHeaders.Get(codexHeaderTurnMetadata)) == "" {
+		wsHeaders.Set(codexHeaderTurnMetadata, turnMetadata)
+	}
 	codexEnsureExecutionSessionHeader(wsHeaders, codexGinHeadersFromContext(ctx), executionSessionID)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	turnStateScope := strings.TrimSpace(wsHeaders.Get(codexHeaderTurnMetadata))
 	body = codexApplyWebsocketClientMetadata(ctx, body, wsHeaders, auth, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -752,10 +1078,21 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		if prepared.sess != nil {
 			prepared.sess.reqMu.Lock()
 			prepared.sessionLocked = true
+			prepared.httpFallback = prepared.sess.httpFallbackActive()
+			if !prepared.httpFallback {
+				prepared.sess.setTurnStateScope(turnStateScope)
+				prepared.sess.applyTurnStateHeader(prepared.wsHeaders)
+			}
 		}
 	}
 
 	prepared.wsReqBody = buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
+	if !prepared.httpFallback && prepared.sess != nil {
+		if incrementalBody, ok := buildCodexIncrementalWebsocketRequestBody(prepared.sess, body, wsHeaders.Get("X-Codex-Turn-Metadata")); ok {
+			prepared.wsReqBody = incrementalBody
+		}
+	}
+	prepared.wsReqBody = stampCodexWebsocketStreamRequestStartMS(prepared.wsReqBody, time.Now())
 	prepared.wsReqLog = helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -776,6 +1113,12 @@ func codexEnsureExecutionSessionHeader(headers http.Header, source http.Header, 
 		return
 	}
 	if firstNonEmptyHeaderValue(headers, source, codexHeaderSessionID) != "" {
+		return
+	}
+	if firstNonEmptyHeaderValue(headers, source, codexHeaderOfficialSessionID) != "" {
+		return
+	}
+	if firstNonEmptyHeaderValue(headers, source, codexHeaderOfficialThreadID) != "" {
 		return
 	}
 	if firstNonEmptyHeaderValue(headers, source, "Conversation_id") != "" {
@@ -802,18 +1145,44 @@ func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequest(
 	auth *cliproxyauth.Auth,
 	sess *codexWebsocketSession,
 	conn *websocket.Conn,
+	readCh *chan codexWebsocketRead,
 	authID string,
 	wsURL string,
 	wsHeaders http.Header,
 	wsReqLog helps.UpstreamRequestLog,
-	body []byte,
+	wsReqBody []byte,
 	sendErr error,
 ) (*websocket.Conn, []byte, error) {
+	return e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "send_error", sendErr)
+}
+
+func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequestWithReason(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	sess *codexWebsocketSession,
+	conn *websocket.Conn,
+	readCh *chan codexWebsocketRead,
+	authID string,
+	wsURL string,
+	wsHeaders http.Header,
+	wsReqLog helps.UpstreamRequestLog,
+	wsReqBody []byte,
+	reason string,
+	cause error,
+) (*websocket.Conn, []byte, error) {
 	if sess == nil {
-		return nil, nil, sendErr
+		return nil, nil, cause
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "retry"
 	}
 
-	e.invalidateUpstreamConn(sess, conn, "send_error", sendErr)
+	if readCh != nil && *readCh != nil {
+		sess.clearActive(*readCh)
+		*readCh = nil
+	}
+	e.invalidateUpstreamConn(sess, conn, reason, cause)
 
 	// Retry once with a fresh websocket connection. This mainly handles upstream
 	// closing the socket between sequential requests within the same execution session.
@@ -824,12 +1193,24 @@ func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequest(
 		return nil, nil, errDialRetry
 	}
 
-	wsReqBodyRetry := buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
+	wsReqBodyRetry := bytes.Clone(wsReqBody)
 	wsReqLog.Body = wsReqBodyRetry
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+	if respHSRetry != nil {
+		sess.rememberTurnStateHeader(respHSRetry.Header)
+	}
+	if readCh != nil {
+		newReadCh := make(chan codexWebsocketRead, codexResponsesWebsocketReadBuffer)
+		sess.setActive(newReadCh, connRetry)
+		*readCh = newReadCh
+	}
 
 	if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
+		if readCh != nil && *readCh != nil {
+			sess.clearActive(*readCh)
+			*readCh = nil
+		}
 		e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
 		return nil, nil, errSendRetry
@@ -862,7 +1243,53 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 	if conn == nil {
 		return fmt.Errorf("codex websockets executor: websocket conn is nil")
 	}
+	_ = conn.SetWriteDeadline(time.Now().Add(codexResponsesWebsocketWriteTO))
 	return conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+func codexWebsocketResponseProcessedEnabled(headers http.Header) bool {
+	if headers == nil {
+		return false
+	}
+	for _, raw := range headers.Values("X-Codex-Beta-Features") {
+		for _, feature := range strings.Split(raw, ",") {
+			if strings.EqualFold(strings.TrimSpace(feature), codexBetaFeatureResponseProcessed) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func codexWebsocketShouldSendResponseProcessed(headers http.Header, requestBody []byte) bool {
+	if !codexWebsocketResponseProcessedEnabled(headers) {
+		return false
+	}
+	generate := gjson.GetBytes(requestBody, "generate")
+	return !generate.Exists() || generate.Bool()
+}
+
+func buildCodexWebsocketResponseProcessedRequest(responseID string) []byte {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return nil
+	}
+	payload := make([]byte, 0, len(responseID)+48)
+	payload = append(payload, `{"type":"response.processed","response_id":`...)
+	payload = strconv.AppendQuote(payload, responseID)
+	payload = append(payload, '}')
+	return payload
+}
+
+func (e *CodexWebsocketsExecutor) sendCodexWebsocketResponseProcessed(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, responseID string) {
+	payload := buildCodexWebsocketResponseProcessedRequest(responseID)
+	if len(payload) == 0 {
+		return
+	}
+	if err := writeCodexWebsocketMessage(sess, conn, payload); err != nil {
+		helps.RecordAPIWebsocketError(ctx, e.cfg, "response_processed", err)
+		log.Debugf("codex websockets executor: send response.processed failed: %v", err)
+	}
 }
 
 func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []byte {
@@ -904,12 +1331,154 @@ func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []by
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
 	}
-	fallback := bytes.Clone(body)
-	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
-	if turnMetadataHeader != "" && gjson.GetBytes(fallback, "client_metadata.x-codex-turn-metadata").String() != turnMetadataHeader {
-		fallback, _ = sjson.SetBytes(fallback, "client_metadata.x-codex-turn-metadata", turnMetadataHeader)
+	return body
+}
+
+func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body []byte, turnMetadataHeader string) ([]byte, bool) {
+	if sess == nil || len(sess.lastRequestCmp) == 0 {
+		return nil, false
 	}
-	return fallback
+	previousResponseID := strings.TrimSpace(sess.lastResponseID)
+	if previousResponseID == "" {
+		return nil, false
+	}
+
+	currentComparable, ok := codexComparableRequestWithoutInput(body)
+	if !ok || !bytes.Equal(sess.lastRequestCmp, currentComparable) {
+		return nil, false
+	}
+
+	previousInput := sess.lastRequestInput
+	if previousInput == nil {
+		return nil, false
+	}
+	currentInput, ok := codexRawArrayItems(gjson.GetBytes(body, "input"))
+	if !ok {
+		return nil, false
+	}
+	responseOutput := sess.lastResponseItems
+	if responseOutput == nil {
+		return nil, false
+	}
+
+	baseline := make([][]byte, 0, len(previousInput)+len(responseOutput))
+	baseline = append(baseline, previousInput...)
+	baseline = append(baseline, responseOutput...)
+	if len(currentInput) < len(baseline) {
+		return nil, false
+	}
+	for i := range baseline {
+		if !codexJSONRawEqual(currentInput[i], baseline[i]) {
+			return nil, false
+		}
+	}
+
+	delta := currentInput[len(baseline):]
+	wsReqBody := buildCodexWebsocketRequestBody(body, turnMetadataHeader)
+	updated, err := sjson.SetRawBytes(wsReqBody, "input", codexRawJSONArray(delta))
+	if err != nil {
+		return nil, false
+	}
+	updated, err = sjson.SetBytes(updated, "previous_response_id", previousResponseID)
+	if err != nil || len(updated) == 0 {
+		return nil, false
+	}
+	return updated, true
+}
+
+func stampCodexWebsocketStreamRequestStartMS(body []byte, now time.Time) []byte {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return codexSetClientMetadataString(body, codexClientMetadataWSStreamRequestStartMS, strconv.FormatInt(now.UnixMilli(), 10), true)
+}
+
+func codexComparableRequestWithoutInput(body []byte) ([]byte, bool) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, false
+	}
+	comparable, err := sjson.DeleteBytes(body, "input")
+	if err != nil {
+		return nil, false
+	}
+	for _, path := range []string{
+		"generate",
+		"client_metadata." + codexClientMetadataTurnMetadata,
+		"client_metadata." + codexClientMetadataWSStreamRequestStartMS,
+	} {
+		comparable, err = sjson.DeleteBytes(comparable, path)
+		if err != nil {
+			return nil, false
+		}
+	}
+	metadata := gjson.GetBytes(comparable, "client_metadata")
+	if metadata.Exists() && bytes.Equal(bytes.TrimSpace([]byte(metadata.Raw)), []byte("{}")) {
+		comparable, err = sjson.DeleteBytes(comparable, "client_metadata")
+		if err != nil {
+			return nil, false
+		}
+	}
+	canonical, ok := codexCanonicalJSONBytes(comparable)
+	if !ok {
+		return nil, false
+	}
+	return canonical, true
+}
+
+func codexRawArrayItems(result gjson.Result) ([][]byte, bool) {
+	if !result.Exists() || !result.IsArray() {
+		return nil, false
+	}
+	items := make([][]byte, 0, len(result.Array()))
+	result.ForEach(func(_, item gjson.Result) bool {
+		items = append(items, []byte(item.Raw))
+		return true
+	})
+	return items, true
+}
+
+func codexCanonicalJSONBytes(raw []byte) ([]byte, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	return canonical, true
+}
+
+func codexJSONRawEqual(left []byte, right []byte) bool {
+	left = bytes.TrimSpace(left)
+	right = bytes.TrimSpace(right)
+	if bytes.Equal(left, right) {
+		return true
+	}
+	var leftValue any
+	var rightValue any
+	if err := json.Unmarshal(left, &leftValue); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(right, &rightValue); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+func codexCompletedResponseOutput(eventData []byte) []byte {
+	output := gjson.GetBytes(eventData, "response.output")
+	if output.Exists() && output.IsArray() {
+		return []byte(output.Raw)
+	}
+	return []byte("[]")
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
@@ -1088,6 +1657,16 @@ func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Conte
 	return rawJSON, headers
 }
 
+func codexExplicitWebsocketTurnMetadata(ctx context.Context, body []byte) string {
+	if value := strings.TrimSpace(gjson.GetBytes(body, "client_metadata."+codexClientMetadataTurnMetadata).String()); value != "" {
+		return value
+	}
+	if ctx != nil {
+		return strings.TrimSpace(codexGinHeadersFromContext(ctx).Get(codexHeaderTurnMetadata))
+	}
+	return ""
+}
+
 func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config) http.Header {
 	if headers == nil {
 		headers = http.Header{}
@@ -1096,37 +1675,28 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		headers.Set("Authorization", "Bearer "+token)
 	}
 
-	var ginHeaders http.Header
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
-	}
-
+	ginHeaders := codexGinHeadersFromContext(ctx)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
-	misc.EnsureHeader(headers, ginHeaders, "Version", codexDefaultVersionHeader())
+	if codexIncludeTimingMetrics(cfg) {
+		headers.Set("x-responsesapi-include-timing-metrics", "true")
+	}
+	codexEnsureVersionHeader(headers, ginHeaders)
 	misc.EnsureHeader(headers, ginHeaders, "x-openai-subagent", "")
-	misc.EnsureHeader(headers, ginHeaders, "traceparent", "")
-	misc.EnsureHeader(headers, ginHeaders, "tracestate", "")
+	misc.EnsureHeader(headers, ginHeaders, codexHeaderOAIAttestation, "")
 
-	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
-	if betaHeader == "" && ginHeaders != nil {
-		betaHeader = strings.TrimSpace(ginHeaders.Get("OpenAI-Beta"))
-	}
-	if betaHeader == "" || !strings.Contains(betaHeader, "responses_websockets=") {
-		betaHeader = codexResponsesWebsocketBetaHeaderValue
-	}
-	headers.Set("OpenAI-Beta", betaHeader)
+	headers.Set("OpenAI-Beta", codexResponsesWebsocketBetaHeaderValue)
 	identity := codexResolvedIdentity(headers, ginHeaders, auth, cfg)
 	headers.Set("User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: true,
 	})
 	codexEnsureTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
-		sessionID:    sessionID,
-		threadSource: codexDefaultThreadSource,
-		turnID:       uuid.NewString(),
-		sandbox:      codexDefaultSandboxTag,
+		sessionID: sessionID,
+		threadID:  strings.TrimSpace(headers.Get(codexHeaderThreadID)),
+		turnID:    uuid.NewString(),
+		sandbox:   codexDefaultSandboxTag,
 	})
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	codexEnsureResponsesIdentityHeaders(headers, ginHeaders)
@@ -1159,6 +1729,10 @@ func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, s
 	}
 	userAgent := strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	return userAgent, strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+func codexIncludeTimingMetrics(cfg *config.Config) bool {
+	return cfg != nil && cfg.CodexHeaderDefaults.IncludeTimingMetrics != nil && *cfg.CodexHeaderDefaults.IncludeTimingMetrics
 }
 
 func ensureHeaderWithPriority(target http.Header, source http.Header, key, configValue, fallbackValue string) {
@@ -1290,9 +1864,6 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 	// orthogonal to park/unpark traffic which now has its own lock.
 	store.sessionsMu.RLock()
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
-		if sess.upstreamDisconnectCh == nil {
-			sess.upstreamDisconnectCh = make(chan error, 1)
-		}
 		if reuseKey == "" || sess.reuseKey == reuseKey {
 			store.sessionsMu.RUnlock()
 			return sess
@@ -1305,9 +1876,6 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 		store.sessions = make(map[string]*codexWebsocketSession)
 	}
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
-		if sess.upstreamDisconnectCh == nil {
-			sess.upstreamDisconnectCh = make(chan error, 1)
-		}
 		if reuseKey != "" {
 			sess.reuseKey = reuseKey
 		}
@@ -1331,16 +1899,13 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 			store.parkedMu.Unlock()
 			sess.sessionID = sessionID
 			sess.reuseKey = reuseKey
-			if sess.upstreamDisconnectCh == nil {
-				sess.upstreamDisconnectCh = make(chan error, 1)
-			}
 			store.sessions[sessionID] = sess
 			store.sessionsMu.Unlock()
 			return sess
 		}
 		store.parkedMu.Unlock()
 	}
-	sess := &codexWebsocketSession{sessionID: sessionID, reuseKey: reuseKey, upstreamDisconnectCh: make(chan error, 1)}
+	sess := &codexWebsocketSession{sessionID: sessionID, reuseKey: reuseKey}
 	store.sessions[sessionID] = sess
 	store.sessionsMu.Unlock()
 	return sess
@@ -1351,7 +1916,33 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-cha
 	if sess == nil {
 		return nil
 	}
-	return sess.upstreamDisconnectCh
+	return sess.upstreamDisconnectChan()
+}
+
+func (e *CodexWebsocketsExecutor) UpstreamDisconnectChanIfExists(sessionID string) <-chan error {
+	sess := e.existingSession(sessionID)
+	if sess == nil {
+		return nil
+	}
+	return sess.upstreamDisconnectChan()
+}
+
+func (e *CodexWebsocketsExecutor) existingSession(sessionID string) *codexWebsocketSession {
+	sessionID = strings.TrimSpace(sessionID)
+	if e == nil || sessionID == "" {
+		return nil
+	}
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	if store == nil {
+		return nil
+	}
+	store.sessionsMu.RLock()
+	sess := store.sessions[sessionID]
+	store.sessionsMu.RUnlock()
+	return sess
 }
 
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
@@ -1430,11 +2021,8 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
 			codexMetrics.wsUpstreamError.Add(1)
-			sess.activeMu.Lock()
-			ch := sess.activeCh
-			done := sess.activeDone
-			sess.activeMu.Unlock()
-			if ch != nil {
+			ch, done, active := sess.activeForConn(conn)
+			if active {
 				// Terminal error must reach the consumer; do NOT fall through a
 				// `default` that silently drops it. The buffer is 32, and the
 				// consumer either drains it or abandons the read by closing
@@ -1445,6 +2033,8 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				}
 				sess.clearActive(ch)
 				close(ch)
+			} else if sess.isCurrentConn(conn) {
+				sess.notifyUpstreamDisconnect(errRead)
 			}
 			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			return
@@ -1454,11 +2044,8 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			if msgType == websocket.BinaryMessage {
 				codexMetrics.wsUpstreamBinary.Add(1)
 				errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
-				sess.activeMu.Lock()
-				ch := sess.activeCh
-				done := sess.activeDone
-				sess.activeMu.Unlock()
-				if ch != nil {
+				ch, done, active := sess.activeForConn(conn)
+				if active {
 					// Same reasoning as the upstream-disconnect path above:
 					// surfacing the terminal error to the consumer is the
 					// whole point, silently dropping it is a correctness bug.
@@ -1468,6 +2055,8 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 					}
 					sess.clearActive(ch)
 					close(ch)
+				} else if sess.isCurrentConn(conn) {
+					sess.notifyUpstreamDisconnect(errBinary)
 				}
 				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				return
@@ -1476,11 +2065,11 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		}
 		sess.touchActivity()
 
-		sess.activeMu.Lock()
-		ch := sess.activeCh
-		done := sess.activeDone
-		sess.activeMu.Unlock()
-		if ch == nil {
+		ch, done, active := sess.activeForConn(conn)
+		if !active {
+			if sess.activeOwnedByAnotherConn(conn) {
+				return
+			}
 			codexMetrics.wsActiveChMissing.Add(1)
 			continue
 		}
@@ -1488,6 +2077,16 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		case ch <- codexWebsocketRead{conn: conn, msgType: msgType, payload: payload}:
 		case <-done:
 		}
+	}
+}
+
+func (e *CodexWebsocketsExecutor) activateSessionHTTPFallback(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
+	if sess == nil {
+		return
+	}
+	sess.activateHTTPFallback()
+	if conn != nil {
+		e.invalidateUpstreamConn(sess, conn, reason, err)
 	}
 }
 
@@ -1512,7 +2111,6 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 	sess.connMu.Unlock()
 
 	logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason, err)
-	sess.notifyUpstreamDisconnect(err)
 	if errClose := conn.Close(); errClose != nil {
 		log.Errorf("codex websockets executor: close websocket error: %v", errClose)
 	}
@@ -1641,6 +2239,9 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 
 func (e *CodexWebsocketsExecutor) parkExecutionSession(sess *codexWebsocketSession) bool {
 	if sess == nil {
+		return false
+	}
+	if sess.httpFallbackActive() {
 		return false
 	}
 	reuseKey := strings.TrimSpace(sess.reuseKey)

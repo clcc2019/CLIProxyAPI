@@ -4,7 +4,10 @@
 package util
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -219,6 +222,254 @@ func MaskSensitiveHeaderValue(key, value string) string {
 	default:
 		return value
 	}
+}
+
+// RedactSensitiveJSONBytes masks credential-like JSON fields before writing
+// request payloads to diagnostic logs. Non-JSON payloads are returned unchanged.
+func RedactSensitiveJSONBytes(data []byte) []byte {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return data
+	}
+	out, ok := redactSensitiveJSONBytes(trimmed)
+	if !ok {
+		return data
+	}
+	return out
+}
+
+func redactSensitiveJSONBytes(trimmed []byte) ([]byte, bool) {
+	var value any
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return nil, false
+	}
+	redactSensitiveJSONValue(value)
+	out, err := json.Marshal(value)
+	if err != nil || len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// RedactSensitiveLogBytes masks credential-like JSON fields in plain JSON and
+// in SSE data lines before diagnostic payloads are written to request logs. It
+// also handles plain-text error strings that include header-like or query-like
+// credentials.
+func RedactSensitiveLogBytes(data []byte) []byte {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return data
+	}
+	if out, ok := redactSensitiveJSONBytes(trimmed); ok {
+		return out
+	}
+	return redactSensitivePlainTextBytes(redactSensitiveSSEDataBytes(data))
+}
+
+var (
+	plainAuthorizationCredentialPattern = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:(bearer|basic|apikey)\s+)?([^\s,;]+)`)
+	plainBearerCredentialPattern        = regexp.MustCompile(`(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{8,})`)
+	plainKeyValueCredentialPattern      = regexp.MustCompile(`(?i)\b(api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|session[-_ ]?token|bearer[-_ ]?token|client[-_ ]?secret|password|credential|credentials)\b(\s*[:=]\s*)([^\s&;,]+)`)
+)
+
+func redactSensitivePlainTextBytes(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	if !mayContainSensitiveTextBytes(data) {
+		return data
+	}
+	redacted := plainAuthorizationCredentialPattern.ReplaceAllFunc(data, func(match []byte) []byte {
+		parts := plainAuthorizationCredentialPattern.FindSubmatch(match)
+		if len(parts) < 4 {
+			return match
+		}
+		out := make([]byte, 0, len(parts[1])+len(parts[2])+len(" [REDACTED]")+len("[REDACTED]"))
+		out = append(out, parts[1]...)
+		if len(parts[2]) > 0 {
+			out = append(out, parts[2]...)
+			out = append(out, ' ')
+		}
+		out = append(out, "[REDACTED]"...)
+		return out
+	})
+	redacted = plainBearerCredentialPattern.ReplaceAll(redacted, []byte(`${1} [REDACTED]`))
+	redacted = plainKeyValueCredentialPattern.ReplaceAll(redacted, []byte(`${1}${2}[REDACTED]`))
+	return redacted
+}
+
+func redactSensitiveJSONValue(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if shouldRedactJSONKey(key) {
+				typed[key] = "[REDACTED]"
+				continue
+			}
+			if str, ok := child.(string); ok {
+				typed[key] = redactSensitiveJSONString(str)
+				continue
+			}
+			redactSensitiveJSONValue(child)
+		}
+	case []any:
+		for i, child := range typed {
+			if str, ok := child.(string); ok {
+				typed[i] = redactSensitiveJSONString(str)
+				continue
+			}
+			redactSensitiveJSONValue(child)
+		}
+	}
+}
+
+func redactSensitiveJSONString(value string) string {
+	if value == "" {
+		return value
+	}
+	if !mayContainSensitiveTextString(value) {
+		return value
+	}
+	redacted := redactSensitivePlainTextBytes([]byte(value))
+	if len(redacted) == 0 {
+		return value
+	}
+	return string(redacted)
+}
+
+var sensitiveTextMarkers = []string{
+	"authorization",
+	"bearer",
+	"basic",
+	"api",
+	"token",
+	"secret",
+	"password",
+	"credential",
+}
+
+func mayContainSensitiveTextString(value string) bool {
+	value = strings.ToLower(value)
+	for _, marker := range sensitiveTextMarkers {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func mayContainSensitiveTextBytes(data []byte) bool {
+	for _, marker := range sensitiveTextMarkers {
+		if containsASCIIFold(data, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsASCIIFold(data []byte, marker string) bool {
+	if len(marker) == 0 {
+		return true
+	}
+	if len(data) < len(marker) {
+		return false
+	}
+	for i := 0; i <= len(data)-len(marker); i++ {
+		matched := true
+		for j := 0; j < len(marker); j++ {
+			if lowerASCII(data[i+j]) != marker[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func lowerASCII(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+func shouldRedactJSONKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return false
+	}
+	normalized := strings.ReplaceAll(key, "-", "_")
+	normalized = strings.ReplaceAll(normalized, " ", "_")
+	compact := strings.ReplaceAll(normalized, "_", "")
+	switch normalized {
+	case "authorization", "auth", "auth_token", "access_token", "refresh_token", "id_token",
+		"token", "bearer_token", "session_token", "api_key", "apikey", "x_api_key",
+		"secret", "client_secret", "password", "passcode", "credential", "credentials":
+		return true
+	}
+	switch compact {
+	case "authtoken", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "sessiontoken",
+		"apikey", "xapikey", "clientsecret":
+		return true
+	}
+	return strings.Contains(normalized, "authorization") ||
+		strings.Contains(normalized, "api_key") ||
+		strings.Contains(normalized, "apikey") ||
+		strings.HasSuffix(normalized, "_token") ||
+		strings.HasSuffix(normalized, "_secret") ||
+		strings.Contains(normalized, "password") ||
+		strings.Contains(normalized, "credential")
+}
+
+func redactSensitiveSSEDataBytes(data []byte) []byte {
+	if len(data) == 0 || !bytes.Contains(data, []byte("data:")) {
+		return data
+	}
+	segments := bytes.SplitAfter(data, []byte("\n"))
+	changed := false
+	for i, segment := range segments {
+		line, suffix := trimLineEnding(segment)
+		trimmedLeft := bytes.TrimLeft(line, " \t")
+		leadingLen := len(line) - len(trimmedLeft)
+		if !bytes.HasPrefix(trimmedLeft, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(trimmedLeft[len("data:"):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !json.Valid(payload) {
+			continue
+		}
+		redactedPayload := RedactSensitiveJSONBytes(payload)
+		if bytes.Equal(redactedPayload, payload) {
+			continue
+		}
+		updated := make([]byte, 0, leadingLen+len("data: ")+len(redactedPayload)+len(suffix))
+		updated = append(updated, line[:leadingLen]...)
+		updated = append(updated, "data: "...)
+		updated = append(updated, redactedPayload...)
+		updated = append(updated, suffix...)
+		segments[i] = updated
+		changed = true
+	}
+	if !changed {
+		return data
+	}
+	return bytes.Join(segments, nil)
+}
+
+func trimLineEnding(line []byte) ([]byte, []byte) {
+	if len(line) == 0 {
+		return line, nil
+	}
+	if line[len(line)-1] != '\n' {
+		return line, nil
+	}
+	if len(line) >= 2 && line[len(line)-2] == '\r' {
+		return line[:len(line)-2], line[len(line)-2:]
+	}
+	return line[:len(line)-1], line[len(line)-1:]
 }
 
 // MaskSensitiveQuery masks sensitive query parameters, e.g. auth_token, within the raw query string.

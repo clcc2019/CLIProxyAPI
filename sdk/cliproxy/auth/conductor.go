@@ -1089,6 +1089,16 @@ func (e *streamBootstrapError) Headers() http.Header {
 	return cloneHTTPHeader(e.headers)
 }
 
+func (e *streamBootstrapError) StatusCode() int {
+	if e == nil || e.cause == nil {
+		return 0
+	}
+	if se, ok := e.cause.(interface{ StatusCode() int }); ok && se != nil {
+		return se.StatusCode()
+	}
+	return 0
+}
+
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	ch <- cliproxyexecutor.StreamChunk{Err: err}
@@ -1097,6 +1107,10 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 		Headers: cloneHTTPHeader(headers),
 		Chunks:  ch,
 	}
+}
+
+func invalidStreamResultError(message string) *Error {
+	return &Error{Code: "invalid_stream_result", Message: message, Retryable: true, HTTPStatus: http.StatusBadGateway}
 }
 
 func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
@@ -1206,6 +1220,26 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			lastErr = errStream
 			continue
 		}
+		if streamResult == nil {
+			invalidErr := invalidStreamResultError("upstream executor returned nil stream result")
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: invalidErr}
+			m.MarkResult(ctx, result)
+			if idx < len(execModels)-1 {
+				lastErr = invalidErr
+				continue
+			}
+			return nil, newStreamBootstrapError(invalidErr, nil)
+		}
+		if streamResult.Chunks == nil {
+			invalidErr := invalidStreamResultError("upstream executor returned stream result without chunks")
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: invalidErr}
+			m.MarkResult(ctx, result)
+			if idx < len(execModels)-1 {
+				lastErr = invalidErr
+				continue
+			}
+			return nil, newStreamBootstrapError(invalidErr, streamResult.Headers)
+		}
 
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
@@ -1239,7 +1273,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && len(buffered) == 0 {
-			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true, HTTPStatus: http.StatusBadGateway}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
 			if idx < len(execModels)-1 {
@@ -2940,7 +2974,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			if result.Model != "" && !result.AuthScoped {
+			authWideFailure := result.AuthScoped || isAuthWideResultError(result.Error)
+			if result.Model != "" && !authWideFailure {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
@@ -3033,15 +3068,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					schedulerDirty = true
 				}
 			} else {
-				// result.AuthScoped elevates a model-specific failure (Kiro 429
-				// on a shared AGENTIC_REQUEST bucket) to an auth-wide suspend so
-				// session-affinity binds move to the next credential instead of
-				// staying on a depleted one for unrelated models.
+				// Auth-wide failures suspend the credential itself, not just the
+				// triggering model. Kiro auth-scoped quota errors and generic 401s
+				// both need future routing to move to a different auth file.
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
-				// Mark the auth-level quota as auth-scoped so isAuthBlockedForModel
-				// treats every model as exhausted, even ones with no per-model
-				// state recorded yet.
-				auth.Quota.AuthScope = true
+				// Mark explicit auth-scoped failures so isAuthBlockedForModel treats
+				// every model as unavailable, even ones with no per-model state.
+				if result.AuthScoped {
+					auth.Quota.AuthScope = true
+				}
 				if result.Model != "" {
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -3059,7 +3094,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.Quota.AuthScope = false
 						setModelQuota = true
 					}
-					suspendReason = "auth_scope_quota"
+					suspendReason = authWideSuspendReason(result.Error, result.AuthScoped)
 					shouldSuspendModel = true
 				}
 				schedulerDirty = true
@@ -3482,6 +3517,28 @@ func statusCodeFromResult(err *Error) int {
 	return err.StatusCode()
 }
 
+func isAuthWideResultError(err *Error) bool {
+	return statusCodeFromResult(err) == http.StatusUnauthorized
+}
+
+func authWideSuspendReason(err *Error, explicitAuthScoped bool) string {
+	switch statusCodeFromResult(err) {
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusPaymentRequired, http.StatusForbidden:
+		return "payment_required"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusTooManyRequests:
+		if explicitAuthScoped {
+			return "auth_scope_quota"
+		}
+		return "quota"
+	default:
+		return "auth_scope_failure"
+	}
+}
+
 func isModelSupportErrorMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	if lower == "" {
@@ -3627,11 +3684,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
-		}
+		// disable_cooling is intended for quota/capacity retry loops. A 401 means
+		// the credential itself is invalid, so keep it out of routing until a
+		// refresh or re-login updates the auth state.
+		auth.NextRetryAfter = now.Add(30 * time.Minute)
 	case 402, 403:
 		auth.StatusMessage = "payment_required"
 		if disableCooling {
@@ -5238,6 +5294,10 @@ var refreshPreservedMetadataKeys = []string{
 	"userAgent",
 	"websockets",
 	"websocket",
+	"service_tier_passthrough",
+	"service-tier-passthrough",
+	"serviceTierPassthrough",
+	"fast",
 	"websocket_handshake_debug",
 }
 
@@ -5250,6 +5310,7 @@ var refreshPreservedAttributeKeys = []string{
 	"excluded_models",
 	"excluded_models_hash",
 	"websockets",
+	"service_tier_passthrough",
 	"user_agent",
 	"user-agent",
 	"userAgent",

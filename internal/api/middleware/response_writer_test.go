@@ -47,6 +47,24 @@ func TestExtractRequestBodySupportsStringOverride(t *testing.T) {
 	}
 }
 
+func TestExtractRequestBodyRedactsSensitiveJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	wrapper := &ResponseWriterWrapper{
+		requestInfo: &RequestInfo{Body: []byte(`{"access_token":"secret-token","value":"visible"}`)},
+	}
+
+	body := string(wrapper.extractRequestBody(c))
+	if strings.Contains(body, "secret-token") {
+		t.Fatalf("request body log leaked sensitive value: %s", body)
+	}
+	if !strings.Contains(body, "[REDACTED]") || !strings.Contains(body, "visible") {
+		t.Fatalf("request body log missing expected redacted content: %s", body)
+	}
+}
+
 func TestExtractResponseBodyPrefersOverride(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -72,6 +90,23 @@ func TestExtractResponseBodyPrefersOverride(t *testing.T) {
 	}
 }
 
+func TestExtractResponseBodyRedactsSensitiveSSE(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	wrapper := &ResponseWriterWrapper{body: &bytes.Buffer{}}
+	wrapper.body.WriteString("data: {\"api_key\":\"sk-secret\",\"value\":\"stream\"}\n\n")
+
+	body := string(wrapper.extractResponseBody(c))
+	if strings.Contains(body, "sk-secret") {
+		t.Fatalf("response body log leaked sensitive value: %s", body)
+	}
+	if !strings.Contains(body, "[REDACTED]") || !strings.Contains(body, "stream") {
+		t.Fatalf("response body log missing expected redacted content: %s", body)
+	}
+}
+
 func TestExtractAPIResponseSupportsStringBuilder(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -85,6 +120,31 @@ func TestExtractAPIResponseSupportsStringBuilder(t *testing.T) {
 	body := wrapper.extractAPIResponse(c)
 	if string(body) != "streamed-response" {
 		t.Fatalf("api response = %q, want %q", string(body), "streamed-response")
+	}
+}
+
+func TestExtractAPILogsRedactSensitivePlainText(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	c.Set("API_REQUEST", "Authorization: Bearer request-secret\nvisible=request")
+	c.Set("API_RESPONSE", []byte("upstream error access_token=response-secret visible=response"))
+	c.Set("API_WEBSOCKET_TIMELINE", []byte("websocket.response\napi_key=timeline-secret visible=timeline"))
+
+	wrapper := &ResponseWriterWrapper{}
+	for name, body := range map[string][]byte{
+		"api request":            wrapper.extractAPIRequest(c),
+		"api response":           wrapper.extractAPIResponse(c),
+		"api websocket timeline": wrapper.extractAPIWebsocketTimeline(c),
+	} {
+		text := string(body)
+		if strings.Contains(text, "request-secret") || strings.Contains(text, "response-secret") || strings.Contains(text, "timeline-secret") {
+			t.Fatalf("%s log leaked sensitive value: %s", name, text)
+		}
+		if !strings.Contains(text, "[REDACTED]") || !strings.Contains(text, "visible=") {
+			t.Fatalf("%s log missing expected redacted content: %s", name, text)
+		}
 	}
 }
 
@@ -135,6 +195,23 @@ func TestExtractWebsocketTimelineUsesOverride(t *testing.T) {
 	body := wrapper.extractWebsocketTimeline(c)
 	if string(body) != "timeline" {
 		t.Fatalf("websocket timeline = %q, want %q", string(body), "timeline")
+	}
+}
+
+func TestExtractWebsocketTimelineRedactsSensitiveJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	wrapper := &ResponseWriterWrapper{}
+	c.Set(websocketTimelineOverrideContextKey, []byte(`{"access_token":"secret-token","value":"visible"}`))
+
+	timeline := string(wrapper.extractWebsocketTimeline(c))
+	if strings.Contains(timeline, "secret-token") {
+		t.Fatalf("websocket timeline log leaked sensitive value: %s", timeline)
+	}
+	if !strings.Contains(timeline, "[REDACTED]") || !strings.Contains(timeline, "visible") {
+		t.Fatalf("websocket timeline log missing expected redacted content: %s", timeline)
 	}
 }
 

@@ -12,11 +12,11 @@ import (
 )
 
 const (
-	websocketToolOutputCacheMaxPerSession = 64
+	websocketToolOutputCacheMaxPerSession = 256
 	websocketToolOutputCacheMaxItemBytes  = 256 << 10
 	websocketToolOutputCacheMaxBytes      = 2 << 20
 	websocketToolOutputCacheTTL           = 10 * time.Minute
-	websocketToolCallCacheMaxPerSession   = 128
+	websocketToolCallCacheMaxPerSession   = 256
 	websocketToolCallCacheMaxItemBytes    = 128 << 10
 	websocketToolCallCacheMaxBytes        = 1 << 20
 )
@@ -38,6 +38,7 @@ type websocketToolOutputCache struct {
 	maxPerSession int
 	maxItemBytes  int
 	maxBytes      int
+	lastCleanup   time.Time
 	sessions      map[string]*websocketToolOutputSession
 }
 
@@ -89,6 +90,11 @@ func (c *websocketToolOutputCache) record(sessionKey string, callID string, item
 	c.cleanupLocked(now)
 
 	session, ok := c.sessions[sessionKey]
+	if ok && c.sessionExpired(session, now) {
+		delete(c.sessions, sessionKey)
+		session = nil
+		ok = false
+	}
 	if oversized && (!ok || session == nil) {
 		return
 	}
@@ -164,6 +170,10 @@ func (c *websocketToolOutputCache) get(sessionKey string, callID string) (json.R
 	if !ok || session == nil {
 		return nil, false
 	}
+	if c.sessionExpired(session, now) {
+		delete(c.sessions, sessionKey)
+		return nil, false
+	}
 	session.lastSeen = now
 	item, ok := session.outputs[callID]
 	if !ok || len(item) == 0 {
@@ -176,16 +186,38 @@ func (c *websocketToolOutputCache) cleanupLocked(now time.Time) {
 	if c == nil || c.ttl <= 0 {
 		return
 	}
+	interval := c.cleanupInterval()
+	if !c.lastCleanup.IsZero() && now.Sub(c.lastCleanup) < interval {
+		return
+	}
+	c.lastCleanup = now
 
 	for key, session := range c.sessions {
-		if session == nil {
-			delete(c.sessions, key)
-			continue
-		}
-		if now.Sub(session.lastSeen) > c.ttl {
+		if c.sessionExpired(session, now) {
 			delete(c.sessions, key)
 		}
 	}
+}
+
+func (c *websocketToolOutputCache) cleanupInterval() time.Duration {
+	if c == nil || c.ttl <= 0 {
+		return time.Minute
+	}
+	interval := c.ttl / 4
+	if interval < time.Second {
+		return time.Second
+	}
+	if interval > time.Minute {
+		return time.Minute
+	}
+	return interval
+}
+
+func (c *websocketToolOutputCache) sessionExpired(session *websocketToolOutputSession, now time.Time) bool {
+	if c == nil || session == nil {
+		return true
+	}
+	return c.ttl > 0 && now.Sub(session.lastSeen) > c.ttl
 }
 
 func (c *websocketToolOutputCache) deleteSession(sessionKey string) {

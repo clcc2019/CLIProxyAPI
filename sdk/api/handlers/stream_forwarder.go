@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -9,6 +10,9 @@ import (
 )
 
 var defaultSSEKeepAlive = []byte(": keep-alive\n\n")
+
+var errNilStreamChannels = errors.New("stream forwarder received nil data and error channels")
+var errNilStreamChunkWriter = errors.New("stream forwarder received data without a chunk writer")
 
 type StreamForwardOptions struct {
 	// KeepAliveInterval overrides the configured streaming keep-alive interval.
@@ -32,19 +36,22 @@ type StreamForwardOptions struct {
 	WriteKeepAlive func()
 }
 
+func PendingStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
+	if errs == nil {
+		return nil, false
+	}
+	select {
+	case errMsg, ok := <-errs:
+		if !ok {
+			return nil, false
+		}
+		return errMsg, true
+	default:
+		return nil, false
+	}
+}
+
 func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, opts StreamForwardOptions) {
-	if c == nil {
-		return
-	}
-	if cancel == nil {
-		return
-	}
-
-	writeChunk := opts.WriteChunk
-	if writeChunk == nil {
-		writeChunk = func([]byte) bool { return false }
-	}
-
 	writeKeepAlive := opts.WriteKeepAlive
 	if writeKeepAlive == nil {
 		writeKeepAlive = func() {
@@ -69,12 +76,26 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			flusher.Flush()
 		}
 	}
+	failNilStreamChannels := func() {
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errNilStreamChannels}
+		if opts.WriteTerminalError != nil {
+			opts.WriteTerminalError(errMsg)
+			flushNow()
+		}
+		cancel(errNilStreamChannels)
+	}
+
+	if data == nil && errs == nil {
+		failNilStreamChannels()
+		return
+	}
+	requestCtx := c.Request.Context()
 
 	var terminalErr *interfaces.ErrorMessage
 	for {
 		select {
-		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
+		case <-requestCtx.Done():
+			cancel(requestCtx.Err())
 			return
 		case chunk, ok := <-data:
 			if !ok {
@@ -103,12 +124,25 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				cancel(nil)
 				return
 			}
-			if writeChunk(chunk) {
+			if opts.WriteChunk == nil {
+				errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: errNilStreamChunkWriter}
+				if opts.WriteTerminalError != nil {
+					opts.WriteTerminalError(errMsg)
+					flushNow()
+				}
+				cancel(errNilStreamChunkWriter)
+				return
+			}
+			if opts.WriteChunk(chunk) {
 				flushNow()
 			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
+				if data == nil {
+					failNilStreamChannels()
+					return
+				}
 				continue
 			}
 			if errMsg != nil {

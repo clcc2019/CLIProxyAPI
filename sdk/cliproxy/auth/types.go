@@ -1060,6 +1060,31 @@ func (a *Auth) ToolPrefixDisabled() bool {
 	return false
 }
 
+// ServiceTierPassthrough returns whether this auth is allowed to pass a
+// client-provided Codex service_tier through to the upstream request.
+func (a *Auth) ServiceTierPassthrough() bool {
+	if a == nil {
+		return false
+	}
+	for _, key := range authFileServiceTierPassthroughKeys {
+		if a.Metadata != nil {
+			if val, ok := a.Metadata[key]; ok {
+				if parsed, okParse := parseBoolAny(val); okParse {
+					return parsed
+				}
+			}
+		}
+		if a.Attributes != nil {
+			if val, ok := a.Attributes[key]; ok {
+				if parsed, okParse := parseBoolAny(val); okParse {
+					return parsed
+				}
+			}
+		}
+	}
+	return false
+}
+
 // RequestRetryOverride returns the auth-file scoped request_retry override when present.
 // The value is read from metadata key "request_retry" (or legacy "request-retry").
 func (a *Auth) RequestRetryOverride() (int, bool) {
