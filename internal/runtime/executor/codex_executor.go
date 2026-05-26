@@ -31,6 +31,16 @@ func codexStreamClosedBeforeCompletedErr() error {
 	return statusErr{code: http.StatusRequestTimeout, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
 }
 
+func codexShouldRetryStreamRead(ctx context.Context, err error, emittedPayload bool, completedStreamObserved bool, pendingTerminalErr error, terminalFailure bool, attempt int) bool {
+	if err == nil || emittedPayload || completedStreamObserved || pendingTerminalErr != nil || terminalFailure {
+		return false
+	}
+	if attempt >= codexHTTPMaxRequestRetries {
+		return false
+	}
+	return codexShouldRetryHTTPTransportError(ctx, err)
+}
+
 func codexUnauthorizedRetryAlreadyUsed(ctx context.Context) bool {
 	if ctx == nil {
 		return false
@@ -359,26 +369,6 @@ codexStreamResponseOK:
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
-		idleReader := newIdleTimeoutReadCloser(httpResp.Body, codexResponsesStreamIdleTimeout)
-		streamBody := idleReader
-		defer func() {
-			idleReader.StopTimer()
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("codex executor: close response body error: %v", errClose)
-			}
-		}()
-		var param any
-		streamState := newCodexStreamCompletionState()
-		terminalFailure := false
-		var terminalFailureErr error
-		emittedPayload := false
-		completedStreamObserved := false
-		// pendingTerminalErr captures the terminal upstream error observed
-		// mid-stream (e.g. usage_limit_reached) so the downstream client is
-		// informed even when we had to stop reading after already sending
-		// partial payload chunks. Without this the client would treat a
-		// partially-delivered response as a successful completion.
-		var pendingTerminalErr error
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
 			select {
 			case out <- chunk:
@@ -387,107 +377,172 @@ codexStreamResponseOK:
 				return false
 			}
 		}
-		errRead := helps.ReadStreamLines(streamBody, func(line []byte) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			stopAfterForward := false
-			if eventData, ok := codexEventData(line); ok {
-				eventType := codexEventType(eventData)
-				if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
-					log.Warnf("codex stream terminated with %s: %s", eventType, terminalErr.Error())
-					terminalFailure = true
-					terminalFailureErr = terminalErr
-					if !emittedPayload {
-						return terminalErr
-					}
-					pendingTerminalErr = terminalErr
-					return errCodexStopStream
+		for streamAttempt := 0; ; streamAttempt++ {
+			if streamAttempt > 0 {
+				retryResp, retryErr := e.doCodexHTTPRequest(ctx, auth, call.prepared)
+				if retryErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+					reporter.PublishFailureWithError(ctx, retryErr)
+					_ = send(cliproxyexecutor.StreamChunk{Err: retryErr})
+					reporter.EnsurePublished(ctx)
+					return
 				}
-				switch eventType {
-				case "response.incomplete":
-					// Mirror codex-rs: treat response.incomplete as a terminal
-					// failure. Forward the event once, then stop reading instead
-					// of waiting for the upstream connection to close.
-					reason := codexResponseIncompleteReason(eventData)
-					log.Warnf("codex stream terminated with response.incomplete: reason=%s", reason)
-					terminalFailure = true
-					terminalFailureErr = codexResponseIncompleteEventErr(eventData)
-					pendingTerminalErr = terminalFailureErr
-					stopAfterForward = true
-				case "response.failed":
-					message := gjson.GetBytes(eventData, "response.error.message").String()
-					if message == "" {
-						message = "response.failed"
+				httpResp = retryResp
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
+				if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+					data, readErr := helps.ReadErrorResponseBody(httpResp.Body)
+					if errClose := httpResp.Body.Close(); errClose != nil {
+						log.Errorf("codex executor: close response body error: %v", errClose)
 					}
-					log.Warnf("codex stream terminated with response.failed: %s", message)
-					terminalFailure = true
-					terminalFailureErr = errors.New(message)
-				}
-				if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
-					completedStreamObserved = true
-					stopAfterForward = true
-					if detail, ok := helps.ParseCodexUsage(completed.data); ok {
-						reporter.Publish(ctx, detail)
+					if readErr != nil {
+						helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+						reporter.PublishFailureWithError(ctx, readErr)
+						_ = send(cliproxyexecutor.StreamChunk{Err: readErr})
+						reporter.EnsurePublished(ctx)
+						return
 					}
-					if completed.recoveredCount > 0 {
-						log.Warnf(
-							"codex stream completed with empty response.output; recovered_items=%d cached_done_items=%d cached_function_calls=%d",
-							completed.recoveredCount,
-							len(streamState.outputItemsByIndex)+len(streamState.outputItemsFallback),
-							len(streamState.functionCallsByItem),
-						)
-						line = codexSSEDataLine(completed.data)
-					}
+					helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+					statusErr := newCodexStatusErr(httpResp.StatusCode, data)
+					helps.RecordAPIResponseError(ctx, e.cfg, statusErr)
+					reporter.PublishFailureWithError(ctx, statusErr)
+					_ = send(cliproxyexecutor.StreamChunk{Err: statusErr})
+					reporter.EnsurePublished(ctx)
+					return
 				}
 			}
 
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
-			for i := range chunks {
-				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-					return ctx.Err()
+			idleReader := newIdleTimeoutReadCloser(httpResp.Body, codexResponsesStreamIdleTimeout)
+			streamBody := idleReader
+			var param any
+			streamState := newCodexStreamCompletionState()
+			terminalFailure := false
+			var terminalFailureErr error
+			emittedPayload := false
+			completedStreamObserved := false
+			// pendingTerminalErr captures the terminal upstream error observed
+			// mid-stream (e.g. usage_limit_reached) so the downstream client is
+			// informed even when we had to stop reading after already sending
+			// partial payload chunks. Without this the client would treat a
+			// partially-delivered response as a successful completion.
+			var pendingTerminalErr error
+			errRead := helps.ReadStreamLines(streamBody, func(line []byte) error {
+				if err := ctx.Err(); err != nil {
+					return err
 				}
-				if len(chunks[i]) > 0 {
-					emittedPayload = true
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				stopAfterForward := false
+				if eventData, ok := codexEventData(line); ok {
+					eventType := codexEventType(eventData)
+					if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
+						log.Warnf("codex stream terminated with %s: %s", eventType, terminalErr.Error())
+						terminalFailure = true
+						terminalFailureErr = terminalErr
+						if !emittedPayload {
+							return terminalErr
+						}
+						pendingTerminalErr = terminalErr
+						return errCodexStopStream
+					}
+					switch eventType {
+					case "response.incomplete":
+						// Mirror codex-rs: treat response.incomplete as a terminal
+						// failure. Forward the event once, then stop reading instead
+						// of waiting for the upstream connection to close.
+						reason := codexResponseIncompleteReason(eventData)
+						log.Warnf("codex stream terminated with response.incomplete: reason=%s", reason)
+						terminalFailure = true
+						terminalFailureErr = codexResponseIncompleteEventErr(eventData)
+						pendingTerminalErr = terminalFailureErr
+						stopAfterForward = true
+					case "response.failed":
+						message := gjson.GetBytes(eventData, "response.error.message").String()
+						if message == "" {
+							message = "response.failed"
+						}
+						log.Warnf("codex stream terminated with response.failed: %s", message)
+						terminalFailure = true
+						terminalFailureErr = errors.New(message)
+					}
+					if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
+						completedStreamObserved = true
+						stopAfterForward = true
+						if detail, ok := helps.ParseCodexUsage(completed.data); ok {
+							reporter.Publish(ctx, detail)
+						}
+						if completed.recoveredCount > 0 {
+							log.Warnf(
+								"codex stream completed with empty response.output; recovered_items=%d cached_done_items=%d cached_function_calls=%d",
+								completed.recoveredCount,
+								len(streamState.outputItemsByIndex)+len(streamState.outputItemsFallback),
+								len(streamState.functionCallsByItem),
+							)
+							line = codexSSEDataLine(completed.data)
+						}
+					}
+				}
+
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
+				for i := range chunks {
+					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+						return ctx.Err()
+					}
+					if len(chunks[i]) > 0 {
+						emittedPayload = true
+					}
+				}
+				if stopAfterForward {
+					return errCodexStopStream
+				}
+				return nil
+			})
+			if errRead != nil {
+				if errors.Is(errRead, errCodexStopStream) {
+					errRead = nil
 				}
 			}
-			if stopAfterForward {
-				return errCodexStopStream
+			if idleReader.TimedOut() && !completedStreamObserved && pendingTerminalErr == nil {
+				errRead = codexStreamIdleTimeoutErr()
+			} else if errRead != nil && idleReader.TimedOut() {
+				errRead = codexStreamIdleTimeoutErr()
 			}
-			return nil
-		})
-		if errRead != nil {
-			if errors.Is(errRead, errCodexStopStream) {
-				errRead = nil
+			idleReader.StopTimer()
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
+			if codexShouldRetryStreamRead(ctx, errRead, emittedPayload, completedStreamObserved, pendingTerminalErr, terminalFailure, streamAttempt) {
+				helps.LogWithRequestID(ctx).Debugf("codex executor: retrying stream after transport read error (attempt=%d/%d): %v", streamAttempt+1, codexHTTPMaxRequestRetries, errRead)
+				if errSleep := codexSleepBeforeHTTPRetry(ctx, streamAttempt+1); errSleep != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, errSleep)
+					reporter.PublishFailureWithError(ctx, errSleep)
+					_ = send(cliproxyexecutor.StreamChunk{Err: errSleep})
+					reporter.EnsurePublished(ctx)
+					return
+				}
+				continue
+			}
+			if errRead != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+				reporter.PublishFailureWithError(ctx, errRead)
+				_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
+			} else if pendingTerminalErr != nil {
+				// The stream ended gracefully after we detected a terminal upstream
+				// event post-partial-payload. Surface the error to the downstream
+				// client so it can render a failure instead of treating the partial
+				// payload as a complete response.
+				helps.RecordAPIResponseError(ctx, e.cfg, pendingTerminalErr)
+				reporter.PublishFailureWithError(ctx, pendingTerminalErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: pendingTerminalErr})
+			} else if !completedStreamObserved && !terminalFailure {
+				closedErr := codexStreamClosedBeforeCompletedErr()
+				helps.RecordAPIResponseError(ctx, e.cfg, closedErr)
+				reporter.PublishFailureWithError(ctx, closedErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: closedErr})
+			} else if terminalFailure {
+				reporter.PublishFailureWithError(ctx, terminalFailureErr)
+			}
+			reporter.EnsurePublished(ctx)
+			return
 		}
-		if idleReader.TimedOut() && !completedStreamObserved && pendingTerminalErr == nil {
-			errRead = codexStreamIdleTimeoutErr()
-		} else if errRead != nil && idleReader.TimedOut() {
-			errRead = codexStreamIdleTimeoutErr()
-		}
-		if errRead != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-			reporter.PublishFailureWithError(ctx, errRead)
-			_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
-		} else if pendingTerminalErr != nil {
-			// The stream ended gracefully after we detected a terminal upstream
-			// event post-partial-payload. Surface the error to the downstream
-			// client so it can render a failure instead of treating the partial
-			// payload as a complete response.
-			helps.RecordAPIResponseError(ctx, e.cfg, pendingTerminalErr)
-			reporter.PublishFailureWithError(ctx, pendingTerminalErr)
-			_ = send(cliproxyexecutor.StreamChunk{Err: pendingTerminalErr})
-		} else if !completedStreamObserved && !terminalFailure {
-			closedErr := codexStreamClosedBeforeCompletedErr()
-			helps.RecordAPIResponseError(ctx, e.cfg, closedErr)
-			reporter.PublishFailureWithError(ctx, closedErr)
-			_ = send(cliproxyexecutor.StreamChunk{Err: closedErr})
-		} else if terminalFailure {
-			reporter.PublishFailureWithError(ctx, terminalFailureErr)
-		}
-		reporter.EnsurePublished(ctx)
 	}()
 	var headers http.Header
 	if needResponseHeaders {

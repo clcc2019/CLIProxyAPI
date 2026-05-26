@@ -43,6 +43,11 @@ var currentHomeRequestLogClient = func() homeRequestLogClient {
 }
 
 const (
+	WebsocketTimelineSourceContextKey    = "WEBSOCKET_TIMELINE_SOURCE"
+	APIWebsocketTimelineSourceContextKey = "API_WEBSOCKET_TIMELINE_SOURCE"
+)
+
+const (
 	maxDecompressedLogBodyBytes    = 4 << 20
 	decompressedLogTruncatedMarker = "\n...[decompressed log body truncated]...\n"
 	// streamingLogChunkQueueSize bounds the in-flight chunk backlog for a
@@ -59,6 +64,197 @@ var (
 	filenameUnsafeCharPattern = regexp.MustCompile(`[<>:"|?*\s]`)
 	filenameMultiDashPattern  = regexp.MustCompile(`-+`)
 )
+
+// FileBodySource stores large log sections as ordered temp-file parts.
+type FileBodySource struct {
+	mu      sync.Mutex
+	dir     string
+	paths   []string
+	cleaned bool
+}
+
+// NewFileBodySourceInDir creates a temp-backed source under baseDir.
+func NewFileBodySourceInDir(baseDir string, prefix string) (*FileBodySource, error) {
+	prefix = sanitizeTempPrefix(prefix)
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		return nil, fmt.Errorf("base directory is required")
+	}
+	if errMkdir := os.MkdirAll(baseDir, 0755); errMkdir != nil {
+		return nil, errMkdir
+	}
+	dir, errCreate := os.MkdirTemp(baseDir, "request-log-parts-"+prefix+"-*")
+	if errCreate != nil {
+		return nil, errCreate
+	}
+	return &FileBodySource{dir: dir}, nil
+}
+
+func sanitizeTempPrefix(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return "log"
+	}
+	var builder strings.Builder
+	for _, r := range prefix {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-' || r == '_':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('-')
+		}
+	}
+	out := strings.Trim(builder.String(), "-_")
+	if out == "" {
+		return "log"
+	}
+	return out
+}
+
+// CreatePart creates one ordered detail log part.
+func (s *FileBodySource) CreatePart(prefix string) (*os.File, error) {
+	if s == nil {
+		return nil, fmt.Errorf("file body source is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cleaned {
+		return nil, fmt.Errorf("file body source has been cleaned")
+	}
+	prefix = sanitizeTempPrefix(prefix)
+	file, errCreate := os.CreateTemp(s.dir, prefix+"-*.tmp")
+	if errCreate != nil {
+		return nil, errCreate
+	}
+	s.paths = append(s.paths, file.Name())
+	return file, nil
+}
+
+// AppendPart appends one complete ordered part to the source.
+func (s *FileBodySource) AppendPart(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil
+	}
+	file, errCreate := s.CreatePart("part")
+	if errCreate != nil {
+		return errCreate
+	}
+	_, writeErr := file.Write(data)
+	if errClose := file.Close(); errClose != nil && writeErr == nil {
+		writeErr = errClose
+	}
+	return writeErr
+}
+
+// HasPayload reports whether any detail parts were recorded.
+func (s *FileBodySource) HasPayload() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.paths) > 0 && !s.cleaned
+}
+
+// Paths returns a copy of the ordered part paths.
+func (s *FileBodySource) Paths() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.paths))
+	copy(out, s.paths)
+	return out
+}
+
+// WriteTo merges all ordered parts into w.
+func (s *FileBodySource) WriteTo(w io.Writer) error {
+	if s == nil || w == nil {
+		return nil
+	}
+	paths := s.Paths()
+	for i, path := range paths {
+		if i > 0 {
+			if _, errWrite := io.WriteString(w, "\n"); errWrite != nil {
+				return errWrite
+			}
+		}
+		file, errOpen := os.Open(path)
+		if errOpen != nil {
+			return errOpen
+		}
+		_, errCopy := io.Copy(w, file)
+		if errClose := file.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close log part file")
+			if errCopy == nil {
+				errCopy = errClose
+			}
+		}
+		if errCopy != nil {
+			return errCopy
+		}
+	}
+	return nil
+}
+
+// Bytes merges all ordered parts into memory.
+func (s *FileBodySource) Bytes() ([]byte, error) {
+	var buf bytes.Buffer
+	if errWrite := s.WriteTo(&buf); errWrite != nil {
+		return nil, errWrite
+	}
+	return buf.Bytes(), nil
+}
+
+// Cleanup removes all temp detail parts and their directory.
+func (s *FileBodySource) Cleanup() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	if s.cleaned {
+		s.mu.Unlock()
+		return nil
+	}
+	paths := make([]string, len(s.paths))
+	copy(paths, s.paths)
+	dir := s.dir
+	s.paths = nil
+	s.cleaned = true
+	s.mu.Unlock()
+
+	var firstErr error
+	for _, path := range paths {
+		if errRemove := os.Remove(path); errRemove != nil && !os.IsNotExist(errRemove) && firstErr == nil {
+			firstErr = errRemove
+		}
+	}
+	if dir != "" {
+		if errRemove := os.Remove(dir); errRemove != nil && !os.IsNotExist(errRemove) && firstErr == nil {
+			firstErr = errRemove
+		}
+	}
+	return firstErr
+}
+
+func cleanupFileBodySources(sources ...*FileBodySource) {
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		if errCleanup := source.Cleanup(); errCleanup != nil {
+			log.WithError(errCleanup).Warn("failed to clean up log part files")
+		}
+	}
+}
 
 // RequestLogger defines the interface for logging HTTP requests and responses.
 // It provides methods for logging both regular and streaming HTTP request/response cycles.
@@ -185,6 +381,7 @@ type FileRequestLogger struct {
 
 type homeRequestLogPayload struct {
 	Headers    map[string][]string `json:"headers,omitempty"`
+	RequestID  string              `json:"request_id,omitempty"`
 	RequestLog string              `json:"request_log,omitempty"`
 }
 
@@ -211,7 +408,7 @@ func cloneHeaders(headers map[string][]string) map[string][]string {
 	return out
 }
 
-func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers map[string][]string, logText string) error {
+func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers map[string][]string, requestID string, logText string) error {
 	if l == nil || !l.homeEnabled {
 		return nil
 	}
@@ -221,6 +418,7 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 	}
 	payload := homeRequestLogPayload{
 		Headers:    cloneHeaders(headers),
+		RequestID:  strings.TrimSpace(requestID),
 		RequestLog: logText,
 	}
 	raw, errMarshal := json.Marshal(&payload)
@@ -267,6 +465,17 @@ func (l *FileRequestLogger) SetHomeEnabled(enabled bool) {
 		return
 	}
 	l.homeEnabled = enabled
+}
+
+// NewFileBodySource creates a temp-backed source in this logger's log directory.
+func (l *FileRequestLogger) NewFileBodySource(prefix string) (*FileBodySource, error) {
+	if l == nil {
+		return nil, fmt.Errorf("request logger is nil")
+	}
+	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
+		return nil, errEnsure
+	}
+	return NewFileBodySourceInDir(l.logsDir, prefix)
 }
 
 // IsEnabled returns whether request logging is currently enabled.
@@ -328,6 +537,44 @@ func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHea
 	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors, force, requestID, requestTimestamp, apiResponseTimestamp)
 }
 
+// LogRequestWithOptionsAndSources logs a request and merges large file-backed
+// websocket timeline sections without keeping them in memory while capturing.
+func (l *FileRequestLogger) LogRequestWithOptionsAndSources(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline []byte, websocketTimelineSource *FileBodySource, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *FileBodySource, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	var errMerge error
+	websocketTimeline, errMerge = mergeLogFileBodySource(websocketTimeline, websocketTimelineSource)
+	if errMerge != nil {
+		cleanupFileBodySources(apiWebsocketTimelineSource)
+		return errMerge
+	}
+	apiWebsocketTimeline, errMerge = mergeLogFileBodySource(apiWebsocketTimeline, apiWebsocketTimelineSource)
+	if errMerge != nil {
+		return errMerge
+	}
+	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors, force, requestID, requestTimestamp, apiResponseTimestamp)
+}
+
+func mergeLogFileBodySource(payload []byte, source *FileBodySource) ([]byte, error) {
+	if source == nil {
+		return payload, nil
+	}
+	defer cleanupFileBodySources(source)
+	if !source.HasPayload() {
+		return payload, nil
+	}
+	var buf bytes.Buffer
+	if len(payload) > 0 {
+		buf.Write(payload)
+		if !bytes.HasSuffix(payload, []byte("\n")) {
+			buf.WriteByte('\n')
+		}
+		buf.WriteByte('\n')
+	}
+	if errWrite := source.WriteTo(&buf); errWrite != nil {
+		return nil, errWrite
+	}
+	return buf.Bytes(), nil
+}
+
 func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	enabled := l.IsEnabled()
 	if !enabled && !force {
@@ -363,7 +610,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		if writeErr != nil {
 			return fmt.Errorf("failed to build request log content: %w", writeErr)
 		}
-		return l.forwardRequestLogToHome(context.Background(), requestHeaders, buf.String())
+		return l.forwardRequestLogToHome(context.Background(), requestHeaders, requestID, buf.String())
 	}
 
 	// Ensure logs directory exists
@@ -457,7 +704,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 	}
 
 	if l.homeEnabled {
-		client := home.Current()
+		client := currentHomeRequestLogClient()
 		if client == nil || !client.HeartbeatOK() {
 			return &NoOpStreamingLogWriter{}, nil
 		}
@@ -1710,6 +1957,7 @@ func (w *NoOpStreamingLogWriter) Close() error { return nil }
 type homeStreamingLogWriter struct {
 	url       string
 	method    string
+	requestID string
 	timestamp time.Time
 
 	requestHeaders map[string][]string
@@ -1729,7 +1977,7 @@ type homeStreamingLogWriter struct {
 	firstChunkTS     time.Time
 }
 
-func newHomeStreamingLogWriter(url, method string, headers map[string][]string, body []byte, _ string) *homeStreamingLogWriter {
+func newHomeStreamingLogWriter(url, method string, headers map[string][]string, body []byte, requestID string) *homeStreamingLogWriter {
 	requestHeaders := make(map[string][]string, len(headers))
 	for key, values := range headers {
 		headerValues := make([]string, len(values))
@@ -1740,6 +1988,7 @@ func newHomeStreamingLogWriter(url, method string, headers map[string][]string, 
 	writer := &homeStreamingLogWriter{
 		url:            url,
 		method:         method,
+		requestID:      strings.TrimSpace(requestID),
 		timestamp:      time.Now(),
 		requestHeaders: requestHeaders,
 		requestBody:    append([]byte(nil), body...),
@@ -1860,6 +2109,7 @@ func (w *homeStreamingLogWriter) Close() error {
 
 	payload := homeRequestLogPayload{
 		Headers:    cloneHeaders(w.requestHeaders),
+		RequestID:  strings.TrimSpace(w.requestID),
 		RequestLog: buf.String(),
 	}
 	raw, errMarshal := json.Marshal(&payload)

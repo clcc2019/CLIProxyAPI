@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -170,5 +171,21 @@ func TestCodexShouldRetryHTTPTransportErrorHonorsCanceledParentContext(t *testin
 	}
 	if !codexShouldRetryHTTPTransportError(context.Background(), context.Canceled) {
 		t.Fatal("context.Canceled from transport should retry when parent context is still active")
+	}
+}
+
+func TestCodexShouldRetryStreamReadBeforePayloadOnHTTP2InternalError(t *testing.T) {
+	err := errors.New("stream error: stream ID 33; INTERNAL_ERROR; received from peer")
+	if !codexShouldRetryStreamRead(context.Background(), err, false, false, nil, false, 0) {
+		t.Fatal("expected HTTP/2 internal stream read error before payload to be retryable")
+	}
+	if codexShouldRetryStreamRead(context.Background(), err, true, false, nil, false, 0) {
+		t.Fatal("must not retry after payload was emitted")
+	}
+	if codexShouldRetryStreamRead(context.Background(), err, false, true, nil, false, 0) {
+		t.Fatal("must not retry after response.completed was observed")
+	}
+	if codexShouldRetryStreamRead(context.Background(), err, false, false, nil, false, codexHTTPMaxRequestRetries) {
+		t.Fatal("must not retry after max attempts")
 	}
 }
