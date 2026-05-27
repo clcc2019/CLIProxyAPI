@@ -138,7 +138,7 @@ func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *c
 		}, nil
 	})
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		codexRecordAPIResponseError(ctx, e.cfg, err)
 		return codexNonStreamHTTPResult{}, executed, err
 	}
 	if shared && !executed {
@@ -191,7 +191,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 		return aggregate, nil
 	})
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		codexRecordAPIResponseError(ctx, e.cfg, err)
 		return codexNonStreamHTTPResult{}, executed, err
 	}
 	if shared && !executed {

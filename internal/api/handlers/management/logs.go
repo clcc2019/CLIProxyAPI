@@ -419,6 +419,7 @@ func newLogAccumulator(cutoff int64, limit int) *logAccumulator {
 }
 
 func (acc *logAccumulator) consumeFile(path string) error {
+	// #nosec G304 -- paths come from collectLogFiles, which only returns known log filenames from the configured log directory.
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

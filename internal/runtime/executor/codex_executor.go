@@ -268,6 +268,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
+	upstreamCtx, releaseUpstreamCtx := codexDetachUpstreamContext(ctx, e.cfg)
+	releaseUpstreamCtxOnReturn := true
+	defer func() {
+		if releaseUpstreamCtxOnReturn {
+			releaseUpstreamCtx()
+		}
+	}()
 	needResponseHeaders := needResponseHeadersFromOptions(opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -276,9 +283,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewUsageReporter(upstreamCtx, e.Identifier(), baseModel, auth)
 	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
-	defer reporter.TrackFailure(ctx, &err)
+	defer func() {
+		if !codexRequestContextDone(ctx, err) {
+			reporter.TrackFailure(upstreamCtx, &err)
+		}
+	}()
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
@@ -303,16 +314,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	preparedBody := body
-	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
+	call, err := e.prepareCodexHTTPCall(upstreamCtx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
 	if err != nil {
 		return nil, err
 	}
 	body = call.prepared.body
 	helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
 
-	httpResp, err := e.doCodexHTTPRequest(ctx, auth, call.prepared)
+	httpResp, err := e.doCodexHTTPRequest(upstreamCtx, auth, call.prepared)
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		codexRecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
@@ -322,27 +333,27 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 		if readErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+			codexRecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
 		}
 		if httpResp.StatusCode == http.StatusUnauthorized {
-			refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(upstreamCtx, auth)
 			if refreshErr != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, refreshErr)
+				codexRecordAPIResponseError(ctx, e.cfg, refreshErr)
 				return nil, refreshErr
 			}
 			if retried {
 				auth = refreshedAuth
 				apiKey, _ = codexCreds(auth)
-				call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
+				call, err = e.prepareCodexHTTPCall(upstreamCtx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
 				if err != nil {
 					return nil, err
 				}
 				body = call.prepared.body
 				helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-				httpResp, err = e.doCodexHTTPRequest(ctx, auth, call.prepared)
+				httpResp, err = e.doCodexHTTPRequest(upstreamCtx, auth, call.prepared)
 				if err != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, err)
+					codexRecordAPIResponseError(ctx, e.cfg, err)
 					return nil, err
 				}
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
@@ -354,7 +365,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					log.Errorf("codex executor: close response body error: %v", errClose)
 				}
 				if readErr != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+					codexRecordAPIResponseError(ctx, e.cfg, readErr)
 					return nil, readErr
 				}
 			}
@@ -367,24 +378,34 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 codexStreamResponseOK:
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
+	releaseUpstreamCtxOnReturn = false
 	go func() {
+		defer releaseUpstreamCtx()
 		defer close(out)
+		downstreamClosed := false
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if downstreamClosed {
+				return false
+			}
 			select {
 			case out <- chunk:
 				return true
 			case <-ctx.Done():
+				downstreamClosed = true
 				return false
 			}
 		}
 		for streamAttempt := 0; ; streamAttempt++ {
 			if streamAttempt > 0 {
-				retryResp, retryErr := e.doCodexHTTPRequest(ctx, auth, call.prepared)
+				retryResp, retryErr := e.doCodexHTTPRequest(upstreamCtx, auth, call.prepared)
 				if retryErr != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
-					reporter.PublishFailureWithError(ctx, retryErr)
+					if codexRequestContextDone(ctx, retryErr) {
+						return
+					}
+					codexRecordAPIResponseError(ctx, e.cfg, retryErr)
+					reporter.PublishFailureWithError(upstreamCtx, retryErr)
 					_ = send(cliproxyexecutor.StreamChunk{Err: retryErr})
-					reporter.EnsurePublished(ctx)
+					reporter.EnsurePublished(upstreamCtx)
 					return
 				}
 				httpResp = retryResp
@@ -395,18 +416,21 @@ codexStreamResponseOK:
 						log.Errorf("codex executor: close response body error: %v", errClose)
 					}
 					if readErr != nil {
-						helps.RecordAPIResponseError(ctx, e.cfg, readErr)
-						reporter.PublishFailureWithError(ctx, readErr)
+						if codexRequestContextDone(ctx, readErr) {
+							return
+						}
+						codexRecordAPIResponseError(ctx, e.cfg, readErr)
+						reporter.PublishFailureWithError(upstreamCtx, readErr)
 						_ = send(cliproxyexecutor.StreamChunk{Err: readErr})
-						reporter.EnsurePublished(ctx)
+						reporter.EnsurePublished(upstreamCtx)
 						return
 					}
 					helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 					statusErr := newCodexStatusErr(httpResp.StatusCode, data)
-					helps.RecordAPIResponseError(ctx, e.cfg, statusErr)
-					reporter.PublishFailureWithError(ctx, statusErr)
+					codexRecordAPIResponseError(ctx, e.cfg, statusErr)
+					reporter.PublishFailureWithError(upstreamCtx, statusErr)
 					_ = send(cliproxyexecutor.StreamChunk{Err: statusErr})
-					reporter.EnsurePublished(ctx)
+					reporter.EnsurePublished(upstreamCtx)
 					return
 				}
 			}
@@ -426,7 +450,7 @@ codexStreamResponseOK:
 			// partially-delivered response as a successful completion.
 			var pendingTerminalErr error
 			errRead := helps.ReadStreamLines(streamBody, func(line []byte) error {
-				if err := ctx.Err(); err != nil {
+				if err := upstreamCtx.Err(); err != nil {
 					return err
 				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -467,7 +491,7 @@ codexStreamResponseOK:
 						completedStreamObserved = true
 						stopAfterForward = true
 						if detail, ok := helps.ParseCodexUsage(completed.data); ok {
-							reporter.Publish(ctx, detail)
+							reporter.Publish(upstreamCtx, detail)
 						}
 						if completed.recoveredCount > 0 {
 							log.Warnf(
@@ -481,13 +505,15 @@ codexStreamResponseOK:
 					}
 				}
 
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
-				for i := range chunks {
-					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-						return ctx.Err()
-					}
-					if len(chunks[i]) > 0 {
-						emittedPayload = true
+				if !downstreamClosed {
+					chunks := sdktranslator.TranslateStream(upstreamCtx, to, from, req.Model, originalPayload, body, line, &param)
+					for i := range chunks {
+						if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+							break
+						}
+						if len(chunks[i]) > 0 {
+							emittedPayload = true
+						}
 					}
 				}
 				if stopAfterForward {
@@ -511,36 +537,42 @@ codexStreamResponseOK:
 			}
 			if codexShouldRetryStreamRead(ctx, errRead, emittedPayload, completedStreamObserved, pendingTerminalErr, terminalFailure, streamAttempt) {
 				helps.LogWithRequestID(ctx).Debugf("codex executor: retrying stream after transport read error (attempt=%d/%d): %v", streamAttempt+1, codexHTTPMaxRequestRetries, errRead)
-				if errSleep := codexSleepBeforeHTTPRetry(ctx, streamAttempt+1); errSleep != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, errSleep)
-					reporter.PublishFailureWithError(ctx, errSleep)
+				if errSleep := codexSleepBeforeHTTPRetry(upstreamCtx, streamAttempt+1); errSleep != nil {
+					if codexRequestContextDone(ctx, errSleep) {
+						return
+					}
+					codexRecordAPIResponseError(ctx, e.cfg, errSleep)
+					reporter.PublishFailureWithError(upstreamCtx, errSleep)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errSleep})
-					reporter.EnsurePublished(ctx)
+					reporter.EnsurePublished(upstreamCtx)
 					return
 				}
 				continue
 			}
 			if errRead != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-				reporter.PublishFailureWithError(ctx, errRead)
+				if codexRequestContextDone(ctx, errRead) {
+					return
+				}
+				codexRecordAPIResponseError(ctx, e.cfg, errRead)
+				reporter.PublishFailureWithError(upstreamCtx, errRead)
 				_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
 			} else if pendingTerminalErr != nil {
 				// The stream ended gracefully after we detected a terminal upstream
 				// event post-partial-payload. Surface the error to the downstream
 				// client so it can render a failure instead of treating the partial
 				// payload as a complete response.
-				helps.RecordAPIResponseError(ctx, e.cfg, pendingTerminalErr)
-				reporter.PublishFailureWithError(ctx, pendingTerminalErr)
+				codexRecordAPIResponseError(ctx, e.cfg, pendingTerminalErr)
+				reporter.PublishFailureWithError(upstreamCtx, pendingTerminalErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: pendingTerminalErr})
 			} else if !completedStreamObserved && !terminalFailure {
 				closedErr := codexStreamClosedBeforeCompletedErr()
-				helps.RecordAPIResponseError(ctx, e.cfg, closedErr)
-				reporter.PublishFailureWithError(ctx, closedErr)
+				codexRecordAPIResponseError(ctx, e.cfg, closedErr)
+				reporter.PublishFailureWithError(upstreamCtx, closedErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: closedErr})
 			} else if terminalFailure {
-				reporter.PublishFailureWithError(ctx, terminalFailureErr)
+				reporter.PublishFailureWithError(upstreamCtx, terminalFailureErr)
 			}
-			reporter.EnsurePublished(ctx)
+			reporter.EnsurePublished(upstreamCtx)
 			return
 		}
 	}()

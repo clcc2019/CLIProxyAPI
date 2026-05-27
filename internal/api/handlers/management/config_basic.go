@@ -98,7 +98,8 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 
 func WriteConfig(path string, data []byte) error {
 	data = config.NormalizeCommentIndentation(data)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	// #nosec G304 -- path is the server's configured config file path, not a request-supplied path.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

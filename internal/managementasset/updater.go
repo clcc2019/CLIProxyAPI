@@ -217,7 +217,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			}
 		}
 
-		if errMkdirAll := os.MkdirAll(staticDir, 0o755); errMkdirAll != nil {
+		if errMkdirAll := os.MkdirAll(staticDir, 0o750); errMkdirAll != nil {
 			log.WithError(errMkdirAll).Warn("failed to prepare static directory for management asset")
 			return nil, nil
 		}

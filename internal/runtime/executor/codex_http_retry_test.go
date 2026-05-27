@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -171,6 +173,63 @@ func TestCodexShouldRetryHTTPTransportErrorHonorsCanceledParentContext(t *testin
 	}
 	if !codexShouldRetryHTTPTransportError(context.Background(), context.Canceled) {
 		t.Fatal("context.Canceled from transport should retry when parent context is still active")
+	}
+}
+
+func TestCodexRequestContextDoneRequiresCanceledParent(t *testing.T) {
+	err := errors.New(`Post "https://chatgpt.com/backend-api/codex/responses": context canceled`)
+	if codexRequestContextDone(context.Background(), err) {
+		t.Fatal("active parent context must not be treated as downstream cancellation")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !codexRequestContextDone(ctx, context.Canceled) {
+		t.Fatal("canceled parent context should be treated as downstream cancellation")
+	}
+	if !codexRequestContextDone(ctx, err) {
+		t.Fatal("canceled parent context should classify context-canceled POST errors as downstream cancellation")
+	}
+	if codexRequestContextDone(ctx, errors.New("stream error: stream ID 33; INTERNAL_ERROR; received from peer")) {
+		t.Fatal("non-context transport errors must remain visible even after cancellation")
+	}
+}
+
+func TestCodexUpstreamDrainAfterDownstreamCancelConfig(t *testing.T) {
+	if got := codexUpstreamDrainAfterDownstreamCancel(nil); got != defaultCodexUpstreamDrainAfterDownstreamCancel {
+		t.Fatalf("nil config drain = %s, want %s", got, defaultCodexUpstreamDrainAfterDownstreamCancel)
+	}
+	if got := codexUpstreamDrainAfterDownstreamCancel(&config.Config{}); got != defaultCodexUpstreamDrainAfterDownstreamCancel {
+		t.Fatalf("zero config drain = %s, want %s", got, defaultCodexUpstreamDrainAfterDownstreamCancel)
+	}
+	cfg := &config.Config{SDKConfig: config.SDKConfig{Streaming: config.StreamingConfig{UpstreamDrainAfterDownstreamCancelMS: 250}}}
+	if got := codexUpstreamDrainAfterDownstreamCancel(cfg); got != 250*time.Millisecond {
+		t.Fatalf("configured drain = %s, want 250ms", got)
+	}
+	cfg.Streaming.UpstreamDrainAfterDownstreamCancelMS = -1
+	if got := codexUpstreamDrainAfterDownstreamCancel(cfg); got != 0 {
+		t.Fatalf("disabled drain = %s, want 0", got)
+	}
+}
+
+func TestCodexDetachUpstreamContextDoesNotDrainDeadline(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer parentCancel()
+
+	upstreamCtx, release := codexDetachUpstreamContext(parent, &config.Config{
+		SDKConfig: config.SDKConfig{
+			Streaming: config.StreamingConfig{UpstreamDrainAfterDownstreamCancelMS: 1000},
+		},
+	})
+	defer release()
+
+	select {
+	case <-upstreamCtx.Done():
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("upstream context should cancel promptly on parent deadline")
+	}
+	if !errors.Is(upstreamCtx.Err(), context.Canceled) {
+		t.Fatalf("upstream context err = %v, want context canceled", upstreamCtx.Err())
 	}
 }
 

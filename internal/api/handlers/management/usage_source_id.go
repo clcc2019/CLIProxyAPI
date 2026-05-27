@@ -23,21 +23,27 @@ func (h *Handler) usageExportSourceID() string {
 		return ""
 	}
 
-	sourceIDPath := filepath.Join(baseDir, usageExportSourceIDFilename)
-	if raw, err := os.ReadFile(sourceIDPath); err == nil {
-		if sourceID := strings.TrimSpace(string(raw)); sourceID != "" {
-			return sourceID
+	if root, err := os.OpenRoot(baseDir); err == nil {
+		if raw, errRead := root.ReadFile(usageExportSourceIDFilename); errRead == nil {
+			if sourceID := strings.TrimSpace(string(raw)); sourceID != "" {
+				_ = root.Close()
+				return sourceID
+			}
 		}
+		_ = root.Close()
 	}
 
 	sourceID := uuid.NewString()
-	if err := os.MkdirAll(baseDir, 0o755); err == nil {
-		tmpPath := sourceIDPath + ".tmp"
-		if errWrite := os.WriteFile(tmpPath, []byte(sourceID+"\n"), 0o644); errWrite == nil {
-			if errRename := os.Rename(tmpPath, sourceIDPath); errRename == nil {
-				return sourceID
+	if err := os.MkdirAll(baseDir, 0o750); err == nil {
+		if root, errRoot := os.OpenRoot(baseDir); errRoot == nil {
+			defer func() { _ = root.Close() }()
+			tmpName := usageExportSourceIDFilename + ".tmp"
+			if errWrite := root.WriteFile(tmpName, []byte(sourceID+"\n"), 0o600); errWrite == nil {
+				if errRename := root.Rename(tmpName, usageExportSourceIDFilename); errRename == nil {
+					return sourceID
+				}
+				_ = root.Remove(tmpName)
 			}
-			_ = os.Remove(tmpPath)
 		}
 	}
 

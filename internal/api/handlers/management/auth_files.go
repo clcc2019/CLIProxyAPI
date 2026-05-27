@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -127,7 +129,15 @@ type authFilesListQuery struct {
 }
 
 type authFileEntryBuildOptions struct {
-	Summary bool
+	Summary   bool
+	AuthDir   string
+	AuthRoot  *os.Root
+	StatCache map[string]authFileStatResult
+}
+
+type authFileStatResult struct {
+	Info os.FileInfo
+	Err  error
 }
 
 func authFilesListQueryFromRequest(c *gin.Context) authFilesListQuery {
@@ -350,6 +360,10 @@ func codexLoginRequestUserAgent(c *gin.Context) string {
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
+	if err := validateCallbackForwardTarget(targetBase); err != nil {
+		return nil, err
+	}
+
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
 	if prev != nil {
@@ -377,6 +391,7 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 			}
 		}
 		w.Header().Set("Cache-Control", "no-store")
+		// #nosec G710 -- targetBase is restricted to the local management callback URL before the server starts.
 		http.Redirect(w, r, target, http.StatusFound)
 	})
 
@@ -407,6 +422,29 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
+}
+
+func validateCallbackForwardTarget(target string) error {
+	u, err := url.Parse(strings.TrimSpace(target))
+	if err != nil {
+		return fmt.Errorf("invalid callback target: %w", err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+	default:
+		return fmt.Errorf("invalid callback target scheme")
+	}
+	host := strings.TrimSpace(u.Hostname())
+	if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return fmt.Errorf("callback target must be local")
+	}
+	if strings.TrimSpace(u.Port()) == "" {
+		return fmt.Errorf("callback target port is required")
+	}
+	if !strings.HasPrefix(u.Path, "/") {
+		return fmt.Errorf("callback target path is invalid")
+	}
+	return nil
 }
 
 func stopCallbackForwarderInstance(port int, forwarder *callbackForwarder) {
@@ -504,18 +542,35 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 	if deferRefreshToPage {
 		entrySubscriptionMode = codexSubscriptionListCache
 	}
+	entryOpts := authFileEntryBuildOptions{Summary: q.Summary}
+	if !q.Summary && h != nil && h.cfg != nil {
+		entryOpts.AuthDir = strings.TrimSpace(h.cfg.AuthDir)
+		if entryOpts.AuthDir != "" {
+			if root, err := os.OpenRoot(entryOpts.AuthDir); err == nil {
+				entryOpts.AuthRoot = root
+				defer func() { _ = root.Close() }()
+			}
+		}
+	}
+	if !q.Summary {
+		entryOpts.StatCache = make(map[string]authFileStatResult, len(auths))
+	}
+	countEntries := make([]gin.H, 0, len(auths))
 	displayEntries := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
-		if !authFileMatchesListDisplayQuery(auth, q) {
+		if authFileMatchesListDisplayQuery(auth, q) {
+			countEntries = append(countEntries, authFileTypeCountEntry(auth))
+		}
+		if !authFileMatchesListPreQuery(auth, q) {
 			continue
 		}
 		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth, entrySubscriptionMode)
-		if entry := h.buildAuthFileEntryWithOptions(auth, authFileEntryBuildOptions{Summary: q.Summary}); entry != nil {
+		if entry := h.buildAuthFileEntryWithOptions(auth, entryOpts); entry != nil {
 			displayEntries = append(displayEntries, entry)
 		}
 	}
 	displayEntries = dedupeAuthFileEntries(displayEntries)
-	typeCounts := authFileEntryTypeCounts(displayEntries, authFilesListQuery{})
+	typeCounts := authFileEntryTypeCounts(dedupeAuthFileEntries(countEntries), authFilesListQuery{})
 
 	filtered := make([]gin.H, 0, len(displayEntries))
 	for _, entry := range displayEntries {
@@ -643,11 +698,19 @@ func (h *Handler) GetCodexUsage(c *gin.Context) {
 
 // List auth files from disk when the auth manager is unavailable.
 func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode, q authFilesListQuery) {
-	entries, err := os.ReadDir(h.cfg.AuthDir)
+	authDir := strings.TrimSpace(h.cfg.AuthDir)
+	root, err := os.OpenRoot(authDir)
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to open auth dir: %v", err)})
+		return
+	}
+	defer func() { _ = root.Close() }()
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 		return
 	}
+
 	entrySubscriptionMode := codexSubscriptionMode
 	deferRefreshToPage := q.Paginated && codexSubscriptionMode == codexSubscriptionListRefresh
 	if deferRefreshToPage {
@@ -663,11 +726,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 			continue
 		}
 		if info, errInfo := e.Info(); errInfo == nil {
+			full := filepath.Join(authDir, name)
 			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
 
-			// Read file to get type field
-			full := filepath.Join(h.cfg.AuthDir, name)
-			if data, errRead := os.ReadFile(full); errRead == nil {
+			// Read file to get type field.
+			if data, errRead := readAuthRootFile(root, name); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
@@ -855,6 +918,12 @@ func (h *Handler) refreshAuthFileEntryPageFromDisk(ctx context.Context, files []
 	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" || len(files) == 0 {
 		return files
 	}
+	root, err := os.OpenRoot(strings.TrimSpace(h.cfg.AuthDir))
+	if err != nil {
+		return files
+	}
+	defer func() { _ = root.Close() }()
+
 	type refreshTask struct {
 		index int
 		entry gin.H
@@ -870,7 +939,7 @@ func (h *Handler) refreshAuthFileEntryPageFromDisk(ctx context.Context, files []
 	}
 	runAuthFilePageRefreshTasks(len(tasks), func(taskIndex int) {
 		task := tasks[taskIndex]
-		if updatedEntry := h.refreshAuthFileEntryFromDisk(ctx, task.entry); updatedEntry != nil {
+		if updatedEntry := h.refreshAuthFileEntryFromDiskWithRoot(ctx, root, task.entry); updatedEntry != nil {
 			refreshed[task.index] = updatedEntry
 		}
 	})
@@ -907,12 +976,24 @@ func runAuthFilePageRefreshTasks(total int, run func(index int)) {
 }
 
 func (h *Handler) refreshAuthFileEntryFromDisk(ctx context.Context, entry gin.H) gin.H {
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+		return nil
+	}
+	root, err := os.OpenRoot(strings.TrimSpace(h.cfg.AuthDir))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = root.Close() }()
+	return h.refreshAuthFileEntryFromDiskWithRoot(ctx, root, entry)
+}
+
+func (h *Handler) refreshAuthFileEntryFromDiskWithRoot(ctx context.Context, root *os.Root, entry gin.H) gin.H {
 	name := strings.TrimSpace(valueAsString(entry["name"]))
-	if name == "" || h == nil || h.cfg == nil {
+	if name == "" || h == nil || h.cfg == nil || root == nil {
 		return nil
 	}
 	path := filepath.Join(h.cfg.AuthDir, name)
-	data, err := os.ReadFile(path)
+	data, err := readAuthRootFile(root, name)
 	if err != nil {
 		return nil
 	}
@@ -1392,6 +1473,35 @@ func authFileEntryTypeCounts(files []gin.H, q authFilesListQuery) map[string]int
 	return counts
 }
 
+func authFileTypeCountEntry(auth *coreauth.Auth) gin.H {
+	if auth == nil {
+		return nil
+	}
+	name := strings.TrimSpace(auth.FileName)
+	if name == "" {
+		name = auth.ID
+	}
+	entry := gin.H{
+		"id":           auth.ID,
+		"name":         name,
+		"type":         strings.TrimSpace(auth.Provider),
+		"provider":     strings.TrimSpace(auth.Provider),
+		"disabled":     auth.Disabled,
+		"status":       auth.Status,
+		"runtime_only": isRuntimeOnlyAuth(auth),
+		"source":       "memory",
+	}
+	if path := strings.TrimSpace(authAttribute(auth, "path")); path != "" {
+		entry["path"] = path
+		entry["source"] = "file"
+	}
+	if !auth.UpdatedAt.IsZero() {
+		entry["modtime"] = auth.UpdatedAt
+		entry["updated_at"] = auth.UpdatedAt
+	}
+	return entry
+}
+
 func dedupeAuthFileEntries(entries []gin.H) []gin.H {
 	if len(entries) <= 1 {
 		return entries
@@ -1601,6 +1711,21 @@ func authFileMatchesListDisplayQuery(auth *coreauth.Auth, q authFilesListQuery) 
 		return false
 	}
 	return true
+}
+
+func authFileMatchesListPreQuery(auth *coreauth.Auth, q authFilesListQuery) bool {
+	if !authFileMatchesListDisplayQuery(auth, q) {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if q.Type != "" && provider != q.Type {
+		return false
+	}
+	name := strings.TrimSpace(auth.FileName)
+	if name == "" {
+		name = auth.ID
+	}
+	return authFileMatchesSearch(q.Search, name, provider)
 }
 
 func authFileEntryMatchesListQuery(file gin.H, q authFilesListQuery) bool {
@@ -1998,7 +2123,7 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 		entry["path"] = path
 		entry["source"] = "file"
 		if !opts.Summary {
-			if info, err := os.Stat(path); err == nil {
+			if info, err := statAuthFileEntryPath(path, opts); err == nil {
 				entry["size"] = info.Size()
 				entry["modtime"] = info.ModTime()
 			} else if os.IsNotExist(err) {
@@ -2081,6 +2206,41 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 		entry["disable_cooling"] = disableCooling
 	}
 	return entry
+}
+
+func statAuthFileEntryPath(path string, opts authFileEntryBuildOptions) (os.FileInfo, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, os.ErrNotExist
+	}
+	cacheKey := path
+	if abs, errAbs := filepath.Abs(path); errAbs == nil {
+		cacheKey = abs
+	}
+	if opts.StatCache != nil {
+		if cached, ok := opts.StatCache[cacheKey]; ok {
+			return cached.Info, cached.Err
+		}
+	}
+
+	var info os.FileInfo
+	var err error
+	authDir := strings.TrimSpace(opts.AuthDir)
+	if opts.AuthRoot != nil && authDir != "" && authFilePathWithinDir(path, authDir) {
+		_, relPath, scopedErr := scopedManagedAuthPath(path, authDir)
+		if scopedErr == nil {
+			info, err = opts.AuthRoot.Stat(relPath)
+		} else {
+			err = scopedErr
+		}
+	} else {
+		info, err = os.Stat(path)
+	}
+
+	if opts.StatCache != nil {
+		opts.StatCache[cacheKey] = authFileStatResult{Info: info, Err: err}
+	}
+	return info, err
 }
 
 func boolFromGJSON(data []byte, keys ...string) (bool, bool) {
@@ -2624,7 +2784,11 @@ func (h *Handler) persistCodexSubscriptionBackfill(ctx context.Context, auth *co
 	if path == "" {
 		return
 	}
-	if err := persistCodexSubscriptionBackfillFile(path, auth.Metadata); err != nil {
+	authDir := ""
+	if h.cfg != nil {
+		authDir = strings.TrimSpace(h.cfg.AuthDir)
+	}
+	if err := persistCodexSubscriptionBackfillFile(path, authDir, auth.Metadata); err != nil {
 		log.WithError(err).WithField("path", path).Warn("failed to persist codex subscription info")
 	}
 }
@@ -2651,14 +2815,16 @@ func resolveCodexSubscriptionBackfillPath(h *Handler, auth *coreauth.Auth) strin
 	if auth == nil {
 		return ""
 	}
-	if auth.Attributes != nil {
-		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
-			return path
-		}
-	}
 	authDir := ""
 	if h != nil && h.cfg != nil {
 		authDir = strings.TrimSpace(h.cfg.AuthDir)
+	}
+	if auth.Attributes != nil {
+		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
+			if authDir == "" || authFilePathWithinDir(path, authDir) {
+				return path
+			}
+		}
 	}
 	for _, candidate := range []string{auth.FileName, auth.ID} {
 		candidate = strings.TrimSpace(candidate)
@@ -2666,19 +2832,25 @@ func resolveCodexSubscriptionBackfillPath(h *Handler, auth *coreauth.Auth) strin
 			continue
 		}
 		if filepath.IsAbs(candidate) || authDir == "" {
-			return candidate
+			if authDir == "" || authFilePathWithinDir(candidate, authDir) {
+				return candidate
+			}
+			continue
 		}
-		return filepath.Join(authDir, candidate)
+		path := filepath.Join(authDir, candidate)
+		if authFilePathWithinDir(path, authDir) {
+			return path
+		}
 	}
 	return ""
 }
 
-func persistCodexSubscriptionBackfillFile(path string, metadata map[string]any) error {
+func persistCodexSubscriptionBackfillFile(path, authDir string, metadata map[string]any) error {
 	path = strings.TrimSpace(path)
 	if path == "" || len(metadata) == 0 {
 		return nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := readManagedAuthPathFile(path, authDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -2697,7 +2869,7 @@ func persistCodexSubscriptionBackfillFile(path string, metadata map[string]any) 
 		return fmt.Errorf("failed to encode auth file: %w", err)
 	}
 	updated = append(updated, '\n')
-	if err := os.WriteFile(path, updated, 0o600); err != nil {
+	if err := writeManagedAuthPathFile(path, authDir, updated, 0o600); err != nil {
 		return fmt.Errorf("failed to write auth file: %w", err)
 	}
 	return nil
@@ -3538,6 +3710,135 @@ func isUnsafeAuthFileName(name string) bool {
 	return false
 }
 
+func (h *Handler) readAuthDirFile(name string) ([]byte, error) {
+	if h == nil || h.cfg == nil {
+		return nil, fmt.Errorf("auth directory is unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if isUnsafeAuthFileName(name) {
+		return nil, fmt.Errorf("invalid auth file name")
+	}
+	authDir := strings.TrimSpace(h.cfg.AuthDir)
+	if authDir == "" {
+		return nil, fmt.Errorf("auth directory is empty")
+	}
+	root, err := os.OpenRoot(authDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	return readAuthRootFile(root, name)
+}
+
+func readAuthRootFile(root *os.Root, name string) ([]byte, error) {
+	if root == nil {
+		return nil, fmt.Errorf("auth directory is unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if isUnsafeAuthFileName(name) {
+		return nil, fmt.Errorf("invalid auth file name")
+	}
+	return root.ReadFile(name)
+}
+
+func scopedManagedAuthPath(path, authDir string) (string, string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", "", fmt.Errorf("auth path is empty")
+	}
+	authDir = strings.TrimSpace(authDir)
+	if authDir == "" {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return "", "", fmt.Errorf("resolve auth path: %w", err)
+		}
+		return filepath.Dir(absPath), filepath.Base(absPath), nil
+	}
+	absDir, err := filepath.Abs(authDir)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve auth directory: %w", err)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve auth path: %w", err)
+	}
+	rel, err := filepath.Rel(absDir, absPath)
+	if err != nil {
+		return "", "", fmt.Errorf("relate auth path: %w", err)
+	}
+	if rel == "." || rel == "" || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("auth path is outside auth directory")
+	}
+	return absDir, rel, nil
+}
+
+func readManagedAuthPathFile(path, authDir string) ([]byte, error) {
+	rootDir, relPath, err := scopedManagedAuthPath(path, authDir)
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	return root.ReadFile(relPath)
+}
+
+func writeManagedAuthPathFile(path, authDir string, data []byte, perm os.FileMode) error {
+	rootDir, relPath, err := scopedManagedAuthPath(path, authDir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(rootDir, 0o700); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.WriteFile(relPath, data, perm)
+}
+
+func statManagedAuthPath(path, authDir string) (os.FileInfo, error) {
+	rootDir, relPath, err := scopedManagedAuthPath(path, authDir)
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	return root.Stat(relPath)
+}
+
+func authFilePathWithinDir(path string, authDir string) bool {
+	path = strings.TrimSpace(path)
+	authDir = strings.TrimSpace(authDir)
+	if path == "" || authDir == "" {
+		return false
+	}
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) {
+		if abs, errAbs := filepath.Abs(cleanPath); errAbs == nil {
+			cleanPath = abs
+		}
+	}
+	cleanDir := filepath.Clean(authDir)
+	if !filepath.IsAbs(cleanDir) {
+		if abs, errAbs := filepath.Abs(cleanDir); errAbs == nil {
+			cleanDir = abs
+		}
+	}
+	rel, err := filepath.Rel(cleanDir, cleanPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+		return false
+	}
+	return !isUnsafeAuthFileName(filepath.Base(cleanPath))
+}
+
 func normalizeOptionalAuthFileName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -3560,8 +3861,7 @@ func (h *Handler) readAuthFileByName(name string) ([]byte, string, int, string) 
 	if !strings.HasSuffix(strings.ToLower(name), ".json") {
 		return nil, "", http.StatusBadRequest, "name must end with .json"
 	}
-	full := filepath.Join(h.cfg.AuthDir, name)
-	data, err := os.ReadFile(full)
+	data, err := h.readAuthDirFile(name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, "", http.StatusNotFound, "file not found"
@@ -4100,7 +4400,7 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if errNormalize != nil {
 		return fmt.Errorf("invalid auth file: %w", errNormalize)
 	}
-	if errWrite := os.WriteFile(dst, dataToWrite, 0o600); errWrite != nil {
+	if errWrite := writeManagedAuthPathFile(dst, h.cfg.AuthDir, dataToWrite, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
@@ -4155,7 +4455,11 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	}
 	if data == nil {
 		var err error
-		data, err = os.ReadFile(path)
+		authDir := ""
+		if h != nil && h.cfg != nil {
+			authDir = h.cfg.AuthDir
+		}
+		data, err = readManagedAuthPathFile(path, authDir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read auth file: %w", err)
 		}
@@ -4298,7 +4602,9 @@ func (req patchAuthFileFieldsRequest) resolvedServiceTierPassthrough() *bool {
 func resolvePatchAuthFilePath(targetAuth *coreauth.Auth, authDir, fallbackName string) string {
 	candidates := make([]string, 0, 2)
 	if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
-		candidates = append(candidates, path)
+		if strings.TrimSpace(authDir) == "" || authFilePathWithinDir(path, authDir) {
+			candidates = append(candidates, path)
+		}
 	}
 	if strings.TrimSpace(authDir) != "" && !isUnsafeAuthFileName(fallbackName) {
 		candidates = append(candidates, filepath.Join(authDir, filepath.Base(fallbackName)))
@@ -4313,7 +4619,10 @@ func resolvePatchAuthFilePath(targetAuth *coreauth.Auth, authDir, fallbackName s
 				candidate = abs
 			}
 		}
-		if _, err := os.Stat(candidate); err == nil {
+		if strings.TrimSpace(authDir) != "" && !authFilePathWithinDir(candidate, authDir) {
+			continue
+		}
+		if _, err := statManagedAuthPath(candidate, authDir); err == nil {
 			return candidate
 		}
 	}
@@ -4455,7 +4764,7 @@ func (h *Handler) persistPatchedAuthFile(
 		return nil
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := readManagedAuthPathFile(path, authDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -4485,7 +4794,7 @@ func (h *Handler) persistPatchedAuthFile(
 	}
 	updated = append(updated, '\n')
 
-	if err := os.WriteFile(path, updated, 0o600); err != nil {
+	if err := writeManagedAuthPathFile(path, authDir, updated, 0o600); err != nil {
 		return fmt.Errorf("failed to write auth file: %w", err)
 	}
 	return nil
@@ -5112,7 +5421,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 
 		// Helper: wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
+		waitFileName := fmt.Sprintf(".oauth-anthropic-%s.oauth", state)
+		waitFile := filepath.Join(h.cfg.AuthDir, waitFileName)
 		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
 			deadline := time.Now().Add(timeout)
 			for {
@@ -5123,7 +5433,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 					SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
 					return nil, fmt.Errorf("timeout waiting for OAuth callback")
 				}
-				data, errRead := os.ReadFile(path)
+				data, errRead := h.readAuthDirFile(filepath.Base(path))
 				if errRead == nil {
 					var m map[string]string
 					_ = json.Unmarshal(data, &m)
@@ -5248,7 +5558,8 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		}
 
 		// Wait for callback file written by server route
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-gemini-%s.oauth", state))
+		waitFileName := fmt.Sprintf(".oauth-gemini-%s.oauth", state)
+		waitFile := filepath.Join(h.cfg.AuthDir, waitFileName)
 		fmt.Println("Waiting for authentication callback...")
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
@@ -5261,7 +5572,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 				SetOAuthSessionError(state, "OAuth flow timed out")
 				return
 			}
-			if data, errR := os.ReadFile(waitFile); errR == nil {
+			if data, errR := h.readAuthDirFile(waitFileName); errR == nil {
 				var m map[string]string
 				_ = json.Unmarshal(data, &m)
 				_ = os.Remove(waitFile)
@@ -5522,7 +5833,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 
 		// Wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
+		waitFileName := fmt.Sprintf(".oauth-codex-%s.oauth", state)
+		waitFile := filepath.Join(h.cfg.AuthDir, waitFileName)
 		deadline := time.Now().Add(5 * time.Minute)
 		var code string
 		for {
@@ -5535,7 +5847,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
 				return
 			}
-			if data, errR := os.ReadFile(waitFile); errR == nil {
+			if data, errR := h.readAuthDirFile(waitFileName); errR == nil {
 				var m map[string]string
 				_ = json.Unmarshal(data, &m)
 				_ = os.Remove(waitFile)
@@ -5662,7 +5974,8 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
 		}
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
+		waitFileName := fmt.Sprintf(".oauth-antigravity-%s.oauth", state)
+		waitFile := filepath.Join(h.cfg.AuthDir, waitFileName)
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
@@ -5674,7 +5987,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 				SetOAuthSessionError(state, "OAuth flow timed out")
 				return
 			}
-			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+			if data, errReadFile := h.readAuthDirFile(waitFileName); errReadFile == nil {
 				var payload map[string]string
 				_ = json.Unmarshal(data, &payload)
 				_ = os.Remove(waitFile)
@@ -5863,7 +6176,8 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(kiroauth.DefaultOAuthCallbackPort, forwarder)
 		}
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state))
+		waitFileName := fmt.Sprintf(".oauth-kiro-%s.oauth", state)
+		waitFile := filepath.Join(h.cfg.AuthDir, waitFileName)
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
@@ -5875,7 +6189,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 				SetOAuthSessionError(state, "OAuth flow timed out")
 				return
 			}
-			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+			if data, errReadFile := h.readAuthDirFile(waitFileName); errReadFile == nil {
 				var payload map[string]string
 				_ = json.Unmarshal(data, &payload)
 				_ = os.Remove(waitFile)
@@ -6022,7 +6336,8 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(xaiauth.CallbackPort, forwarder)
 		}
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-xai-%s.oauth", state))
+		waitFileName := fmt.Sprintf(".oauth-xai-%s.oauth", state)
+		waitFile := filepath.Join(h.cfg.AuthDir, waitFileName)
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
@@ -6034,7 +6349,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 				SetOAuthSessionError(state, "OAuth flow timed out")
 				return
 			}
-			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+			if data, errReadFile := h.readAuthDirFile(waitFileName); errReadFile == nil {
 				var payload map[string]string
 				_ = json.Unmarshal(data, &payload)
 				_ = os.Remove(waitFile)

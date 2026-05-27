@@ -180,7 +180,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = os.WriteFile(outputPath, raw, 0o644); err != nil {
+	if err = os.WriteFile(outputPath, raw, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to write output file %s: %v\n", outputPath, err)
 		os.Exit(1)
 	}

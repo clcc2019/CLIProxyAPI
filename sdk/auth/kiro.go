@@ -281,9 +281,8 @@ func waitForKiroBuilderIDToken(ctx context.Context, ssoClient *kiroauth.SSOOIDCC
 
 func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.TokenData, source string) *coreauth.Auth {
 	now := time.Now()
-	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
-	if err != nil {
-		expiresAt = now.Add(time.Hour)
+	if _, err := time.Parse(time.RFC3339, tokenData.ExpiresAt); err != nil {
+		expiresAt := now.Add(time.Hour)
 		tokenData.ExpiresAt = expiresAt.UTC().Format(time.RFC3339)
 	}
 	if kiroauth.NormalizeKiroMachineID(tokenData.MachineID) == "" {

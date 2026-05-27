@@ -101,6 +101,31 @@ func TestCodexExecutorNativeImagesGenerationUsesResponsesPath(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorNativeImagesUsesConfiguredBaseModel(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{
+		SDKConfig: config.SDKConfig{GPTImage2BaseModel: "gpt-5.4"},
+	})
+	mainModel := executor.resolveGPTImage2BaseModel()
+	if mainModel != "gpt-5.4" {
+		t.Fatalf("resolved main model = %q, want configured model", mainModel)
+	}
+
+	body, err := executor.prepareCodexOpenAIImageBody([]byte(`{"model":"gpt-image-2","input":[]}`), cliproxyexecutor.Request{Model: "gpt-image-2"}, cliproxyexecutor.Options{}, mainModel)
+	if err != nil {
+		t.Fatalf("prepareCodexOpenAIImageBody() error = %v", err)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.4" {
+		t.Fatalf("prepared model = %q, want configured model; body=%s", got, string(body))
+	}
+
+	invalid := NewCodexExecutor(&config.Config{
+		SDKConfig: config.SDKConfig{GPTImage2BaseModel: "claude-sonnet"},
+	})
+	if got := invalid.resolveGPTImage2BaseModel(); got != codexOpenAIImagesMainModel {
+		t.Fatalf("invalid configured model resolved to %q, want fallback %q", got, codexOpenAIImagesMainModel)
+	}
+}
+
 func TestCodexExecutorNativeImagesRefreshesAfterUnauthorized(t *testing.T) {
 	var (
 		mu      sync.Mutex

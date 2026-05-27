@@ -242,6 +242,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			ProxyURL:                              "http://old-proxy",
 			APIKeys:                               config.ClientAPIKeys{{APIKey: "key-1"}},
 			ForceModelPrefix:                      false,
+			Streaming:                             sdkconfig.StreamingConfig{UpstreamDrainAfterDownstreamCancelMS: 0},
 			NonStreamKeepAliveInterval:            0,
 			ImageStreamKeepAliveSeconds:           0,
 			ImageStreamDataIntervalTimeoutSeconds: 0,
@@ -284,6 +285,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			ProxyURL:                              "http://new-proxy",
 			APIKeys:                               config.ClientAPIKeys{{APIKey: " key-1 "}, {APIKey: "key-2"}},
 			ForceModelPrefix:                      true,
+			Streaming:                             sdkconfig.StreamingConfig{UpstreamDrainAfterDownstreamCancelMS: 1500},
 			NonStreamKeepAliveInterval:            5,
 			ImageStreamKeepAliveSeconds:           10,
 			ImageStreamDataIntervalTimeoutSeconds: 900,
@@ -302,6 +304,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, details, "ws-auth: false -> true")
 	expectContains(t, details, "force-model-prefix: false -> true")
+	expectContains(t, details, "streaming.upstream-drain-after-downstream-cancel-ms: 0 -> 1500")
 	expectContains(t, details, "nonstream-keepalive-interval: 0 -> 5")
 	expectContains(t, details, "image-stream-keepalive-seconds: 0 -> 10")
 	expectContains(t, details, "image-stream-data-interval-timeout-seconds: 0 -> 900")

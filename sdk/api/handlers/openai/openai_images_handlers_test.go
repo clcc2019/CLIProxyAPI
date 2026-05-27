@@ -670,6 +670,43 @@ func TestForwardNativeImagesStreamWritesKeepAlive(t *testing.T) {
 	}
 }
 
+func TestWaitImagesStreamExecutionWritesKeepAliveWhileStarting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/images/generations", nil)
+
+	timing := newImageStreamTiming(10*time.Millisecond, 0)
+	defer timing.Stop()
+
+	wroteKeepAlive := make(chan struct{})
+	var once sync.Once
+	result, canceled := waitImagesStreamExecution(ginCtx, timing, func() {
+		once.Do(func() { close(wroteKeepAlive) })
+		timing.MarkWrite()
+	}, func() imagesStreamExecutionResult {
+		time.Sleep(50 * time.Millisecond)
+		data := make(chan []byte)
+		close(data)
+		return imagesStreamExecutionResult{Data: data, UpstreamHeaders: http.Header{"X-Test": []string{"ok"}}}
+	})
+
+	if canceled {
+		t.Fatal("waitImagesStreamExecution canceled unexpectedly")
+	}
+	select {
+	case <-wroteKeepAlive:
+	default:
+		t.Fatal("expected keepalive while stream execution was starting")
+	}
+	if result.Data == nil {
+		t.Fatal("result data channel is nil")
+	}
+	if got := result.UpstreamHeaders.Get("X-Test"); got != "ok" {
+		t.Fatalf("upstream header = %q, want ok", got)
+	}
+}
+
 func TestForwardNativeImagesStreamRejectsNilDataAfterErrorChannelCloses(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

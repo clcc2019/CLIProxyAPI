@@ -153,3 +153,37 @@ func TestDownloadAuthFile_RejectsPathSeparators(t *testing.T) {
 		}
 	}
 }
+
+func TestReadAuthFileByNameRejectsSymlinkEscape(t *testing.T) {
+	authDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "secret.json")
+	if err := os.WriteFile(outsidePath, []byte(`{"type":"codex","secret":"outside"}`), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(authDir, "escape.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	data, _, status, _ := h.readAuthFileByName("escape.json")
+	if status == http.StatusOK {
+		t.Fatalf("symlink escape read succeeded with data %s", string(data))
+	}
+}
+
+func TestValidateCallbackForwardTargetRequiresLocalManagementURL(t *testing.T) {
+	if err := validateCallbackForwardTarget("http://127.0.0.1:8317/anthropic/callback"); err != nil {
+		t.Fatalf("local callback target rejected: %v", err)
+	}
+	for _, target := range []string{
+		"https://example.com/callback",
+		"//example.com/callback",
+		"javascript:alert(1)",
+		"http://127.0.0.1/callback",
+	} {
+		if err := validateCallbackForwardTarget(target); err == nil {
+			t.Fatalf("target %q accepted, want rejection", target)
+		}
+	}
+}

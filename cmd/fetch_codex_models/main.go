@@ -154,7 +154,7 @@ func main() {
 		}
 	}
 
-	if err = os.WriteFile(outputPath, raw, 0o644); err != nil {
+	if err = os.WriteFile(outputPath, raw, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to write output file %s: %v\n", outputPath, err)
 		os.Exit(1)
 	}
@@ -243,10 +243,10 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 	httpReq.Header.Set("Originator", defaultCodexOriginator)
 	httpReq.Header.Set("User-Agent", defaultCodexUserAgent)
-	if accountID := metaStringValue(auth.Metadata, "account_id"); accountID != "" {
-		httpReq.Header.Set("Chatgpt-Account-Id", accountID)
-	}
 	if auth != nil {
+		if accountID := metaStringValue(auth.Metadata, "account_id"); accountID != "" {
+			httpReq.Header.Set("Chatgpt-Account-Id", accountID)
+		}
 		util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
 	}
 

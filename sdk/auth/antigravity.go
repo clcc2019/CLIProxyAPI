@@ -256,7 +256,10 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 		}
 	})
 
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		if errServe := srv.Serve(listener); errServe != nil && !strings.Contains(errServe.Error(), "Server closed") {
 			log.Warnf("antigravity callback server error: %v", errServe)

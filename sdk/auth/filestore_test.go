@@ -62,6 +62,97 @@ func TestFileTokenStoreSaveDisabledPersistsFlagForTokenStorage(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreSaveRejectsPathOutsideBaseDir(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	outsidePath := filepath.Join(t.TempDir(), "outside.json")
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       "outside.json",
+		Provider: "test",
+		Attributes: map[string]string{
+			"path": outsidePath,
+		},
+		Metadata: map[string]any{"type": "test"},
+	}
+
+	if _, err := store.Save(ctx, auth); err == nil {
+		t.Fatalf("Save() error = nil, want outside auth directory error")
+	}
+	if _, err := os.Stat(outsidePath); !os.IsNotExist(err) {
+		t.Fatalf("outside file stat error = %v, want not exist", err)
+	}
+}
+
+func TestFileTokenStoreSaveRejectsSymlinkEscape(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	outsidePath := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte(`{"type":"outside"}`), 0o600); err != nil {
+		t.Fatalf("seed outside auth file: %v", err)
+	}
+	linkPath := filepath.Join(baseDir, "escape.json")
+	if err := os.Symlink(outsidePath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       "escape.json",
+		Provider: "test",
+		FileName: "escape.json",
+		Metadata: map[string]any{"type": "test"},
+	}
+
+	if _, err := store.Save(ctx, auth); err == nil {
+		t.Fatalf("Save() error = nil, want symlink escape error")
+	}
+	raw, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("read outside auth file: %v", err)
+	}
+	if string(raw) != `{"type":"outside"}` {
+		t.Fatalf("outside file was modified: %s", raw)
+	}
+}
+
+func TestFileTokenStoreSaveTokenStorageRejectsSymlinkEscape(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	outsidePath := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte(`{"type":"outside"}`), 0o600); err != nil {
+		t.Fatalf("seed outside auth file: %v", err)
+	}
+	linkPath := filepath.Join(baseDir, "escape-token.json")
+	if err := os.Symlink(outsidePath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       "escape-token.json",
+		Provider: "test",
+		FileName: "escape-token.json",
+		Storage:  &testTokenStorage{},
+		Metadata: map[string]any{"type": "test"},
+	}
+
+	if _, err := store.Save(ctx, auth); err == nil {
+		t.Fatalf("Save() error = nil, want symlink escape error")
+	}
+	raw, err := os.ReadFile(outsidePath)
+	if err != nil {
+		t.Fatalf("read outside auth file: %v", err)
+	}
+	if string(raw) != `{"type":"outside"}` {
+		t.Fatalf("outside file was modified: %s", raw)
+	}
+}
+
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
 
@@ -157,7 +248,7 @@ func TestFileTokenStoreListNormalizesKiroCLIToken(t *testing.T) {
 
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
-	auths, err := store.List(nil)
+	auths, err := store.List(context.Background())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -198,7 +289,7 @@ func TestFileTokenStoreListAppliesKiroAuthFileOptions(t *testing.T) {
 
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
-	auths, err := store.List(nil)
+	auths, err := store.List(context.Background())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}

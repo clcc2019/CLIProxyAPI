@@ -83,8 +83,11 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
+	if cfg == nil {
+		return logging.NewFileRequestLogger(false, logsDir, configDir, 0)
+	}
 	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
-	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
+	logger.SetHomeEnabled(cfg.Home.Enabled)
 	return logger
 }
 

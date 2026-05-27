@@ -117,7 +117,7 @@ func DoVertexImport(cfg *config.Config, keyPath string, prefix string) {
 func sanitizeFilePart(s string) string {
 	out := strings.TrimSpace(s)
 	replacers := []string{"/", "_", "\\", "_", ":", "_", " ", "-"}
-	for i := 0; i < len(replacers); i += 2 {
+	for i := 0; i+1 < len(replacers); i += 2 {
 		out = strings.ReplaceAll(out, replacers[i], replacers[i+1])
 	}
 	return out

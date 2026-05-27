@@ -163,6 +163,10 @@ disable-cooling: false
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations, /v1/images/edits, and /v1/images/variations enabled.
 disable-image-generation: false
 
+# Base model used when proxying gpt-image-2 via the hosted image_generation tool (Responses API).
+# Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
+# gpt-image-2-base-model: "gpt-5.4-mini"
+
 # Reserved for the disabled core auth auto-refresh worker pool.
 # Explicit management refresh actions do not use this background worker pool.
 # auth-auto-refresh-workers: 16

@@ -427,7 +427,7 @@ func TestCodexExecutorExecuteStreamSurfacesEOFBeforeCompleted(t *testing.T) {
 	}
 }
 
-func TestCodexExecutorExecuteStreamStopsWhenContextCancelledWithoutDraining(t *testing.T) {
+func TestCodexExecutorExecuteStreamDrainsBrieflyWhenContextCancelled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
@@ -441,7 +441,13 @@ func TestCodexExecutorExecuteStreamStopsWhenContextCancelledWithoutDraining(t *t
 	}))
 	defer server.Close()
 
-	executor := NewCodexExecutor(&config.Config{})
+	executor := NewCodexExecutor(&config.Config{
+		SDKConfig: config.SDKConfig{
+			Streaming: config.StreamingConfig{
+				UpstreamDrainAfterDownstreamCancelMS: 20,
+			},
+		},
+	})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"base_url": server.URL,
 		"api_key":  "test",

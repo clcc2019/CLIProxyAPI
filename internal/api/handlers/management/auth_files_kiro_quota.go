@@ -373,7 +373,7 @@ func (h *Handler) readKiroUsageAuthFromDisk(_ context.Context, name string) (*co
 	}
 
 	fullPath := filepath.Join(h.cfg.AuthDir, name)
-	data, err := os.ReadFile(fullPath)
+	data, err := h.readAuthDirFile(name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, http.StatusNotFound, fmt.Errorf("auth file not found")

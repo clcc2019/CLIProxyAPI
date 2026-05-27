@@ -19,6 +19,13 @@ type SDKConfig struct {
 	//     while keeping /v1/images/generations, /v1/images/edits, and /v1/images/variations enabled and preserving image_generation there.
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
+	// GPTImage2BaseModel sets the base (mainline) model used when proxying GPT Image 2
+	// requests via the hosted image_generation tool (e.g. Codex OAuth /v1/images/*).
+	//
+	// The value must start with "gpt-" (case-insensitive). If empty or invalid, the
+	// default base model ("gpt-5.4-mini") is used.
+	GPTImage2BaseModel string `yaml:"gpt-image-2-base-model,omitempty" json:"gpt-image-2-base-model,omitempty"`
+
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
 	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`
@@ -102,4 +109,10 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// UpstreamDrainAfterDownstreamCancelMS keeps selected upstream streams alive briefly
+	// after the downstream client disconnects. This lets Codex finish and publish
+	// terminal usage/output events instead of aborting immediately on UI reconnects.
+	// < 0 disables draining. 0 uses the executor default.
+	UpstreamDrainAfterDownstreamCancelMS int `yaml:"upstream-drain-after-downstream-cancel-ms,omitempty" json:"upstream-drain-after-downstream-cancel-ms,omitempty"`
 }

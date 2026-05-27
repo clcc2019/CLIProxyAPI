@@ -80,7 +80,7 @@ func NewFileBodySourceInDir(baseDir string, prefix string) (*FileBodySource, err
 	if baseDir == "" {
 		return nil, fmt.Errorf("base directory is required")
 	}
-	if errMkdir := os.MkdirAll(baseDir, 0755); errMkdir != nil {
+	if errMkdir := os.MkdirAll(baseDir, 0o750); errMkdir != nil {
 		return nil, errMkdir
 	}
 	dir, errCreate := os.MkdirTemp(baseDir, "request-log-parts-"+prefix+"-*")
@@ -175,8 +175,8 @@ func (s *FileBodySource) Paths() []string {
 	return out
 }
 
-// WriteTo merges all ordered parts into w.
-func (s *FileBodySource) WriteTo(w io.Writer) error {
+// WritePartsTo merges all ordered parts into w.
+func (s *FileBodySource) WritePartsTo(w io.Writer) error {
 	if s == nil || w == nil {
 		return nil
 	}
@@ -208,7 +208,7 @@ func (s *FileBodySource) WriteTo(w io.Writer) error {
 // Bytes merges all ordered parts into memory.
 func (s *FileBodySource) Bytes() ([]byte, error) {
 	var buf bytes.Buffer
-	if errWrite := s.WriteTo(&buf); errWrite != nil {
+	if errWrite := s.WritePartsTo(&buf); errWrite != nil {
 		return nil, errWrite
 	}
 	return buf.Bytes(), nil
@@ -569,7 +569,7 @@ func mergeLogFileBodySource(payload []byte, source *FileBodySource) ([]byte, err
 		}
 		buf.WriteByte('\n')
 	}
-	if errWrite := source.WriteTo(&buf); errWrite != nil {
+	if errWrite := source.WritePartsTo(&buf); errWrite != nil {
 		return nil, errWrite
 	}
 	return buf.Bytes(), nil
