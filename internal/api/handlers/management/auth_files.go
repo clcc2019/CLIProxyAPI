@@ -559,7 +559,9 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 	displayEntries := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if authFileMatchesListDisplayQuery(auth, q) {
-			countEntries = append(countEntries, authFileTypeCountEntry(auth))
+			if entry := authFileTypeCountEntry(auth); entry != nil {
+				countEntries = append(countEntries, entry)
+			}
 		}
 		if !authFileMatchesListPreQuery(auth, q) {
 			continue
@@ -1477,6 +1479,11 @@ func authFileTypeCountEntry(auth *coreauth.Auth) gin.H {
 	if auth == nil {
 		return nil
 	}
+	runtimeOnly := isRuntimeOnlyAuth(auth)
+	path := strings.TrimSpace(authAttribute(auth, "path"))
+	if path == "" && !runtimeOnly {
+		return nil
+	}
 	name := strings.TrimSpace(auth.FileName)
 	if name == "" {
 		name = auth.ID
@@ -1488,10 +1495,10 @@ func authFileTypeCountEntry(auth *coreauth.Auth) gin.H {
 		"provider":     strings.TrimSpace(auth.Provider),
 		"disabled":     auth.Disabled,
 		"status":       auth.Status,
-		"runtime_only": isRuntimeOnlyAuth(auth),
+		"runtime_only": runtimeOnly,
 		"source":       "memory",
 	}
-	if path := strings.TrimSpace(authAttribute(auth, "path")); path != "" {
+	if path != "" {
 		entry["path"] = path
 		entry["source"] = "file"
 	}

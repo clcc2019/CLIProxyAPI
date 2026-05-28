@@ -115,6 +115,14 @@ func TestListAuthFiles_PaginatedManagerResponse(t *testing.T) {
 			t.Fatalf("register auth file %s: %v", item.name, err)
 		}
 	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "claude-config-runtime",
+		FileName: "claude-config-runtime",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register pathless claude auth: %v", err)
+	}
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 	rec := httptest.NewRecorder()
@@ -144,6 +152,9 @@ func TestListAuthFiles_PaginatedManagerResponse(t *testing.T) {
 	}
 	if body.TypeCounts["all"] != 3 || body.TypeCounts["codex"] != 2 || body.TypeCounts["kiro"] != 1 {
 		t.Fatalf("type_counts = %#v", body.TypeCounts)
+	}
+	if body.TypeCounts["claude"] != 0 {
+		t.Fatalf("type_counts should not include pathless claude auth: %#v", body.TypeCounts)
 	}
 }
 
