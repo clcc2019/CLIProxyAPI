@@ -62,12 +62,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheCreationTokens: record.Detail.CacheCreationTokens,
 		TotalTokens:         record.Detail.TotalTokens,
 	}
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
-	}
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
-	}
+	tokens = normalizeQueuedTokenStats(provider, tokens)
 
 	failed := record.Failed
 	if !failed {
@@ -138,6 +133,28 @@ type tokenStats struct {
 	CacheReadTokens     int64 `json:"cache_read_tokens"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens"`
 	TotalTokens         int64 `json:"total_tokens"`
+}
+
+func normalizeQueuedTokenStats(provider string, tokens tokenStats) tokenStats {
+	if tokens.TotalTokens == 0 {
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens
+		if !queuedProviderReportsReasoningAsOutputDetail(provider) {
+			tokens.TotalTokens += tokens.ReasoningTokens
+		}
+	}
+	if tokens.TotalTokens == 0 {
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
+	}
+	return tokens
+}
+
+func queuedProviderReportsReasoningAsOutputDetail(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "openai":
+		return true
+	default:
+		return false
+	}
 }
 
 type failDetail struct {

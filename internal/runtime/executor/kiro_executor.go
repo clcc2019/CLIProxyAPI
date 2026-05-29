@@ -1466,6 +1466,7 @@ func applyKiroUsageMap(detail *usage.Detail, m map[string]any) {
 		// cost calculators. Claude clients render this as
 		// `usage.cache_read_input_tokens`.
 		detail.CachedTokens = cacheReadTokens
+		detail.CacheReadTokens = cacheReadTokens
 	}
 	if cacheWriteTokens > 0 {
 		// CacheCreationTokens captures the tokens billed for populating a

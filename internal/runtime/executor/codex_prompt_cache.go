@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const codexPromptCacheKeyMaxLen = 64
+
 // codexPromptCacheResolution carries the chosen prompt_cache_key alongside a
 // second identifier that may be used as the fallback value for the
 // Session_id/Thread_id headers. Both can be empty when the request lacks any
@@ -20,6 +23,8 @@ import (
 type codexPromptCacheResolution struct {
 	cache            helps.CodexCache
 	headerEligibleID string
+	sessionHeaderID  string
+	threadHeaderID   string
 }
 
 // resolvePromptCache decides which prompt_cache_key value to send upstream.
@@ -45,12 +50,14 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 	// Path 1: the caller already supplied a prompt_cache_key. Trust it; this
 	// is the codex-rs native path (prompt_cache_key == conversation_id).
 	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "prompt_cache_key").String()); key != "" {
+		key = codexNormalizePromptCacheKey(key)
 		return codexPromptCacheResolution{
 			cache:            helps.CodexCache{ID: key},
 			headerEligibleID: key,
 		}
 	}
 	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "metadata.prompt_cache_key").String()); key != "" {
+		key = codexNormalizePromptCacheKey(key)
 		return codexPromptCacheResolution{
 			cache:            helps.CodexCache{ID: key},
 			headerEligibleID: key,
@@ -73,17 +80,48 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 	// identity in the body. Use the caller-owned value directly so the proxy
 	// does not replace a valid upstream cache key with its own synthetic UUID.
 	if key := codexPromptCachePayloadConversationHint(req.Payload); key != "" {
+		key = codexNormalizePromptCacheKey(key)
 		return codexPromptCacheResolution{
 			cache:            helps.CodexCache{ID: key},
 			headerEligibleID: key,
 		}
 	}
 
-	// Path 4: native Codex/OpenAI clients often carry their conversation
+	// Path 4: websocket clients may carry the official turn metadata in
+	// client_metadata instead of an HTTP header. Keep it ahead of header
+	// fallbacks because it belongs to this specific request body.
+	if threadID, sessionID := codexPromptCachePayloadTurnMetadataIDs(req.Payload); threadID != "" || sessionID != "" {
+		key := threadID
+		if key == "" {
+			key = sessionID
+		}
+		key = codexNormalizePromptCacheKey(key)
+		return codexPromptCacheResolution{
+			cache:            helps.CodexCache{ID: key},
+			headerEligibleID: key,
+			sessionHeaderID:  sessionID,
+			threadHeaderID:   threadID,
+		}
+	}
+
+	// Path 5: native Codex/OpenAI clients often carry their conversation
 	// identity in headers. Use that exact caller-owned key before deriving a
 	// synthetic fingerprint, while preserving official Session_id/Thread_id
 	// separation when both headers are present.
 	if key := codexPromptCacheHeaderHint(ctx); key != "" {
+		key = codexNormalizePromptCacheKey(key)
+		return codexPromptCacheResolution{
+			cache:            helps.CodexCache{ID: key},
+			headerEligibleID: key,
+		}
+	}
+
+	// Path 6: downstream websocket sessions already have a proxy-owned execution
+	// session ID. Codex CLI uses its thread_id directly as prompt_cache_key; mirror
+	// that before payload fingerprinting so long multi-turn requests do not pay to
+	// hash large bodies just to arrive at the same session-scoped key.
+	if executionSessionID = strings.TrimSpace(executionSessionID); executionSessionID != "" {
+		key := codexNormalizePromptCacheKey(executionSessionID)
 		return codexPromptCacheResolution{
 			cache:            helps.CodexCache{ID: key},
 			headerEligibleID: key,
@@ -109,7 +147,7 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 			return cached, nil
 		}
 		resolution := codexPromptCacheResolution{}
-		// Path 5: derive a conversation fingerprint from whatever
+		// Path 7: derive a conversation fingerprint from whatever
 		// conversation-scoped fields the caller happened to include. The
 		// fingerprint goes through codexCacheStore, so repeated requests with
 		// the same fingerprint map to the same stable UUID even after the
@@ -124,19 +162,7 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
 			return resolution, nil
 		}
-		// Path 6: downstream websocket sessions already have a proxy-owned
-		// execution session ID. Reuse it as the header value while keeping the
-		// upstream prompt_cache_key scoped through codexCacheStore.
-		if executionSessionID = strings.TrimSpace(executionSessionID); executionSessionID != "" {
-			cache := loadOrCreateCodexCache("exec:" + scope + ":" + req.Model + ":" + executionSessionID)
-			resolution = codexPromptCacheResolution{
-				cache:            cache,
-				headerEligibleID: executionSessionID,
-			}
-			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-			return resolution, nil
-		}
-		// Path 7: final structured fallback for clients without explicit
+		// Path 8: final structured fallback for clients without explicit
 		// session signals. This preserves the existing content-based reuse.
 		if fp := conversationContentFingerprint(req); fp != "" {
 			key := "fp:" + scope + ":" + req.Model + ":" + fp
@@ -145,7 +171,7 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 			return resolution, nil
 		}
 
-		// Path 8 (fallback): api_key-level stable UUID. This is strictly less
+		// Path 9 (fallback): api_key-level stable UUID. This is strictly less
 		// precise than a real conversation id but preserves backwards-compatible
 		// behaviour for callers that send neither prompt_cache_key nor any
 		// identifiable content (e.g. the upstream smoke tests that post just
@@ -171,6 +197,14 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 	return resolution
 }
 
+func codexNormalizePromptCacheKey(key string) string {
+	key = strings.TrimSpace(key)
+	if len(key) <= codexPromptCacheKeyMaxLen {
+		return key
+	}
+	return "pc-" + uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache-key:"+key)).String()
+}
+
 // codexPromptCacheConversationHintFields lists the JSON paths inspected for a
 // caller-owned conversation identifier, in precedence order. Declared as a
 // package-level variable so it is constructed once rather than on every
@@ -188,6 +222,28 @@ var codexPromptCacheConversationHintFields = []string{
 	"metadata.threadId",
 	"metadata.session_id",
 	"metadata.sessionId",
+}
+
+var codexPromptCacheHeaderHintKeys = []string{
+	codexHeaderThreadID,
+	codexHeaderOfficialThreadID,
+	"X-Thread-ID",
+	"Conversation_id",
+	codexHeaderSessionID,
+	codexHeaderOfficialSessionID,
+	"X-Session-ID",
+}
+
+var codexPromptCacheSessionHeaderKeys = []string{
+	codexHeaderSessionID,
+	codexHeaderOfficialSessionID,
+	"X-Session-ID",
+}
+
+var codexPromptCacheThreadHeaderKeys = []string{
+	codexHeaderThreadID,
+	codexHeaderOfficialThreadID,
+	"X-Thread-ID",
 }
 
 func codexPromptCachePayloadConversationHint(payload []byte) string {
@@ -209,55 +265,87 @@ func codexPromptCachePayloadConversationHint(payload []byte) string {
 	return ""
 }
 
+func codexPromptCachePayloadTurnMetadataIDs(payload []byte) (threadID string, sessionID string) {
+	return codexPromptCachePayloadTurnMetadataValue(payload, "thread_id"),
+		codexPromptCachePayloadTurnMetadataValue(payload, "session_id")
+}
+
+func codexPromptCachePayloadTurnMetadataValue(payload []byte, path string) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	metadata := gjson.GetBytes(payload, "client_metadata."+codexClientMetadataTurnMetadata)
+	if metadata.IsObject() {
+		return strings.TrimSpace(metadata.Get(path).String())
+	}
+	if metadata.Type != gjson.String {
+		return ""
+	}
+	raw := strings.TrimSpace(metadata.String())
+	if raw == "" {
+		return ""
+	}
+	return strings.TrimSpace(gjson.Get(raw, path).String())
+}
+
 func codexPromptCacheHeaderHint(ctx context.Context) string {
 	headers := codexGinHeadersFromContext(ctx)
 	if headers == nil {
 		return ""
 	}
-	for _, key := range []string{codexHeaderThreadID, "X-Thread-ID", "Conversation_id", codexHeaderSessionID, "X-Session-ID"} {
+	for _, key := range codexPromptCacheHeaderHintKeys {
 		if value := strings.TrimSpace(headers.Get(key)); value != "" {
 			return value
 		}
+	}
+	if value := codexPromptCacheTurnMetadataValue(headers, "thread_id"); value != "" {
+		return value
+	}
+	if value := codexPromptCacheTurnMetadataValue(headers, "session_id"); value != "" {
+		return value
 	}
 	return ""
 }
 
 func codexPromptCacheSessionHeaderValue(ctx context.Context, fallback string) string {
 	headers := codexGinHeadersFromContext(ctx)
-	for _, key := range []string{codexHeaderSessionID, "X-Session-ID"} {
+	for _, key := range codexPromptCacheSessionHeaderKeys {
 		if headers != nil {
 			if value := strings.TrimSpace(headers.Get(key)); value != "" {
 				return value
 			}
 		}
+	}
+	if value := codexPromptCacheTurnMetadataValue(headers, "session_id"); value != "" {
+		return value
 	}
 	return strings.TrimSpace(fallback)
 }
 
-func codexPromptCacheThreadHeaderValue(ctx context.Context, payload []byte, fallback string) string {
+func codexPromptCacheThreadHeaderValue(ctx context.Context, fallback string) string {
 	headers := codexGinHeadersFromContext(ctx)
-	for _, key := range []string{codexHeaderThreadID, "X-Thread-ID"} {
+	for _, key := range codexPromptCacheThreadHeaderKeys {
 		if headers != nil {
 			if value := strings.TrimSpace(headers.Get(key)); value != "" {
 				return value
 			}
 		}
 	}
-	if key := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()); key != "" {
-		return key
-	}
-	if key := strings.TrimSpace(gjson.GetBytes(payload, "metadata.prompt_cache_key").String()); key != "" {
-		return key
-	}
-	if key := codexPromptCachePayloadConversationHint(payload); key != "" {
-		return key
-	}
-	if headers != nil {
-		if value := strings.TrimSpace(headers.Get("Conversation_id")); value != "" {
-			return value
-		}
+	if value := codexPromptCacheTurnMetadataValue(headers, "thread_id"); value != "" {
+		return value
 	}
 	return strings.TrimSpace(fallback)
+}
+
+func codexPromptCacheTurnMetadataValue(headers http.Header, path string) string {
+	if headers == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(headers.Get(codexHeaderTurnMetadata))
+	if raw == "" {
+		return ""
+	}
+	return strings.TrimSpace(gjson.Get(raw, path).String())
 }
 
 // codexConversationIdentifierFields lists the JSON paths that may carry an
@@ -275,9 +363,6 @@ var codexConversationIdentifierFields = []string{
 	"conversationId",
 	"thread_id",
 	"threadId",
-	// OpenAI "user" top-level field identifies an end-user; two users on
-	// the same api key are almost never the same conversation.
-	"user",
 }
 
 // conversationFingerprint extracts a conversation-scoped hint out of req.Payload.
@@ -319,6 +404,9 @@ func conversationContentFingerprint(req cliproxyexecutor.Request) string {
 	// message + same model ⇒ same conversation, which is the assumption
 	// prompt caching is built on anyway.
 	if content := firstUserContent(payload); content != "" {
+		if user := strings.TrimSpace(gjson.GetBytes(payload, "user").String()); user != "" {
+			return "c:" + shortHashString("user="+user+"\x00content="+content)
+		}
 		return "c:" + shortHashString(content)
 	}
 

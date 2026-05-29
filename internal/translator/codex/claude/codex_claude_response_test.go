@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -384,6 +385,103 @@ func TestConvertCodexResponseToClaude_StreamSignatureOnlyReasoningEmitsThinkingS
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamReasoningDoneFallbackUsesSummary(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"model\":\"gpt-5\"}}"),
+		[]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_sig_done_summary\"}}"),
+		[]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_sig_done_summary\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"First \"},{\"type\":\"summary_text\",\"text\":\"second\"}]}}"),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	events := []string{}
+	thinkingText := ""
+	signature := ""
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				if data.Get("content_block.type").String() == "thinking" {
+					events = append(events, "thinking_start")
+				}
+			case "content_block_delta":
+				switch data.Get("delta.type").String() {
+				case "thinking_delta":
+					events = append(events, "thinking_delta")
+					thinkingText += data.Get("delta.thinking").String()
+				case "signature_delta":
+					events = append(events, "signature_delta")
+					signature = data.Get("delta.signature").String()
+				}
+			case "content_block_stop":
+				if data.Get("index").Int() == 0 {
+					events = append(events, "thinking_stop")
+				}
+			}
+		}
+	}
+
+	if got, want := strings.Join(events, ","), "thinking_start,thinking_delta,signature_delta,thinking_stop"; got != want {
+		t.Fatalf("fallback summary event order = %s, want %s. Outputs=%q", got, want, outputs)
+	}
+	if thinkingText != "First second" {
+		t.Fatalf("thinking text = %q, want %q", thinkingText, "First second")
+	}
+	if signature != "enc_sig_done_summary" {
+		t.Fatalf("signature = %q, want enc_sig_done_summary", signature)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamReasoningDoneFallbackUsesContent(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"content reasoning\"}]}}"), &param)
+
+	thinkingText := ""
+	signatureDeltaFound := false
+	stopFound := false
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "thinking_delta" {
+				thinkingText += data.Get("delta.thinking").String()
+			}
+			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "signature_delta" {
+				signatureDeltaFound = true
+			}
+			if data.Get("type").String() == "content_block_stop" && data.Get("index").Int() == 0 {
+				stopFound = true
+			}
+		}
+	}
+
+	if thinkingText != "content reasoning" {
+		t.Fatalf("thinking text = %q, want content reasoning. Outputs=%q", thinkingText, outputs)
+	}
+	if signatureDeltaFound {
+		t.Fatal("did not expect signature_delta when reasoning item has no encrypted_content")
+	}
+	if !stopFound {
+		t.Fatalf("expected fallback thinking block to stop. Outputs=%q", outputs)
+	}
+}
+
 func TestConvertCodexResponseToClaudeNonStream_ThinkingIncludesSignature(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)
@@ -422,6 +520,42 @@ func TestConvertCodexResponseToClaudeNonStream_ThinkingIncludesSignature(t *test
 	}
 }
 
+func TestConvertCodexResponseToClaudeNonStream_ReasoningTextFromSummaryAndContent(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_123",
+			"model":"gpt-5",
+			"usage":{"input_tokens":10,"output_tokens":20},
+			"output":[
+				{
+					"type":"reasoning",
+					"summary":[
+						{"type":"summary_text","text":"summary "},
+						{"type":"summary_text","text":"text"}
+					]
+				},
+				{
+					"type":"reasoning",
+					"content":[{"type":"reasoning_text","text":"content text"}]
+				}
+			]
+		}
+	}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := gjson.ParseBytes(out)
+
+	if got := parsed.Get("content.0.thinking").String(); got != "summary text" {
+		t.Fatalf("summary thinking = %q, want summary text. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("content.1.thinking").String(); got != "content text" {
+		t.Fatalf("content thinking = %q, want content text. Output: %s", got, string(out))
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessageFallback(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"tools":[]}`)
@@ -456,6 +590,53 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 	}
 	if !foundText {
 		t.Fatalf("expected fallback content from response.output_item.done message; outputs=%q", outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamUsageMapsOfficialCacheAndReasoningFields(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150}}}`), &param)
+	messageDelta, ok := findClaudeStreamMessageDelta(outputs)
+	if !ok {
+		t.Fatalf("did not find message_delta; outputs=%q", outputs)
+	}
+	usage := messageDelta.Get("usage")
+	if got := usage.Get("input_tokens").Int(); got != 60 {
+		t.Fatalf("input_tokens = %d, want non-cached 60. Outputs=%q", got, outputs)
+	}
+	if got := usage.Get("cache_read_input_tokens").Int(); got != 40 {
+		t.Fatalf("cache_read_input_tokens = %d, want 40. Outputs=%q", got, outputs)
+	}
+	if got := usage.Get("output_tokens").Int(); got != 65 {
+		t.Fatalf("output_tokens = %d, want output+reasoning 65. Outputs=%q", got, outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_UsageMapsOfficialCacheAndReasoningFields(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_123",
+			"model":"gpt-5",
+			"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150},
+			"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+		}
+	}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got != 60 {
+		t.Fatalf("input_tokens = %d, want non-cached 60. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "usage.cache_read_input_tokens").Int(); got != 40 {
+		t.Fatalf("cache_read_input_tokens = %d, want 40. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "usage.output_tokens").Int(); got != 65 {
+		t.Fatalf("output_tokens = %d, want output+reasoning 65. Output: %s", got, string(out))
 	}
 }
 
@@ -521,6 +702,80 @@ func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 			t.Fatalf("nonstream tool_use id was not shortened: %q", toolID)
 		}
 	})
+}
+
+func TestConvertCodexResponseToClaude_OfficialToolCallVariants(t *testing.T) {
+	ctx := context.Background()
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_1",
+			"model":"gpt-5",
+			"usage":{"input_tokens":1,"output_tokens":1},
+			"output":[
+				{"type":"custom_tool_call","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},
+				{"type":"local_shell_call","call_id":"call_shell","status":"completed","action":{"type":"exec","command":["echo","hi"]}},
+				{"type":"tool_search_call","call_id":"call_search","execution":"client","arguments":{"query":"calendar","limit":1}}
+			]
+		}
+	}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", nil, nil, response, nil)
+	if got := gjson.GetBytes(out, "content.0.name").String(); got != "apply_patch" {
+		t.Fatalf("custom tool name = %q, want apply_patch. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "content.0.input.input").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("custom tool input = %q. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "content.1.name").String(); got != "local_shell" {
+		t.Fatalf("local shell tool name = %q, want local_shell. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "content.1.input.command.0").String(); got != "echo" {
+		t.Fatalf("local shell command[0] = %q, want echo. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "content.2.name").String(); got != "tool_search" {
+		t.Fatalf("tool search name = %q, want tool_search. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "content.2.input.query").String(); got != "calendar" {
+		t.Fatalf("tool search query = %q, want calendar. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamCustomToolCallUsesDoneInput(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_patch","name":"apply_patch","input":""}}`),
+		[]byte(`data: {"type":"response.custom_tool_call_input.delta","call_id":"call_patch","delta":"*** Begin Patch\n"}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", nil, nil, chunk, &param)...)
+	}
+	joined := string(bytes.Join(outputs, nil))
+	if !strings.Contains(joined, `"type":"content_block_start"`) || !strings.Contains(joined, `"name":"apply_patch"`) {
+		t.Fatalf("missing custom tool start event. Outputs=%q", outputs)
+	}
+	foundInput := false
+	for _, line := range strings.Split(joined, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+		if data.Get("delta.partial_json").String() == "{\"input\":\"*** Begin Patch\\n*** End Patch\"}" {
+			foundInput = true
+			break
+		}
+	}
+	if !foundInput {
+		t.Fatalf("missing wrapped custom tool input delta. Outputs=%q", outputs)
+	}
+	if !strings.Contains(joined, `"type":"content_block_stop"`) {
+		t.Fatalf("missing custom tool stop event. Outputs=%q", outputs)
+	}
 }
 
 func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {

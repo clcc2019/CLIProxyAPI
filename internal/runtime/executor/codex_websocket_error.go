@@ -9,6 +9,8 @@ import (
 )
 
 const codexWebsocketConnectionLimitReachedCode = "websocket_connection_limit_reached"
+const codexPreviousResponseNotFoundCode = "previous_response_not_found"
+const codexNoToolCallFoundForFunctionOutputMessage = "no tool call found for function call output"
 
 // statusErrWithHeaders decorates a statusErr with response headers that the
 // upstream websocket-level error carried. We keep the distinction because
@@ -57,6 +59,31 @@ func codexWebsocketConnectionLimitReached(payload []byte) bool {
 	}
 	for _, path := range []string{"error.code", "code"} {
 		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, path).String()), codexWebsocketConnectionLimitReachedCode) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexWebsocketPreviousResponseNotFound(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	for _, path := range []string{"error.code", "code"} {
+		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, path).String()), codexPreviousResponseNotFoundCode) {
+			return true
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "error.param").String()), "previous_response_id")
+}
+
+func codexWebsocketNoToolCallFoundForFunctionOutput(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	for _, path := range []string{"error.message", "message", "error"} {
+		message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, path).String()))
+		if strings.Contains(message, codexNoToolCallFoundForFunctionOutputMessage) {
 			return true
 		}
 	}

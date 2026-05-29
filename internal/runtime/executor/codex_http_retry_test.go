@@ -165,6 +165,61 @@ func TestDoCodexHTTPRequestRetriesZstdRejectionWithoutCompression(t *testing.T) 
 	}
 }
 
+func TestDoCodexHTTPRequestDoesNotRetryZstdApplicationBadRequest(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+	errBody := `{"error":{"code":"previous_response_not_found","message":"Previous response with id 'resp_1' not found.","param":"previous_response_id","type":"invalid_request_error"}}`
+
+	var attempts int
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(codexRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts != 1 {
+			t.Fatalf("unexpected retry attempt %d", attempts)
+		}
+		if got := req.Header.Get("Content-Encoding"); got != "zstd" {
+			t.Fatalf("Content-Encoding = %q, want zstd", got)
+		}
+		if _, errRead := io.ReadAll(req.Body); errRead != nil {
+			t.Fatalf("ReadAll(request body) error = %v", errRead)
+		}
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(errBody)),
+		}, nil
+	})))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := maybeEnableCodexRequestCompressionWithConfig(req, auth, nil, body); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompressionWithConfig() error = %v", err)
+	}
+
+	resp, err := (&CodexExecutor{}).doCodexHTTPRequest(ctx, auth, codexPreparedRequest{httpReq: req, body: body})
+	if err != nil {
+		t.Fatalf("doCodexHTTPRequest() error = %v", err)
+	}
+	if resp == nil || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("response = %#v, want 400", resp)
+	}
+	gotBody, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		t.Fatalf("ReadAll(response body) error = %v", errRead)
+	}
+	if string(gotBody) != errBody {
+		t.Fatalf("response body = %s, want %s", gotBody, errBody)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
 func TestCodexShouldRetryHTTPTransportErrorHonorsCanceledParentContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -244,7 +299,13 @@ func TestCodexShouldRetryStreamReadBeforePayloadOnHTTP2InternalError(t *testing.
 	if codexShouldRetryStreamRead(context.Background(), err, false, true, nil, false, 0) {
 		t.Fatal("must not retry after response.completed was observed")
 	}
-	if codexShouldRetryStreamRead(context.Background(), err, false, false, nil, false, codexHTTPMaxRequestRetries) {
+	if !codexShouldRetryStreamRead(context.Background(), err, false, false, nil, false, codexHTTPMaxStreamReadRetries-1) {
+		t.Fatal("must still retry before max stream attempts")
+	}
+	if codexShouldRetryStreamRead(context.Background(), err, false, false, nil, false, codexHTTPMaxStreamReadRetries) {
 		t.Fatal("must not retry after max attempts")
+	}
+	if codexHTTPMaxStreamReadRetries != 5 {
+		t.Fatalf("stream retry budget = %d, want official default 5", codexHTTPMaxStreamReadRetries)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -222,6 +224,9 @@ func TestCodexExecutorExecuteNormalizesToolChoiceAllowedTools(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "tools.0.filters.allowed_domains.0").String(); got != "example.com" {
 		t.Fatalf("allowed_domains not moved to filters; got %q body=%s", got, gotBody)
 	}
+	if got := gjson.GetBytes(gotBody, "tools.0.external_web_access").Bool(); got {
+		t.Fatalf("web_search external_web_access = true, want default cached false; body=%s", gotBody)
+	}
 	if got := gjson.GetBytes(gotBody, "tool_choice.tools.0.type").String(); got != "function" {
 		t.Fatalf("tool_choice.tools.0.type = %q, want function; body=%s", got, gotBody)
 	}
@@ -318,12 +323,14 @@ func TestNormalizeCodexFinalUpstreamBodyPreservesOfficialCodexToolShapes(t *test
 					"description":"Create an event.",
 					"strict":false,
 					"defer_loading":true,
-					"parameters":{"type":"object","properties":{}}
+					"parameters":{"type":"object","properties":{}},
+					"output_schema":{"type":"object"}
 				}]
 				},
+				{"type":"function","name":"plain","description":"Plain.","strict":false,"defer_loading":false,"parameters":{"type":"object","properties":{}},"output_schema":{"type":"object"}},
 				{"type":"tool_search","execution":"sync","description":"Search for tools.","parameters":{"type":"object","properties":{}},"cache_control":{"type":"ephemeral"}},
 				{"type":"image_generation","output_format":"png","cache_control":{"type":"ephemeral"}},
-				{"type":"custom","name":"apply_patch","description":"Apply patches.","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}}
+				{"type":"custom","name":"apply_patch","description":"Apply patches.","defer_loading":false,"output_schema":{"type":"object"},"format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}}
 			],
 			"tool_choice":{"type":"custom","name":"apply_patch"}
 	}`)
@@ -333,8 +340,8 @@ func TestNormalizeCodexFinalUpstreamBodyPreservesOfficialCodexToolShapes(t *test
 		streamMode:  codexStreamFieldTrue,
 	})
 
-	if gotCount := gjson.GetBytes(got, "tools.#").Int(); gotCount != 4 {
-		t.Fatalf("tools length = %d, want 4; body=%s", gotCount, got)
+	if gotCount := gjson.GetBytes(got, "tools.#").Int(); gotCount != 5 {
+		t.Fatalf("tools length = %d, want 5; body=%s", gotCount, got)
 	}
 	if gotType := gjson.GetBytes(got, "tools.0.type").String(); gotType != "namespace" {
 		t.Fatalf("tools.0.type = %q, want namespace; body=%s", gotType, got)
@@ -348,29 +355,270 @@ func TestNormalizeCodexFinalUpstreamBodyPreservesOfficialCodexToolShapes(t *test
 	if gotDeferred := gjson.GetBytes(got, "tools.0.tools.0.defer_loading").Bool(); !gotDeferred {
 		t.Fatalf("namespace child defer_loading not preserved; body=%s", got)
 	}
-	if gotType := gjson.GetBytes(got, "tools.1.type").String(); gotType != "tool_search" {
+	if gjson.GetBytes(got, "tools.0.tools.0.output_schema").Exists() {
+		t.Fatalf("namespace child output_schema should not be serialized upstream; body=%s", got)
+	}
+	if gotType := gjson.GetBytes(got, "tools.1.type").String(); gotType != "function" {
+		t.Fatalf("tools.1.type = %q, want function; body=%s", gotType, got)
+	}
+	if gjson.GetBytes(got, "tools.1.defer_loading").Exists() || gjson.GetBytes(got, "tools.1.output_schema").Exists() {
+		t.Fatalf("function tool should omit false defer_loading and output_schema; body=%s", got)
+	}
+	if gotType := gjson.GetBytes(got, "tools.2.type").String(); gotType != "tool_search" {
 		t.Fatalf("tools.1.type = %q, want tool_search; body=%s", gotType, got)
 	}
-	if gjson.GetBytes(got, "tools.1.cache_control").Exists() {
+	if gjson.GetBytes(got, "tools.2.cache_control").Exists() {
 		t.Fatalf("tool_search cache_control should be removed; body=%s", got)
 	}
-	if gotType := gjson.GetBytes(got, "tools.2.type").String(); gotType != "image_generation" {
+	if gotType := gjson.GetBytes(got, "tools.3.type").String(); gotType != "image_generation" {
 		t.Fatalf("tools.2.type = %q, want image_generation; body=%s", gotType, got)
 	}
-	if gjson.GetBytes(got, "tools.2.cache_control").Exists() {
+	if gjson.GetBytes(got, "tools.3.cache_control").Exists() {
 		t.Fatalf("image_generation cache_control should be removed; body=%s", got)
 	}
-	if gotType := gjson.GetBytes(got, "tools.3.type").String(); gotType != "custom" {
+	if gotType := gjson.GetBytes(got, "tools.4.type").String(); gotType != "custom" {
 		t.Fatalf("tools.3.type = %q, want custom; body=%s", gotType, got)
 	}
-	if gotSyntax := gjson.GetBytes(got, "tools.3.format.syntax").String(); gotSyntax != "lark" {
+	if gotSyntax := gjson.GetBytes(got, "tools.4.format.syntax").String(); gotSyntax != "lark" {
 		t.Fatalf("custom format syntax = %q, want lark; body=%s", gotSyntax, got)
+	}
+	if gjson.GetBytes(got, "tools.4.defer_loading").Exists() || gjson.GetBytes(got, "tools.4.output_schema").Exists() {
+		t.Fatalf("custom tool should omit non-freeform fields; body=%s", got)
 	}
 	if gotType := gjson.GetBytes(got, "tool_choice.type").String(); gotType != "custom" {
 		t.Fatalf("tool_choice.type = %q, want custom; body=%s", gotType, got)
 	}
-	if gjson.GetBytes(got, "tools.3.parameters").Exists() {
+	if gjson.GetBytes(got, "tools.4.parameters").Exists() {
 		t.Fatalf("custom tool should not be converted to function parameters; body=%s", got)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBodyCompletesHostedCodexToolDefaults(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"instructions":"Be helpful.",
+		"input":"hello",
+		"tools":[
+			{"type":"tool_search","execution":"","description":"","parameters":null,"output_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}},
+			{"type":"tool_search","execution":"client","description":"Search.","parameters":{"type":"object","properties":{}}},
+			{"type":"image_generation","output_format":"","output_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}},
+			{"type":"web_search","name":"web_search","enabled":true,"max_uses":5,"output_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}
+		]
+	}`)
+
+	got := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", nil, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+
+	if gotExecution := gjson.GetBytes(got, "tools.0.execution").String(); gotExecution != "client" {
+		t.Fatalf("tool_search execution = %q, want client; body=%s", gotExecution, got)
+	}
+	if gotDescription := gjson.GetBytes(got, "tools.0.description").String(); !strings.Contains(gotDescription, "Tool discovery") {
+		t.Fatalf("tool_search description was not defaulted; body=%s", got)
+	}
+	if gotType := gjson.GetBytes(got, "tools.0.parameters.type").String(); gotType != "object" {
+		t.Fatalf("tool_search parameters.type = %q, want object; body=%s", gotType, got)
+	}
+	if gotRequired := gjson.GetBytes(got, `tools.0.parameters.required.0`).String(); gotRequired != "query" {
+		t.Fatalf("tool_search required[0] = %q, want query; body=%s", gotRequired, got)
+	}
+	if gotLimit := gjson.GetBytes(got, "tools.1.parameters.properties.limit.type").String(); gotLimit != "number" {
+		t.Fatalf("tool_search malformed parameters were not repaired; body=%s", got)
+	}
+	if gotAdditional := gjson.GetBytes(got, "tools.1.parameters.additionalProperties"); gotAdditional.Type != gjson.False {
+		t.Fatalf("tool_search additionalProperties = %s, want false; body=%s", gotAdditional.Raw, got)
+	}
+	if gotFormat := gjson.GetBytes(got, "tools.2.output_format").String(); gotFormat != "png" {
+		t.Fatalf("image_generation output_format = %q, want png; body=%s", gotFormat, got)
+	}
+	if gotExternal := gjson.GetBytes(got, "tools.3.external_web_access"); !gotExternal.Exists() || gotExternal.Bool() {
+		t.Fatalf("web_search external_web_access = %s, want false; body=%s", gotExternal.Raw, got)
+	}
+	if gjson.GetBytes(got, "tools.3.name").Exists() || gjson.GetBytes(got, "tools.3.enabled").Exists() || gjson.GetBytes(got, "tools.3.max_uses").Exists() {
+		t.Fatalf("web_search kept compatibility-only fields; body=%s", got)
+	}
+	if gjson.GetBytes(got, "tools.0.cache_control").Exists() || gjson.GetBytes(got, "tools.2.cache_control").Exists() || gjson.GetBytes(got, "tools.3.cache_control").Exists() {
+		t.Fatalf("hosted tool cache_control should be removed; body=%s", got)
+	}
+	if gjson.GetBytes(got, "tools.0.output_schema").Exists() || gjson.GetBytes(got, "tools.2.output_schema").Exists() || gjson.GetBytes(got, "tools.3.output_schema").Exists() {
+		t.Fatalf("hosted tool output_schema should be removed; body=%s", got)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBodyCoalescesNamespaceToolsLikeOfficialCodex(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"instructions":"Be helpful.",
+		"input":"hello",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__sample",
+				"description":"",
+				"tools":[
+					{"type":"function","name":"z_last","parameters":{"type":"object","properties":{}}},
+					{"type":"function","name":"a_first","parameters":{"type":"object","properties":{}}}
+				]
+			},
+			{"type":"function","name":"plain","parameters":{"type":"object","properties":{}}},
+			{
+				"type":"namespace",
+				"name":"mcp__sample",
+				"description":"Sample tools.",
+				"tools":[{"type":"function","name":"middle","parameters":{"type":"object","properties":{}}}]
+			},
+			{"type":"namespace","name":"mcp__empty","tools":null}
+		]
+	}`)
+
+	got := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", nil, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+
+	if gotCount := gjson.GetBytes(got, "tools.#").Int(); gotCount != 3 {
+		t.Fatalf("tools length = %d, want merged namespace + function + empty namespace; body=%s", gotCount, got)
+	}
+	if gotDescription := gjson.GetBytes(got, "tools.0.description").String(); gotDescription != "Sample tools." {
+		t.Fatalf("merged namespace description = %q; body=%s", gotDescription, got)
+	}
+	for index, wantName := range []string{"a_first", "middle", "z_last"} {
+		path := "tools.0.tools." + strconv.Itoa(index) + ".name"
+		if gotName := gjson.GetBytes(got, path).String(); gotName != wantName {
+			t.Fatalf("%s = %q, want %q; body=%s", path, gotName, wantName, got)
+		}
+	}
+	if gotDescription := gjson.GetBytes(got, "tools.2.description").String(); gotDescription != "Tools in the mcp__empty namespace." {
+		t.Fatalf("empty namespace description = %q; body=%s", gotDescription, got)
+	}
+	if gotCount := gjson.GetBytes(got, "tools.2.tools.#").Int(); gotCount != 0 {
+		t.Fatalf("empty namespace tool count = %d, want 0; body=%s", gotCount, got)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBodyPreservesExplicitWebSearchModeAndConfig(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"instructions":"Be helpful.",
+		"input":"hello",
+		"tools":[{
+			"type":"web_search",
+			"external_web_access":true,
+			"filters":{"allowed_domains":["example.com"]},
+			"user_location":{"type":"approximate","country":"US","region":"California","city":"San Francisco","timezone":"America/Los_Angeles"},
+			"search_context_size":"high",
+			"search_content_types":["text","image"]
+		}]
+	}`)
+
+	got := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", nil, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+
+	if gotExternal := gjson.GetBytes(got, "tools.0.external_web_access"); !gotExternal.Bool() {
+		t.Fatalf("web_search external_web_access = %s, want true; body=%s", gotExternal.Raw, got)
+	}
+	if gotDomain := gjson.GetBytes(got, "tools.0.filters.allowed_domains.0").String(); gotDomain != "example.com" {
+		t.Fatalf("web_search allowed domain = %q; body=%s", gotDomain, got)
+	}
+	if gotCity := gjson.GetBytes(got, "tools.0.user_location.city").String(); gotCity != "San Francisco" {
+		t.Fatalf("web_search user_location.city = %q; body=%s", gotCity, got)
+	}
+	if gotSize := gjson.GetBytes(got, "tools.0.search_context_size").String(); gotSize != "high" {
+		t.Fatalf("web_search search_context_size = %q; body=%s", gotSize, got)
+	}
+	if gotContentType := gjson.GetBytes(got, "tools.0.search_content_types.1").String(); gotContentType != "image" {
+		t.Fatalf("web_search search_content_types missing image; body=%s", got)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBodyDropsNonFunctionNamespaceChildren(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"instructions":"Be helpful.",
+		"input":"hello",
+		"tools":[{
+			"type":"namespace",
+			"name":"mcp__sample",
+			"description":"Sample namespace.",
+			"tools":[
+				{"type":"function","name":"keep_me","parameters":{"type":"object","properties":{}}},
+				{"type":"custom","name":"drop_custom","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},
+				{"type":"web_search","filters":{"allowed_domains":["example.com"]}}
+			]
+		}]
+	}`)
+
+	got := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", nil, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+
+	if gotCount := gjson.GetBytes(got, "tools.0.tools.#").Int(); gotCount != 1 {
+		t.Fatalf("namespace child count = %d, want 1; body=%s", gotCount, got)
+	}
+	if gotName := gjson.GetBytes(got, "tools.0.tools.0.name").String(); gotName != "keep_me" {
+		t.Fatalf("namespace child name = %q, want keep_me; body=%s", gotName, got)
+	}
+	if gotType := gjson.GetBytes(got, "tools.0.tools.0.type").String(); gotType != "function" {
+		t.Fatalf("namespace child type = %q, want function; body=%s", gotType, got)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBodyUnwrapsNestedCustomTools(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"instructions":"Be helpful.",
+		"input":"hello",
+		"tools":[{
+			"type":"custom",
+			"custom":{
+				"name":"apply_patch",
+				"description":"Apply patches.",
+				"format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}
+			},
+			"parameters":{"type":"object"},
+			"cache_control":{"type":"ephemeral"}
+		}],
+		"tool_choice":{
+			"type":"allowed_tools",
+			"mode":"any",
+			"tools":[{
+				"type":"custom",
+				"custom":{"name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}}
+			}]
+		}
+	}`)
+
+	got := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", nil, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+
+	if gotType := gjson.GetBytes(got, "tools.0.type").String(); gotType != "custom" {
+		t.Fatalf("tools.0.type = %q, want custom; body=%s", gotType, got)
+	}
+	if gotName := gjson.GetBytes(got, "tools.0.name").String(); gotName != "apply_patch" {
+		t.Fatalf("tools.0.name = %q, want apply_patch; body=%s", gotName, got)
+	}
+	if gotSyntax := gjson.GetBytes(got, "tools.0.format.syntax").String(); gotSyntax != "lark" {
+		t.Fatalf("custom format syntax = %q, want lark; body=%s", gotSyntax, got)
+	}
+	for _, path := range []string{"tools.0.custom", "tools.0.parameters", "tools.0.cache_control"} {
+		if gjson.GetBytes(got, path).Exists() {
+			t.Fatalf("%s should be removed from custom tool; body=%s", path, got)
+		}
+	}
+	if gotType := gjson.GetBytes(got, "tool_choice.tools.0.type").String(); gotType != "custom" {
+		t.Fatalf("allowed custom type = %q, want custom; body=%s", gotType, got)
+	}
+	if gotName := gjson.GetBytes(got, "tool_choice.tools.0.name").String(); gotName != "apply_patch" {
+		t.Fatalf("allowed custom name = %q, want apply_patch; body=%s", gotName, got)
+	}
+	if gjson.GetBytes(got, "tool_choice.tools.0.custom").Exists() {
+		t.Fatalf("allowed custom tool should be a reference; body=%s", got)
 	}
 }
 

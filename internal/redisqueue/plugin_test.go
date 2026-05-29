@@ -60,6 +60,25 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginNormalisesOpenAIReasoningAsOutputDetail(t *testing.T) {
+	withEnabledQueue(t, func() {
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:    "openai",
+			Model:       "gpt-5.4",
+			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:     100,
+				OutputTokens:    50,
+				ReasoningTokens: 15,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireTokenTotal(t, payload, 150)
+	})
+}
+
 func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
@@ -283,6 +302,24 @@ func requireMissingField(t *testing.T, payload map[string]json.RawMessage, key s
 
 	if _, ok := payload[key]; ok {
 		t.Fatalf("payload unexpectedly contains %q", key)
+	}
+}
+
+func requireTokenTotal(t *testing.T, payload map[string]json.RawMessage, want int64) {
+	t.Helper()
+
+	raw, ok := payload["tokens"]
+	if !ok {
+		t.Fatalf("payload missing %q", "tokens")
+	}
+	var got struct {
+		TotalTokens int64 `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal tokens: %v", err)
+	}
+	if got.TotalTokens != want {
+		t.Fatalf("tokens.total_tokens = %d, want %d", got.TotalTokens, want)
 	}
 }
 

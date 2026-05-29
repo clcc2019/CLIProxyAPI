@@ -35,7 +35,7 @@ func codexShouldRetryStreamRead(ctx context.Context, err error, emittedPayload b
 	if err == nil || emittedPayload || completedStreamObserved || pendingTerminalErr != nil || terminalFailure {
 		return false
 	}
-	if attempt >= codexHTTPMaxRequestRetries {
+	if attempt >= codexHTTPMaxStreamReadRetries {
 		return false
 	}
 	return codexShouldRetryHTTPTransportError(ctx, err)
@@ -536,7 +536,7 @@ codexStreamResponseOK:
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 			if codexShouldRetryStreamRead(ctx, errRead, emittedPayload, completedStreamObserved, pendingTerminalErr, terminalFailure, streamAttempt) {
-				helps.LogWithRequestID(ctx).Debugf("codex executor: retrying stream after transport read error (attempt=%d/%d): %v", streamAttempt+1, codexHTTPMaxRequestRetries, errRead)
+				helps.LogWithRequestID(ctx).Debugf("codex executor: retrying stream after transport read error (attempt=%d/%d): %v", streamAttempt+1, codexHTTPMaxStreamReadRetries, errRead)
 				if errSleep := codexSleepBeforeHTTPRetry(upstreamCtx, streamAttempt+1); errSleep != nil {
 					if codexRequestContextDone(ctx, errSleep) {
 						return

@@ -134,9 +134,8 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "previous_response_id"); got.Exists() {
 		t.Fatalf("previous_response_id should not be sent to responses/compact: %s", gotBody)
 	}
-	if got := gotHeaders.Get(codexHeaderTurnMetadata); got != "" {
-		t.Fatalf("%s should not be sent by default to responses/compact: %q", codexHeaderTurnMetadata, got)
-	}
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "request_kind", codexCompactionRequestKind)
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "window_id", gotHeaders.Get(codexHeaderWindowID))
 	if got := gotHeaders.Get(codexHeaderTurnState); got != "" {
 		t.Fatalf("%s should not be sent by default to responses/compact: %q", codexHeaderTurnState, got)
 	}
@@ -298,6 +297,10 @@ func TestCodexExecutorCompactUsesTurnMetadataSessionIDWhenHeaderMissing(t *testi
 	if got := gotHeaders.Get(codexHeaderWindowID); got != "turn-session-1:0" {
 		t.Fatalf("%s = %q, want %q", codexHeaderWindowID, got, "turn-session-1:0")
 	}
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "session_id", "turn-session-1")
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "turn_id", "turn-1")
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "request_kind", codexCompactionRequestKind)
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "window_id", gotHeaders.Get(codexHeaderWindowID))
 
 	nextReq, err := http.NewRequestWithContext(
 		ctx,

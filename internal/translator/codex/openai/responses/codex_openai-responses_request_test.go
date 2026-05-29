@@ -46,6 +46,32 @@ func TestConvertSystemRoleToDeveloper_BasicConversion(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_UsesResolvedModelName(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "client-alias/gpt-5.2",
+		"input": "hello"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	if got := gjson.GetBytes(output, "model").String(); got != "gpt-5.2" {
+		t.Fatalf("model = %q, want resolved model gpt-5.2; output=%s", got, string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_ReasoningNullDoesNotRequestReasoningInclude(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"reasoning": null,
+		"input": "hello"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	include := gjson.GetBytes(output, "include")
+	if !include.IsArray() || len(include.Array()) != 0 {
+		t.Fatalf("include = %s, want empty array for reasoning:null; output=%s", include.Raw, string(output))
+	}
+}
+
 // TestConvertSystemRoleToDeveloper_MultipleSystemMessages tests conversion with multiple system messages
 func TestConvertSystemRoleToDeveloper_MultipleSystemMessages(t *testing.T) {
 	inputJSON := []byte(`{
@@ -491,6 +517,63 @@ func TestContextManagementCompactionCompatibility(t *testing.T) {
 	}
 	if gjson.Get(outputStr, "truncation").Exists() {
 		t.Fatalf("truncation should be removed for Codex compatibility")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesOfficialInputItems(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"mcp_tool_call_output","call_id":"call_mcp_1","output":"{\"ok\":true}"},
+			{"type":"mcp_tool_call_output","call_id":"call_mcp_2","output":{"content":[{"type":"text","text":"fallback"}],"structuredContent":{"ok":true}}},
+			{"type":"compaction_summary","encrypted_content":"enc-summary"},
+			{"type":"context_compaction","encrypted_content":"enc-context"},
+			{"type":"compaction_trigger","reason":"token_limit"},
+			{"type":"compaction","encrypted_content":"enc-compaction"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	input := gjson.GetBytes(output, "input")
+	if !input.IsArray() {
+		t.Fatalf("input should remain an array: %s", string(output))
+	}
+	items := input.Array()
+	if len(items) != 6 {
+		t.Fatalf("input length = %d, want 6 after filtering compaction_trigger: %s", len(items), string(output))
+	}
+	if got := items[1].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("mcp_tool_call_output should map to function_call_output, got %q: %s", got, string(output))
+	}
+	if got := items[1].Get("call_id").String(); got != "call_mcp_1" {
+		t.Fatalf("call_id was not preserved, got %q: %s", got, string(output))
+	}
+	if got := items[1].Get("output").String(); got != `{"ok":true}` {
+		t.Fatalf("output was not preserved, got %q: %s", got, string(output))
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("object mcp_tool_call_output should map to function_call_output, got %q: %s", got, string(output))
+	}
+	if got := items[2].Get("output").String(); got != "Wall time: 0.0000 seconds\nOutput:\n"+`{"ok":true}` {
+		t.Fatalf("object mcp output was not converted to Responses output text, got %q: %s", got, string(output))
+	}
+	if got := items[3].Get("type").String(); got != "compaction" {
+		t.Fatalf("compaction_summary should map to compaction, got %q: %s", got, string(output))
+	}
+	if got := items[3].Get("encrypted_content").String(); got != "enc-summary" {
+		t.Fatalf("compaction_summary encrypted_content was not preserved, got %q", got)
+	}
+	if got := items[4].Get("type").String(); got != "context_compaction" {
+		t.Fatalf("context_compaction should be preserved, got %q: %s", got, string(output))
+	}
+	if got := items[5].Get("type").String(); got != "compaction" {
+		t.Fatalf("existing compaction should be preserved, got %q: %s", got, string(output))
+	}
+	for _, item := range items {
+		if got := item.Get("type").String(); got == "compaction_trigger" || got == "mcp_tool_call_output" || got == "compaction_summary" {
+			t.Fatalf("unsupported official input item type leaked upstream: %s", string(output))
+		}
 	}
 }
 

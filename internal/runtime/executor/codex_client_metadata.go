@@ -98,7 +98,7 @@ func codexApplyHTTPClientMetadataWithSource(body []byte, target http.Header, sou
 		body,
 		codexClientMetadataInstallationID,
 		codexResolvedInstallationID(target, source, auth, cfg),
-		false,
+		true,
 	)
 }
 
@@ -116,7 +116,7 @@ func codexApplyWebsocketClientMetadata(ctx context.Context, body []byte, headers
 		{key: codexClientMetadataTurnMetadata, value: firstNonEmptyHeaderValue(headers, source, codexHeaderTurnMetadata)},
 		{key: codexWSClientMetadataTraceparent, value: firstNonEmptyHeaderValue(headers, source, "Traceparent")},
 		{key: codexWSClientMetadataTracestate, value: firstNonEmptyHeaderValue(headers, source, "Tracestate")},
-	}, false)
+	}, true)
 
 	// codex-rs carries websocket trace context through client_metadata, not a
 	// top-level trace field.

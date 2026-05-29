@@ -28,13 +28,16 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
 	}
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 4)
+	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
 	}
 }
 
 func TestParseOpenAIUsageResponses(t *testing.T) {
-	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
+	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7,"cache_creation_tokens":3},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail := ParseOpenAIUsage(data)
 	if detail.InputTokens != 10 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
@@ -48,8 +51,88 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
 	}
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 7)
+	}
+	if detail.CacheCreationTokens != 3 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 3)
+	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
+	}
+}
+
+func TestParseOpenAIUsageOfficialCodexTokenUsageShape(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 100 {
+		t.Fatalf("input tokens = %d, want 100", detail.InputTokens)
+	}
+	if detail.OutputTokens != 50 {
+		t.Fatalf("output tokens = %d, want 50", detail.OutputTokens)
+	}
+	if detail.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want 150", detail.TotalTokens)
+	}
+	if detail.CachedTokens != 40 {
+		t.Fatalf("cached tokens = %d, want 40", detail.CachedTokens)
+	}
+	if detail.CacheReadTokens != 40 {
+		t.Fatalf("cache read tokens = %d, want 40", detail.CacheReadTokens)
+	}
+	if detail.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", detail.ReasoningTokens)
+	}
+}
+
+func TestParseOpenAIUsageOfficialCodexTokenUsageShapeWithoutTotal(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want 150", detail.TotalTokens)
+	}
+	if detail.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", detail.ReasoningTokens)
+	}
+}
+
+func TestParseCodexUsageOfficialTokenUsageShape(t *testing.T) {
+	data := []byte(`{"response":{"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150}}}`)
+	detail, ok := ParseCodexUsage(data)
+	if !ok {
+		t.Fatal("expected Codex usage to be parsed")
+	}
+	if detail.InputTokens != 100 {
+		t.Fatalf("input tokens = %d, want 100", detail.InputTokens)
+	}
+	if detail.OutputTokens != 50 {
+		t.Fatalf("output tokens = %d, want 50", detail.OutputTokens)
+	}
+	if detail.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want 150", detail.TotalTokens)
+	}
+	if detail.CachedTokens != 40 {
+		t.Fatalf("cached tokens = %d, want 40", detail.CachedTokens)
+	}
+	if detail.CacheReadTokens != 40 {
+		t.Fatalf("cache read tokens = %d, want 40", detail.CacheReadTokens)
+	}
+	if detail.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", detail.ReasoningTokens)
+	}
+}
+
+func TestParseCodexUsageOfficialTokenUsageShapeWithoutTotal(t *testing.T) {
+	data := []byte(`{"response":{"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15}}}`)
+	detail, ok := ParseCodexUsage(data)
+	if !ok {
+		t.Fatal("expected Codex usage to be parsed")
+	}
+	if detail.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want 150", detail.TotalTokens)
+	}
+	if detail.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", detail.ReasoningTokens)
 	}
 }
 
@@ -71,13 +154,16 @@ func TestParseOpenAIStreamUsageChatCompletions(t *testing.T) {
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
 	}
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 4)
+	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
 	}
 }
 
 func TestParseOpenAIStreamUsageResponses(t *testing.T) {
-	line := []byte(`data: {"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
+	line := []byte(`data: {"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7,"cache_creation_tokens":3},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail, ok := ParseOpenAIStreamUsage(line)
 	if !ok {
 		t.Fatal("expected usage to be parsed")
@@ -94,8 +180,68 @@ func TestParseOpenAIStreamUsageResponses(t *testing.T) {
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
 	}
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 7)
+	}
+	if detail.CacheCreationTokens != 3 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 3)
+	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
+	}
+}
+
+func TestParseOpenAIUsageCacheReadCreationCompatibilityFields(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":20,"cache_creation_input_tokens":30}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.CachedTokens != 20 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 20)
+	}
+	if detail.CacheReadTokens != 20 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 20)
+	}
+	if detail.CacheCreationTokens != 30 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 30)
+	}
+}
+
+func TestParseOpenAIStreamUsageOfficialCodexTokenUsageShape(t *testing.T) {
+	line := []byte(`data: {"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("expected usage to be parsed")
+	}
+	if detail.InputTokens != 100 {
+		t.Fatalf("input tokens = %d, want 100", detail.InputTokens)
+	}
+	if detail.OutputTokens != 50 {
+		t.Fatalf("output tokens = %d, want 50", detail.OutputTokens)
+	}
+	if detail.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want 150", detail.TotalTokens)
+	}
+	if detail.CachedTokens != 40 {
+		t.Fatalf("cached tokens = %d, want 40", detail.CachedTokens)
+	}
+	if detail.CacheReadTokens != 40 {
+		t.Fatalf("cache read tokens = %d, want 40", detail.CacheReadTokens)
+	}
+	if detail.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", detail.ReasoningTokens)
+	}
+}
+
+func TestParseOpenAIStreamUsageOfficialCodexTokenUsageShapeWithoutTotal(t *testing.T) {
+	line := []byte(`data: {"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("expected usage to be parsed")
+	}
+	if detail.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want 150", detail.TotalTokens)
+	}
+	if detail.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", detail.ReasoningTokens)
 	}
 }
 
@@ -135,6 +281,9 @@ func TestParseClaudeUsageSeparatesCacheReadAndCreation(t *testing.T) {
 	if detail.CachedTokens != 20 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 20)
 	}
+	if detail.CacheReadTokens != 20 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 20)
+	}
 	if detail.CacheCreationTokens != 30 {
 		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 30)
 	}
@@ -164,6 +313,60 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestUsageReporterBuildRecordDoesNotDoubleCountOpenAIReasoning(t *testing.T) {
+	reporter := &UsageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: time.Now(),
+	}
+
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"input_tokens":100,"output_tokens":50,"reasoning_output_tokens":15}}`))
+	record := reporter.buildRecord(detail, false)
+	if record.Detail.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want 150", record.Detail.TotalTokens)
+	}
+	if record.Detail.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", record.Detail.ReasoningTokens)
+	}
+}
+
+func TestUsageReporterBuildRecordDoesNotDoubleCountCodexReasoningWithoutTotal(t *testing.T) {
+	reporter := &UsageReporter{
+		provider:    "codex",
+		model:       "gpt-5.4",
+		requestedAt: time.Now(),
+	}
+
+	record := reporter.buildRecord(usage.Detail{
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 15,
+	}, false)
+	if record.Detail.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want 150", record.Detail.TotalTokens)
+	}
+	if record.Detail.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", record.Detail.ReasoningTokens)
+	}
+}
+
+func TestUsageReporterBuildRecordKeepsSeparateReasoningProviderTotals(t *testing.T) {
+	reporter := &UsageReporter{
+		provider:    "kiro",
+		model:       "kiro-model",
+		requestedAt: time.Now(),
+	}
+
+	record := reporter.buildRecord(usage.Detail{
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 15,
+	}, false)
+	if record.Detail.TotalTokens != 165 {
+		t.Fatalf("total tokens = %d, want 165", record.Detail.TotalTokens)
 	}
 }
 

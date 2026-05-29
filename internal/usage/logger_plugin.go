@@ -231,7 +231,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if timestamp.IsZero() {
 		timestamp = time.Now()
 	}
-	detail := normaliseDetail(record.Detail)
+	detail := normaliseDetail(record.Provider, record.Detail)
 	totalTokens := detail.TotalTokens
 	apiKey := strings.TrimSpace(record.APIKey)
 	statsKey := apiKey
@@ -912,7 +912,7 @@ func resolveSuccess(ctx context.Context) bool {
 
 const httpStatusBadRequest = 400
 
-func normaliseDetail(detail coreusage.Detail) TokenStats {
+func normaliseDetail(provider string, detail coreusage.Detail) TokenStats {
 	tokens := TokenStats{
 		InputTokens:     detail.InputTokens,
 		OutputTokens:    detail.OutputTokens,
@@ -921,12 +921,24 @@ func normaliseDetail(detail coreusage.Detail) TokenStats {
 		TotalTokens:     detail.TotalTokens,
 	}
 	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens
+		if !providerReportsReasoningAsOutputDetail(provider) {
+			tokens.TotalTokens += detail.ReasoningTokens
+		}
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 	}
 	return tokens
+}
+
+func providerReportsReasoningAsOutputDetail(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "openai":
+		return true
+	default:
+		return false
+	}
 }
 
 func normaliseTokenStats(tokens TokenStats) TokenStats {

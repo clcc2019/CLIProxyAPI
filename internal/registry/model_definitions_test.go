@@ -59,6 +59,46 @@ func TestCodexFreeStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T
 	}
 }
 
+func TestCodexClientModelSupportsParallelToolCallsUsesEmbeddedCatalog(t *testing.T) {
+	supported, ok := CodexClientModelSupportsParallelToolCalls("gpt-5.4")
+	if !ok {
+		t.Fatal("expected gpt-5.4 in embedded Codex client model catalog")
+	}
+	if !supported {
+		t.Fatal("gpt-5.4 should support parallel tool calls")
+	}
+
+	if _, ok := CodexClientModelSupportsParallelToolCalls("unknown-model"); ok {
+		t.Fatal("unknown model should not have embedded Codex client capabilities")
+	}
+}
+
+func TestCodexClientModelCapabilitiesForModelUsesEmbeddedCatalog(t *testing.T) {
+	capabilities, ok := CodexClientModelCapabilitiesForModel("gpt-5.4")
+	if !ok {
+		t.Fatal("expected gpt-5.4 in embedded Codex client model catalog")
+	}
+	if !capabilities.SupportsParallelToolCalls {
+		t.Fatal("gpt-5.4 should support parallel tool calls")
+	}
+	if !capabilities.SupportsReasoningSummaries {
+		t.Fatal("gpt-5.4 should support reasoning summaries")
+	}
+	if capabilities.DefaultReasoningLevel != "xhigh" {
+		t.Fatalf("default reasoning level = %q, want xhigh", capabilities.DefaultReasoningLevel)
+	}
+	if !capabilities.SupportsVerbosity {
+		t.Fatal("gpt-5.4 should support verbosity")
+	}
+	if capabilities.DefaultVerbosity != "low" {
+		t.Fatalf("default verbosity = %q, want low", capabilities.DefaultVerbosity)
+	}
+
+	if _, ok := CodexClientModelCapabilitiesForModel("unknown-model"); ok {
+		t.Fatal("unknown model should not have embedded Codex client capabilities")
+	}
+}
+
 func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	found := false

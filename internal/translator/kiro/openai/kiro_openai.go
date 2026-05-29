@@ -243,6 +243,7 @@ func kiroUsageFromClaudeJSON(usageJSON gjson.Result) usage.Detail {
 		InputTokens:         usageJSON.Get("input_tokens").Int(),
 		OutputTokens:        usageJSON.Get("output_tokens").Int(),
 		CachedTokens:        usageJSON.Get("cache_read_input_tokens").Int(),
+		CacheReadTokens:     usageJSON.Get("cache_read_input_tokens").Int(),
 		CacheCreationTokens: usageJSON.Get("cache_creation_input_tokens").Int(),
 		ReasoningTokens:     usageJSON.Get("reasoning_tokens").Int(),
 	}

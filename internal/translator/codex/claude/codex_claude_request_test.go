@@ -210,6 +210,63 @@ func TestConvertClaudeRequestToCodex_ShortenLongToolUseIDs(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_RestoresCodexNativeToolHistory(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{"role": "user", "content": [{"type":"text","text":"use tools"}]},
+			{"role": "assistant", "content": [
+				{"type":"tool_use","id":"call_patch","name":"apply_patch","input":{"input":"*** Begin Patch\n*** End Patch"}},
+				{"type":"tool_use","id":"call_shell","name":"local_shell","input":{"type":"exec","command":["pwd"]}},
+				{"type":"tool_use","id":"call_search","name":"tool_search","input":{"query":"calendar","limit":1}}
+			]},
+			{"role": "user", "content": [
+				{"type":"tool_result","tool_use_id":"call_patch","content":"patched"},
+				{"type":"tool_result","tool_use_id":"call_shell","content":"/tmp"},
+				{"type":"tool_result","tool_use_id":"call_search","content":"{\"tools\":[{\"name\":\"calendar.create_event\"}]}"}
+			]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	byCallIDAndType := map[string]gjson.Result{}
+	for _, item := range gjson.GetBytes(result, "input").Array() {
+		callID := item.Get("call_id").String()
+		itemType := item.Get("type").String()
+		if callID != "" && itemType != "" {
+			byCallIDAndType[callID+"|"+itemType] = item
+		}
+	}
+
+	if got := byCallIDAndType["call_patch|custom_tool_call"].Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("call_patch type = %q, want custom_tool_call. Output: %s", got, string(result))
+	}
+	if got := byCallIDAndType["call_patch|custom_tool_call"].Get("input").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("custom input = %q. Output: %s", got, string(result))
+	}
+	if got := byCallIDAndType["call_patch|custom_tool_call_output"].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("call_patch output type = %q, want custom_tool_call_output. Output: %s", got, string(result))
+	}
+	if got := byCallIDAndType["call_shell|local_shell_call"].Get("type").String(); got != "local_shell_call" {
+		t.Fatalf("call_shell type = %q, want local_shell_call. Output: %s", got, string(result))
+	}
+	if got := byCallIDAndType["call_shell|local_shell_call"].Get("action.command.0").String(); got != "pwd" {
+		t.Fatalf("local_shell command = %q, want pwd. Output: %s", got, string(result))
+	}
+	if got := byCallIDAndType["call_search|tool_search_call"].Get("type").String(); got != "tool_search_call" {
+		t.Fatalf("call_search type = %q, want tool_search_call. Output: %s", got, string(result))
+	}
+	if got := byCallIDAndType["call_search|tool_search_call"].Get("arguments.query").String(); got != "calendar" {
+		t.Fatalf("tool_search query = %q, want calendar. Output: %s", got, string(result))
+	}
+	if got := byCallIDAndType["call_search|tool_search_output"].Get("type").String(); got != "tool_search_output" {
+		t.Fatalf("call_search output type = %q, want tool_search_output. Output: %s", got, string(result))
+	}
+	if got := byCallIDAndType["call_search|tool_search_output"].Get("tools.0.name").String(); got != "calendar.create_event" {
+		t.Fatalf("tool_search output name = %q. Output: %s", got, string(result))
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ToolChoiceModeMapping(t *testing.T) {
 	tests := []struct {
 		name                string

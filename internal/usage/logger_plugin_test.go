@@ -44,6 +44,49 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestRequestStatisticsNormalisesOpenAIReasoningAsOutputDetail(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:    "openai",
+		APIKey:      "test-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:     100,
+			OutputTokens:    50,
+			ReasoningTokens: 15,
+		},
+	})
+
+	model := stats.Snapshot().APIs["test-key"].Models["gpt-5.4"]
+	if model.TotalTokens != 150 || model.TokenBreakdown.TotalTokens != 150 {
+		t.Fatalf("total tokens = model:%d breakdown:%d, want 150 without double-counting reasoning", model.TotalTokens, model.TokenBreakdown.TotalTokens)
+	}
+	if model.TokenBreakdown.ReasoningTokens != 15 {
+		t.Fatalf("reasoning tokens = %d, want 15", model.TokenBreakdown.ReasoningTokens)
+	}
+}
+
+func TestRequestStatisticsNormalisesSeparateReasoningProviders(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:    "gemini",
+		APIKey:      "test-key",
+		Model:       "gemini-3-pro",
+		RequestedAt: time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:     100,
+			OutputTokens:    50,
+			ReasoningTokens: 15,
+		},
+	})
+
+	model := stats.Snapshot().APIs["test-key"].Models["gemini-3-pro"]
+	if model.TotalTokens != 165 || model.TokenBreakdown.TotalTokens != 165 {
+		t.Fatalf("total tokens = model:%d breakdown:%d, want 165 with separate reasoning", model.TotalTokens, model.TokenBreakdown.TotalTokens)
+	}
+}
+
 func TestRequestStatisticsRecordIncludesErrorMessageForFailures(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(context.Background(), coreusage.Record{

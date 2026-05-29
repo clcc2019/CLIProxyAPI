@@ -82,6 +82,25 @@ func TestCodexApplyHTTPClientMetadataKeepsOnlyStringMetadata(t *testing.T) {
 	}
 }
 
+func TestCodexApplyHTTPClientMetadataOverwritesReservedInstallationID(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[],"client_metadata":{"x-codex-installation-id":"stale-install","keep":"value"}}`)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	req.Header.Set(codexHeaderInstallationID, "current-install")
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+
+	got := codexApplyHTTPClientMetadata(body, req, auth, nil)
+
+	if id := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); id != "current-install" {
+		t.Fatalf("client_metadata.x-codex-installation-id = %q, want current-install; body=%s", id, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.keep").String(); value != "value" {
+		t.Fatalf("client_metadata.keep = %q, want value; body=%s", value, got)
+	}
+}
+
 func TestCodexApplyWebsocketClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	resetCodexWindowStateStore()
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
@@ -131,4 +150,34 @@ func TestCodexApplyWebsocketClientMetadataHonorsExplicitAPIKeyHeaders(t *testing
 	if windowID := gjson.GetBytes(got, "client_metadata.x-codex-window-id").String(); windowID != "window-1" {
 		t.Fatalf("client_metadata.x-codex-window-id = %q, want window-1; body=%s", windowID, got)
 	}
+}
+
+func TestCodexApplyWebsocketClientMetadataOverwritesReservedFields(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[],"client_metadata":{"x-codex-installation-id":"stale-install","x-codex-window-id":"stale-window","x-openai-subagent":"stale-subagent","x-codex-parent-thread-id":"stale-parent","x-codex-turn-metadata":"stale-turn","ws_request_header_traceparent":"stale-traceparent","ws_request_header_tracestate":"stale-tracestate","keep":"value"}}`)
+	headers := http.Header{}
+	headers.Set(codexHeaderInstallationID, "current-install")
+	headers.Set(codexHeaderWindowID, "current-window")
+	headers.Set("X-OpenAI-Subagent", "review")
+	headers.Set(codexHeaderParentThreadID, "parent-1")
+	headers.Set(codexHeaderTurnMetadata, `{"turn_id":"turn-1"}`)
+	headers.Set("Traceparent", "00-current")
+	headers.Set("Tracestate", "state-current")
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+
+	got := codexApplyWebsocketClientMetadata(context.Background(), body, headers, auth, nil)
+
+	assertMetadata := func(path string, want string) {
+		t.Helper()
+		if gotValue := gjson.GetBytes(got, "client_metadata."+path).String(); gotValue != want {
+			t.Fatalf("client_metadata.%s = %q, want %q; body=%s", path, gotValue, want, got)
+		}
+	}
+	assertMetadata("x-codex-installation-id", "current-install")
+	assertMetadata("x-codex-window-id", "current-window")
+	assertMetadata("x-openai-subagent", "review")
+	assertMetadata("x-codex-parent-thread-id", "parent-1")
+	assertMetadata("x-codex-turn-metadata", `{"turn_id":"turn-1"}`)
+	assertMetadata("ws_request_header_traceparent", "00-current")
+	assertMetadata("ws_request_header_tracestate", "state-current")
+	assertMetadata("keep", "value")
 }

@@ -8,10 +8,12 @@ package chat_completions
 
 import (
 	"encoding/json"
+	"strings"
 
 	codexcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // ConvertOpenAIRequestToCodex converts an OpenAI Chat Completions request JSON
@@ -42,9 +44,14 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
 		out.Reasoning.Effort = v.Value()
 	}
+	if v := gjson.GetBytes(rawJSON, "parallel_tool_calls"); v.Exists() && v.Type == gjson.False {
+		out.ParallelToolCalls = false
+	}
 
 	tools := gjson.GetBytes(rawJSON, "tools")
 	originalToolNameMap := buildOriginalToolNameMap(tools)
+	toolKindByName := buildCodexChatToolKindMap(tools, originalToolNameMap)
+	toolKindByCallID := map[string]codexChatToolCallKind{}
 
 	messages := gjson.GetBytes(rawJSON, "messages")
 	if messages.IsArray() {
@@ -54,11 +61,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			role := m.Get("role").String()
 
 			if role == "tool" {
-				out.Input = append(out.Input, codexFunctionCallOutput{
-					Type:   "function_call_output",
-					CallID: m.Get("tool_call_id").String(),
-					Output: codexToolOutputValue(m.Get("content")),
-				})
+				appendCodexToolOutput(&out.Input, m, toolKindByCallID)
 				continue
 			}
 
@@ -75,7 +78,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			}
 
 			if role == "assistant" {
-				appendCodexAssistantToolCalls(&out.Input, m.Get("tool_calls"), originalToolNameMap)
+				appendCodexAssistantToolCalls(&out.Input, m.Get("tool_calls"), originalToolNameMap, toolKindByName, toolKindByCallID)
 			}
 		}
 	}
@@ -90,9 +93,13 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			out.Text.Format = &codexTextFormat{Type: "text"}
 		case "json_schema":
 			if js := rf.Get("json_schema"); js.Exists() {
+				name := jsonFieldValue(js.Get("name"))
+				if name == nil {
+					name = "codex_output_schema"
+				}
 				out.Text.Format = &codexTextFormat{
 					Type:   "json_schema",
-					Name:   jsonFieldValue(js.Get("name")),
+					Name:   name,
 					Strict: jsonFieldValue(js.Get("strict")),
 					Schema: util.RawJSON(js.Get("schema").Raw),
 				}
@@ -113,7 +120,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			t := toolItems[i]
 			toolType := t.Get("type").String()
 			if toolType != "" && toolType != "function" && t.IsObject() {
-				out.Tools = append(out.Tools, util.RawJSON(t.Raw))
+				out.Tools = append(out.Tools, codexOpenAICompatToolRaw(t))
 				continue
 			}
 			if toolType != "function" {
@@ -147,6 +154,13 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				out.ToolChoice = codexFunctionToolChoice{
 					Type: "function",
 					Name: resolveToolName(tc.Get("function.name").String(), originalToolNameMap),
+				}
+			} else if tcType == "custom" {
+				if name := codexOpenAICompatCustomToolName(tc); name != "" {
+					out.ToolChoice = codexFunctionToolChoice{
+						Type: "custom",
+						Name: name,
+					}
 				}
 			} else if tcType != "" {
 				out.ToolChoice = util.RawJSON(tc.Raw)
@@ -222,10 +236,47 @@ type codexFunctionCall struct {
 	Arguments string `json:"arguments"`
 }
 
+type codexCustomToolCall struct {
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Name   string `json:"name"`
+	Input  string `json:"input"`
+}
+
+type codexLocalShellCall struct {
+	Type   string          `json:"type"`
+	CallID string          `json:"call_id"`
+	Status string          `json:"status,omitempty"`
+	Action json.RawMessage `json:"action"`
+}
+
+type codexToolSearchCall struct {
+	Type      string          `json:"type"`
+	CallID    string          `json:"call_id"`
+	Status    string          `json:"status,omitempty"`
+	Execution string          `json:"execution"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
 type codexFunctionCallOutput struct {
 	Type   string `json:"type"`
 	CallID string `json:"call_id"`
 	Output any    `json:"output"`
+}
+
+type codexCustomToolCallOutput struct {
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Name   string `json:"name,omitempty"`
+	Output any    `json:"output"`
+}
+
+type codexToolSearchOutput struct {
+	Type      string          `json:"type"`
+	CallID    string          `json:"call_id"`
+	Status    string          `json:"status"`
+	Execution string          `json:"execution"`
+	Tools     json.RawMessage `json:"tools"`
 }
 
 type codexTool struct {
@@ -239,6 +290,11 @@ type codexTool struct {
 type codexFunctionToolChoice struct {
 	Type string `json:"type"`
 	Name string `json:"name,omitempty"`
+}
+
+type codexChatToolCallKind struct {
+	ItemType string
+	Name     string
 }
 
 func buildOriginalToolNameMap(tools gjson.Result) map[string]string {
@@ -261,6 +317,60 @@ func buildOriginalToolNameMap(tools gjson.Result) map[string]string {
 		return map[string]string{}
 	}
 	return buildShortNameMap(names)
+}
+
+func codexOpenAICompatToolRaw(tool gjson.Result) json.RawMessage {
+	if tool.Get("type").String() != "custom" {
+		return util.RawJSON(tool.Raw)
+	}
+
+	raw := []byte(tool.Raw)
+	if nested := tool.Get("custom"); nested.IsObject() && strings.TrimSpace(tool.Get("name").String()) == "" {
+		raw = []byte(nested.Raw)
+	}
+	raw, _ = sjson.SetBytes(raw, "type", "custom")
+	if name := codexOpenAICompatCustomToolName(tool); name != "" {
+		raw, _ = sjson.SetBytes(raw, "name", name)
+	}
+	raw, _ = sjson.DeleteBytes(raw, "custom")
+	return util.RawJSON(string(raw))
+}
+
+func codexOpenAICompatCustomToolName(tool gjson.Result) string {
+	if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+		return name
+	}
+	return strings.TrimSpace(tool.Get("custom.name").String())
+}
+
+func buildCodexChatToolKindMap(tools gjson.Result, originalToolNameMap map[string]string) map[string]codexChatToolCallKind {
+	kinds := map[string]codexChatToolCallKind{
+		"local_shell": {ItemType: "local_shell_call", Name: "local_shell"},
+		"tool_search": {ItemType: "tool_search_call", Name: "tool_search"},
+	}
+	if !tools.IsArray() {
+		return kinds
+	}
+
+	for _, tool := range tools.Array() {
+		toolType := tool.Get("type").String()
+		switch toolType {
+		case "custom":
+			if name := codexOpenAICompatCustomToolName(tool); name != "" {
+				kinds[name] = codexChatToolCallKind{ItemType: "custom_tool_call", Name: name}
+			}
+		case "tool_search":
+			kinds["tool_search"] = codexChatToolCallKind{ItemType: "tool_search_call", Name: "tool_search"}
+		case "local_shell":
+			kinds["local_shell"] = codexChatToolCallKind{ItemType: "local_shell_call", Name: "local_shell"}
+		case "function":
+			origName := tool.Get("function.name").String()
+			if shortName, ok := originalToolNameMap[origName]; ok {
+				kinds[origName] = codexChatToolCallKind{ItemType: "function_call", Name: shortName}
+			}
+		}
+	}
+	return kinds
 }
 
 func codexMessageRole(role string) string {
@@ -398,7 +508,7 @@ func codexToolOutputPart(item gjson.Result) (any, bool) {
 	}
 }
 
-func appendCodexAssistantToolCalls(input *[]any, toolCalls gjson.Result, originalToolNameMap map[string]string) {
+func appendCodexAssistantToolCalls(input *[]any, toolCalls gjson.Result, originalToolNameMap map[string]string, toolKindByName map[string]codexChatToolCallKind, toolKindByCallID map[string]codexChatToolCallKind) {
 	if !toolCalls.Exists() || !toolCalls.IsArray() {
 		return
 	}
@@ -406,16 +516,168 @@ func appendCodexAssistantToolCalls(input *[]any, toolCalls gjson.Result, origina
 	callItems := toolCalls.Array()
 	for i := 0; i < len(callItems); i++ {
 		tc := callItems[i]
-		if tc.Get("type").String() != "function" {
+		name, arguments, ok := codexChatToolCallNameArguments(tc)
+		if !ok {
 			continue
 		}
-		*input = append(*input, codexFunctionCall{
-			Type:      "function_call",
-			CallID:    tc.Get("id").String(),
-			Name:      resolveToolName(tc.Get("function.name").String(), originalToolNameMap),
-			Arguments: tc.Get("function.arguments").String(),
+		callID := tc.Get("id").String()
+		kind := codexChatToolKind(name, tc.Get("type").String(), toolKindByName, originalToolNameMap)
+		if kind.Name == "" {
+			kind.Name = name
+		}
+		if callID != "" {
+			toolKindByCallID[callID] = kind
+		}
+		switch kind.ItemType {
+		case "custom_tool_call":
+			*input = append(*input, codexCustomToolCall{
+				Type:   "custom_tool_call",
+				CallID: callID,
+				Name:   kind.Name,
+				Input:  arguments,
+			})
+		case "local_shell_call":
+			action := util.RawJSON(arguments)
+			if len(action) == 0 || !json.Valid(action) {
+				*input = append(*input, codexFunctionCall{
+					Type:      "function_call",
+					CallID:    callID,
+					Name:      resolveToolName(name, originalToolNameMap),
+					Arguments: arguments,
+				})
+				continue
+			}
+			*input = append(*input, codexLocalShellCall{
+				Type:   "local_shell_call",
+				CallID: callID,
+				Status: "completed",
+				Action: action,
+			})
+		case "tool_search_call":
+			args := util.RawJSON(arguments)
+			if len(args) == 0 || !json.Valid(args) {
+				args = json.RawMessage(`{}`)
+			}
+			*input = append(*input, codexToolSearchCall{
+				Type:      "tool_search_call",
+				CallID:    callID,
+				Status:    "completed",
+				Execution: "client",
+				Arguments: args,
+			})
+		default:
+			*input = append(*input, codexFunctionCall{
+				Type:      "function_call",
+				CallID:    callID,
+				Name:      resolveToolName(name, originalToolNameMap),
+				Arguments: arguments,
+			})
+		}
+	}
+}
+
+func appendCodexToolOutput(input *[]any, message gjson.Result, toolKindByCallID map[string]codexChatToolCallKind) {
+	callID := message.Get("tool_call_id").String()
+	kind := toolKindByCallID[callID]
+	switch kind.ItemType {
+	case "custom_tool_call":
+		*input = append(*input, codexCustomToolCallOutput{
+			Type:   "custom_tool_call_output",
+			CallID: callID,
+			Name:   kind.Name,
+			Output: codexToolOutputValue(message.Get("content")),
+		})
+	case "tool_search_call":
+		*input = append(*input, codexToolSearchOutput{
+			Type:      "tool_search_output",
+			CallID:    callID,
+			Status:    "completed",
+			Execution: "client",
+			Tools:     codexToolSearchOutputTools(message.Get("content")),
+		})
+	default:
+		*input = append(*input, codexFunctionCallOutput{
+			Type:   "function_call_output",
+			CallID: callID,
+			Output: codexToolOutputValue(message.Get("content")),
 		})
 	}
+}
+
+func codexChatToolCallNameArguments(toolCall gjson.Result) (string, string, bool) {
+	switch toolCall.Get("type").String() {
+	case "function", "":
+		name := toolCall.Get("function.name").String()
+		if name == "" {
+			return "", "", false
+		}
+		return name, toolCall.Get("function.arguments").String(), true
+	case "custom", "custom_tool_call":
+		name := strings.TrimSpace(toolCall.Get("name").String())
+		if name == "" {
+			name = strings.TrimSpace(toolCall.Get("custom.name").String())
+		}
+		if name == "" {
+			return "", "", false
+		}
+		input := toolCall.Get("input").String()
+		if input == "" {
+			input = toolCall.Get("custom.input").String()
+		}
+		return name, input, true
+	default:
+		return "", "", false
+	}
+}
+
+func codexChatToolKind(name string, toolCallType string, toolKindByName map[string]codexChatToolCallKind, originalToolNameMap map[string]string) codexChatToolCallKind {
+	if toolCallType == "custom" || toolCallType == "custom_tool_call" {
+		return codexChatToolCallKind{ItemType: "custom_tool_call", Name: name}
+	}
+	if kind, ok := toolKindByName[name]; ok {
+		return kind
+	}
+	if short, ok := originalToolNameMap[name]; ok {
+		return codexChatToolCallKind{ItemType: "function_call", Name: short}
+	}
+	return codexChatToolCallKind{ItemType: "function_call", Name: shortenNameIfNeeded(name)}
+}
+
+func codexToolSearchOutputTools(content gjson.Result) json.RawMessage {
+	if !content.Exists() || content.Type == gjson.Null {
+		return json.RawMessage(`[]`)
+	}
+	if content.IsArray() {
+		return util.RawJSON(content.Raw)
+	}
+	if content.IsObject() {
+		if tools := content.Get("tools"); tools.IsArray() {
+			return util.RawJSON(tools.Raw)
+		}
+		wrapped, _ := json.Marshal([]any{json.RawMessage(content.Raw)})
+		return json.RawMessage(wrapped)
+	}
+	if content.Type == gjson.String {
+		text := strings.TrimSpace(content.String())
+		if text == "" {
+			return json.RawMessage(`[]`)
+		}
+		parsed := gjson.Parse(text)
+		if parsed.IsArray() {
+			return util.RawJSON(parsed.Raw)
+		}
+		if parsed.IsObject() {
+			if tools := parsed.Get("tools"); tools.IsArray() {
+				return util.RawJSON(tools.Raw)
+			}
+			wrapped, _ := json.Marshal([]any{json.RawMessage(parsed.Raw)})
+			return json.RawMessage(wrapped)
+		}
+		wrapped, _ := json.Marshal([]string{text})
+		return json.RawMessage(wrapped)
+	}
+	wrapped, _ := json.Marshal([]any{content.Value()})
+	return json.RawMessage(wrapped)
 }
 
 func resolveToolName(name string, originalToolNameMap map[string]string) string {

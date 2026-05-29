@@ -26,6 +26,16 @@ var defaultWebsocketToolCallCache = newWebsocketToolOutputCacheWithLimits(websoc
 var defaultWebsocketToolSessionRefs = newWebsocketToolSessionRefCounter()
 var defaultWebsocketToolCachesMu sync.RWMutex
 
+var responsesWebsocketToolRepairMarkers = []string{
+	`"function_call"`,
+	`"function_call_output"`,
+	`"custom_tool_call"`,
+	`"custom_tool_call_output"`,
+	`"local_shell_call"`,
+	`"tool_search_call"`,
+	`"tool_search_output"`,
+}
+
 func currentDefaultWebsocketToolCaches() (*websocketToolOutputCache, *websocketToolOutputCache, *websocketToolSessionRefCounter) {
 	defaultWebsocketToolCachesMu.RLock()
 	defer defaultWebsocketToolCachesMu.RUnlock()
@@ -236,16 +246,29 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 	if req == nil {
 		return ""
 	}
-	if requestID := strings.TrimSpace(req.Header.Get("X-Client-Request-Id")); requestID != "" {
-		return requestID
+	for _, key := range []string{"Thread_id", "thread-id", "X-Thread-ID"} {
+		if threadID := strings.TrimSpace(req.Header.Get(key)); threadID != "" {
+			return threadID
+		}
+	}
+	if conversationID := strings.TrimSpace(req.Header.Get("Conversation_id")); conversationID != "" {
+		return conversationID
 	}
 	if raw := strings.TrimSpace(req.Header.Get("X-Codex-Turn-Metadata")); raw != "" {
+		if threadID := strings.TrimSpace(gjson.Get(raw, "thread_id").String()); threadID != "" {
+			return threadID
+		}
 		if sessionID := strings.TrimSpace(gjson.Get(raw, "session_id").String()); sessionID != "" {
 			return sessionID
 		}
 	}
-	if sessionID := strings.TrimSpace(req.Header.Get("Session_id")); sessionID != "" {
-		return sessionID
+	for _, key := range []string{"Session_id", "session-id", "X-Session-ID"} {
+		if sessionID := strings.TrimSpace(req.Header.Get(key)); sessionID != "" {
+			return sessionID
+		}
+	}
+	if requestID := strings.TrimSpace(req.Header.Get("X-Client-Request-Id")); requestID != "" {
+		return requestID
 	}
 	return ""
 }
@@ -347,6 +370,9 @@ func repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache *websock
 	if !input.Exists() || !input.IsArray() {
 		return payload
 	}
+	if !rawStringContainsAny(input.Raw, responsesWebsocketToolRepairMarkers) {
+		return payload
+	}
 
 	allowOrphanOutputs := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != ""
 	updatedRaw, errRepair := repairResponsesToolCallsArray(outputCache, callCache, sessionKey, input.Raw, allowOrphanOutputs)
@@ -361,6 +387,15 @@ func repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache *websock
 	return updated
 }
 
+func rawStringContainsAny(raw string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(raw, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCache, sessionKey string, rawArray string, allowOrphanOutputs bool) (string, error) {
 	rawArray, err := validatedJSONArrayRawString(rawArray)
 	if err != nil {
@@ -372,14 +407,17 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 	type repairItemMeta struct {
 		raw      string
 		callID   string
+		itemType string
 		isCall   bool
 		isOutput bool
 	}
 	metas := make([]repairItemMeta, 0, itemCount)
 
-	// First pass: record tool outputs and remember which call_ids have outputs in this payload.
+	// First pass: remember typed call/output pairs in this payload. Outputs
+	// are recorded into the session cache only after the second pass confirms
+	// they are kept; otherwise dropped orphan outputs could poison later turns.
 	outputPresent := make(map[string]struct{}, itemCount)
-	callPresent := make(map[string]struct{}, itemCount)
+	callPresent := make(map[string]string, itemCount)
 	result.ForEach(func(_, item gjson.Result) bool {
 		itemRaw := strings.TrimSpace(item.Raw)
 		if itemRaw == "" {
@@ -389,6 +427,7 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		meta := repairItemMeta{
 			raw:      itemRaw,
 			callID:   strings.TrimSpace(item.Get("call_id").String()),
+			itemType: itemType,
 			isCall:   isResponsesToolCallType(itemType),
 			isOutput: isResponsesToolCallOutputType(itemType),
 		}
@@ -398,13 +437,12 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 			if meta.callID == "" {
 				return true
 			}
-			outputPresent[meta.callID] = struct{}{}
-			outputCache.record(sessionKey, meta.callID, json.RawMessage(itemRaw))
+			outputPresent[toolOutputPresenceKey(meta.itemType, meta.callID)] = struct{}{}
 		case meta.isCall:
 			if meta.callID == "" {
 				return true
 			}
-			callPresent[meta.callID] = struct{}{}
+			callPresent[meta.callID] = meta.itemType
 			if callCache != nil {
 				callCache.record(sessionKey, meta.callID, json.RawMessage(itemRaw))
 			}
@@ -413,37 +451,58 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 	})
 
 	filtered := make([]string, 0, len(metas))
+	appendFiltered := func(meta repairItemMeta, raw string) {
+		filtered = append(filtered, raw)
+		if meta.isOutput && meta.callID != "" {
+			outputCache.record(sessionKey, meta.callID, json.RawMessage(raw))
+		}
+	}
 	insertedCalls := make(map[string]struct{}, itemCount)
 	changed := false
 	for _, meta := range metas {
 		item := meta.raw
 		if meta.isOutput {
 			callID := meta.callID
+			if meta.itemType == "tool_search_output" && (callID == "" || strings.EqualFold(strings.TrimSpace(gjson.Get(meta.raw, "execution").String()), "server")) {
+				appendFiltered(meta, item)
+				continue
+			}
 			if callID == "" {
-				// Upstream rejects tool outputs without a call_id; drop it.
+				// Upstream rejects ordinary client-side outputs without a call_id;
+				// tool-search outputs were handled above because Codex allows
+				// call_id-less search results to stand alone.
 				changed = true
 				continue
 			}
 
-			if _, ok := callPresent[callID]; ok {
-				filtered = append(filtered, item)
+			if callType, ok := callPresent[callID]; ok {
+				if toolOutputTypeMatchesCallType(meta.itemType, callType) {
+					appendFiltered(meta, item)
+					continue
+				}
+				changed = true
 				continue
 			}
 
 			if allowOrphanOutputs {
-				filtered = append(filtered, item)
+				appendFiltered(meta, item)
 				continue
 			}
 
 			if callCache != nil {
 				if cached, ok := callCache.get(sessionKey, callID); ok {
+					cachedCallType := strings.TrimSpace(gjson.GetBytes(cached, "type").String())
+					if !toolOutputTypeMatchesCallType(meta.itemType, cachedCallType) {
+						changed = true
+						continue
+					}
 					if _, already := insertedCalls[callID]; !already {
 						filtered = append(filtered, string(cached))
 						insertedCalls[callID] = struct{}{}
-						callPresent[callID] = struct{}{}
+						callPresent[callID] = cachedCallType
 						changed = true
 					}
-					filtered = append(filtered, item)
+					appendFiltered(meta, item)
 					continue
 				}
 			}
@@ -460,11 +519,16 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		callID := meta.callID
 		if callID == "" {
 			// Upstream rejects tool calls without a call_id; drop it.
+			if meta.itemType == "local_shell_call" || meta.itemType == "tool_search_call" {
+				filtered = append(filtered, item)
+				continue
+			}
 			changed = true
 			continue
 		}
 
-		if _, ok := outputPresent[callID]; ok {
+		expectedOutputType := toolOutputTypeForCallType(meta.itemType)
+		if _, ok := outputPresent[toolOutputPresenceKey(expectedOutputType, callID)]; ok {
 			filtered = append(filtered, item)
 			continue
 		}
@@ -475,9 +539,22 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		}
 
 		if cached, ok := outputCache.get(sessionKey, callID); ok {
+			cachedOutputType := strings.TrimSpace(gjson.GetBytes(cached, "type").String())
+			if !toolOutputTypeMatchesCallType(cachedOutputType, meta.itemType) {
+				changed = true
+			} else {
+				filtered = append(filtered, item)
+				filtered = append(filtered, string(cached))
+				outputPresent[toolOutputPresenceKey(cachedOutputType, callID)] = struct{}{}
+				changed = true
+				continue
+			}
+		}
+
+		if missingOutput := buildResponsesMissingOutputForCall(meta.itemType, callID); len(missingOutput) > 0 {
 			filtered = append(filtered, item)
-			filtered = append(filtered, string(cached))
-			outputPresent[callID] = struct{}{}
+			filtered = append(filtered, string(missingOutput))
+			outputPresent[toolOutputPresenceKey(expectedOutputType, callID)] = struct{}{}
 			changed = true
 			continue
 		}
@@ -490,6 +567,61 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		return rawArray, nil
 	}
 	return joinJSONArrayRaw(filtered), nil
+}
+
+func buildResponsesMissingOutputForCall(callType string, callID string) json.RawMessage {
+	switch strings.TrimSpace(callType) {
+	case "function_call":
+		return buildResponsesFunctionCallMissingOutput(callID)
+	case "local_shell_call":
+		return buildResponsesFunctionCallMissingOutput(callID)
+	case "custom_tool_call":
+		return buildResponsesCustomToolMissingOutput(callID)
+	case "tool_search_call":
+		return buildResponsesToolSearchMissingOutput(callID)
+	default:
+		return nil
+	}
+}
+
+func buildResponsesFunctionCallMissingOutput(callID string) json.RawMessage {
+	payload := []byte(`{"type":"function_call_output","call_id":"","output":"aborted"}`)
+	payload, _ = sjson.SetBytes(payload, "call_id", callID)
+	return payload
+}
+
+func buildResponsesCustomToolMissingOutput(callID string) json.RawMessage {
+	payload := []byte(`{"type":"custom_tool_call_output","call_id":"","output":"aborted"}`)
+	payload, _ = sjson.SetBytes(payload, "call_id", callID)
+	return payload
+}
+
+func toolOutputPresenceKey(outputType string, callID string) string {
+	return strings.TrimSpace(outputType) + "\x00" + strings.TrimSpace(callID)
+}
+
+func toolOutputTypeForCallType(callType string) string {
+	switch strings.TrimSpace(callType) {
+	case "function_call", "local_shell_call":
+		return "function_call_output"
+	case "custom_tool_call":
+		return "custom_tool_call_output"
+	case "tool_search_call":
+		return "tool_search_output"
+	default:
+		return ""
+	}
+}
+
+func toolOutputTypeMatchesCallType(outputType string, callType string) bool {
+	return strings.TrimSpace(outputType) != "" &&
+		strings.TrimSpace(outputType) == toolOutputTypeForCallType(callType)
+}
+
+func buildResponsesToolSearchMissingOutput(callID string) json.RawMessage {
+	payload := []byte(`{"type":"tool_search_output","call_id":"","status":"completed","execution":"client","tools":[]}`)
+	payload, _ = sjson.SetBytes(payload, "call_id", callID)
+	return payload
 }
 
 func recordResponsesWebsocketToolCallsFromPayload(sessionKey string, payload []byte) {
@@ -539,7 +671,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 
 func isResponsesToolCallType(itemType string) bool {
 	switch strings.TrimSpace(itemType) {
-	case "function_call", "custom_tool_call":
+	case "function_call", "custom_tool_call", "local_shell_call", "tool_search_call":
 		return true
 	default:
 		return false
@@ -548,7 +680,7 @@ func isResponsesToolCallType(itemType string) bool {
 
 func isResponsesToolCallOutputType(itemType string) bool {
 	switch strings.TrimSpace(itemType) {
-	case "function_call_output", "custom_tool_call_output":
+	case "function_call_output", "custom_tool_call_output", "tool_search_output":
 		return true
 	default:
 		return false

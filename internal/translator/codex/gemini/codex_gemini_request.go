@@ -7,6 +7,7 @@ package gemini
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -67,7 +68,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// Gemini uses sequential pairing across possibly multiple in-flight
 	// functionCalls, so we keep a FIFO queue of generated call IDs and
 	// consume them in order when functionResponses arrive.
-	var pendingCallIDs []string
+	var pendingCalls []codexGeminiPendingToolCall
 
 	// genCallID creates a random call id like: call_<8chars>
 	genCallID := func() string {
@@ -139,51 +140,32 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 				// function call from model
 				if fc := p.Get("functionCall"); fc.Exists() {
-					fn := []byte(`{"type":"function_call"}`)
-					if name := fc.Get("name"); name.Exists() {
-						n := name.String()
-						if short, ok := shortMap[n]; ok {
-							n = short
-						} else {
-							n = shortenNameIfNeeded(n)
-						}
-						fn, _ = sjson.SetBytes(fn, "name", n)
-					}
-					if args := fc.Get("args"); args.Exists() {
-						fn, _ = sjson.SetBytes(fn, "arguments", args.Raw)
-					}
 					// generate a paired random call_id and enqueue it so the
 					// corresponding functionResponse can pop the earliest id
 					// to preserve ordering when multiple calls are present.
 					id := genCallID()
-					fn, _ = sjson.SetBytes(fn, "call_id", id)
-					pendingCallIDs = append(pendingCallIDs, id)
-					out, _ = sjson.SetRawBytes(out, "input.-1", fn)
+					kind := codexGeminiToolCallKindForName(fc.Get("name").String(), fc.Get("args"))
+					pendingCalls = append(pendingCalls, codexGeminiPendingToolCall{CallID: id, Kind: kind})
+					out, _ = sjson.SetRawBytes(out, "input.-1", codexGeminiFunctionCallToInputItem(fc, id, kind, shortMap))
 					continue
 				}
 
 				// function response from user
 				if fr := p.Get("functionResponse"); fr.Exists() {
-					fno := []byte(`{"type":"function_call_output"}`)
-					// Prefer a string result if present; otherwise embed the raw response as a string
-					if res := fr.Get("response.result"); res.Exists() {
-						fno, _ = sjson.SetBytes(fno, "output", res.String())
-					} else if resp := fr.Get("response"); resp.Exists() {
-						fno, _ = sjson.SetBytes(fno, "output", resp.Raw)
-					}
-					// fno, _ = sjson.SetBytes(fno, "call_id", "call_W6nRJzFXyPM2LFBbfo98qAbq")
 					// attach the oldest queued call_id to pair the response
 					// with its call. If the queue is empty, generate a new id.
-					var id string
-					if len(pendingCallIDs) > 0 {
-						id = pendingCallIDs[0]
+					pending := codexGeminiPendingToolCall{}
+					if len(pendingCalls) > 0 {
+						pending = pendingCalls[0]
 						// pop the first element
-						pendingCallIDs = pendingCallIDs[1:]
+						pendingCalls = pendingCalls[1:]
 					} else {
-						id = genCallID()
+						pending = codexGeminiPendingToolCall{
+							CallID: genCallID(),
+							Kind:   codexGeminiToolCallKindForName(fr.Get("name").String(), gjson.Result{}),
+						}
 					}
-					fno, _ = sjson.SetBytes(fno, "call_id", id)
-					out, _ = sjson.SetRawBytes(out, "input.-1", fno)
+					out, _ = sjson.SetRawBytes(out, "input.-1", codexGeminiFunctionResponseToInputItem(fr, pending))
 					continue
 				}
 			}
@@ -292,6 +274,137 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 
 	return out
+}
+
+type codexGeminiToolCallKind struct {
+	ItemType string
+	Name     string
+}
+
+type codexGeminiPendingToolCall struct {
+	CallID string
+	Kind   codexGeminiToolCallKind
+}
+
+func codexGeminiToolCallKindForName(name string, args gjson.Result) codexGeminiToolCallKind {
+	switch name {
+	case "local_shell":
+		return codexGeminiToolCallKind{ItemType: "local_shell_call", Name: name}
+	case "tool_search":
+		return codexGeminiToolCallKind{ItemType: "tool_search_call", Name: name}
+	case "apply_patch":
+		return codexGeminiToolCallKind{ItemType: "custom_tool_call", Name: name}
+	}
+	if args.IsObject() {
+		fields := args.Map()
+		if len(fields) == 1 && args.Get("input").Type == gjson.String {
+			return codexGeminiToolCallKind{ItemType: "custom_tool_call", Name: name}
+		}
+	}
+	return codexGeminiToolCallKind{ItemType: "function_call", Name: name}
+}
+
+func codexGeminiFunctionCallToInputItem(functionCall gjson.Result, callID string, kind codexGeminiToolCallKind, shortMap map[string]string) []byte {
+	args := functionCall.Get("args")
+	switch kind.ItemType {
+	case "custom_tool_call":
+		item := []byte(`{"type":"custom_tool_call"}`)
+		item, _ = sjson.SetBytes(item, "call_id", callID)
+		item, _ = sjson.SetBytes(item, "name", kind.Name)
+		if payload := args.Get("input"); payload.Exists() {
+			item, _ = sjson.SetBytes(item, "input", payload.String())
+		} else {
+			item, _ = sjson.SetBytes(item, "input", args.Raw)
+		}
+		return item
+	case "local_shell_call":
+		item := []byte(`{"type":"local_shell_call","status":"completed","action":{}}`)
+		item, _ = sjson.SetBytes(item, "call_id", callID)
+		if args.IsObject() {
+			item, _ = sjson.SetRawBytes(item, "action", []byte(args.Raw))
+		}
+		return item
+	case "tool_search_call":
+		item := []byte(`{"type":"tool_search_call","status":"completed","execution":"client","arguments":{}}`)
+		item, _ = sjson.SetBytes(item, "call_id", callID)
+		if args.IsObject() {
+			item, _ = sjson.SetRawBytes(item, "arguments", []byte(args.Raw))
+		}
+		return item
+	default:
+		item := []byte(`{"type":"function_call"}`)
+		item, _ = sjson.SetBytes(item, "call_id", callID)
+		name := functionCall.Get("name").String()
+		if short, ok := shortMap[name]; ok {
+			name = short
+		} else {
+			name = shortenNameIfNeeded(name)
+		}
+		item, _ = sjson.SetBytes(item, "name", name)
+		if args.Exists() {
+			item, _ = sjson.SetBytes(item, "arguments", args.Raw)
+		}
+		return item
+	}
+}
+
+func codexGeminiFunctionResponseToInputItem(functionResponse gjson.Result, pending codexGeminiPendingToolCall) []byte {
+	switch pending.Kind.ItemType {
+	case "custom_tool_call":
+		item := []byte(`{"type":"custom_tool_call_output"}`)
+		item, _ = sjson.SetBytes(item, "call_id", pending.CallID)
+		if pending.Kind.Name != "" {
+			item, _ = sjson.SetBytes(item, "name", pending.Kind.Name)
+		}
+		return codexGeminiSetFunctionResponseOutput(item, functionResponse)
+	case "tool_search_call":
+		item := []byte(`{"type":"tool_search_output","status":"completed","execution":"client","tools":[]}`)
+		item, _ = sjson.SetBytes(item, "call_id", pending.CallID)
+		item, _ = sjson.SetRawBytes(item, "tools", codexGeminiToolSearchOutputTools(functionResponse.Get("response")))
+		return item
+	default:
+		item := []byte(`{"type":"function_call_output"}`)
+		item, _ = sjson.SetBytes(item, "call_id", pending.CallID)
+		return codexGeminiSetFunctionResponseOutput(item, functionResponse)
+	}
+}
+
+func codexGeminiSetFunctionResponseOutput(item []byte, functionResponse gjson.Result) []byte {
+	if res := functionResponse.Get("response.result"); res.Exists() {
+		item, _ = sjson.SetBytes(item, "output", res.String())
+	} else if resp := functionResponse.Get("response"); resp.Exists() {
+		item, _ = sjson.SetBytes(item, "output", resp.Raw)
+	}
+	return item
+}
+
+func codexGeminiToolSearchOutputTools(response gjson.Result) []byte {
+	if !response.Exists() || response.Type == gjson.Null {
+		return []byte(`[]`)
+	}
+	if tools := response.Get("tools"); tools.IsArray() {
+		return []byte(tools.Raw)
+	}
+	if result := response.Get("result"); result.Exists() {
+		return codexGeminiToolSearchOutputTools(result)
+	}
+	if response.IsArray() {
+		return []byte(response.Raw)
+	}
+	if response.IsObject() {
+		wrapped, _ := json.Marshal([]any{json.RawMessage(response.Raw)})
+		return wrapped
+	}
+	text := strings.TrimSpace(response.String())
+	if text == "" {
+		return []byte(`[]`)
+	}
+	if gjson.Valid(text) {
+		parsed := gjson.Parse(text)
+		return codexGeminiToolSearchOutputTools(parsed)
+	}
+	wrapped, _ := json.Marshal([]string{text})
+	return wrapped
 }
 
 // shortenNameIfNeeded applies the simple shortening rule for a single name.

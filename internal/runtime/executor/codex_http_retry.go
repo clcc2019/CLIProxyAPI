@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -15,8 +16,9 @@ import (
 )
 
 const (
-	codexHTTPMaxRequestRetries = 4
-	codexHTTPRetryBaseDelay    = 200 * time.Millisecond
+	codexHTTPMaxRequestRetries    = 4
+	codexHTTPMaxStreamReadRetries = 5
+	codexHTTPRetryBaseDelay       = 200 * time.Millisecond
 )
 
 var codexHTTPRetryableTransportMarkers = []string{
@@ -119,8 +121,23 @@ func codexShouldRetryHTTPStatusWithoutCompression(resp *http.Response) bool {
 		return false
 	}
 	switch resp.StatusCode {
-	case http.StatusBadRequest, http.StatusUnsupportedMediaType:
+	case http.StatusUnsupportedMediaType:
 		return true
+	case http.StatusBadRequest:
+		if resp.Body == nil {
+			return false
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+		if err != nil {
+			return false
+		}
+		lower := strings.ToLower(string(data))
+		return strings.Contains(lower, "content-encoding") ||
+			strings.Contains(lower, "content encoding") ||
+			strings.Contains(lower, "unsupported encoding") ||
+			strings.Contains(lower, "unsupported compression") ||
+			strings.Contains(lower, "zstd")
 	default:
 		return false
 	}

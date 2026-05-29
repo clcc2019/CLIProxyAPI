@@ -162,7 +162,7 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if model == "" {
 		return usage.Record{}, false
 	}
-	detail = normalizeUsageDetailTotal(detail)
+	detail = normalizeUsageDetailTotalForProvider(r.provider, detail)
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
@@ -202,20 +202,36 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
-	detail = normalizeUsageDetailTotal(detail)
+	detail = normalizeUsageDetailTotalForProvider(r.provider, detail)
 	r.once.Do(func() {
 		r.publishRecord(ctx, r.buildRecordWithFailure(detail, failed, fail, err))
 	})
 }
 
 func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
+	return normalizeUsageDetailTotalForProvider("", detail)
+}
+
+func normalizeUsageDetailTotalForProvider(provider string, detail usage.Detail) usage.Detail {
 	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		total := detail.InputTokens + detail.OutputTokens
+		if !usageProviderReportsReasoningAsOutputDetail(provider) {
+			total += detail.ReasoningTokens
+		}
 		if total > 0 {
 			detail.TotalTokens = total
 		}
 	}
 	return detail
+}
+
+func usageProviderReportsReasoningAsOutputDetail(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "openai":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasNonZeroTokenUsage(detail usage.Detail) bool {
@@ -256,8 +272,10 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, errs ...er
 
 func (r *UsageReporter) buildRecordWithFailure(detail usage.Detail, failed bool, fail usage.Failure, err error) usage.Record {
 	if r == nil {
+		detail = normalizeUsageDetailTotal(detail)
 		return usage.Record{Detail: detail, Failed: failed, Fail: fail, ErrorMessage: usageErrorMessage(err)}
 	}
+	detail = normalizeUsageDetailTotalForProvider(r.provider, detail)
 	return r.buildRecordForModel(r.model, detail, failed, fail, err)
 }
 
@@ -567,18 +585,7 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
-	}
-	if cached := usageNode.Get("input_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	if reasoning := usageNode.Get("output_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
-	return detail, true
+	return parseOpenAIStyleUsageNode(usageNode), true
 }
 
 func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
@@ -606,8 +613,14 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 		usageNode.Get("completion_tokens").Exists() ||
 		usageNode.Get("output_tokens").Exists() ||
 		usageNode.Get("total_tokens").Exists() ||
+		usageNode.Get("cached_input_tokens").Exists() ||
+		usageNode.Get("cache_read_input_tokens").Exists() ||
+		usageNode.Get("cache_creation_input_tokens").Exists() ||
+		usageNode.Get("reasoning_output_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cache_creation_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cache_creation_tokens").Exists() ||
 		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
 		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
@@ -630,15 +643,38 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
+	if !cached.Exists() {
+		cached = usageNode.Get("cached_input_tokens")
+	}
+	if !cached.Exists() {
+		cached = usageNode.Get("cache_read_input_tokens")
+	}
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
+		detail.CacheReadTokens = detail.CachedTokens
+	}
+	cacheCreation := usageNode.Get("prompt_tokens_details.cache_creation_tokens")
+	if !cacheCreation.Exists() {
+		cacheCreation = usageNode.Get("input_tokens_details.cache_creation_tokens")
+	}
+	if !cacheCreation.Exists() {
+		cacheCreation = usageNode.Get("cache_creation_input_tokens")
+	}
+	if cacheCreation.Exists() {
+		detail.CacheCreationTokens = cacheCreation.Int()
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
 		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
 	}
+	if !reasoning.Exists() {
+		reasoning = usageNode.Get("reasoning_output_tokens")
+	}
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
+	}
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	}
 	return detail
 }
@@ -649,37 +685,11 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() || usageNode.Type != gjson.JSON {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
-	inputNode := usageNode.Get("prompt_tokens")
-	if !inputNode.Exists() {
-		inputNode = usageNode.Get("input_tokens")
-	}
-	outputNode := usageNode.Get("completion_tokens")
-	if !outputNode.Exists() {
-		outputNode = usageNode.Get("output_tokens")
-	}
-	detail := usage.Detail{
-		InputTokens:  inputNode.Int(),
-		OutputTokens: outputNode.Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
-	}
-	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
-	if !cached.Exists() {
-		cached = usageNode.Get("input_tokens_details.cached_tokens")
-	}
-	if cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
-	if !reasoning.Exists() {
-		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
-	}
-	if reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
-	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0 {
+	detail := parseOpenAIStyleUsageNode(usageNode)
+	if usageDetailIsZero(detail) {
 		return usage.Detail{}, false
 	}
 	return detail, true
@@ -717,6 +727,7 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		InputTokens:         uncachedInputTokens + cacheReadTokens + cacheCreationTokens,
 		OutputTokens:        usageNode.Get("output_tokens").Int(),
 		CachedTokens:        cacheReadTokens,
+		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
@@ -728,6 +739,7 @@ func usageDetailIsZero(detail usage.Detail) bool {
 		detail.OutputTokens == 0 &&
 		detail.ReasoningTokens == 0 &&
 		detail.CachedTokens == 0 &&
+		detail.CacheReadTokens == 0 &&
 		detail.CacheCreationTokens == 0 &&
 		detail.TotalTokens == 0
 }
@@ -740,6 +752,7 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 		TotalTokens:     node.Get("totalTokenCount").Int(),
 		CachedTokens:    node.Get("cachedContentTokenCount").Int(),
 	}
+	detail.CacheReadTokens = detail.CachedTokens
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 	}

@@ -627,6 +627,72 @@ func TestPatchCodexCompletedOutputRecoversCustomToolCallByCallID(t *testing.T) {
 	}
 }
 
+func TestPatchCodexCompletedOutputRecoversLocalShellCallFromAdded(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"lsc_1","type":"local_shell_call","call_id":"call_shell","status":"in_progress","action":{"type":"exec","command":["pwd"],"timeout_ms":1000}}}`))
+
+	patched, recoveredCount := streamState.patchCompletedOutputIfEmpty([]byte(`{"response":{"output":[]}}`))
+	if recoveredCount != 1 {
+		t.Fatalf("recovered count = %d, want %d", recoveredCount, 1)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.type").String(); got != "local_shell_call" {
+		t.Fatalf("response.output.0.type = %q, want local_shell_call; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.call_id").String(); got != "call_shell" {
+		t.Fatalf("response.output.0.call_id = %q, want call_shell; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.status").String(); got != "completed" {
+		t.Fatalf("response.output.0.status = %q, want completed; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.action.command.0").String(); got != "pwd" {
+		t.Fatalf("response.output.0.action.command.0 = %q, want pwd; body=%s", got, patched)
+	}
+}
+
+func TestPatchCodexCompletedOutputRecoversToolSearchCallFromAdded(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"tsc_1","type":"tool_search_call","call_id":"search_1","status":"completed","execution":"client","arguments":{"query":"calendar","limit":1}}}`))
+
+	patched, recoveredCount := streamState.patchCompletedOutputIfEmpty([]byte(`{"response":{"output":[]}}`))
+	if recoveredCount != 1 {
+		t.Fatalf("recovered count = %d, want %d", recoveredCount, 1)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.type").String(); got != "tool_search_call" {
+		t.Fatalf("response.output.0.type = %q, want tool_search_call; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.call_id").String(); got != "search_1" {
+		t.Fatalf("response.output.0.call_id = %q, want search_1; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.execution").String(); got != "client" {
+		t.Fatalf("response.output.0.execution = %q, want client; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.arguments.query").String(); got != "calendar" {
+		t.Fatalf("response.output.0.arguments.query = %q, want calendar; body=%s", got, patched)
+	}
+}
+
+func TestPatchCodexCompletedOutputRecoversServerToolSearchCallWithoutCallID(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"tool_search_call","call_id":null,"status":"completed","execution":"server","arguments":{"paths":["crm"]}}}`))
+
+	patched, recoveredCount := streamState.patchCompletedOutputIfEmpty([]byte(`{"response":{"output":[]}}`))
+	if recoveredCount != 1 {
+		t.Fatalf("recovered count = %d, want %d", recoveredCount, 1)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.type").String(); got != "tool_search_call" {
+		t.Fatalf("response.output.0.type = %q, want tool_search_call; body=%s", got, patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.execution").String(); got != "server" {
+		t.Fatalf("response.output.0.execution = %q, want server; body=%s", got, patched)
+	}
+	if gjson.GetBytes(patched, "response.output.0.call_id").Exists() {
+		t.Fatalf("server tool_search_call without call_id should not synthesize one; body=%s", patched)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.arguments.paths.0").String(); got != "crm" {
+		t.Fatalf("response.output.0.arguments.paths.0 = %q, want crm; body=%s", got, patched)
+	}
+}
+
 func BenchmarkCodexStreamFunctionCallArgumentDeltas(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		streamState := newCodexStreamCompletionState()

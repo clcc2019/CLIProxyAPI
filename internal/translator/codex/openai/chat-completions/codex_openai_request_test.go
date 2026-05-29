@@ -97,6 +97,235 @@ func TestToolCallSimple(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToCodex_PreservesExplicitParallelToolCallsFalse(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"parallel_tool_calls": false,
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [{
+			"type": "function",
+			"function": {
+				"name": "lookup",
+				"parameters": {"type": "object", "properties": {}}
+			}
+		}]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	if got := gjson.GetBytes(out, "parallel_tool_calls").Bool(); got {
+		t.Fatalf("parallel_tool_calls = true, want false. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_MapsResponseFormatToOfficialTextFormat(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "hi"}],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"schema": {
+					"type": "object",
+					"properties": {"answer": {"type": "string"}},
+					"required": ["answer"]
+				}
+			}
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	if got := gjson.GetBytes(out, "text.format.type").String(); got != "json_schema" {
+		t.Fatalf("text.format.type = %q, want json_schema. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "text.format.name").String(); got != "codex_output_schema" {
+		t.Fatalf("text.format.name = %q, want codex_output_schema. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "text.format.strict").Exists() {
+		t.Fatalf("text.format.strict should be omitted when not provided. Output: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "text.format.schema.properties.answer.type").String(); got != "string" {
+		t.Fatalf("schema was not preserved. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_UnwrapsCustomToolShape(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "run code"}],
+		"tools": [{
+			"type": "custom",
+			"custom": {
+				"name": "code_exec",
+				"description": "Executes code.",
+				"format": {
+					"type": "grammar",
+					"syntax": "lark",
+					"definition": "start: /.+/"
+				}
+			}
+		}],
+		"tool_choice": {
+			"type": "custom",
+			"custom": {"name": "code_exec"}
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "custom" {
+		t.Fatalf("tools.0.type = %q, want custom. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "code_exec" {
+		t.Fatalf("tools.0.name = %q, want code_exec. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.format.syntax").String(); got != "lark" {
+		t.Fatalf("tools.0.format.syntax = %q, want lark. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.custom").Exists() {
+		t.Fatalf("nested custom wrapper should be removed. Output: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "custom" {
+		t.Fatalf("tool_choice.type = %q, want custom. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "code_exec" {
+		t.Fatalf("tool_choice.name = %q, want code_exec. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_RestoresCustomToolHistory(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "patch"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [{
+					"id": "call_patch",
+					"type": "function",
+					"function": {
+						"name": "apply_patch",
+						"arguments": "*** Begin Patch\n*** End Patch"
+					}
+				}]
+			},
+			{"role": "tool", "tool_call_id": "call_patch", "content": "Done"}
+		],
+		"tools": [{
+			"type": "custom",
+			"name": "apply_patch",
+			"description": "Apply patches.",
+			"format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}
+		}]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("input length = %d, want 3. Output: %s", len(items), string(out))
+	}
+	if got := items[1].Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("input.1.type = %q, want custom_tool_call. Output: %s", got, string(out))
+	}
+	if got := items[1].Get("name").String(); got != "apply_patch" {
+		t.Fatalf("custom tool name = %q, want apply_patch. Output: %s", got, string(out))
+	}
+	if got := items[1].Get("input").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("custom tool input = %q. Output: %s", got, string(out))
+	}
+	if got := items[2].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("input.2.type = %q, want custom_tool_call_output. Output: %s", got, string(out))
+	}
+	if got := items[2].Get("call_id").String(); got != "call_patch" {
+		t.Fatalf("custom output call_id = %q, want call_patch. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_RestoresToolSearchHistory(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "find a tool"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [{
+					"id": "call_search",
+					"type": "function",
+					"function": {
+						"name": "tool_search",
+						"arguments": "{\"query\":\"calendar\",\"limit\":1}"
+					}
+				}]
+			},
+			{"role": "tool", "tool_call_id": "call_search", "content": "{\"tools\":[{\"name\":\"calendar.create_event\"}]}"}
+		],
+		"tools": [{
+			"type": "tool_search",
+			"execution": "sync",
+			"description": "Search for tools.",
+			"parameters": {"type": "object", "properties": {}}
+		}]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("input length = %d, want 3. Output: %s", len(items), string(out))
+	}
+	if got := items[1].Get("type").String(); got != "tool_search_call" {
+		t.Fatalf("input.1.type = %q, want tool_search_call. Output: %s", got, string(out))
+	}
+	if got := items[1].Get("execution").String(); got != "client" {
+		t.Fatalf("tool_search execution = %q, want client. Output: %s", got, string(out))
+	}
+	if got := items[1].Get("arguments.query").String(); got != "calendar" {
+		t.Fatalf("tool_search query = %q, want calendar. Output: %s", got, string(out))
+	}
+	if got := items[2].Get("type").String(); got != "tool_search_output" {
+		t.Fatalf("input.2.type = %q, want tool_search_output. Output: %s", got, string(out))
+	}
+	if got := items[2].Get("tools.0.name").String(); got != "calendar.create_event" {
+		t.Fatalf("tool_search output tool name = %q. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_RestoresLocalShellCallHistory(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "pwd"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [{
+					"id": "call_shell",
+					"type": "function",
+					"function": {
+						"name": "local_shell",
+						"arguments": "{\"type\":\"exec\",\"command\":[\"pwd\"]}"
+					}
+				}]
+			},
+			{"role": "tool", "tool_call_id": "call_shell", "content": "/tmp"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("input length = %d, want 3. Output: %s", len(items), string(out))
+	}
+	if got := items[1].Get("type").String(); got != "local_shell_call" {
+		t.Fatalf("input.1.type = %q, want local_shell_call. Output: %s", got, string(out))
+	}
+	if got := items[1].Get("action.command.0").String(); got != "pwd" {
+		t.Fatalf("local_shell command = %q, want pwd. Output: %s", got, string(out))
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("input.2.type = %q, want function_call_output. Output: %s", got, string(out))
+	}
+}
+
 // Assistant has both text content and tool_calls — the message should
 // be emitted (non-empty content), followed by function_call items.
 func TestToolCallWithContent(t *testing.T) {

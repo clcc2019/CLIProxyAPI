@@ -877,12 +877,101 @@ func TestExtractSessionID_CodexHeaders(t *testing.T) {
 	}
 
 	headers.Del("Session_id")
+	headers.Set("session-id", "official-session")
+
+	got = ExtractSessionID(headers, nil, nil)
+	want = "codex:official-session"
+	if got != want {
+		t.Errorf("ExtractSessionID() with session-id = %q, want %q", got, want)
+	}
+
+	headers.Del("session-id")
+	headers.Set("thread-id", "official-thread")
+
+	got = ExtractSessionID(headers, nil, nil)
+	want = "codex-thread:official-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with thread-id = %q, want %q", got, want)
+	}
+
+	headers.Set("session-id", "official-session")
+	got = ExtractSessionID(headers, nil, nil)
+	want = "codex-thread:official-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with thread-id and session-id = %q, want %q", got, want)
+	}
+
+	headers.Del("Session_id")
+	headers.Del("session-id")
+	headers.Del("thread-id")
 	headers.Set("Conversation_id", "conv-123")
 
 	got = ExtractSessionID(headers, nil, nil)
 	want = "conv:conv-123"
 	if got != want {
 		t.Errorf("ExtractSessionID() with Conversation_id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_CodexTurnMetadata(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"meta-session","thread_id":"meta-thread"}`)
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "codex-thread:meta-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with turn metadata header = %q, want %q", got, want)
+	}
+
+	payload := []byte(`{"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"body-session\",\"thread_id\":\"body-thread\"}"}}`)
+	got = ExtractSessionID(nil, payload, nil)
+	want = "codex-thread:body-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with body turn metadata = %q, want %q", got, want)
+	}
+
+	headers.Set("session-id", "official-session")
+	got = ExtractSessionID(headers, payload, nil)
+	want = "codex-thread:meta-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with header turn metadata, body turn metadata, and session-id = %q, want %q", got, want)
+	}
+
+	headers.Del("X-Codex-Turn-Metadata")
+	got = ExtractSessionID(headers, payload, nil)
+	want = "codex-thread:body-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with body turn metadata and session-id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_CodexTurnMetadataBeatsRequestID(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Client-Request-Id", "request-ephemeral")
+	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"meta-session","thread_id":"meta-thread"}`)
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "codex-thread:meta-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with turn metadata and request id = %q, want %q", got, want)
+	}
+
+	payload := []byte(`{"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"body-session\",\"thread_id\":\"body-thread\"}"}}`)
+	got = ExtractSessionID(headers, payload, nil)
+	want = "codex-thread:meta-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with header turn metadata, body turn metadata, and request id = %q, want %q", got, want)
+	}
+
+	headers.Del("X-Codex-Turn-Metadata")
+	got = ExtractSessionID(headers, payload, nil)
+	want = "codex-thread:body-thread"
+	if got != want {
+		t.Errorf("ExtractSessionID() with body turn metadata and request id = %q, want %q", got, want)
 	}
 }
 

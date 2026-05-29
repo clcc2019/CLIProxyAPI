@@ -669,18 +669,20 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // ExtractSessionID extracts session identifier from multiple sources.
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
-//  2. X-Session-ID header
-//  3. Session_id header (Codex)
-//  4. X-Amp-Thread-Id header (Amp CLI thread ID)
-//  5. X-Client-Request-Id header (PI)
-//  6. Conversation_id header / execution session metadata
-//  7. explicit body session_id / thread_id fields
-//  8. metadata.user_id (non-Claude Code format)
-//  9. explicit conversation_id fields
-//  10. prompt_cache_key / metadata.prompt_cache_key in request body
-//  11. Kiro native conversationState identifiers
-//  12. client principal metadata
-//  13. Stable hash from first few messages content (fallback)
+//  2. Thread_id / thread-id header or turn metadata (Codex)
+//  3. X-Session-ID header
+//  4. Conversation_id header
+//  5. Session_id / session-id header (Codex)
+//  6. X-Amp-Thread-Id header (Amp CLI thread ID)
+//  7. execution session metadata
+//  8. explicit body session_id / thread_id fields
+//  9. X-Client-Request-Id header (PI)
+//  10. metadata.user_id (non-Claude Code format)
+//  11. explicit conversation_id fields
+//  12. prompt_cache_key / metadata.prompt_cache_key in request body
+//  13. Kiro native conversationState identifiers
+//  14. client principal metadata
+//  15. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -709,41 +711,68 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 2. X-Session-ID header
+	// 2. Thread_id / thread-id header or turn metadata (Codex). Official
+	// Codex uses thread_id as prompt_cache_key, so auth affinity must follow
+	// the same identity to avoid mixing independent threads under one session.
+	if headers != nil {
+		for _, key := range []string{"Thread_id", "thread-id", "X-Thread-ID"} {
+			if tid := strings.TrimSpace(headers.Get(key)); tid != "" {
+				return "codex-thread:" + tid, ""
+			}
+		}
+		if raw := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); raw != "" {
+			if threadID := strings.TrimSpace(gjson.Get(raw, "thread_id").String()); threadID != "" {
+				return "codex-thread:" + threadID, ""
+			}
+		}
+	}
+	if len(payload) > 0 {
+		if threadID := strings.TrimSpace(gjson.GetBytes(payload, "client_metadata.x-codex-turn-metadata.thread_id").String()); threadID != "" {
+			return "codex-thread:" + threadID, ""
+		}
+		if raw := strings.TrimSpace(gjson.GetBytes(payload, "client_metadata.x-codex-turn-metadata").String()); raw != "" {
+			if threadID := strings.TrimSpace(gjson.Get(raw, "thread_id").String()); threadID != "" {
+				return "codex-thread:" + threadID, ""
+			}
+		}
+	}
+
+	// 3. X-Session-ID header
 	if headers != nil {
 		if sid := headers.Get("X-Session-ID"); sid != "" {
 			return "header:" + sid, ""
 		}
 	}
 
-	// 3. Session_id header (Codex)
-	if headers != nil {
-		if sid := headers.Get("Session_id"); sid != "" {
-			return "codex:" + sid, ""
-		}
-	}
-
-	// 4. X-Amp-Thread-Id header (Amp CLI thread ID)
-	if headers != nil {
-		if tid := headers.Get("X-Amp-Thread-Id"); tid != "" {
-			return "amp:" + tid, ""
-		}
-	}
-
-	// 5. X-Client-Request-Id header (PI)
-	if headers != nil {
-		if rid := headers.Get("X-Client-Request-Id"); rid != "" {
-			return "clientreq:" + rid, ""
-		}
-	}
-
+	// 4. Conversation_id header.
 	if headers != nil {
 		if convID := headers.Get("Conversation_id"); convID != "" {
 			return "conv:" + convID, ""
 		}
 	}
 
-	// 6. explicit execution session metadata (Responses websocket/session handlers)
+	// 5. Session_id / session-id header (Codex)
+	if headers != nil {
+		for _, key := range []string{"Session_id", "session-id"} {
+			if sid := strings.TrimSpace(headers.Get(key)); sid != "" {
+				return "codex:" + sid, ""
+			}
+		}
+		if raw := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); raw != "" {
+			if sessionID := strings.TrimSpace(gjson.Get(raw, "session_id").String()); sessionID != "" {
+				return "codex:" + sessionID, ""
+			}
+		}
+	}
+
+	// 6. X-Amp-Thread-Id header (Amp CLI thread ID)
+	if headers != nil {
+		if tid := headers.Get("X-Amp-Thread-Id"); tid != "" {
+			return "amp:" + tid, ""
+		}
+	}
+
+	// 7. explicit execution session metadata (Responses websocket/session handlers)
 	if sessionID := metadataStringValue(metadata, cliproxyexecutor.ExecutionSessionMetadataKey); sessionID != "" {
 		return "exec:" + sessionID, ""
 	}
@@ -755,11 +784,13 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "", ""
 	}
 
-	// 7. explicit body session/thread identifiers
+	// 8. explicit body session/thread identifiers
 	for _, candidate := range []struct {
 		path   string
 		prefix string
 	}{
+		{path: "client_metadata.x-codex-turn-metadata.thread_id", prefix: "codex-thread:"},
+		{path: "client_metadata.x-codex-turn-metadata.session_id", prefix: "codex:"},
 		{path: "metadata.session_id", prefix: "session:"},
 		{path: "metadata.sessionId", prefix: "session:"},
 		{path: "session_id", prefix: "session:"},
@@ -773,14 +804,31 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 			return candidate.prefix + sessionID, ""
 		}
 	}
+	if raw := strings.TrimSpace(gjson.GetBytes(payload, "client_metadata.x-codex-turn-metadata").String()); raw != "" {
+		if threadID := strings.TrimSpace(gjson.Get(raw, "thread_id").String()); threadID != "" {
+			return "codex-thread:" + threadID, ""
+		}
+		if sessionID := strings.TrimSpace(gjson.Get(raw, "session_id").String()); sessionID != "" {
+			return "codex:" + sessionID, ""
+		}
+	}
 
-	// 8. metadata.user_id (non-Claude Code format)
+	// 9. X-Client-Request-Id header (PI). Keep this behind Codex turn/session
+	// identity because some clients send a fresh request id every turn while
+	// carrying the stable thread id in the request body.
+	if headers != nil {
+		if rid := strings.TrimSpace(headers.Get("X-Client-Request-Id")); rid != "" {
+			return "clientreq:" + rid, ""
+		}
+	}
+
+	// 10. metadata.user_id (non-Claude Code format)
 	userID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if userID != "" {
 		return "user:" + userID, ""
 	}
 
-	// 9. explicit conversation identifiers
+	// 11. explicit conversation identifiers
 	for _, path := range []string{
 		"metadata.conversation_id",
 		"metadata.conversationId",
@@ -792,7 +840,7 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 10. prompt_cache_key / metadata.prompt_cache_key
+	// 12. prompt_cache_key / metadata.prompt_cache_key
 	if promptCacheKey := gjson.GetBytes(payload, "prompt_cache_key").String(); promptCacheKey != "" {
 		return "cache:" + promptCacheKey, ""
 	}
@@ -800,7 +848,7 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "cache:" + promptCacheKey, ""
 	}
 
-	// 11. Kiro native conversationState identifiers
+	// 13. Kiro native conversationState identifiers
 	if convID := gjson.GetBytes(payload, "conversationState.conversationId").String(); convID != "" {
 		fallbackID := ""
 		if continuationID := gjson.GetBytes(payload, "conversationState.agentContinuationId").String(); continuationID != "" && continuationID != convID {
@@ -815,12 +863,12 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "kiro-cont:" + continuationID, ""
 	}
 
-	// 12. client principal metadata
+	// 14. client principal metadata
 	if principal := metadataStringValue(metadata, cliproxyexecutor.ClientPrincipalMetadataKey); principal != "" {
 		return "client:" + principal, ""
 	}
 
-	// 13. Hash-based fallback from message content
+	// 15. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
 }
 

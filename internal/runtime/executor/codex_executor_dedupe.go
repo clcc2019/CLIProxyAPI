@@ -92,10 +92,18 @@ func (e *CodexExecutor) prepareCodexRequestWithKind(ctx context.Context, from sd
 		if resolution.headerEligibleID != "" {
 			fallbackHeaderValue = resolution.headerEligibleID
 		}
-		if sessionHeaderValue := codexPromptCacheSessionHeaderValue(ctx, fallbackHeaderValue); sessionHeaderValue != "" {
+		sessionFallbackValue := fallbackHeaderValue
+		if resolution.sessionHeaderID != "" {
+			sessionFallbackValue = resolution.sessionHeaderID
+		}
+		threadFallbackValue := fallbackHeaderValue
+		if resolution.threadHeaderID != "" {
+			threadFallbackValue = resolution.threadHeaderID
+		}
+		if sessionHeaderValue := codexPromptCacheSessionHeaderValue(ctx, sessionFallbackValue); sessionHeaderValue != "" {
 			httpReq.Header.Set(codexHeaderSessionID, sessionHeaderValue)
 		}
-		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, req.Payload, fallbackHeaderValue); threadHeaderValue != "" {
+		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, threadFallbackValue); threadHeaderValue != "" {
 			httpReq.Header.Set(codexHeaderThreadID, threadHeaderValue)
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	codexcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/common"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -144,20 +145,13 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.output_item.added" {
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
-		if itemType == "function_call" {
+		if id, name, _, ok := codexClaudeToolUseFields(itemResult, params.reverseToolNameMap(originalRequestRawJSON)); ok {
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 			params.HasToolCall = true
 			params.HasReceivedArgumentsDelta = false
-			name := itemResult.Get("name").String()
-			{
-				rev := params.reverseToolNameMap(originalRequestRawJSON)
-				if orig, ok := rev[name]; ok {
-					name = orig
-				}
-			}
 			template = buildClaudeToolUseStart(
 				params.BlockIndex,
-				shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(itemResult.Get("call_id").String())),
+				id,
 				name,
 			)
 
@@ -211,7 +205,11 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.BlockIndex++
 			params.HasTextDelta = true
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
-		} else if itemType == "function_call" {
+		} else if _, _, inputRaw, ok := codexClaudeToolUseFields(itemResult, params.reverseToolNameMap(originalRequestRawJSON)); ok {
+			if !params.HasReceivedArgumentsDelta && inputRaw != "{}" {
+				template = buildClaudeInputJSONDelta(params.BlockIndex, inputRaw)
+				output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+			}
 			template = buildClaudeContentBlockStop(params.BlockIndex)
 			params.BlockIndex++
 
@@ -221,6 +219,11 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 				params.ThinkingSignature = signature
 			}
 			if params.ThinkingSummarySeen {
+				output = append(output, finalizeCodexThinkingBlock(params)...)
+			} else if reasoningText := codexClaudeReasoningText(itemResult); reasoningText != "" {
+				output = append(output, startCodexThinkingBlock(params)...)
+				template = buildClaudeThinkingDelta(params.BlockIndex, reasoningText)
+				output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 				output = append(output, finalizeCodexThinkingBlock(params)...)
 			} else {
 				output = append(output, finalizeCodexSignatureOnlyThinkingBlock(params)...)
@@ -239,6 +242,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 				template = buildClaudeInputJSONDelta(params.BlockIndex, args)
 
 				output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+				params.HasReceivedArgumentsDelta = true
 			}
 		}
 	}
@@ -284,43 +288,13 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 		output.ForEach(func(_, item gjson.Result) bool {
 			switch item.Get("type").String() {
 			case "reasoning":
-				thinkingBuilder := strings.Builder{}
+				thinkingText := codexClaudeReasoningText(item)
 				signature := item.Get("encrypted_content").String()
-				if summary := item.Get("summary"); summary.Exists() {
-					if summary.IsArray() {
-						summary.ForEach(func(_, part gjson.Result) bool {
-							if txt := part.Get("text"); txt.Exists() {
-								thinkingBuilder.WriteString(txt.String())
-							} else {
-								thinkingBuilder.WriteString(part.String())
-							}
-							return true
-						})
-					} else {
-						thinkingBuilder.WriteString(summary.String())
-					}
-				}
-				if thinkingBuilder.Len() == 0 {
-					if content := item.Get("content"); content.Exists() {
-						if content.IsArray() {
-							content.ForEach(func(_, part gjson.Result) bool {
-								if txt := part.Get("text"); txt.Exists() {
-									thinkingBuilder.WriteString(txt.String())
-								} else {
-									thinkingBuilder.WriteString(part.String())
-								}
-								return true
-							})
-						} else {
-							thinkingBuilder.WriteString(content.String())
-						}
-					}
-				}
-				if thinkingBuilder.Len() > 0 || signature != "" {
+				if thinkingText != "" || signature != "" {
 					if contentCount > 0 {
 						out = append(out, ',')
 					}
-					out = appendClaudeThinkingBlock(out, thinkingBuilder.String(), signature)
+					out = appendClaudeThinkingBlock(out, thinkingText, signature)
 					contentCount++
 				}
 			case "message":
@@ -350,24 +324,16 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 						}
 					}
 				}
-			case "function_call":
+			case "function_call", "custom_tool_call", "local_shell_call", "tool_search_call":
 				hasToolCall = true
-				name := item.Get("name").String()
-				if original, ok := revNames[name]; ok {
-					name = original
-				}
-
-				inputRaw := "{}"
-				if argsStr := item.Get("arguments").String(); argsStr != "" && gjson.Valid(argsStr) {
-					argsJSON := gjson.Parse(argsStr)
-					if argsJSON.IsObject() {
-						inputRaw = argsJSON.Raw
-					}
+				id, name, inputRaw, ok := codexClaudeToolUseFields(item, revNames)
+				if !ok {
+					return true
 				}
 				if contentCount > 0 {
 					out = append(out, ',')
 				}
-				out = appendClaudeToolUseBlock(out, shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(item.Get("call_id").String())), name, inputRaw)
+				out = appendClaudeToolUseBlock(out, id, name, inputRaw)
 				contentCount++
 			}
 			return true
@@ -398,6 +364,98 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	out = append(out, "}}"...)
 
 	return out
+}
+
+func codexClaudeToolUseFields(item gjson.Result, revNames map[string]string) (id, name, inputRaw string, ok bool) {
+	itemType := item.Get("type").String()
+	callID := item.Get("call_id").String()
+	if callID == "" {
+		return "", "", "", false
+	}
+	id = shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(callID))
+	inputRaw = "{}"
+	switch itemType {
+	case "function_call":
+		name = item.Get("name").String()
+		if original, ok := revNames[name]; ok {
+			name = original
+		}
+		if argsStr := item.Get("arguments").String(); argsStr != "" && gjson.Valid(argsStr) {
+			argsJSON := gjson.Parse(argsStr)
+			if argsJSON.IsObject() {
+				inputRaw = argsJSON.Raw
+			}
+		}
+	case "custom_tool_call":
+		name = item.Get("name").String()
+		inputRaw = codexStringInputObject(item.Get("input").String())
+	case "local_shell_call":
+		name = "local_shell"
+		if action := item.Get("action"); action.Exists() && action.IsObject() {
+			inputRaw = action.Raw
+		}
+	case "tool_search_call":
+		name = "tool_search"
+		if args := item.Get("arguments"); args.Exists() && args.IsObject() {
+			inputRaw = args.Raw
+		}
+	default:
+		return "", "", "", false
+	}
+	if name == "" {
+		return "", "", "", false
+	}
+	return id, name, inputRaw, true
+}
+
+func codexClaudeReasoningText(item gjson.Result) string {
+	var builder strings.Builder
+	if summary := item.Get("summary"); summary.Exists() {
+		if summary.IsArray() {
+			summary.ForEach(func(_, part gjson.Result) bool {
+				if txt := part.Get("text"); txt.Exists() {
+					builder.WriteString(txt.String())
+				} else {
+					builder.WriteString(part.String())
+				}
+				return true
+			})
+		} else {
+			builder.WriteString(summary.String())
+		}
+	}
+	if builder.Len() > 0 {
+		return builder.String()
+	}
+	if content := item.Get("content"); content.Exists() {
+		if content.IsArray() {
+			content.ForEach(func(_, part gjson.Result) bool {
+				if txt := part.Get("text"); txt.Exists() {
+					builder.WriteString(txt.String())
+				} else {
+					builder.WriteString(part.String())
+				}
+				return true
+			})
+		} else {
+			builder.WriteString(content.String())
+		}
+	}
+	return builder.String()
+}
+
+func codexStringInputObject(input string) string {
+	if input != "" && gjson.Valid(input) {
+		parsed := gjson.Parse(input)
+		if parsed.IsObject() {
+			return parsed.Raw
+		}
+	}
+	out := make([]byte, 0, len(input)+16)
+	out = append(out, `{"input":`...)
+	out = appendJSONString(out, input)
+	out = append(out, '}')
+	return string(out)
 }
 
 func codexStopReason(responseData gjson.Result) string {
@@ -448,7 +506,12 @@ func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
 
 	inputTokens := usage.Get("input_tokens").Int()
 	outputTokens := usage.Get("output_tokens").Int()
-	cachedTokens := usage.Get("input_tokens_details.cached_tokens").Int()
+	reasoningTokens := codexcommon.ReasoningOutputTokens(usage).Int()
+	cachedTokens := codexcommon.CachedInputTokens(usage).Int()
+
+	if reasoningTokens > 0 {
+		outputTokens += reasoningTokens
+	}
 
 	if cachedTokens > 0 {
 		if inputTokens >= cachedTokens {

@@ -39,19 +39,27 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: requestKind != codexFinalUpstreamCompact,
 	})
+	codexEnsureResponsesIdentityHeaders(headers, ginHeaders)
 	if requestKind == codexFinalUpstreamCompact {
-		misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnMetadata, "")
-		misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
-	} else {
-		codexEnsureTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
+		codexEnsureCompactTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
 			sessionID: sessionID,
 			threadID:  strings.TrimSpace(headers.Get(codexHeaderThreadID)),
 			turnID:    uuid.NewString(),
 			sandbox:   codexDefaultSandboxTag,
+			windowID:  strings.TrimSpace(headers.Get(codexHeaderWindowID)),
+		})
+		misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
+	} else {
+		codexEnsureTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
+			requestKind: codexTurnRequestKind,
+			sessionID:   sessionID,
+			threadID:    strings.TrimSpace(headers.Get(codexHeaderThreadID)),
+			turnID:      uuid.NewString(),
+			sandbox:     codexDefaultSandboxTag,
+			windowID:    strings.TrimSpace(headers.Get(codexHeaderWindowID)),
 		})
 		misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	}
-	codexEnsureResponsesIdentityHeaders(headers, ginHeaders)
 
 	if stream {
 		headers.Set("Accept", "text/event-stream")

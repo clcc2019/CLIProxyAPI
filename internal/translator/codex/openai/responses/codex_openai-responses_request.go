@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	codexcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/common"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -11,6 +12,10 @@ import (
 
 func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
+
+	if strings.TrimSpace(modelName) != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "model", modelName)
+	}
 
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if inputResult.Type == gjson.String {
@@ -43,6 +48,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	rawJSON = normalizeCodexResponseInputItems(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
@@ -106,7 +112,8 @@ func applyResponsesTextFormatCompatibility(rawJSON []byte) []byte {
 // include=["reasoning.encrypted_content"] when the request has a reasoning
 // block and include=[] otherwise.
 func applyCodexIncludeField(rawJSON []byte) []byte {
-	hasReasoning := gjson.GetBytes(rawJSON, "reasoning").Exists()
+	reasoning := gjson.GetBytes(rawJSON, "reasoning")
+	hasReasoning := reasoning.Exists() && reasoning.Type != gjson.Null
 
 	existing := gjson.GetBytes(rawJSON, "include")
 	callerAlreadySet := existing.IsArray() && len(existing.Array()) > 0
@@ -139,6 +146,13 @@ func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
 	return rawJSON
+}
+
+// normalizeCodexResponseInputItems mirrors codex-rs history/input conversion
+// for official Responses input item variants that the Codex upstream does not
+// accept verbatim.
+func normalizeCodexResponseInputItems(rawJSON []byte) []byte {
+	return codexcommon.NormalizeResponseInputItems(rawJSON)
 }
 
 // convertSystemRoleToDeveloper traverses the input array and converts any message items
