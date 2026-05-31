@@ -346,7 +346,7 @@ func newCodexRefreshHTTPError(statusCode int, body []byte) *CodexRefreshHTTPErro
 		StatusCodeValue: statusCode,
 		Code:            code,
 		Body:            strings.TrimSpace(string(body)),
-		Permanent:       codexRefreshErrorIsPermanent(statusCode, code),
+		Permanent:       codexRefreshErrorIsPermanent(statusCode, code) || codexRefreshBodyIsPermanent(body),
 	}
 }
 
@@ -413,7 +413,22 @@ func codexRefreshErrorIsPermanent(statusCode int, code string) bool {
 	case "refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated", "invalid_grant", "invalid_client":
 		return true
 	}
+	if strings.Contains(normalized, "refresh token") &&
+		(strings.Contains(normalized, "already been used") || strings.Contains(normalized, "sign in again") || strings.Contains(normalized, "signing in again")) {
+		return true
+	}
 	return statusCode == http.StatusUnauthorized
+}
+
+func codexRefreshBodyIsPermanent(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(string(body)))
+	return strings.Contains(raw, "refresh token") &&
+		(strings.Contains(raw, "already been used") ||
+			strings.Contains(raw, "sign in again") ||
+			strings.Contains(raw, "signing in again"))
 }
 
 // CreateTokenStorage creates a new CodexTokenStorage from a CodexAuthBundle.
@@ -473,6 +488,10 @@ func isNonRetryableRefreshErr(err error) bool {
 	return strings.Contains(raw, "refresh_token_reused") ||
 		strings.Contains(raw, "refresh_token_expired") ||
 		strings.Contains(raw, "refresh_token_invalidated") ||
+		(strings.Contains(raw, "refresh token") &&
+			(strings.Contains(raw, "already been used") ||
+				strings.Contains(raw, "sign in again") ||
+				strings.Contains(raw, "signing in again"))) ||
 		strings.Contains(raw, "invalid_grant") ||
 		strings.Contains(raw, "invalid_client")
 }

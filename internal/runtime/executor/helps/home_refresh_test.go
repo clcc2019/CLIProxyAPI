@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 )
@@ -11,5 +12,12 @@ func TestStatusFromHomeErrorCodeMapsAuthenticationErrorToUnauthorized(t *testing
 	}
 	if got := statusFromHomeErrorCode("unauthorized"); got != http.StatusUnauthorized {
 		t.Fatalf("statusFromHomeErrorCode(unauthorized) = %d, want %d", got, http.StatusUnauthorized)
+	}
+}
+
+func TestStatusFromHomeRefreshClientErrorRecognizesHTTP401Text(t *testing.T) {
+	err := errors.New("HTTP 401: Your refresh token has already been used to generate a new access token. Please try signing in again.")
+	if got := statusFromHomeRefreshClientError(err); got != http.StatusUnauthorized {
+		t.Fatalf("statusFromHomeRefreshClientError() = %d, want %d", got, http.StatusUnauthorized)
 	}
 }

@@ -153,6 +153,35 @@ func TestRefreshTokensPermanentErrorsExposeStatusAndMarker(t *testing.T) {
 	}
 }
 
+func TestRefreshTokensWithRetry_ReusedRefreshTokenExposesPermanentMarker(t *testing.T) {
+	t.Parallel()
+
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader(`{"error_description":"Your refresh token has already been used to generate a new access token. Please try signing in again."}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "old-refresh", 3)
+	if err == nil {
+		t.Fatal("RefreshTokensWithRetry() expected error")
+	}
+	permanent, ok := err.(interface{ IsPermanentAuthError() bool })
+	if !ok || !permanent.IsPermanentAuthError() {
+		t.Fatalf("error does not mark permanent auth failure: %T %v", err, err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "signing in again") {
+		t.Fatalf("error = %v, want signing-in-again detail", err)
+	}
+}
+
 func TestTokenStorageKeepsPlanAndPreservesMissingRefreshFields(t *testing.T) {
 	t.Parallel()
 

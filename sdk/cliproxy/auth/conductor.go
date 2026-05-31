@@ -3400,6 +3400,15 @@ func resultErrorFromError(err error) *Error {
 	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
 		resultErr.HTTPStatus = se.StatusCode()
 	}
+	if resultErr.HTTPStatus == 0 && isUnauthorizedError(err) {
+		resultErr.HTTPStatus = http.StatusUnauthorized
+	}
+	if resultErr.HTTPStatus != http.StatusUnauthorized && isPermanentRefreshError(err) {
+		resultErr.HTTPStatus = http.StatusUnauthorized
+	}
+	if resultErr.HTTPStatus == http.StatusUnauthorized && resultErr.Code == "" {
+		resultErr.Code = "unauthorized"
+	}
 	return resultErr
 }
 
@@ -3448,7 +3457,11 @@ func isUnauthorizedError(err error) bool {
 		return true
 	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
+	return strings.Contains(raw, "status 401") ||
+		strings.Contains(raw, "http 401") ||
+		strings.Contains(raw, "401 unauthorized") ||
+		strings.Contains(raw, "please try signing in again") ||
+		strings.Contains(raw, "sign in again")
 }
 
 func hasUnauthorizedAuthFailure(auth *Auth) bool {
@@ -3481,6 +3494,9 @@ func refreshErrorFromError(err error) *Error {
 	}
 	statusCode := statusCodeFromError(err)
 	if statusCode == 0 && isUnauthorizedError(err) {
+		statusCode = http.StatusUnauthorized
+	}
+	if statusCode != http.StatusUnauthorized && isPermanentRefreshError(err) {
 		statusCode = http.StatusUnauthorized
 	}
 	resultErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
@@ -6051,6 +6067,7 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 					now := time.Now()
 					if unauthorized {
 						cur.NextRefreshAfter = time.Time{}
+						cur.NextRetryAfter = now.Add(refreshPermanentBackoff)
 					} else {
 						cur.NextRefreshAfter = now.Add(refreshPermanentBackoff)
 					}
@@ -6168,6 +6185,7 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 			if permanent {
 				if unauthorized {
 					current.NextRefreshAfter = time.Time{}
+					current.NextRetryAfter = now.Add(refreshPermanentBackoff)
 				} else {
 					current.NextRefreshAfter = now.Add(refreshPermanentBackoff)
 				}

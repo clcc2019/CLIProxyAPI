@@ -39,11 +39,31 @@ func (e schedulerProviderTestExecutor) HttpRequest(ctx context.Context, auth *Au
 
 type unauthorizedRefreshTestExecutor struct {
 	schedulerProviderTestExecutor
+	err error
 }
 
 func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
 	return nil, errors.New("token refresh failed with status 401: invalid_grant")
 }
+
+type permanentRefreshStatusError struct {
+	code int
+	msg  string
+}
+
+func (e permanentRefreshStatusError) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return "permanent refresh failure"
+}
+
+func (e permanentRefreshStatusError) StatusCode() int { return e.code }
+
+func (e permanentRefreshStatusError) IsPermanentAuthError() bool { return true }
 
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
 	ctx := context.Background()
@@ -81,12 +101,63 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	if !updated.NextRefreshAfter.IsZero() {
 		t.Fatalf("NextRefreshAfter = %s, want zero for unauthorized refresh failure", updated.NextRefreshAfter)
 	}
+	if !updated.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("NextRetryAfter = %s, want future routing cooldown", updated.NextRetryAfter)
+	}
+	if AuthAvailableForModel(updated, "gpt-5-test", time.Now()) {
+		t.Fatal("expected unauthorized refresh failure to make auth unavailable for routing")
+	}
 	now := time.Now()
 	if manager.shouldRefresh(updated, now) {
 		t.Fatal("expected unauthorized auth to stop refresh attempts")
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestManager_PermanentRefreshFailureIsAuthWideEvenWhenProviderReturns400(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(unauthorizedRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+		err: permanentRefreshStatusError{
+			code: http.StatusBadRequest,
+			msg:  `token refresh failed with status 400: {"error":"invalid_grant","error_description":"refresh token already used"}`,
+		},
+	})
+
+	auth := &Auth{
+		ID:       "permanent-refresh-400",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email": "x@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if updated.LastError == nil {
+		t.Fatal("expected permanent refresh failure to be recorded")
+	}
+	if got := updated.LastError.StatusCode(); got != http.StatusUnauthorized {
+		t.Fatalf("LastError.StatusCode() = %d, want %d", got, http.StatusUnauthorized)
+	}
+	if !updated.Unavailable {
+		t.Fatal("expected permanent refresh failure to mark auth unavailable")
+	}
+	if !updated.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("NextRetryAfter = %s, want future routing cooldown", updated.NextRetryAfter)
+	}
+	if AuthAvailableForModel(updated, "gpt-5-test", time.Now()) {
+		t.Fatal("expected permanent refresh failure to block the auth for all models")
 	}
 }
 
