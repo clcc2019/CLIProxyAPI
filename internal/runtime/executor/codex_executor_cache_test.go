@@ -769,6 +769,18 @@ func TestHashCodexDedupeHeaders_DistinguishesRelevantHeaders(t *testing.T) {
 	}
 }
 
+func TestHashCodexDedupeHeadersDistinguishesTurnState(t *testing.T) {
+	left := http.Header{}
+	left.Set(codexHeaderTurnState, "turn-state-a")
+
+	right := http.Header{}
+	right.Set(codexHeaderTurnState, "turn-state-b")
+
+	if leftHash, rightHash := hashCodexDedupeHeaders(left), hashCodexDedupeHeaders(right); leftHash == rightHash {
+		t.Fatalf("hashCodexDedupeHeaders() should differ for turn-state: left=%q right=%q", leftHash, rightHash)
+	}
+}
+
 func TestHashCodexDedupeHeadersReadsCanonicalizedHeaders(t *testing.T) {
 	left := http.Header{}
 	left.Set("OpenAI-Beta", "responses=v1")
@@ -804,6 +816,33 @@ func BenchmarkHashCodexDedupeHeaders(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = hashCodexDedupeHeaders(headers)
+	}
+}
+
+func BenchmarkCodexResponseDedupeKey(b *testing.B) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-123",
+		Provider: "codex",
+	}
+	prepared := codexPreparedRequest{
+		httpReq: &http.Request{Header: http.Header{
+			"Session_id":              []string{"session-123"},
+			"OpenAI-Beta":             []string{"responses=v1"},
+			"X-Codex-Beta-Features":   []string{"beta-a"},
+			"X-Codex-Installation-Id": []string{"installation-123"},
+			misc.CodexResidencyHeader: []string{"us"},
+		}},
+		body:          bytes.Repeat([]byte(`{"input":[{"type":"message","content":"hello"}]}`), 16),
+		promptCacheID: "prompt-cache-123",
+	}
+	url := "https://chatgpt.com/backend-api/codex/responses"
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if key := executor.codexResponseDedupeKey(auth, url, prepared); key == "" {
+			b.Fatal("empty dedupe key")
+		}
 	}
 }
 

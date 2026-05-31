@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -358,6 +359,8 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 			limitedManager, limitedExecutor := newCredentialRetryLimitTestManager(t, 1)
 			if errInvoke := tc.invoke(limitedManager); errInvoke == nil {
 				t.Fatalf("expected error for limited retry execution")
+			} else if !strings.Contains(errInvoke.Error(), "max-retry-credentials=1") {
+				t.Fatalf("limited retry error = %v, want max-retry-credentials diagnostic", errInvoke)
 			}
 			if calls := limitedExecutor.Calls(); calls != 1 {
 				t.Fatalf("expected 1 call with max-retry-credentials=1, got %d", calls)

@@ -220,6 +220,78 @@ func TestDoCodexHTTPRequestDoesNotRetryZstdApplicationBadRequest(t *testing.T) {
 	}
 }
 
+func TestDoCodexHTTPRequestRebuildsBodyAcrossSeparateCalls(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+
+	var attempts int
+	var firstBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(codexRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		gotBody, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatalf("ReadAll(request body) error = %v", errRead)
+		}
+		if len(gotBody) == 0 {
+			t.Fatalf("attempt %d sent empty body", attempts)
+		}
+		if got := req.Header.Get("Content-Encoding"); got != "zstd" {
+			t.Fatalf("attempt %d Content-Encoding = %q, want zstd", attempts, got)
+		}
+		if bytes.Equal(gotBody, body) {
+			t.Fatalf("attempt %d request body should be compressed", attempts)
+		}
+		if attempts == 1 {
+			firstBody = append([]byte(nil), gotBody...)
+		} else if !bytes.Equal(gotBody, firstBody) {
+			t.Fatalf("attempt %d body differs from first compressed body", attempts)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		}, nil
+	})))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := maybeEnableCodexRequestCompressionWithConfig(req, auth, nil, body); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompressionWithConfig() error = %v", err)
+	}
+
+	prepared := codexPreparedRequest{httpReq: req, body: body}
+	for i := 0; i < 2; i++ {
+		resp, err := (&CodexExecutor{}).doCodexHTTPRequest(ctx, auth, prepared)
+		if err != nil {
+			t.Fatalf("doCodexHTTPRequest(%d) error = %v", i+1, err)
+		}
+		if resp == nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("response %d = %#v, want 200", i+1, resp)
+		}
+		if resp.Body != nil {
+			if errClose := resp.Body.Close(); errClose != nil {
+				t.Fatalf("response %d Close() error = %v", i+1, errClose)
+			}
+		}
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestDoCodexHTTPRequestRejectsNilPreparedRequest(t *testing.T) {
+	_, err := (&CodexExecutor{}).doCodexHTTPRequest(context.Background(), nil, codexPreparedRequest{})
+	if err == nil || !strings.Contains(err.Error(), "request is nil") {
+		t.Fatalf("error = %v, want request is nil", err)
+	}
+}
+
 func TestCodexShouldRetryHTTPTransportErrorHonorsCanceledParentContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

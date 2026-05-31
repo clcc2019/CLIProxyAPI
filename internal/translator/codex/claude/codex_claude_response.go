@@ -33,6 +33,7 @@ type ConvertCodexResponseToClaudeParams struct {
 	ThinkingStopPending       bool
 	ThinkingSignature         string
 	ThinkingSummarySeen       bool
+	ThinkingContentSeen       bool
 	// reverseNameMap caches the short→original tool name mapping derived from
 	// the original Claude request. It is lazily built once per stream and
 	// reused across every tool-call event so the tools array is only parsed
@@ -92,6 +93,15 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		case "response.content_part.added", "response.completed", "response.incomplete":
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 		}
+	} else if params.ThinkingBlockOpen && params.ThinkingContentSeen {
+		switch rootResult.Get("type").String() {
+		case "response.content_part.added", "response.output_text.delta", "response.completed", "response.incomplete":
+			output = append(output, finalizeCodexThinkingBlock(params)...)
+		case "response.output_item.added":
+			if rootResult.Get("item.type").String() != "reasoning" {
+				output = append(output, finalizeCodexThinkingBlock(params)...)
+			}
+		}
 	}
 
 	typeResult := rootResult.Get("type")
@@ -112,6 +122,15 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		params.ThinkingSummarySeen = true
 		output = append(output, startCodexThinkingBlock(params)...)
 	} else if typeStr == "response.reasoning_summary_text.delta" {
+		template = buildClaudeThinkingDelta(params.BlockIndex, rootResult.Get("delta").String())
+
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+	} else if typeStr == "response.reasoning_text.delta" {
+		if params.ThinkingBlockOpen && params.ThinkingStopPending {
+			output = append(output, finalizeCodexThinkingBlock(params)...)
+		}
+		params.ThinkingContentSeen = true
+		output = append(output, startCodexThinkingBlock(params)...)
 		template = buildClaudeThinkingDelta(params.BlockIndex, rootResult.Get("delta").String())
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
@@ -162,6 +181,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 		} else if itemType == "reasoning" {
 			params.ThinkingSummarySeen = false
+			params.ThinkingContentSeen = false
 			params.ThinkingSignature = itemResult.Get("encrypted_content").String()
 		}
 	} else if typeStr == "response.output_item.done" {
@@ -220,6 +240,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			}
 			if params.ThinkingSummarySeen {
 				output = append(output, finalizeCodexThinkingBlock(params)...)
+			} else if params.ThinkingContentSeen {
+				output = append(output, finalizeCodexThinkingBlock(params)...)
 			} else if reasoningText := codexClaudeReasoningText(itemResult); reasoningText != "" {
 				output = append(output, startCodexThinkingBlock(params)...)
 				template = buildClaudeThinkingDelta(params.BlockIndex, reasoningText)
@@ -230,6 +252,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			}
 			params.ThinkingSignature = ""
 			params.ThinkingSummarySeen = false
+			params.ThinkingContentSeen = false
 		}
 	} else if typeStr == "response.function_call_arguments.delta" {
 		params.HasReceivedArgumentsDelta = true
@@ -395,6 +418,9 @@ func codexClaudeToolUseFields(item gjson.Result, revNames map[string]string) (id
 			inputRaw = action.Raw
 		}
 	case "tool_search_call":
+		if strings.EqualFold(strings.TrimSpace(item.Get("execution").String()), "server") {
+			return "", "", "", false
+		}
 		name = "tool_search"
 		if args := item.Get("arguments"); args.Exists() && args.IsObject() {
 			inputRaw = args.Raw
@@ -591,6 +617,7 @@ func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []by
 	params.BlockIndex++
 	params.ThinkingBlockOpen = false
 	params.ThinkingStopPending = false
+	params.ThinkingContentSeen = false
 
 	return output
 }

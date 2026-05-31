@@ -142,7 +142,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 	}
 
-	if dataType == "response.reasoning_summary_text.delta" {
+	if dataType == "response.reasoning_summary_text.delta" || dataType == "response.reasoning_text.delta" {
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			(*param).(*ConvertCliToOpenAIParams).HasReasoningDelta = true
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
@@ -667,6 +667,9 @@ func codexChatToolCallFields(item gjson.Result, reverseNameMap map[string]string
 			arguments = action.Raw
 		}
 	case "tool_search_call":
+		if strings.EqualFold(strings.TrimSpace(item.Get("execution").String()), "server") {
+			return "", "", false
+		}
 		name = "tool_search"
 		if args := item.Get("arguments"); args.Exists() && args.Type != gjson.Null {
 			arguments = args.Raw

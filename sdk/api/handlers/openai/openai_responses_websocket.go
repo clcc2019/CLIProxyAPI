@@ -341,6 +341,29 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	lastResponseOutput := []byte("[]")
 	lastResponseID := ""
 	pinnedAuthID := ""
+	clearPinnedAuthIfUnusable := func(sessionID, reason string) bool {
+		if pinnedAuthID == "" {
+			return false
+		}
+		if h == nil || h.AuthManager == nil {
+			pinnedAuthID = ""
+			return true
+		}
+		if h.responsesWebsocketPinnedAuthReusable(pinnedAuthID) {
+			return false
+		}
+		authID := pinnedAuthID
+		pinnedAuthID = ""
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID != "" {
+			suppressNextUpstreamDisconnect(sessionID)
+			setActiveDisconnectSessionID("")
+			h.AuthManager.ResetExecutionSession(sessionID)
+			setActiveDisconnectSessionID(sessionID)
+		}
+		log.Infof("responses websocket: unpinned auth id=%s session=%s reason=%s", authID, sessionID, reason)
+		return true
+	}
 	incrementalInputSupportByModel := make(map[string]bool)
 
 	for {
@@ -381,6 +404,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				currentExecutionSessionID = generatedExecutionSessionID
 			}
 		}
+		pinnedAuthClearedBeforeNormalize := clearPinnedAuthIfUnusable(currentExecutionSessionID, "pre_normalize")
 		sessionChanged := activeExecutionSessionID != "" && activeExecutionSessionID != currentExecutionSessionID
 		normalizationLastRequest := lastRequest
 		normalizationLastResponseOutput := lastResponseOutput
@@ -393,7 +417,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		allowIncrementalInputWithPreviousResponseID := false
 		payloadPreviousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
-		if payloadPreviousResponseID != "" && payloadPreviousResponseID != normalizationLastResponseID {
+		if pinnedAuthClearedBeforeNormalize {
+			allowIncrementalInputWithPreviousResponseID = false
+		} else if payloadPreviousResponseID != "" && payloadPreviousResponseID != normalizationLastResponseID {
 			allowIncrementalInputWithPreviousResponseID = false
 		} else if pinnedAuthID != "" {
 			allowIncrementalInputWithPreviousResponseID = true
@@ -484,9 +510,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, currentExecutionSessionID)
-		if pinnedAuthID != "" && !h.responsesWebsocketPinnedAuthReusable(pinnedAuthID) {
-			pinnedAuthID = ""
-		}
+		clearPinnedAuthIfUnusable(currentExecutionSessionID, "pre_request")
 		if pinnedAuthID != "" {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 		} else {
@@ -538,6 +562,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			cliCtx, cliCancel = h.GetContextWithCancel(h, c, context.Background())
 			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 			cliCtx = handlers.WithExecutionSessionID(cliCtx, currentExecutionSessionID)
+			clearPinnedAuthIfUnusable(currentExecutionSessionID, "pre_retry")
 			if pinnedAuthID != "" && h.responsesWebsocketPinnedAuthReusable(pinnedAuthID) {
 				cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 			}
@@ -550,6 +575,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Warnf("responses websocket: forward failed id=%s error=%v", connectionID, errForward)
 			return
 		}
+		clearPinnedAuthIfUnusable(currentExecutionSessionID, "post_forward")
 		if completedForward {
 			lastRequest = requestStateToCommit
 			lastResponseOutput = completedOutput

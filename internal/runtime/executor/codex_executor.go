@@ -61,6 +61,7 @@ func contextWithCodexUnauthorizedRetryUsed(ctx context.Context) context.Context 
 type CodexExecutor struct {
 	cfg            *config.Config
 	codexAuthCache sync.Map
+	httpTurnState  *codexHTTPTurnStateStore
 	responseDedupe helps.InFlightGroup[codexNonStreamHTTPResult]
 	// refreshDedupe serialises concurrent token refreshes per auth.ID. Without
 	// it multiple in-flight requests sharing an expired access_token would each
@@ -69,7 +70,9 @@ type CodexExecutor struct {
 	refreshDedupe helps.InFlightGroup[*codexauth.CodexTokenData]
 }
 
-func NewCodexExecutor(cfg *config.Config) *CodexExecutor { return &CodexExecutor{cfg: cfg} }
+func NewCodexExecutor(cfg *config.Config) *CodexExecutor {
+	return &CodexExecutor{cfg: cfg, httpTurnState: newCodexHTTPTurnStateStore()}
+}
 
 func (e *CodexExecutor) Identifier() string { return "codex" }
 
@@ -327,6 +330,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
+	e.rememberCodexHTTPTurnState(auth, call.prepared, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := helps.ReadErrorResponseBody(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -357,6 +361,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return nil, err
 				}
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
+				e.rememberCodexHTTPTurnState(auth, call.prepared, httpResp.Header)
 				if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 					goto codexStreamResponseOK
 				}
@@ -410,6 +415,7 @@ codexStreamResponseOK:
 				}
 				httpResp = retryResp
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
+				e.rememberCodexHTTPTurnState(auth, call.prepared, httpResp.Header)
 				if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 					data, readErr := helps.ReadErrorResponseBody(httpResp.Body)
 					if errClose := httpResp.Body.Close(); errClose != nil {

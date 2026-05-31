@@ -128,6 +128,9 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 		return codexPreparedHTTPCall{}, err
 	}
 	applyCodexHeaders(prepared.httpReq, auth, token, stream, e.cfg)
+	if requestKind != codexFinalUpstreamCompact {
+		e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
+	}
 	if requestKind == codexFinalUpstreamCompact {
 		if installationID := codexResolvedInstallationID(prepared.httpReq.Header, ginHeaders, auth, e.cfg); installationID != "" {
 			prepared.httpReq.Header.Set(codexHeaderInstallationID, installationID)

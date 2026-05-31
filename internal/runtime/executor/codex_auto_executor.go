@@ -83,17 +83,27 @@ func (e *CodexAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 }
 
 func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
-	if e == nil || e.wsExec == nil {
+	if e == nil {
 		return
 	}
-	e.wsExec.CloseExecutionSession(sessionID)
+	if e.httpExec != nil {
+		e.httpExec.CloseExecutionSession(sessionID)
+	}
+	if e.wsExec != nil {
+		e.wsExec.CloseExecutionSession(sessionID)
+	}
 }
 
 func (e *CodexAutoExecutor) ResetExecutionSession(sessionID string) {
-	if e == nil || e.wsExec == nil {
+	if e == nil {
 		return
 	}
-	e.wsExec.ResetExecutionSession(sessionID)
+	if e.httpExec != nil {
+		e.httpExec.ResetExecutionSession(sessionID)
+	}
+	if e.wsExec != nil {
+		e.wsExec.ResetExecutionSession(sessionID)
+	}
 }
 
 // codexUseWebsocketTransport returns true when the downstream request context

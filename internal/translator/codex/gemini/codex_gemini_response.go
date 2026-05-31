@@ -172,7 +172,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		template, _ = sjson.SetBytes(template, "modelVersion", rootResult.Get("response.model").String())
 		template, _ = sjson.SetBytes(template, "responseId", rootResult.Get("response.id").String())
 		params.ResponseID = rootResult.Get("response.id").String()
-	} else if typeStr == "response.reasoning_summary_text.delta" { // Handle reasoning/thinking content delta
+	} else if typeStr == "response.reasoning_summary_text.delta" || typeStr == "response.reasoning_text.delta" { // Handle reasoning/thinking content delta
 		params.HasReasoningDelta = true
 		part := []byte(`{"thought":true,"text":""}`)
 		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
@@ -409,7 +409,7 @@ func codexGeminiFunctionCallPart(item gjson.Result, revNames map[string]string) 
 		}
 	case "tool_search_call":
 		name = "tool_search"
-		if item.Get("execution").String() == "server" && item.Get("call_id").String() == "" {
+		if strings.EqualFold(strings.TrimSpace(item.Get("execution").String()), "server") {
 			return nil, false
 		}
 		if args := item.Get("arguments"); args.Exists() && args.IsObject() {

@@ -34,6 +34,7 @@ var codexDedupeRelevantHeaders = []string{
 	"OpenAI-Beta",
 	"Session_id",
 	codexHeaderThreadID,
+	codexHeaderTurnState,
 	"X-Codex-Beta-Features",
 	"X-Codex-Installation-Id",
 	misc.CodexResidencyHeader,
@@ -45,9 +46,10 @@ var codexDedupeRelevantHeaders = []string{
 // stream would otherwise be consumed before the dedupe-key fingerprint could
 // read it.
 type codexPreparedRequest struct {
-	httpReq       *http.Request
-	body          []byte
-	promptCacheID string
+	httpReq            *http.Request
+	body               []byte
+	promptCacheID      string
+	executionSessionID string
 }
 
 // codexNonStreamHTTPResult is the structured result surfaced to fetch callers.
@@ -108,9 +110,10 @@ func (e *CodexExecutor) prepareCodexRequestWithKind(ctx context.Context, from sd
 		}
 	}
 	return codexPreparedRequest{
-		httpReq:       httpReq,
-		body:          body,
-		promptCacheID: cache.ID,
+		httpReq:            httpReq,
+		body:               body,
+		promptCacheID:      cache.ID,
+		executionSessionID: strings.TrimSpace(executionSessionID),
 	}, nil
 }
 
@@ -134,6 +137,7 @@ func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *c
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
+		e.rememberCodexHTTPTurnState(auth, prepared, httpResp.Header)
 
 		data, errRead := helps.ReadNonStreamResponseBody(httpResp.Body)
 		if errRead != nil {
@@ -177,6 +181,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
+		e.rememberCodexHTTPTurnState(auth, prepared, httpResp.Header)
 
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 			data, errRead := helps.ReadErrorResponseBody(httpResp.Body)
@@ -227,41 +232,106 @@ func (e *CodexExecutor) codexResponseDedupeKey(auth *cliproxyauth.Auth, url stri
 	if prepared.promptCacheID == "" || len(prepared.body) == 0 {
 		return ""
 	}
-	return strings.Join([]string{
-		"codex",
-		e.codexResponseDedupeScope(auth),
-		http.MethodPost,
-		url,
-		prepared.promptCacheID,
-		shortHashBytes(prepared.body),
-		hashCodexDedupeHeaders(prepared.httpReq.Header),
-	}, "|")
+	var builder strings.Builder
+	builder.Grow(len("codex||POST||||") + codexResponseDedupeScopeLen(auth) + len(url) + len(prepared.promptCacheID) + codexResponseDedupeHashLen*2)
+	builder.WriteString("codex|")
+	writeCodexResponseDedupeScope(&builder, auth)
+	builder.WriteByte('|')
+	builder.WriteString(http.MethodPost)
+	builder.WriteByte('|')
+	builder.WriteString(url)
+	builder.WriteByte('|')
+	builder.WriteString(prepared.promptCacheID)
+	builder.WriteByte('|')
+	writeShortHashBytes(&builder, prepared.body)
+	builder.WriteByte('|')
+	writeCodexDedupeHeadersHash(&builder, prepared.httpReq.Header)
+	return builder.String()
 }
 
 func (e *CodexExecutor) codexResponseDedupeScope(auth *cliproxyauth.Auth) string {
+	var builder strings.Builder
+	builder.Grow(codexResponseDedupeScopeLen(auth))
+	writeCodexResponseDedupeScope(&builder, auth)
+	return builder.String()
+}
+
+func writeCodexResponseDedupeScope(builder *strings.Builder, auth *cliproxyauth.Auth) {
+	if builder == nil {
+		return
+	}
 	if auth == nil {
-		return "default"
+		builder.WriteString("default")
+		return
 	}
 	if id := strings.TrimSpace(auth.ID); id != "" {
-		return "id:" + id
+		builder.WriteString("id:")
+		builder.WriteString(id)
+		return
 	}
 
-	parts := make([]string, 0, 3)
+	wrote := false
+	writePart := func(prefix string, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if wrote {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(prefix)
+		builder.WriteString(value)
+		wrote = true
+	}
 	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
-		parts = append(parts, "proxy="+proxyURL)
+		writePart("proxy=", proxyURL)
 	}
 	if auth.Attributes != nil {
 		if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
-			parts = append(parts, "base="+baseURL)
+			writePart("base=", baseURL)
 		}
 		if apiKey := strings.TrimSpace(auth.Attributes["api_key"]); apiKey != "" {
-			parts = append(parts, "api="+shortHashString(apiKey))
+			if wrote {
+				builder.WriteByte(',')
+			}
+			builder.WriteString("api=")
+			writeShortHashString(builder, apiKey)
+			wrote = true
 		}
 	}
-	if len(parts) == 0 {
-		return "default"
+	if !wrote {
+		builder.WriteString("default")
 	}
-	return strings.Join(parts, ",")
+}
+
+func codexResponseDedupeScopeLen(auth *cliproxyauth.Auth) int {
+	if auth == nil {
+		return len("default")
+	}
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return len("id:") + len(id)
+	}
+
+	length := 0
+	parts := 0
+	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+		length += len("proxy=") + len(proxyURL)
+		parts++
+	}
+	if auth.Attributes != nil {
+		if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
+			length += len("base=") + len(baseURL)
+			parts++
+		}
+		if apiKey := strings.TrimSpace(auth.Attributes["api_key"]); apiKey != "" {
+			length += len("api=") + codexResponseDedupeHashLen
+			parts++
+		}
+	}
+	if parts == 0 {
+		return len("default")
+	}
+	return length + parts - 1
 }
 
 // clone produces a defensive copy suitable for the request-specific caller.

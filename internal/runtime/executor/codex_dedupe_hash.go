@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"hash/maphash"
 	"net/http"
+	"strings"
 )
 
 // codexResponseDedupeHashLen is the number of hex characters retained from a
@@ -19,6 +20,24 @@ const codexResponseDedupeHashLen = 16
 // invariant that SHA-256 would otherwise enforce at a much higher CPU cost.
 var codexShortHashSeed = maphash.MakeSeed()
 
+type codexDedupeHeaderLookup struct {
+	key       string
+	canonical string
+}
+
+var codexDedupeRelevantHeaderLookups = buildCodexDedupeRelevantHeaderLookups()
+
+func buildCodexDedupeRelevantHeaderLookups() []codexDedupeHeaderLookup {
+	lookups := make([]codexDedupeHeaderLookup, 0, len(codexDedupeRelevantHeaders))
+	for _, key := range codexDedupeRelevantHeaders {
+		lookups = append(lookups, codexDedupeHeaderLookup{
+			key:       key,
+			canonical: http.CanonicalHeaderKey(key),
+		})
+	}
+	return lookups
+}
+
 // hashCodexDedupeHeaders produces a stable hash over the dedupe-relevant
 // subset of a request's headers. Returns the sentinel "none" when no relevant
 // headers are present, so dedupe keys generated from totally absent header
@@ -31,12 +50,12 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 	var h maphash.Hash
 	h.SetSeed(codexShortHashSeed)
 	wrote := false
-	for _, key := range codexDedupeRelevantHeaders {
-		values := codexDedupeHeaderValues(headers, key)
+	for _, lookup := range codexDedupeRelevantHeaderLookups {
+		values := codexDedupeHeaderValues(headers, lookup)
 		if len(values) == 0 {
 			continue
 		}
-		writeCodexHeaderValues(&h, key, values)
+		writeCodexHeaderValues(&h, lookup.key, values)
 		wrote = true
 	}
 	if !wrote {
@@ -45,16 +64,46 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 	return codexMaphashHex(&h)
 }
 
+func writeCodexDedupeHeadersHash(builder *strings.Builder, headers http.Header) {
+	if builder == nil {
+		return
+	}
+	if len(headers) == 0 {
+		builder.WriteString("none")
+		return
+	}
+
+	var h maphash.Hash
+	h.SetSeed(codexShortHashSeed)
+	wrote := false
+	for _, lookup := range codexDedupeRelevantHeaderLookups {
+		values := codexDedupeHeaderValues(headers, lookup)
+		if len(values) == 0 {
+			continue
+		}
+		writeCodexHeaderValues(&h, lookup.key, values)
+		wrote = true
+	}
+	if !wrote {
+		builder.WriteString("none")
+		return
+	}
+	writeCodexMaphashHex(builder, h.Sum64())
+}
+
 // codexDedupeHeaderValues returns the canonical + raw-key fallback so callers
 // do not have to pre-canonicalise keys at lookup sites.
-func codexDedupeHeaderValues(headers http.Header, key string) []string {
+func codexDedupeHeaderValues(headers http.Header, lookup codexDedupeHeaderLookup) []string {
 	if len(headers) == 0 {
 		return nil
 	}
-	if values := headers.Values(key); len(values) > 0 {
+	if values := headers[lookup.key]; len(values) > 0 {
 		return values
 	}
-	return headers[key]
+	if lookup.canonical != "" && lookup.canonical != lookup.key {
+		return headers[lookup.canonical]
+	}
+	return nil
 }
 
 // writeCodexHeaderValues streams a canonical "Key=Value\n" (or
@@ -94,11 +143,24 @@ func writeCodexHeaderValues(h *maphash.Hash, key string, values []string) {
 // "codex|scope|POST|url|promptCacheID|bodyHash|headersHash") keeps the same
 // shape.
 func codexMaphashHex(h *maphash.Hash) string {
+	encoded := codexMaphashHexBytes(h.Sum64())
+	return string(encoded[:])
+}
+
+func codexMaphashHexBytes(sum64 uint64) [codexResponseDedupeHashLen]byte {
 	var sum [8]byte
-	binary.BigEndian.PutUint64(sum[:], h.Sum64())
+	binary.BigEndian.PutUint64(sum[:], sum64)
 	var encoded [16]byte
 	hex.Encode(encoded[:], sum[:])
-	return string(encoded[:codexResponseDedupeHashLen])
+	return encoded
+}
+
+func writeCodexMaphashHex(builder *strings.Builder, sum64 uint64) {
+	if builder == nil {
+		return
+	}
+	encoded := codexMaphashHexBytes(sum64)
+	_, _ = builder.Write(encoded[:])
 }
 
 func shortHashString(value string) string {
@@ -108,9 +170,29 @@ func shortHashString(value string) string {
 	return codexMaphashHex(&h)
 }
 
+func writeShortHashString(builder *strings.Builder, value string) {
+	if builder == nil {
+		return
+	}
+	var h maphash.Hash
+	h.SetSeed(codexShortHashSeed)
+	_, _ = h.WriteString(value)
+	writeCodexMaphashHex(builder, h.Sum64())
+}
+
 func shortHashBytes(value []byte) string {
 	var h maphash.Hash
 	h.SetSeed(codexShortHashSeed)
 	_, _ = h.Write(value)
 	return codexMaphashHex(&h)
+}
+
+func writeShortHashBytes(builder *strings.Builder, value []byte) {
+	if builder == nil {
+		return
+	}
+	var h maphash.Hash
+	h.SetSeed(codexShortHashSeed)
+	_, _ = h.Write(value)
+	writeCodexMaphashHex(builder, h.Sum64())
 }

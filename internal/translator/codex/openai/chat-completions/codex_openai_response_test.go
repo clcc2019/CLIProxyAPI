@@ -150,6 +150,24 @@ func TestConvertCodexResponseToOpenAI_ToolSearchCallStreamsAsToolCall(t *testing
 	}
 }
 
+func TestConvertCodexResponseToOpenAI_ServerToolSearchIsInternal(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"tool_search_call","execution":"server","call_id":"server_search","status":"completed","arguments":{"paths":["crm"]}}}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("server-side tool search should not become a client tool call, got %d chunks: %q", len(out), out)
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.completed","response":{"status":"completed"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected completion chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.finish_reason").String(); got != "stop" {
+		t.Fatalf("finish_reason = %q, want stop; chunk=%s", got, out[0])
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_MultipleAnnouncedToolCallDoneEventsAreNotDuplicated(t *testing.T) {
 	ctx := context.Background()
 	var param any
@@ -237,6 +255,25 @@ func TestConvertCodexResponseToOpenAI_StreamReasoningDoneFallbackUsesContent(t *
 	}
 	if got := gjson.GetBytes(out[0], "choices.0.delta.reasoning_content").String(); got != "hidden trace" {
 		t.Fatalf("reasoning_content = %q, want joined content; chunk=%s", got, out[0])
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_StreamReasoningTextDelta(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"reasoning"}}`), &param)
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.reasoning_text.delta","delta":"raw trace","content_index":0}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected reasoning_text delta chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.reasoning_content").String(); got != "raw trace" {
+		t.Fatalf("reasoning_content = %q, want raw trace; chunk=%s", got, out[0])
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"raw trace"}]}}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("expected done for streamed raw reasoning item to be suppressed, got %d chunks: %q", len(out), out)
 	}
 }
 
@@ -386,6 +423,20 @@ func TestConvertCodexResponseToOpenAINonStream_ToolSearchCallAddsToolCalls(t *te
 	}
 	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "tool_calls" {
 		t.Fatalf("finish_reason = %q, want tool_calls; body=%s", got, out)
+	}
+}
+
+func TestConvertCodexResponseToOpenAINonStream_ServerToolSearchIsInternal(t *testing.T) {
+	ctx := context.Background()
+
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","status":"completed","output":[{"type":"tool_search_call","execution":"server","call_id":"server_search","status":"completed","arguments":{"paths":["crm"]}}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
+
+	if toolCalls := gjson.GetBytes(out, "choices.0.message.tool_calls"); toolCalls.Exists() && toolCalls.Type != gjson.Null {
+		t.Fatalf("server-side tool search should not become a client tool call; body=%s", out)
+	}
+	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "stop" {
+		t.Fatalf("finish_reason = %q, want stop; body=%s", got, out)
 	}
 }
 

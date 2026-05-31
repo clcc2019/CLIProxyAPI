@@ -5,6 +5,7 @@ import (
 	"container/list"
 	"encoding/binary"
 	"hash/maphash"
+	"strings"
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -330,7 +331,20 @@ func boolToByte(v bool) byte {
 
 func promptResolutionMemoInflightKey(from sdktranslator.Format, model string, scope string, executionSessionID string, payload []byte) string {
 	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, hash)
-	return string(from) + "|" + model + "|" + scope + "|" + executionSessionID + "|" + string(buf)
+	var hashBytes [8]byte
+	binary.LittleEndian.PutUint64(hashBytes[:], hash)
+
+	fromString := string(from)
+	var builder strings.Builder
+	builder.Grow(len(fromString) + len(model) + len(scope) + len(executionSessionID) + len(hashBytes) + 4)
+	builder.WriteString(fromString)
+	builder.WriteByte('|')
+	builder.WriteString(model)
+	builder.WriteByte('|')
+	builder.WriteString(scope)
+	builder.WriteByte('|')
+	builder.WriteString(executionSessionID)
+	builder.WriteByte('|')
+	_, _ = builder.Write(hashBytes[:])
+	return builder.String()
 }

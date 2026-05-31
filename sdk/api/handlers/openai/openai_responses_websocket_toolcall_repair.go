@@ -405,11 +405,12 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 	result := gjson.Parse(rawArray)
 	itemCount := int(result.Get("#").Int())
 	type repairItemMeta struct {
-		raw      string
-		callID   string
-		itemType string
-		isCall   bool
-		isOutput bool
+		raw       string
+		callID    string
+		itemType  string
+		execution string
+		isCall    bool
+		isOutput  bool
 	}
 	metas := make([]repairItemMeta, 0, itemCount)
 
@@ -425,11 +426,12 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		}
 		itemType := strings.TrimSpace(item.Get("type").String())
 		meta := repairItemMeta{
-			raw:      itemRaw,
-			callID:   strings.TrimSpace(item.Get("call_id").String()),
-			itemType: itemType,
-			isCall:   isResponsesToolCallType(itemType),
-			isOutput: isResponsesToolCallOutputType(itemType),
+			raw:       itemRaw,
+			callID:    strings.TrimSpace(item.Get("call_id").String()),
+			itemType:  itemType,
+			execution: strings.TrimSpace(item.Get("execution").String()),
+			isCall:    isResponsesToolCallType(itemType),
+			isOutput:  isResponsesToolCallOutputType(itemType),
 		}
 		metas = append(metas, meta)
 		switch {
@@ -437,9 +439,15 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 			if meta.callID == "" {
 				return true
 			}
+			if meta.itemType == "tool_search_output" && isResponsesServerToolSearchExecution(meta.execution) {
+				return true
+			}
 			outputPresent[toolOutputPresenceKey(meta.itemType, meta.callID)] = struct{}{}
 		case meta.isCall:
 			if meta.callID == "" {
+				return true
+			}
+			if meta.itemType == "tool_search_call" && isResponsesServerToolSearchExecution(meta.execution) {
 				return true
 			}
 			callPresent[meta.callID] = meta.itemType
@@ -454,6 +462,9 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 	appendFiltered := func(meta repairItemMeta, raw string) {
 		filtered = append(filtered, raw)
 		if meta.isOutput && meta.callID != "" {
+			if meta.itemType == "tool_search_output" && isResponsesServerToolSearchExecution(meta.execution) {
+				return
+			}
 			outputCache.record(sessionKey, meta.callID, json.RawMessage(raw))
 		}
 	}
@@ -463,7 +474,7 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		item := meta.raw
 		if meta.isOutput {
 			callID := meta.callID
-			if meta.itemType == "tool_search_output" && (callID == "" || strings.EqualFold(strings.TrimSpace(gjson.Get(meta.raw, "execution").String()), "server")) {
+			if meta.itemType == "tool_search_output" && (callID == "" || isResponsesServerToolSearchExecution(meta.execution)) {
 				appendFiltered(meta, item)
 				continue
 			}
@@ -527,6 +538,11 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 			continue
 		}
 
+		if meta.itemType == "tool_search_call" && isResponsesServerToolSearchExecution(meta.execution) {
+			filtered = append(filtered, item)
+			continue
+		}
+
 		expectedOutputType := toolOutputTypeForCallType(meta.itemType)
 		if _, ok := outputPresent[toolOutputPresenceKey(expectedOutputType, callID)]; ok {
 			filtered = append(filtered, item)
@@ -551,7 +567,7 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 			}
 		}
 
-		if missingOutput := buildResponsesMissingOutputForCall(meta.itemType, callID); len(missingOutput) > 0 {
+		if missingOutput := buildResponsesMissingOutputForCall(meta.itemType, meta.execution, callID); len(missingOutput) > 0 {
 			filtered = append(filtered, item)
 			filtered = append(filtered, string(missingOutput))
 			outputPresent[toolOutputPresenceKey(expectedOutputType, callID)] = struct{}{}
@@ -569,7 +585,7 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 	return joinJSONArrayRaw(filtered), nil
 }
 
-func buildResponsesMissingOutputForCall(callType string, callID string) json.RawMessage {
+func buildResponsesMissingOutputForCall(callType string, execution string, callID string) json.RawMessage {
 	switch strings.TrimSpace(callType) {
 	case "function_call":
 		return buildResponsesFunctionCallMissingOutput(callID)
@@ -578,6 +594,9 @@ func buildResponsesMissingOutputForCall(callType string, callID string) json.Raw
 	case "custom_tool_call":
 		return buildResponsesCustomToolMissingOutput(callID)
 	case "tool_search_call":
+		if isResponsesServerToolSearchExecution(execution) {
+			return nil
+		}
 		return buildResponsesToolSearchMissingOutput(callID)
 	default:
 		return nil
@@ -597,7 +616,7 @@ func buildResponsesCustomToolMissingOutput(callID string) json.RawMessage {
 }
 
 func toolOutputPresenceKey(outputType string, callID string) string {
-	return strings.TrimSpace(outputType) + "\x00" + strings.TrimSpace(callID)
+	return outputType + "\x00" + callID
 }
 
 func toolOutputTypeForCallType(callType string) string {
@@ -624,6 +643,10 @@ func buildResponsesToolSearchMissingOutput(callID string) json.RawMessage {
 	return payload
 }
 
+func isResponsesServerToolSearchExecution(execution string) bool {
+	return strings.EqualFold(strings.TrimSpace(execution), "server")
+}
+
 func recordResponsesWebsocketToolCallsFromPayload(sessionKey string, payload []byte) {
 	_, callCache, _ := currentDefaultWebsocketToolCaches()
 	recordResponsesWebsocketToolCallsFromPayloadWithCache(callCache, sessionKey, payload)
@@ -643,7 +666,11 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 			return
 		}
 		output.ForEach(func(_, item gjson.Result) bool {
-			if !isResponsesToolCallType(item.Get("type").String()) {
+			itemType := strings.TrimSpace(item.Get("type").String())
+			if !isResponsesToolCallType(itemType) {
+				return true
+			}
+			if itemType == "tool_search_call" && isResponsesServerToolSearchExecution(item.Get("execution").String()) {
 				return true
 			}
 			callID := strings.TrimSpace(item.Get("call_id").String())
@@ -658,7 +685,11 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 		if !item.Exists() || !item.IsObject() {
 			return
 		}
-		if !isResponsesToolCallType(item.Get("type").String()) {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if !isResponsesToolCallType(itemType) {
+			return
+		}
+		if itemType == "tool_search_call" && isResponsesServerToolSearchExecution(item.Get("execution").String()) {
 			return
 		}
 		callID := strings.TrimSpace(item.Get("call_id").String())

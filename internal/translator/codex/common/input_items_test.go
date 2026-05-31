@@ -185,6 +185,22 @@ func TestNormalizeResponseInputItemsInsertsMissingToolSearchOutput(t *testing.T)
 	}
 }
 
+func TestNormalizeResponseInputItemsDoesNotInsertOutputForServerToolSearchCall(t *testing.T) {
+	body := []byte(`{"input":[{"type":"tool_search_call","call_id":"server_search","execution":"server","status":"completed","arguments":{"paths":["crm"]}}]}`)
+
+	got := NormalizeFullTranscriptResponseInputItems(body)
+
+	if gotLen := gjson.GetBytes(got, "input.#").Int(); gotLen != 1 {
+		t.Fatalf("input length = %d, want 1; body=%s", gotLen, got)
+	}
+	if gotType := gjson.GetBytes(got, "input.0.type").String(); gotType != "tool_search_call" {
+		t.Fatalf("remaining type = %q, want tool_search_call; body=%s", gotType, got)
+	}
+	if gjson.GetBytes(got, "input.1").Exists() {
+		t.Fatalf("server tool_search_call should not get synthetic output; body=%s", got)
+	}
+}
+
 func TestNormalizeResponseInputItemsRemovesOrphanOutputs(t *testing.T) {
 	body := []byte(`{"input":[
 		{"type":"function_call_output","call_id":"missing_fn","output":"ok"},

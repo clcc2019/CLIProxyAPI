@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -228,6 +229,29 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 		if got.ID != wantID {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
 		}
+	}
+}
+
+func TestSchedulerPick_PinnedAuthDiagnosticWhenNoPinnedCandidateAvailable(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-pinned", Provider: "codex"},
+	)
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: "codex-pinned"},
+	}
+	_, errPick := scheduler.pickSingle(context.Background(), "codex", "", opts, map[string]struct{}{"codex-pinned": {}})
+	if errPick == nil {
+		t.Fatal("pickSingle() error = nil, want pinned auth diagnostic")
+	}
+	authErr, ok := errPick.(*Error)
+	if !ok || authErr.Code != "auth_not_found" {
+		t.Fatalf("pickSingle() error = %#v, want auth_not_found", errPick)
+	}
+	if !strings.Contains(authErr.Message, "pinned auth codex-pinned") {
+		t.Fatalf("pickSingle() message = %q, want pinned auth id", authErr.Message)
 	}
 }
 
@@ -552,6 +576,81 @@ func TestManagerPickNextSessionAffinityUsesSchedulerAndFailsOver(t *testing.T) {
 	}
 	if third == nil || third.ID == first.ID {
 		t.Fatalf("after cached auth disabled pick = %v, want a different auth than %s", third, first.ID)
+	}
+}
+
+func TestManagerPickNextSessionAffinityInvalidatesUnavailableSchedulerCache(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "affinity-a", Provider: "gemini", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register(affinity-a) error = %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"session_id":"stale-session"}}`)}
+	first, _, errPick := manager.pickNext(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("first pickNext() error = %v", errPick)
+	}
+	if first == nil {
+		t.Fatalf("first pickNext() auth = nil")
+	}
+	primaryID, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	cacheKey := sessionAffinityCacheKey("gemini", primaryID, opts.Metadata)
+	if cachedAuthID, ok := selector.cache.Get(cacheKey); !ok || cachedAuthID != first.ID {
+		t.Fatalf("cached auth = %q/%v, want %s/true", cachedAuthID, ok, first.ID)
+	}
+
+	if _, errUpdate := manager.Update(context.Background(), &Auth{ID: first.ID, Provider: "gemini", Status: StatusDisabled, Disabled: true}); errUpdate != nil {
+		t.Fatalf("Update(%s disabled) error = %v", first.ID, errUpdate)
+	}
+	if _, _, errPick = manager.pickNext(context.Background(), "gemini", "", opts, nil); errPick == nil {
+		t.Fatalf("second pickNext() error = nil, want no available auth")
+	}
+	if cachedAuthID, ok := selector.cache.Get(cacheKey); ok {
+		t.Fatalf("stale cached auth = %s, want cache entry invalidated", cachedAuthID)
+	}
+}
+
+func TestManagerPickNextSessionAffinityFallbackCachePropagatesPickError(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversationState":{"conversationId":"primary-conv","agentContinuationId":"fallback-cont"}}`)}
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" || fallbackID == "" || primaryID == fallbackID {
+		t.Fatalf("extractSessionIDs() = %q/%q, want distinct primary and fallback IDs", primaryID, fallbackID)
+	}
+	fallbackKey := sessionAffinityCacheKey("gemini", fallbackID, opts.Metadata)
+	selector.cache.Set(fallbackKey, "affinity-a")
+
+	auth, executor, errPick := manager.pickNext(context.Background(), "gemini", "", opts, nil)
+	if errPick == nil {
+		t.Fatalf("pickNext() error = nil, want executor_not_found")
+	}
+	if auth != nil || executor != nil {
+		t.Fatalf("pickNext() auth/executor = %v/%v, want nil/nil on pick error", auth, executor)
+	}
+	authErr, ok := errPick.(*Error)
+	if !ok || authErr.Code != "executor_not_found" {
+		t.Fatalf("pickNext() error = %#v, want executor_not_found", errPick)
+	}
+	primaryKey := sessionAffinityCacheKey("gemini", primaryID, opts.Metadata)
+	if cachedAuthID, ok := selector.cache.Get(primaryKey); ok {
+		t.Fatalf("primary cached auth = %s, want no write after pick error", cachedAuthID)
 	}
 }
 

@@ -34,20 +34,15 @@ var codexHTTPRetryableTransportMarkers = []string{
 }
 
 func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, prepared codexPreparedRequest) (*http.Response, error) {
+	if prepared.httpReq == nil {
+		return nil, errors.New("codex executor: request is nil")
+	}
 	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth, 0)
 	encoding := strings.ToLower(strings.TrimSpace(prepared.httpReq.Header.Get("Content-Encoding")))
 	for attempt := 0; ; attempt++ {
-		req := prepared.httpReq
-		if attempt > 0 {
-			req = codexClonePreparedHTTPRequestForRetry(prepared)
-			if req == nil {
-				return nil, errors.New("codex executor: cannot rebuild request for retry")
-			}
-			if encoding == "zstd" {
-				req.Header.Del("Content-Encoding")
-			} else if encoding != "" {
-				return nil, errors.New("codex executor: cannot retry request with pre-encoded body")
-			}
+		req, errBuild := codexHTTPRequestForAttempt(prepared, encoding, attempt)
+		if errBuild != nil {
+			return nil, errBuild
 		}
 
 		httpResp, err := httpClient.Do(req)
@@ -99,6 +94,48 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 			return nil, errSleep
 		}
 	}
+}
+
+func codexHTTPRequestForAttempt(prepared codexPreparedRequest, encoding string, attempt int) (*http.Request, error) {
+	if prepared.httpReq == nil {
+		return nil, errors.New("codex executor: request is nil")
+	}
+	if attempt <= 0 {
+		return codexClonePreparedHTTPRequestForFirstAttempt(prepared)
+	}
+	req := codexClonePreparedHTTPRequestForRetry(prepared)
+	if req == nil {
+		return nil, errors.New("codex executor: cannot rebuild request for retry")
+	}
+	if encoding == "zstd" {
+		req.Header.Del("Content-Encoding")
+	} else if encoding != "" {
+		return nil, errors.New("codex executor: cannot retry request with pre-encoded body")
+	}
+	return req, nil
+}
+
+func codexClonePreparedHTTPRequestForFirstAttempt(prepared codexPreparedRequest) (*http.Request, error) {
+	if prepared.httpReq == nil {
+		return nil, errors.New("codex executor: request is nil")
+	}
+	req := prepared.httpReq.Clone(prepared.httpReq.Context())
+	req.Header = prepared.httpReq.Header.Clone()
+	req.Host = prepared.httpReq.Host
+	if prepared.httpReq.GetBody != nil {
+		body, err := prepared.httpReq.GetBody()
+		if err == nil {
+			req.Body = body
+			req.GetBody = prepared.httpReq.GetBody
+			req.ContentLength = prepared.httpReq.ContentLength
+			return req, nil
+		}
+	}
+	if strings.TrimSpace(prepared.httpReq.Header.Get("Content-Encoding")) == "" {
+		codexResetRequestBody(req, prepared.body)
+		return req, nil
+	}
+	return nil, errors.New("codex executor: cannot rebuild pre-encoded request body")
 }
 
 func codexClonePreparedHTTPRequestForRetry(prepared codexPreparedRequest) *http.Request {

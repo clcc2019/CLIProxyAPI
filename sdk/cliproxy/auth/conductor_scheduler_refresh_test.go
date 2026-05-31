@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,97 @@ func (e permanentRefreshStatusError) Error() string {
 func (e permanentRefreshStatusError) StatusCode() int { return e.code }
 
 func (e permanentRefreshStatusError) IsPermanentAuthError() bool { return true }
+
+type requestTimeRefreshFailoverExecutor struct {
+	provider string
+	badID    string
+}
+
+func (e *requestTimeRefreshFailoverExecutor) Identifier() string { return e.provider }
+
+func (e *requestTimeRefreshFailoverExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if auth != nil && auth.ID == e.badID {
+		coord := RefreshCoordinatorFrom(ctx)
+		if coord == nil {
+			return cliproxyexecutor.Response{}, errors.New("missing refresh coordinator")
+		}
+		_, err := coord(ctx, auth)
+		return cliproxyexecutor.Response{}, err
+	}
+	if auth == nil {
+		return cliproxyexecutor.Response{}, errors.New("missing auth")
+	}
+	return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+}
+
+func (e *requestTimeRefreshFailoverExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *requestTimeRefreshFailoverExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	if auth != nil && auth.ID == e.badID {
+		return nil, permanentRefreshStatusError{
+			code: http.StatusUnauthorized,
+			msg:  `token refresh failed with status 401: {"error":{"message":"Your refresh token has already been used to generate a new access token. Please try signing in again.","type":"invalid_request_error","code":"refresh_token_reused"}}`,
+		}
+	}
+	return auth, nil
+}
+
+func (e *requestTimeRefreshFailoverExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *requestTimeRefreshFailoverExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+type proactiveCodexRefreshExecutor struct {
+	provider      string
+	refreshCalls  int
+	executeTokens []string
+}
+
+func (e *proactiveCodexRefreshExecutor) Identifier() string { return e.provider }
+
+func (e *proactiveCodexRefreshExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	token := authRefreshReloadString(auth, "access_token", "accessToken", "api_key")
+	e.executeTokens = append(e.executeTokens, token)
+	return cliproxyexecutor.Response{Payload: []byte(token)}, nil
+}
+
+func (e *proactiveCodexRefreshExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *proactiveCodexRefreshExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	e.refreshCalls++
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = map[string]any{}
+	}
+	oldToken := authRefreshReloadString(auth, "access_token", "accessToken", "api_key")
+	updated.Metadata["access_token"] = "new-access-token"
+	updated.Metadata["refresh_token"] = "new-refresh-token"
+	updated.Metadata["expired"] = time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	updated.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+	if updated.Attributes == nil {
+		updated.Attributes = map[string]string{}
+	}
+	if strings.TrimSpace(updated.Attributes["api_key"]) == strings.TrimSpace(oldToken) {
+		updated.Attributes["api_key"] = "new-access-token"
+	}
+	return updated, nil
+}
+
+func (e *proactiveCodexRefreshExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	token := authRefreshReloadString(auth, "access_token", "accessToken", "api_key")
+	return cliproxyexecutor.Response{Payload: []byte(token)}, nil
+}
+
+func (e *proactiveCodexRefreshExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
 
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
 	ctx := context.Background()
@@ -158,6 +250,162 @@ func TestManager_PermanentRefreshFailureIsAuthWideEvenWhenProviderReturns400(t *
 	}
 	if AuthAvailableForModel(updated, "gpt-5-test", time.Now()) {
 		t.Fatal("expected permanent refresh failure to block the auth for all models")
+	}
+}
+
+func TestManager_RequestTimeRefreshTokenReusedFailsOverToNextAuth(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+
+	badAuth := &Auth{ID: "aa-refresh-token-reused", Provider: "codex"}
+	goodAuth := &Auth{ID: "bb-valid-refresh", Provider: "codex"}
+	model := "gpt-5-refresh-token-reused-failover"
+	exec := &requestTimeRefreshFailoverExecutor{provider: "codex", badID: badAuth.ID}
+	manager.RegisterExecutor(exec)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := manager.Register(ctx, badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(ctx, goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v, want failover success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("Execute() payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+
+	updatedBad, ok := manager.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth %q after request", badAuth.ID)
+	}
+	if !updatedBad.Unavailable {
+		t.Fatal("expected refresh_token_reused to mark auth unavailable")
+	}
+	if updatedBad.LastError == nil || updatedBad.LastError.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("LastError = %+v, want unauthorized", updatedBad.LastError)
+	}
+	if AuthAvailableForModel(updatedBad, model, time.Now()) {
+		t.Fatal("expected refresh_token_reused auth to be blocked for routing")
+	}
+}
+
+func TestManager_RequestTimeProactiveCodexRefreshBeforeExpiry(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	exec := &proactiveCodexRefreshExecutor{provider: "codex"}
+	manager.RegisterExecutor(exec)
+
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:       "codex-proactive-expiry",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key": "old-access-token",
+		},
+		Metadata: map[string]any{
+			"access_token":  "old-access-token",
+			"refresh_token": "old-refresh-token",
+			"email":         "codex@example.com",
+			"expired":       now.Add(time.Minute).Format(time.RFC3339),
+			"last_refresh":  now.Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	resp, errExecute := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if got := string(resp.Payload); got != "new-access-token" {
+		t.Fatalf("Execute() token = %q, want refreshed token", got)
+	}
+	if exec.refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", exec.refreshCalls)
+	}
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected updated auth %q", auth.ID)
+	}
+	if got := authRefreshReloadString(updated, "access_token", "accessToken", "api_key"); got != "new-access-token" {
+		t.Fatalf("stored token = %q, want refreshed token", got)
+	}
+}
+
+func TestManager_RequestTimeProactiveCodexRefreshUsesEightDayFallback(t *testing.T) {
+	ctx := context.Background()
+
+	testCases := []struct {
+		name        string
+		lastRefresh time.Time
+		wantRefresh bool
+	}{
+		{
+			name:        "fresh last refresh",
+			lastRefresh: time.Now().UTC().Add(-7 * 24 * time.Hour),
+			wantRefresh: false,
+		},
+		{
+			name:        "stale last refresh",
+			lastRefresh: time.Now().UTC().Add(-9 * 24 * time.Hour),
+			wantRefresh: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			exec := &proactiveCodexRefreshExecutor{provider: "codex"}
+			manager.RegisterExecutor(exec)
+			auth := &Auth{
+				ID:       "codex-proactive-" + strings.ReplaceAll(tc.name, " ", "-"),
+				Provider: "codex",
+				Attributes: map[string]string{
+					"api_key": "old-access-token",
+				},
+				Metadata: map[string]any{
+					"access_token":  "old-access-token",
+					"refresh_token": "old-refresh-token",
+					"email":         "codex@example.com",
+					"last_refresh":  tc.lastRefresh.Format(time.RFC3339),
+				},
+			}
+			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			resp, errExecute := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+			wantToken := "old-access-token"
+			if tc.wantRefresh {
+				wantToken = "new-access-token"
+			}
+			if got := string(resp.Payload); got != wantToken {
+				t.Fatalf("Execute() token = %q, want %q", got, wantToken)
+			}
+			wantRefreshCalls := 0
+			if tc.wantRefresh {
+				wantRefreshCalls = 1
+			}
+			if exec.refreshCalls != wantRefreshCalls {
+				t.Fatalf("refresh calls = %d, want %d", exec.refreshCalls, wantRefreshCalls)
+			}
+		})
 	}
 }
 

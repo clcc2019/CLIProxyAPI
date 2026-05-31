@@ -133,6 +133,21 @@ func (f authFilter) matches(entry *scheduledAuth) bool {
 	return f.matchesAuthID(entry.auth.ID)
 }
 
+func authNotFoundErrorForFilter(filter authFilter) *Error {
+	return &Error{Code: "auth_not_found", Message: authUnavailableMessageForFilter(filter)}
+}
+
+func authUnavailableErrorForFilter(filter authFilter) *Error {
+	return &Error{Code: "auth_unavailable", Message: authUnavailableMessageForFilter(filter)}
+}
+
+func authUnavailableMessageForFilter(filter authFilter) string {
+	if filter.hasPinned {
+		return "no auth available for pinned auth " + filter.pinnedAuthID
+	}
+	return "no auth available"
+}
+
 // readyBucket keeps the ready views for one priority level.
 type readyBucket struct {
 	all readyView
@@ -311,14 +326,14 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	providerState := s.providers[providerKey]
+	filter := newAuthFilter(pinnedAuthID, tried)
 	if providerState == nil {
-		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		return nil, authNotFoundErrorForFilter(filter)
 	}
 	shard := providerState.ensureModel(modelKey, time.Now())
 	if shard == nil {
-		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		return nil, authNotFoundErrorForFilter(filter)
 	}
-	filter := newAuthFilter(pinnedAuthID, tried)
 	if picked := shard.pickReady(preferWebsocket, s.strategy, filter); picked != nil {
 		return picked, nil
 	}
@@ -343,14 +358,14 @@ func (s *authScheduler) pickSingleStable(ctx context.Context, provider, model st
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	providerState := s.providers[providerKey]
+	filter := newAuthFilter(pinnedAuthID, tried)
 	if providerState == nil {
-		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		return nil, authNotFoundErrorForFilter(filter)
 	}
 	shard := providerState.ensureModel(modelKey, time.Now())
 	if shard == nil {
-		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		return nil, authNotFoundErrorForFilter(filter)
 	}
-	filter := newAuthFilter(pinnedAuthID, tried)
 	if picked := shard.pickReadyStable(preferWebsocket, filter, affinityKey); picked != nil {
 		return picked, nil
 	}
@@ -385,16 +400,16 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if pinnedAuthID != "" {
+		filter := newAuthFilter(pinnedAuthID, tried)
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
-			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+			return nil, "", authNotFoundErrorForFilter(filter)
 		}
 		providerState := s.providers[providerKey]
 		if providerState == nil {
-			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+			return nil, "", authNotFoundErrorForFilter(filter)
 		}
 		shard := providerState.ensureModel(modelKey, time.Now())
-		filter := newAuthFilter(pinnedAuthID, tried)
 		if picked := shard.pickReady(false, s.strategy, filter); picked != nil {
 			return picked, providerKey, nil
 		}
@@ -535,16 +550,16 @@ func (s *authScheduler) pickMixedStable(ctx context.Context, providers []string,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if pinnedAuthID != "" {
+		filter := newAuthFilter(pinnedAuthID, tried)
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
-			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+			return nil, "", authNotFoundErrorForFilter(filter)
 		}
 		providerState := s.providers[providerKey]
 		if providerState == nil {
-			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+			return nil, "", authNotFoundErrorForFilter(filter)
 		}
 		shard := providerState.ensureModel(modelKey, time.Now())
-		filter := newAuthFilter(pinnedAuthID, tried)
 		if picked := shard.pickReadyStable(false, filter, affinityKey); picked != nil {
 			return picked, providerKey, nil
 		}
@@ -700,7 +715,7 @@ func (s *authScheduler) mixedUnavailableError(providers []string, model string, 
 		}
 	}
 	if total == 0 {
-		return &Error{Code: "auth_not_found", Message: "no auth available"}
+		return authNotFoundErrorForFilter(filter)
 	}
 	if cooldownCount == total && !earliest.IsZero() {
 		resetIn := earliest.Sub(now)
@@ -709,7 +724,7 @@ func (s *authScheduler) mixedUnavailableError(providers []string, model string, 
 		}
 		return newModelCooldownError(model, "", resetIn)
 	}
-	return &Error{Code: "auth_unavailable", Message: "no auth available"}
+	return authUnavailableErrorForFilter(filter)
 }
 
 // normalizeProviderKeys lowercases, trims, and de-duplicates provider keys while preserving order.
@@ -1381,7 +1396,7 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, filter a
 	now := time.Now()
 	total, cooldownCount, earliest := m.availabilitySummaryLocked(filter)
 	if total == 0 {
-		return &Error{Code: "auth_not_found", Message: "no auth available"}
+		return authNotFoundErrorForFilter(filter)
 	}
 	if cooldownCount == total && !earliest.IsZero() {
 		providerForError := provider
@@ -1394,7 +1409,7 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, filter a
 		}
 		return newModelCooldownError(model, providerForError, resetIn)
 	}
-	return &Error{Code: "auth_unavailable", Message: "no auth available"}
+	return authUnavailableErrorForFilter(filter)
 }
 
 func (m *modelScheduler) availabilitySummary(filter authFilter) (int, int, time.Time) {

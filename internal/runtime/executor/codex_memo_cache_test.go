@@ -38,6 +38,17 @@ func TestCodexPromptResolutionMemoSkipsOversizedPayload(t *testing.T) {
 	}
 }
 
+func BenchmarkPromptResolutionMemoInflightKey(b *testing.B) {
+	payload := bytes.Repeat([]byte(`{"input":[{"type":"message","content":"hello"}]}`), 16)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if key := promptResolutionMemoInflightKey(sdktranslator.FormatOpenAI, "gpt-5.4", "scope-123", "session-123", payload); key == "" {
+			b.Fatal("empty inflight key")
+		}
+	}
+}
+
 // TestCodexFinalUpstreamBodyMemoIncrementalEviction verifies that adding entries
 // past the byte budget evicts the oldest entries rather than clearing the whole
 // cache. Without incremental eviction, a single overflow wiped every cached

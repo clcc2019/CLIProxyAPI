@@ -123,6 +123,29 @@ func TestConvertCodexResponseToGemini_StreamReasoningDoneFallbackUsesContent(t *
 	}
 }
 
+func TestConvertCodexResponseToGemini_StreamReasoningTextDelta(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[]}`)
+	var param any
+
+	ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", originalRequest, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"reasoning"}}`), &param)
+	out := ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", originalRequest, nil, []byte(`data: {"type":"response.reasoning_text.delta","delta":"raw trace","content_index":0}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected reasoning_text delta chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "candidates.0.content.parts.0.text").String(); got != "raw trace" {
+		t.Fatalf("reasoning text = %q, want raw trace; chunk=%s", got, out[0])
+	}
+	if got := gjson.GetBytes(out[0], "candidates.0.content.parts.0.thought").Bool(); !got {
+		t.Fatalf("reasoning part should be marked thought; chunk=%s", out[0])
+	}
+
+	out = ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", originalRequest, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"raw trace"}]}}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("expected done for streamed raw reasoning item to be suppressed, got %d chunks: %q", len(out), out)
+	}
+}
+
 func TestConvertCodexResponseToGemini_StreamReasoningDeltaStateResetsPerItem(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"tools":[]}`)
@@ -215,6 +238,34 @@ func TestConvertCodexResponseToGemini_NonStreamOfficialToolCallVariants(t *testi
 	}
 	if got := gjson.GetBytes(out, "candidates.0.content.parts.2.functionCall.args.query").String(); got != "calendar" {
 		t.Fatalf("tool search query = %q, want calendar. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertCodexResponseToGemini_ServerToolSearchIsInternal(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[]}`)
+	raw := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_123",
+			"created_at":1700000000,
+			"usage":{"input_tokens":1,"output_tokens":1},
+			"output":[
+				{"type":"tool_search_call","call_id":"server_search","execution":"server","status":"completed","arguments":{"paths":["crm"]}},
+				{"type":"message","content":[{"type":"output_text","text":"done"}]}
+			]
+		}
+	}`)
+
+	out := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", originalRequest, nil, raw, nil)
+	if got := gjson.GetBytes(out, "candidates.0.content.parts.0.text").String(); got != "done" {
+		t.Fatalf("content text = %q, want done. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "candidates.0.content.parts.0.functionCall").Exists() {
+		t.Fatalf("server-side tool search should not emit a Gemini functionCall. Output: %s", string(out))
+	}
+	if gjson.GetBytes(out, "candidates.0.content.parts.1").Exists() {
+		t.Fatalf("unexpected second Gemini part for server-side tool search. Output: %s", string(out))
 	}
 }
 

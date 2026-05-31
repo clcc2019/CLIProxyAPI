@@ -2,6 +2,7 @@ package auth
 
 import (
 	"strings"
+	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 )
@@ -68,6 +69,27 @@ func parseCodexMetadataIDToken(metadata map[string]any) *codexauth.JWTClaims {
 		return nil
 	}
 	return claims
+}
+
+func codexAccessTokenExpirationTime(auth *Auth) (time.Time, bool) {
+	if auth == nil {
+		return time.Time{}, false
+	}
+	token := strings.TrimSpace(metadataString(auth.Metadata, "access_token"))
+	if token == "" {
+		token = strings.TrimSpace(metadataString(auth.Metadata, "accessToken"))
+	}
+	if token == "" && auth.Attributes != nil {
+		token = strings.TrimSpace(auth.Attributes["api_key"])
+	}
+	if token == "" {
+		return time.Time{}, false
+	}
+	claims, err := codexauth.ParseJWTToken(token)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return claims.ExpirationTime()
 }
 
 func metadataString(metadata map[string]any, key string) string {

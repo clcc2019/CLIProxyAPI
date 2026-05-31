@@ -163,13 +163,17 @@ func normalizeFullTranscriptResponseInputItems(rawJSON []byte) []byte {
 		case "custom_tool_call":
 			customToolCallIDs[item.callID] = struct{}{}
 		case "tool_search_call":
-			toolSearchCallIDs[item.callID] = struct{}{}
+			if !isServerToolSearchExecution(item.execution) {
+				toolSearchCallIDs[item.callID] = struct{}{}
+			}
 		case "function_call_output":
 			functionCallOutputIDs[item.callID] = struct{}{}
 		case "custom_tool_call_output":
 			customToolCallOutputIDs[item.callID] = struct{}{}
 		case "tool_search_output":
-			toolSearchOutputIDs[item.callID] = struct{}{}
+			if !isServerToolSearchExecution(item.execution) {
+				toolSearchOutputIDs[item.callID] = struct{}{}
+			}
 		}
 	}
 
@@ -265,7 +269,7 @@ func isOrphanResponseInputOutput(
 		_, ok := customToolCallIDs[item.callID]
 		return !ok
 	case "tool_search_output":
-		if strings.EqualFold(item.execution, "server") || item.callID == "" {
+		if isServerToolSearchExecution(item.execution) || item.callID == "" {
 			return false
 		}
 		_, ok := toolSearchCallIDs[item.callID]
@@ -296,6 +300,9 @@ func missingResponseInputOutputForCall(
 		}
 		return buildMissingCustomToolCallOutput(item.callID)
 	case "tool_search_call":
+		if isServerToolSearchExecution(item.execution) {
+			return nil
+		}
 		if _, ok := toolSearchOutputIDs[item.callID]; ok {
 			return nil
 		}
@@ -303,6 +310,10 @@ func missingResponseInputOutputForCall(
 	default:
 		return nil
 	}
+}
+
+func isServerToolSearchExecution(execution string) bool {
+	return strings.EqualFold(strings.TrimSpace(execution), "server")
 }
 
 func buildMissingFunctionCallOutput(callID string) []byte {

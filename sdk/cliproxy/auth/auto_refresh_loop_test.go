@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +168,69 @@ func TestNextRefreshCheckAt_ProviderLead_Expiry(t *testing.T) {
 	}
 }
 
+func TestNextRefreshCheckAt_CodexAccessTokenExpiry(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	expiry := now.Add(time.Hour)
+	auth := &Auth{
+		ID:       "codex-access-expiry",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":         "x@example.com",
+			"access_token":  testJWTWithExp(t, expiry),
+			"refresh_token": "refresh-token",
+		},
+	}
+
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	if !ok {
+		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
+	}
+	want := expiry.Add(-codexAccessTokenRefreshWindow)
+	if !got.Equal(want) {
+		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	}
+}
+
+func TestNextRefreshCheckAt_CodexFallbackLastRefresh(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	testCases := []struct {
+		name        string
+		lastRefresh time.Time
+		want        time.Time
+	}{
+		{
+			name:        "fresh",
+			lastRefresh: now.Add(-7 * 24 * time.Hour),
+			want:        now.Add(24 * time.Hour),
+		},
+		{
+			name:        "stale",
+			lastRefresh: now.Add(-9 * 24 * time.Hour),
+			want:        now,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &Auth{
+				ID:       "codex-fallback-" + tc.name,
+				Provider: "codex",
+				Metadata: map[string]any{
+					"email":         "x@example.com",
+					"refresh_token": "refresh-token",
+					"last_refresh":  tc.lastRefresh.Format(time.RFC3339),
+				},
+			}
+			got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+			if !ok {
+				t.Fatalf("nextRefreshCheckAt() ok = false, want true")
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	interval := 15 * time.Minute
@@ -183,4 +248,14 @@ func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 	if !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
 	}
+}
+
+func testJWTWithExp(t *testing.T, expiry time.Time) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]int64{"exp": expiry.Unix()})
+	if err != nil {
+		t.Fatalf("marshal jwt payload: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte("{}")) + "." +
+		base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }

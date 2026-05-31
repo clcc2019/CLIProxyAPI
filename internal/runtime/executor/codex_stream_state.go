@@ -122,11 +122,11 @@ func (s *codexStreamCompletionState) functionCallByItem(itemID string, outputInd
 
 func (s *codexStreamCompletionState) functionCallForEvent(eventData []byte) *codexStreamFunctionCallState {
 	itemID := strings.TrimSpace(gjson.GetBytes(eventData, "item_id").String())
-	callID := strings.TrimSpace(gjson.GetBytes(eventData, "call_id").String())
 	outputIndex := codexStreamEventOutputIndex(eventData)
 	if state := s.functionCallByItem(itemID, outputIndex); state != nil {
 		return state
 	}
+	callID := strings.TrimSpace(gjson.GetBytes(eventData, "call_id").String())
 	if key := codexStreamToolCallStateKey(itemID, callID); key != "" {
 		return s.functionCallsByItem[key]
 	}

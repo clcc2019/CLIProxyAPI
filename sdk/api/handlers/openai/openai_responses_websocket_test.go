@@ -81,8 +81,15 @@ func (s *orderedWebsocketSelector) Pick(_ context.Context, _ string, _ string, _
 }
 
 type websocketAuthCaptureExecutor struct {
+	mu       sync.Mutex
+	authIDs  []string
+	payloads [][]byte
+}
+
+type websocketPinnedAuthFailureExecutor struct {
 	mu      sync.Mutex
 	authIDs []string
+	resetID []string
 }
 
 type websocketExecutionSessionCaptureExecutor struct {
@@ -214,10 +221,17 @@ func (e *websocketAuthCaptureExecutor) Execute(context.Context, *coreauth.Auth, 
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
 
-func (e *websocketAuthCaptureExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *websocketAuthCaptureExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return e.executeStream(auth, &req)
+}
+
+func (e *websocketAuthCaptureExecutor) executeStream(auth *coreauth.Auth, req *coreexecutor.Request) (*coreexecutor.StreamResult, error) {
 	e.mu.Lock()
 	if auth != nil {
 		e.authIDs = append(e.authIDs, auth.ID)
+	}
+	if req != nil {
+		e.payloads = append(e.payloads, append([]byte(nil), req.Payload...))
 	}
 	e.mu.Unlock()
 
@@ -243,6 +257,78 @@ func (e *websocketAuthCaptureExecutor) AuthIDs() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]string(nil), e.authIDs...)
+}
+
+func (e *websocketAuthCaptureExecutor) Payloads() [][]byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([][]byte, 0, len(e.payloads))
+	for _, payload := range e.payloads {
+		out = append(out, append([]byte(nil), payload...))
+	}
+	return out
+}
+
+func (e *websocketPinnedAuthFailureExecutor) Identifier() string { return "codex" }
+
+func (e *websocketPinnedAuthFailureExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketPinnedAuthFailureExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	e.mu.Lock()
+	e.authIDs = append(e.authIDs, authID)
+	authWSCalls := 0
+	for _, id := range e.authIDs {
+		if id == "auth-ws" {
+			authWSCalls++
+		}
+	}
+	e.mu.Unlock()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	if authID == "auth-ws" && authWSCalls >= 2 {
+		chunks <- coreexecutor.StreamChunk{Err: websocketStatusError{status: http.StatusUnauthorized, msg: "expired token"}}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-upstream","output":[{"type":"message","id":"out-1"}]}}`)}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketPinnedAuthFailureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketPinnedAuthFailureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketPinnedAuthFailureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketPinnedAuthFailureExecutor) ResetExecutionSession(sessionID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.resetID = append(e.resetID, sessionID)
+}
+
+func (e *websocketPinnedAuthFailureExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.authIDs...)
+}
+
+func (e *websocketPinnedAuthFailureExecutor) ResetIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.resetID...)
 }
 
 func replaceDefaultWebsocketToolCachesForTest(outputCache, callCache *websocketToolOutputCache, refs *websocketToolSessionRefCounter) func() {
@@ -1652,6 +1738,27 @@ func TestRepairResponsesWebsocketToolCallsKeepsServerToolSearchWithoutCallID(t *
 	}
 }
 
+func TestRepairResponsesWebsocketToolCallsKeepsServerToolSearchWithCallIDWithoutOutput(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	raw := []byte(`{"input":[{"type":"tool_search_call","execution":"server","call_id":"server-search","status":"completed","arguments":{"paths":["crm"]}},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCache(cache, sessionKey, raw)
+
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
+	}
+	if input[0].Get("type").String() != "tool_search_call" ||
+		input[0].Get("execution").String() != "server" ||
+		input[0].Get("call_id").String() != "server-search" {
+		t.Fatalf("unexpected server tool search call: %s", input[0].Raw)
+	}
+	if input[1].Get("type").String() != "message" || input[1].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[1].Raw)
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsKeepsClientToolSearchOutputWithoutCallID(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -1689,6 +1796,9 @@ func TestRepairResponsesWebsocketToolCallsKeepsServerToolSearchOutputWithCallID(
 	}
 	if input[1].Get("type").String() != "message" || input[1].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected trailing item: %s", input[1].Raw)
+	}
+	if cached, ok := cache.get(sessionKey, "server-search"); ok {
+		t.Fatalf("server tool search output should not be cached: %s", cached)
 	}
 }
 
@@ -1908,6 +2018,18 @@ func TestRecordResponsesWebsocketToolSearchCallsFromCompletedPayloadWithCache(t 
 	}
 	if gjson.GetBytes(cached, "type").String() != "tool_search_call" || gjson.GetBytes(cached, "call_id").String() != "search-1" {
 		t.Fatalf("unexpected cached tool search call: %s", cached)
+	}
+}
+
+func TestRecordResponsesWebsocketServerToolSearchCallsAreNotCached(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"tool_search_call","call_id":"server-search","execution":"server","status":"completed","arguments":{"paths":["crm"]}}]}}`)
+	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, sessionKey, payload)
+
+	if cached, ok := cache.get(sessionKey, "server-search"); ok {
+		t.Fatalf("server tool search call should not be cached: %s", cached)
 	}
 }
 
@@ -3408,6 +3530,181 @@ func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 
 	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth-sse" || got[1] != "auth-ws" {
 		t.Fatalf("selected auth IDs = %v, want [auth-sse auth-ws]", got)
+	}
+}
+
+func TestResponsesWebsocketUnpinsAuthAfterAuthWideFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	selector := &orderedWebsocketSelector{order: []string{"auth-ws", "auth-fallback"}}
+	executor := &websocketPinnedAuthFailureExecutor{}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(executor)
+
+	authWS := &coreauth.Auth{
+		ID:         "auth-ws",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	authFallback := &coreauth.Auth{
+		ID:         "auth-fallback",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), authWS); err != nil {
+		t.Fatalf("Register websocket auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), authFallback); err != nil {
+		t.Fatalf("Register fallback auth: %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(authWS.ID, authWS.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authFallback.ID, authFallback.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authWS.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authFallback.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	header := http.Header{"X-Session-ID": []string{"ws-auth-failure-session"}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	requests := []string{
+		`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`,
+		`{"type":"response.create","previous_response_id":"resp-upstream","input":[{"type":"message","id":"msg-2"}]}`,
+		`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-3"}]}`,
+	}
+	wantTypes := []string{wsEventTypeCompleted, wsEventTypeError, wsEventTypeCompleted}
+	for i := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message %d: %v", i+1, errReadMessage)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wantTypes[i] {
+			t.Fatalf("message %d payload type = %s, want %s; payload=%s", i+1, got, wantTypes[i], payload)
+		}
+	}
+
+	if got := executor.AuthIDs(); len(got) != 3 || got[0] != "auth-ws" || got[1] != "auth-ws" || got[2] != "auth-fallback" {
+		t.Fatalf("selected auth IDs = %v, want [auth-ws auth-ws auth-fallback]", got)
+	}
+	resets := executor.ResetIDs()
+	if len(resets) == 0 {
+		t.Fatal("expected pinned auth failure to reset execution session")
+	}
+	if got := resets[0]; got != "ws-auth-failure-session" {
+		t.Fatalf("reset session id = %q, want ws-auth-failure-session", got)
+	}
+}
+
+func TestResponsesWebsocketClearsPinnedAuthBeforeNormalizingIncrementalRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	selector := &orderedWebsocketSelector{order: []string{"auth-ws", "auth-fallback"}}
+	executor := &websocketAuthCaptureExecutor{}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(executor)
+
+	authWS := &coreauth.Auth{
+		ID:         "auth-ws",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	authFallback := &coreauth.Auth{
+		ID:         "auth-fallback",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), authWS); err != nil {
+		t.Fatalf("Register websocket auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), authFallback); err != nil {
+		t.Fatalf("Register fallback auth: %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(authWS.ID, authWS.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authFallback.ID, authFallback.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authWS.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authFallback.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`)); errWrite != nil {
+		t.Fatalf("write first websocket message: %v", errWrite)
+	}
+	if _, payload, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
+		t.Fatalf("read first websocket message: %v", errReadMessage)
+	} else if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("first payload type = %s, want %s; payload=%s", got, wsEventTypeCompleted, payload)
+	}
+
+	updatedWS := authWS.Clone()
+	updatedWS.Unavailable = true
+	updatedWS.NextRetryAfter = time.Now().Add(time.Hour)
+	if _, err := manager.Update(coreauth.WithSkipPersist(context.Background()), updatedWS); err != nil {
+		t.Fatalf("mark websocket auth unavailable: %v", err)
+	}
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","previous_response_id":"resp-upstream","input":[{"type":"message","id":"msg-2"}]}`)); errWrite != nil {
+		t.Fatalf("write second websocket message: %v", errWrite)
+	}
+	if _, payload, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
+		t.Fatalf("read second websocket message: %v", errReadMessage)
+	} else if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("second payload type = %s, want %s; payload=%s", got, wsEventTypeCompleted, payload)
+	}
+
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth-ws" || got[1] != "auth-fallback" {
+		t.Fatalf("selected auth IDs = %v, want [auth-ws auth-fallback]", got)
+	}
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("captured payload count = %d, want 2", len(payloads))
+	}
+	if gjson.GetBytes(payloads[1], "previous_response_id").Exists() {
+		t.Fatalf("fallback auth request must not preserve previous_response_id: %s", payloads[1])
 	}
 }
 

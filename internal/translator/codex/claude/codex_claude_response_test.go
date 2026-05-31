@@ -122,6 +122,68 @@ func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillInc
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamRawReasoningTextDelta(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"enc_raw"}}`),
+		[]byte(`data: {"type":"response.reasoning_text.delta","delta":"raw ","content_index":0}`),
+		[]byte(`data: {"type":"response.reasoning_text.delta","delta":"trace","content_index":0}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"reasoning","encrypted_content":"enc_raw","content":[{"type":"reasoning_text","text":"raw trace"}]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	startCount := 0
+	stopCount := 0
+	signatureDeltaCount := 0
+	var thinkingText strings.Builder
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				if data.Get("content_block.type").String() == "thinking" {
+					startCount++
+				}
+			case "content_block_delta":
+				switch data.Get("delta.type").String() {
+				case "thinking_delta":
+					thinkingText.WriteString(data.Get("delta.thinking").String())
+				case "signature_delta":
+					signatureDeltaCount++
+					if got := data.Get("delta.signature").String(); got != "enc_raw" {
+						t.Fatalf("signature = %q, want enc_raw", got)
+					}
+				}
+			case "content_block_stop":
+				stopCount++
+			}
+		}
+	}
+
+	if startCount != 1 {
+		t.Fatalf("thinking block starts = %d, want 1", startCount)
+	}
+	if got := thinkingText.String(); got != "raw trace" {
+		t.Fatalf("thinking text = %q, want raw trace", got)
+	}
+	if signatureDeltaCount != 1 {
+		t.Fatalf("signature delta count = %d, want 1", signatureDeltaCount)
+	}
+	if stopCount != 1 {
+		t.Fatalf("thinking block stops = %d, want 1", stopCount)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamThinkingFinalizesPendingBlockBeforeNextSummaryPart(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)
@@ -738,6 +800,33 @@ func TestConvertCodexResponseToClaude_OfficialToolCallVariants(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "content.2.input.query").String(); got != "calendar" {
 		t.Fatalf("tool search query = %q, want calendar. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertCodexResponseToClaude_ServerToolSearchIsInternal(t *testing.T) {
+	ctx := context.Background()
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_1",
+			"model":"gpt-5",
+			"usage":{"input_tokens":1,"output_tokens":1},
+			"output":[
+				{"type":"tool_search_call","call_id":"server_search","execution":"server","status":"completed","arguments":{"paths":["crm"]}},
+				{"type":"message","content":[{"type":"output_text","text":"done"}]}
+			]
+		}
+	}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", nil, nil, response, nil)
+	if got := gjson.GetBytes(out, "content.0.type").String(); got != "text" {
+		t.Fatalf("content.0.type = %q, want text. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "content.0.text").String(); got != "done" {
+		t.Fatalf("content.0.text = %q, want done. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "content.1").Exists() {
+		t.Fatalf("server-side tool search should not emit a Claude tool_use. Output: %s", string(out))
 	}
 }
 
