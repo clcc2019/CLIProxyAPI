@@ -104,6 +104,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 
+	reporter.SetTranslatedReasoningEffort(plan.translated, plan.to.String())
 	url := strings.TrimSuffix(baseURL, "/") + plan.endpoint
 	httpResp, err := e.executeUpstreamBody(ctx, auth, apiKey, url, plan.translated, plan.contentType, false)
 	if err != nil {

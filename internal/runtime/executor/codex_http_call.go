@@ -123,6 +123,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	if requestKind != codexFinalUpstreamCompact {
 		body = codexApplyHTTPClientMetadataWithSource(body, nil, ginHeaders, auth, e.cfg)
 	}
+	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	prepared, err := e.prepareCodexRequestWithKind(ctx, from, executionSessionID, url, requestKind, req, body)
 	if err != nil {
 		return codexPreparedHTTPCall{}, err

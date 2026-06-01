@@ -127,6 +127,9 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// Codex configures provider-wide Codex request behavior.
+	Codex CodexConfig `yaml:"codex" json:"codex"`
+
 	// CodexHeaderDefaults configures default headers for Codex requests.
 	// The configured UserAgent takes precedence over generated or credential-provided defaults.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
@@ -202,6 +205,11 @@ type CodexHeaderDefaults struct {
 	// Residency overrides the value sent in the upstream
 	// "x-openai-internal-codex-residency" header. Empty means "do not send".
 	Residency string `yaml:"residency,omitempty" json:"residency,omitempty"`
+}
+
+// CodexConfig configures provider-wide Codex request behavior.
+type CodexConfig struct {
+	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 }
 
 // TLSConfig holds HTTPS server settings.

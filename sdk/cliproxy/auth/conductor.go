@@ -27,6 +27,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -79,16 +80,14 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval          = 5 * time.Second
-	refreshMaxConcurrency         = 16
-	refreshPendingBackoff         = time.Minute
-	refreshFailureBackoff         = 5 * time.Minute
-	refreshBatchDrainDelay        = time.Second
-	quotaBackoffBase              = time.Second
-	quotaBackoffMax               = 30 * time.Minute
-	persistDebounceWindow         = time.Second
-	codexAccessTokenRefreshWindow = 5 * time.Minute
-	codexFallbackRefreshInterval  = 8 * 24 * time.Hour
+	refreshCheckInterval   = 5 * time.Second
+	refreshMaxConcurrency  = 16
+	refreshPendingBackoff  = time.Minute
+	refreshFailureBackoff  = 5 * time.Minute
+	refreshBatchDrainDelay = time.Second
+	quotaBackoffBase       = time.Second
+	quotaBackoffMax        = 30 * time.Minute
+	persistDebounceWindow  = time.Second
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -1908,26 +1907,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
-		var errRefresh error
-		auth, errRefresh = m.refreshRequestAuthIfNeeded(execCtx, auth)
-		if errRefresh != nil {
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false}
-			applyResultError(&result, errRefresh)
-			m.MarkResult(execCtx, result)
-			clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errRefresh)
-			if isRequestInvalidError(errRefresh) {
-				return cliproxyexecutor.Response{}, errRefresh
-			}
-			lastErr = errRefresh
-			if homeMode {
-				homeAuthCount++
-			}
-			continue
-		}
-		models = m.filterExecutionModels(auth, routeModel, models, pooled)
-		if len(models) == 0 {
-			continue
-		}
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
@@ -2019,34 +1998,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
-		execCtx = WithRefreshUpdateCallback(execCtx, m.handleExecutionRefreshUpdate)
-		execCtx = WithRefreshCoordinator(execCtx, m.coordinatedRefreshForRequest)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
-		var errRefresh error
-		auth, errRefresh = m.refreshRequestAuthIfNeeded(execCtx, auth)
-		if errRefresh != nil {
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false}
-			applyResultError(&result, errRefresh)
-			m.MarkResult(execCtx, result)
-			clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errRefresh)
-			if isRequestInvalidError(errRefresh) {
-				return cliproxyexecutor.Response{}, errRefresh
-			}
-			lastErr = errRefresh
-			if homeMode {
-				homeAuthCount++
-			}
-			continue
-		}
-		models = m.filterExecutionModels(auth, routeModel, models, pooled)
-		if len(models) == 0 {
-			continue
-		}
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
@@ -2137,34 +2094,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
-		execCtx = WithRefreshUpdateCallback(execCtx, m.handleExecutionRefreshUpdate)
-		execCtx = WithRefreshCoordinator(execCtx, m.coordinatedRefreshForRequest)
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
-		var errRefresh error
-		auth, errRefresh = m.refreshRequestAuthIfNeeded(execCtx, auth)
-		if errRefresh != nil {
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false}
-			applyResultError(&result, errRefresh)
-			m.MarkResult(execCtx, result)
-			clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errRefresh)
-			if isRequestInvalidError(errRefresh) {
-				return nil, errRefresh
-			}
-			lastErr = errRefresh
-			if homeMode {
-				homeAuthCount++
-			}
-			continue
-		}
-		models = m.filterExecutionModels(auth, routeModel, models, pooled)
-		if len(models) == 0 {
-			continue
-		}
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
@@ -2176,7 +2110,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			lastErr = errPrepare
 			continue
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
+		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -2192,6 +2127,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		return streamResult, nil
 	}
+}
+
+func sanitizeDownstreamWebsocketFallbackRequest(ctx context.Context, auth *Auth, req cliproxyexecutor.Request) cliproxyexecutor.Request {
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) || authWebsocketsEnabled(auth) || len(req.Payload) == 0 {
+		return req
+	}
+	updated, errDelete := sjson.DeleteBytes(req.Payload, "generate")
+	if errDelete != nil {
+		return req
+	}
+	req.Payload = updated
+	return req
 }
 
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
@@ -2271,55 +2218,6 @@ type requestAuthPrepareLock struct {
 	mu sync.Mutex
 }
 
-func (m *Manager) refreshRequestAuthIfNeeded(ctx context.Context, auth *Auth) (*Auth, error) {
-	if m == nil || auth == nil {
-		return auth, nil
-	}
-	if !m.shouldRefreshForRequest(auth, time.Now()) {
-		return auth, nil
-	}
-	refreshed, err := m.coordinatedRefreshForRequest(ctx, auth)
-	if err != nil {
-		return auth, err
-	}
-	if refreshed == nil {
-		return auth, nil
-	}
-	return refreshed, nil
-}
-
-func (m *Manager) shouldRefreshForRequest(auth *Auth, now time.Time) bool {
-	if m == nil || authRefreshSuppressed(auth) {
-		return false
-	}
-	accountType, _ := auth.AccountInfo()
-	if accountType == "api_key" {
-		return false
-	}
-	if m.authAutoRefreshEnabled(auth) {
-		return m.shouldRefresh(auth, now)
-	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		return false
-	}
-	if strings.TrimSpace(authRefreshReloadString(auth, "refresh_token", "refreshToken")) == "" {
-		return false
-	}
-
-	lastRefresh := auth.LastRefreshedAt
-	if lastRefresh.IsZero() {
-		if ts, ok := authLastRefreshTimestamp(auth); ok {
-			lastRefresh = ts
-		}
-	}
-	expiry, hasExpiry := auth.ExpirationTime()
-	if !hasExpiry || expiry.IsZero() {
-		expiry, hasExpiry = codexAccessTokenExpirationTime(auth)
-	}
-	dueAt, ok := codexRefreshDueAt(now, lastRefresh, expiry, hasExpiry)
-	return ok && !dueAt.After(now)
-}
-
 func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
 	if m == nil || executor == nil || auth == nil {
 		return auth, nil
@@ -2375,8 +2273,13 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {
 	alias := requestedModelAliasFromOptions(opts, fallback)
 	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
-	if effort := reasoningEffortFromOptions(opts); effort != "" {
+	effort := reasoningEffortFromOptions(opts)
+	if effort != "" {
 		ctx = coreusage.WithReasoningEffort(ctx, effort)
+	}
+	serviceTier := serviceTierFromOptions(opts)
+	if serviceTier != "" {
+		ctx = coreusage.WithServiceTier(ctx, serviceTier)
 	}
 	return ctx
 }
@@ -2411,6 +2314,24 @@ func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {
 		return ""
 	}
 	raw, ok := opts.Metadata[cliproxyexecutor.ReasoningEffortMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+func serviceTierFromOptions(opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey]
 	if !ok || raw == nil {
 		return ""
 	}
@@ -3554,15 +3475,6 @@ func resultErrorFromError(err error) *Error {
 	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
 		resultErr.HTTPStatus = se.StatusCode()
 	}
-	if resultErr.HTTPStatus == 0 && isUnauthorizedError(err) {
-		resultErr.HTTPStatus = http.StatusUnauthorized
-	}
-	if resultErr.HTTPStatus != http.StatusUnauthorized && isPermanentRefreshError(err) {
-		resultErr.HTTPStatus = http.StatusUnauthorized
-	}
-	if resultErr.HTTPStatus == http.StatusUnauthorized && resultErr.Code == "" {
-		resultErr.Code = "unauthorized"
-	}
 	return resultErr
 }
 
@@ -3611,11 +3523,7 @@ func isUnauthorizedError(err error) bool {
 		return true
 	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "status 401") ||
-		strings.Contains(raw, "http 401") ||
-		strings.Contains(raw, "401 unauthorized") ||
-		strings.Contains(raw, "please try signing in again") ||
-		strings.Contains(raw, "sign in again")
+	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
 }
 
 func hasUnauthorizedAuthFailure(auth *Auth) bool {
@@ -3648,9 +3556,6 @@ func refreshErrorFromError(err error) *Error {
 	}
 	statusCode := statusCodeFromError(err)
 	if statusCode == 0 && isUnauthorizedError(err) {
-		statusCode = http.StatusUnauthorized
-	}
-	if statusCode != http.StatusUnauthorized && isPermanentRefreshError(err) {
 		statusCode = http.StatusUnauthorized
 	}
 	resultErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
@@ -5889,9 +5794,6 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	}
 
 	expiry, hasExpiry := a.ExpirationTime()
-	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") && (!hasExpiry || expiry.IsZero()) {
-		expiry, hasExpiry = codexAccessTokenExpirationTime(a)
-	}
 
 	if interval := authPreferredInterval(a); interval > 0 {
 		if hasExpiry && !expiry.IsZero() {
@@ -5909,10 +5811,6 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	}
 
 	provider := strings.ToLower(a.Provider)
-	if provider == "codex" {
-		dueAt, ok := codexRefreshDueAt(now, lastRefresh, expiry, hasExpiry)
-		return ok && !dueAt.After(now)
-	}
 	lead := ProviderRefreshLead(provider, a.Runtime)
 	if lead == nil {
 		return false
@@ -5930,24 +5828,6 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return now.Sub(lastRefresh) >= *lead
 	}
 	return true
-}
-
-func codexRefreshDueAt(now time.Time, lastRefresh time.Time, expiry time.Time, hasExpiry bool) (time.Time, bool) {
-	if hasExpiry && !expiry.IsZero() {
-		dueAt := expiry.Add(-codexAccessTokenRefreshWindow)
-		if dueAt.After(now) {
-			return dueAt, true
-		}
-		return now, true
-	}
-	if !lastRefresh.IsZero() {
-		dueAt := lastRefresh.Add(codexFallbackRefreshInterval)
-		if dueAt.After(now) {
-			return dueAt, true
-		}
-		return now, true
-	}
-	return time.Time{}, false
 }
 
 func authRefreshSuppressed(auth *Auth) bool {
@@ -6300,100 +6180,6 @@ func (m *Manager) RefreshAuthIfNeeded(ctx context.Context, auth *Auth) (*Auth, e
 	return m.coordinatedRefreshForRequest(ctx, current)
 }
 
-func (m *Manager) reloadAuthFromStoreForRequestRefresh(ctx context.Context, current *Auth) (*Auth, bool, error) {
-	if m == nil || m.store == nil || current == nil || strings.TrimSpace(current.ID) == "" {
-		return nil, false, nil
-	}
-	items, err := m.store.List(ctx)
-	if err != nil {
-		return nil, false, err
-	}
-	currentID := strings.TrimSpace(current.ID)
-	for _, candidate := range items {
-		if candidate == nil || strings.TrimSpace(candidate.ID) != currentID {
-			continue
-		}
-		reloaded := candidate.Clone()
-		// If another process already rotated this credential and persisted the
-		// new token, use that snapshot instead of spending the stale refresh token.
-		if !authRefreshReloadIdentityMatches(current, reloaded) {
-			return nil, false, nil
-		}
-		if !authRefreshTokenSnapshotChanged(current, reloaded) {
-			return nil, false, nil
-		}
-		return reloaded, true, nil
-	}
-	return nil, false, nil
-}
-
-func authRefreshReloadIdentityMatches(current, reloaded *Auth) bool {
-	if current == nil || reloaded == nil {
-		return false
-	}
-	if strings.TrimSpace(current.ID) == "" || strings.TrimSpace(current.ID) != strings.TrimSpace(reloaded.ID) {
-		return false
-	}
-	currentProvider := strings.TrimSpace(current.Provider)
-	reloadedProvider := strings.TrimSpace(reloaded.Provider)
-	if currentProvider == "" || reloadedProvider == "" || !strings.EqualFold(currentProvider, reloadedProvider) {
-		return false
-	}
-	for _, key := range []string{"account_id", "accountId", "email", "user_id", "userId"} {
-		currentValue := authRefreshReloadString(current, key)
-		reloadedValue := authRefreshReloadString(reloaded, key)
-		if currentValue == "" || reloadedValue == "" {
-			continue
-		}
-		if key == "email" {
-			if !strings.EqualFold(currentValue, reloadedValue) {
-				return false
-			}
-			continue
-		}
-		if currentValue != reloadedValue {
-			return false
-		}
-	}
-	return true
-}
-
-func authRefreshTokenSnapshotChanged(current, reloaded *Auth) bool {
-	for _, keys := range [][]string{
-		{"access_token", "accessToken"},
-		{"refresh_token", "refreshToken"},
-		{"api_key", "apiKey"},
-	} {
-		currentValue := authRefreshReloadString(current, keys...)
-		reloadedValue := authRefreshReloadString(reloaded, keys...)
-		if currentValue != reloadedValue && (currentValue != "" || reloadedValue != "") {
-			return true
-		}
-	}
-	return false
-}
-
-func authRefreshReloadString(auth *Auth, keys ...string) string {
-	if auth == nil {
-		return ""
-	}
-	for _, key := range keys {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		if value := strings.TrimSpace(metadataString(auth.Metadata, key)); value != "" {
-			return value
-		}
-		if auth.Attributes != nil {
-			if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
-				return value
-			}
-		}
-	}
-	return ""
-}
-
 // coordinatedRefreshForRequest serializes request-time refreshes through the
 // same singleflight group used by the auto-refresh loop. Without this, the
 // executor's own Refresh call could race the background loop on the same
@@ -6430,19 +6216,6 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 		if exec == nil {
 			return managerRefreshOutcome{auth: cloned}, nil
 		}
-		if reloaded, changed, reloadErr := m.reloadAuthFromStoreForRequestRefresh(ctx, cloned); reloadErr != nil {
-			logEntryWithRequestID(ctx).WithField("auth_id", id).Warnf("coordinated refresh: reload persisted auth failed: %v", reloadErr)
-		} else if changed {
-			persisted, updateErr := m.Update(WithSkipPersist(ctx), reloaded)
-			if updateErr != nil {
-				logEntryWithRequestID(ctx).WithField("auth_id", id).Warnf("coordinated refresh: apply persisted auth failed: %v", updateErr)
-				return managerRefreshOutcome{auth: reloaded, err: updateErr}, nil
-			}
-			if persisted != nil {
-				return managerRefreshOutcome{auth: persisted}, nil
-			}
-			return managerRefreshOutcome{auth: reloaded}, nil
-		}
 		updated, refreshErr := exec.Refresh(ctx, cloned)
 		if refreshErr != nil {
 			// Bubble up permanent failures so the conductor can park the
@@ -6457,7 +6230,6 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 					now := time.Now()
 					if unauthorized {
 						cur.NextRefreshAfter = time.Time{}
-						cur.NextRetryAfter = now.Add(refreshPermanentBackoff)
 					} else {
 						cur.NextRefreshAfter = now.Add(refreshPermanentBackoff)
 					}
@@ -6575,7 +6347,6 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 			if permanent {
 				if unauthorized {
 					current.NextRefreshAfter = time.Time{}
-					current.NextRetryAfter = now.Add(refreshPermanentBackoff)
 				} else {
 					current.NextRefreshAfter = now.Add(refreshPermanentBackoff)
 				}

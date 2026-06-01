@@ -408,9 +408,6 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	}
 
 	expiry, hasExpiry := auth.ExpirationTime()
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && (!hasExpiry || expiry.IsZero()) {
-		expiry, hasExpiry = codexAccessTokenExpirationTime(auth)
-	}
 
 	if pref := authPreferredInterval(auth); pref > 0 {
 		candidates := make([]time.Time, 0, 2)
@@ -437,9 +434,6 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	}
 
 	provider := strings.ToLower(auth.Provider)
-	if provider == "codex" {
-		return codexRefreshDueAt(now, lastRefresh, expiry, hasExpiry)
-	}
 	lead := ProviderRefreshLead(provider, auth.Runtime)
 	if lead == nil {
 		return time.Time{}, false

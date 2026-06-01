@@ -3,7 +3,6 @@ package helps
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -66,7 +65,7 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 
 	raw, err := client.GetRefreshAuth(ctx, authIndex)
 	if err != nil {
-		return nil, true, homeStatusErr{code: statusFromHomeRefreshClientError(err), msg: err.Error()}
+		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: err.Error()}
 	}
 
 	var env homeErrorEnvelope
@@ -100,26 +99,4 @@ func statusFromHomeErrorCode(code string) int {
 	default:
 		return http.StatusBadGateway
 	}
-}
-
-func statusFromHomeRefreshClientError(err error) int {
-	if err == nil {
-		return http.StatusBadGateway
-	}
-	type statusCoder interface{ StatusCode() int }
-	var status statusCoder
-	if errors.As(err, &status) && status != nil {
-		if code := status.StatusCode(); code > 0 {
-			return code
-		}
-	}
-	raw := strings.ToLower(strings.TrimSpace(err.Error()))
-	if strings.Contains(raw, "http 401") ||
-		strings.Contains(raw, "status 401") ||
-		strings.Contains(raw, "401 unauthorized") ||
-		strings.Contains(raw, "please try signing in again") ||
-		strings.Contains(raw, "sign in again") {
-		return http.StatusUnauthorized
-	}
-	return http.StatusBadGateway
 }

@@ -31,6 +31,7 @@ type UsageReporter struct {
 	source               string
 	modelReasoningEffort string
 	reasoning            string
+	serviceTier          string
 	requestedAt          time.Time
 	ttftMu               sync.RWMutex
 	ttft                 time.Duration
@@ -54,6 +55,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		source:      resolveUsageSource(auth, ctxAPIKey),
 		authType:    resolveUsageAuthType(auth),
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
+		serviceTier: usage.ServiceTierFromContext(ctx),
 	}
 	if suffix := strings.TrimSpace(thinking.ParseSuffix(model).RawSuffix); suffix != "" {
 		reporter.modelReasoningEffort = normalizeReasoningEffortValue(suffix)
@@ -94,6 +96,7 @@ func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 		return
 	}
 	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+	r.serviceTier = extractServiceTierFromPayload(payload)
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -294,6 +297,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AuthIndex:            r.authIndex,
 		AuthType:             r.authType,
 		ReasoningEffort:      r.reasoning,
+		ServiceTier:          r.serviceTier,
 		RequestedAt:          r.requestedAt,
 		Latency:              r.latency(),
 		TTFT:                 r.ttftDuration(),
@@ -302,6 +306,19 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ErrorMessage:         usageErrorMessage(err),
 		Detail:               detail,
 	}
+}
+
+func extractServiceTierFromPayload(payload []byte) string {
+	if len(payload) == 0 {
+		return usage.DefaultServiceTier
+	}
+	for _, path := range []string{"service_tier", "request.service_tier", "response.service_tier"} {
+		serviceTier := strings.TrimSpace(gjson.GetBytes(payload, path).String())
+		if serviceTier != "" {
+			return serviceTier
+		}
+	}
+	return usage.DefaultServiceTier
 }
 
 func failFromErrors(errs ...error) usage.Failure {
@@ -729,6 +746,9 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CachedTokens:        cacheReadTokens,
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
+	}
+	if detail.CachedTokens == 0 {
+		detail.CachedTokens = detail.CacheCreationTokens
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	return detail

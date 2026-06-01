@@ -22,8 +22,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -302,6 +304,24 @@ func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, 
 	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
 }
 
+func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	serviceTier := coreusage.DefaultServiceTier
+	node := gjson.GetBytes(rawJSON, "service_tier")
+	if node.Exists() {
+		value := strings.TrimSpace(node.String())
+		if value != "" {
+			serviceTier = value
+		}
+	}
+	meta[coreexecutor.ServiceTierMetadataKey] = serviceTier
+}
+
+// requestHeadersFromContext extracts the original HTTP request headers from the gin context
+// embedded in the provided context. This allows session affinity selectors to read
+// client headers like X-Amp-Thread-Id.
 func requestHeadersFromContext(ctx context.Context) http.Header {
 	if ctx == nil {
 		return nil
@@ -718,6 +738,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	if PassthroughHeadersEnabled(h.Cfg) {
 		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
 	}
+	setServiceTierMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -771,6 +792,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if PassthroughHeadersEnabled(h.Cfg) {
 		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
 	}
+	setServiceTierMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -840,6 +862,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	if PassthroughHeadersEnabled(h.Cfg) {
 		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
 	}
+	setServiceTierMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
