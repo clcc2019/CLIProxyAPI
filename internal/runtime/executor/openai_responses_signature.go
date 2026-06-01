@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -12,6 +13,9 @@ import (
 )
 
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
+	if !bytes.Contains(body, []byte("encrypted_content")) {
+		return body
+	}
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
 		return body
@@ -21,15 +25,19 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 		provider = "openai responses upstream"
 	}
 
-	updated := body
-	for index, item := range input.Array() {
+	items := input.Array()
+	rawItems := make([][]byte, 0, len(items))
+	changed := false
+	for index, item := range items {
+		rawItem := []byte(item.Raw)
 		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
+			rawItems = append(rawItems, rawItem)
 			continue
 		}
 
-		encryptedContentPath := fmt.Sprintf("input.%d.encrypted_content", index)
-		encryptedContent := gjson.GetBytes(updated, encryptedContentPath)
+		encryptedContent := item.Get("encrypted_content")
 		if !encryptedContent.Exists() {
+			rawItems = append(rawItems, rawItem)
 			continue
 		}
 
@@ -48,21 +56,32 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
+			rawItems = append(rawItems, rawItem)
 			continue
 		}
 
-		next, err := sjson.DeleteBytes(updated, encryptedContentPath)
+		next, err := sjson.DeleteBytes(rawItem, "encrypted_content")
 		if err != nil {
 			helps.LogWithRequestID(ctx).Debugf("%s: failed to drop invalid reasoning encrypted_content at input[%d]: %v", provider, index, err)
+			rawItems = append(rawItems, rawItem)
 			continue
 		}
-		updated = next
+		rawItems = append(rawItems, next)
+		changed = true
 
-		itemID := strings.TrimSpace(gjson.GetBytes(updated, fmt.Sprintf("input.%d.id", index)).String())
+		itemID := strings.TrimSpace(item.Get("id").String())
 		if itemID == "" {
 			itemID = fmt.Sprintf("input[%d]", index)
 		}
 		helps.LogWithRequestID(ctx).Debugf("%s: dropped invalid reasoning encrypted_content at input[%d] item_id=%q reason=%s", provider, index, itemID, reason)
+	}
+	if !changed {
+		return body
+	}
+	updated, err := helps.SetRawJSONBytes(body, "input", codexRawJSONArray(rawItems))
+	if err != nil {
+		helps.LogWithRequestID(ctx).Debugf("%s: failed to rewrite sanitized reasoning input: %v", provider, err)
+		return body
 	}
 	return updated
 }

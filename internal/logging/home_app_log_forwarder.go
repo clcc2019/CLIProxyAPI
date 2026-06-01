@@ -31,6 +31,18 @@ var currentHomeAppLogClient = func() homeAppLogClient {
 	return home.Current()
 }
 
+var (
+	homeAppLogForwarderMu sync.Mutex
+	activeHomeAppLogHook  *HomeAppLogForwarder
+)
+
+type HomeAppLogForwarderStats struct {
+	Enqueued   uint64
+	Dropped    uint64
+	Pushed     uint64
+	PushErrors uint64
+}
+
 // HomeAppLogForwarder forwards application logs to Home after the control connection is healthy.
 type HomeAppLogForwarder struct {
 	formatter log.Formatter
@@ -39,10 +51,19 @@ type HomeAppLogForwarder struct {
 	stopOnce  sync.Once
 	wg        sync.WaitGroup
 	enabled   atomic.Bool
+	enqueued  atomic.Uint64
+	dropped   atomic.Uint64
+	pushed    atomic.Uint64
+	pushErrs  atomic.Uint64
 }
 
 // StartHomeAppLogForwarder installs a logrus hook that forwards future application logs to Home.
 func StartHomeAppLogForwarder(queueSize int) *HomeAppLogForwarder {
+	homeAppLogForwarderMu.Lock()
+	defer homeAppLogForwarderMu.Unlock()
+	if activeHomeAppLogHook != nil && activeHomeAppLogHook.enabled.Load() {
+		return activeHomeAppLogHook
+	}
 	if queueSize <= 0 {
 		queueSize = defaultHomeAppLogQueueSize
 	}
@@ -55,6 +76,7 @@ func StartHomeAppLogForwarder(queueSize int) *HomeAppLogForwarder {
 	forwarder.wg.Add(1)
 	go forwarder.run()
 	log.AddHook(forwarder)
+	activeHomeAppLogHook = forwarder
 	return forwarder
 }
 
@@ -67,7 +89,24 @@ func (f *HomeAppLogForwarder) Stop() {
 		f.enabled.Store(false)
 		close(f.stop)
 		f.wg.Wait()
+		homeAppLogForwarderMu.Lock()
+		if activeHomeAppLogHook == f {
+			activeHomeAppLogHook = nil
+		}
+		homeAppLogForwarderMu.Unlock()
 	})
+}
+
+func (f *HomeAppLogForwarder) Stats() HomeAppLogForwarderStats {
+	if f == nil {
+		return HomeAppLogForwarderStats{}
+	}
+	return HomeAppLogForwarderStats{
+		Enqueued:   f.enqueued.Load(),
+		Dropped:    f.dropped.Load(),
+		Pushed:     f.pushed.Load(),
+		PushErrors: f.pushErrs.Load(),
+	}
 }
 
 // Levels implements logrus.Hook.
@@ -97,7 +136,9 @@ func (f *HomeAppLogForwarder) Fire(entry *log.Entry) error {
 	}
 	select {
 	case f.queue <- payload:
+		f.enqueued.Add(1)
 	default:
+		f.dropped.Add(1)
 	}
 	return nil
 }
@@ -150,9 +191,14 @@ func (f *HomeAppLogForwarder) forward(payload homeAppLogPayload) {
 	if errMarshal != nil {
 		return
 	}
-	if errPush := client.RPushAppLog(context.Background(), raw); errPush != nil && isHomeAppLogUnsupported(errPush) {
-		f.enabled.Store(false)
+	if errPush := client.RPushAppLog(context.Background(), raw); errPush != nil {
+		f.pushErrs.Add(1)
+		if isHomeAppLogUnsupported(errPush) {
+			f.enabled.Store(false)
+		}
+		return
 	}
+	f.pushed.Add(1)
 }
 
 func isHomeAppLogUnsupported(err error) bool {

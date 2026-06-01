@@ -3,10 +3,22 @@ package auth
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 )
+
+func TestCodexAuthenticatorRefreshLeadIsFiveDays(t *testing.T) {
+	authenticator := NewCodexAuthenticator()
+	lead := authenticator.RefreshLead()
+	if lead == nil {
+		t.Fatal("RefreshLead() = nil, want 5 days")
+	}
+	if got, want := *lead, 5*24*time.Hour; got != want {
+		t.Fatalf("RefreshLead() = %s, want %s", got, want)
+	}
+}
 
 func TestBuildAuthRecordPersistsConfiguredUserAgent(t *testing.T) {
 	authenticator := NewCodexAuthenticator()

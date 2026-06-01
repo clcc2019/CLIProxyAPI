@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +168,25 @@ func TestNextRefreshCheckAt_ProviderLead_Expiry(t *testing.T) {
 	}
 }
 
+func TestNextRefreshCheckAt_CodexAccessTokenJWTExpiryDoesNotSchedule(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	accessTokenExpiry := now.Add(time.Hour)
+	auth := &Auth{
+		ID:              "codex-access-jwt-expiry-ignored",
+		Provider:        "codex",
+		LastRefreshedAt: now,
+		Metadata: map[string]any{
+			"email":         "x@example.com",
+			"access_token":  testJWTWithExp(t, accessTokenExpiry),
+			"refresh_token": "refresh-token",
+		},
+	}
+
+	if got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+		t.Fatalf("nextRefreshCheckAt() = %s, true; want unscheduled without explicit auth expiration", got)
+	}
+}
+
 func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	interval := 15 * time.Minute
@@ -183,4 +204,14 @@ func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 	if !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
 	}
+}
+
+func testJWTWithExp(t *testing.T, expiry time.Time) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]int64{"exp": expiry.Unix()})
+	if err != nil {
+		t.Fatalf("marshal jwt payload: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte("{}")) + "." +
+		base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }

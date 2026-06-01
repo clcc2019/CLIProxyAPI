@@ -172,4 +172,59 @@ func TestHomeAppLogForwarder_DisablesForwardingWhenHomeDoesNotSupportAppLog(t *t
 	if forwarder.enabled.Load() {
 		t.Fatal("forwarder still enabled, want disabled after unsupported app-log response")
 	}
+	if got := forwarder.Stats().PushErrors; got != 1 {
+		t.Fatalf("PushErrors = %d, want 1", got)
+	}
+}
+
+func TestHomeAppLogForwarder_StatsCountEnqueuedDroppedAndPushed(t *testing.T) {
+	original := currentHomeAppLogClient
+	defer func() {
+		currentHomeAppLogClient = original
+	}()
+
+	stub := &stubHomeAppLogClient{heartbeatOK: true}
+	currentHomeAppLogClient = func() homeAppLogClient {
+		return stub
+	}
+
+	forwarder := &HomeAppLogForwarder{
+		formatter: &LogFormatter{},
+		queue:     make(chan homeAppLogPayload, 1),
+		stop:      make(chan struct{}),
+	}
+	forwarder.enabled.Store(true)
+
+	entry := log.NewEntry(log.StandardLogger())
+	entry.Time = time.Now()
+	entry.Level = log.InfoLevel
+	entry.Message = "queued"
+
+	if errFire := forwarder.Fire(entry); errFire != nil {
+		t.Fatalf("first Fire error: %v", errFire)
+	}
+	if errFire := forwarder.Fire(entry); errFire != nil {
+		t.Fatalf("second Fire error: %v", errFire)
+	}
+	stats := forwarder.Stats()
+	if stats.Enqueued != 1 || stats.Dropped != 1 {
+		t.Fatalf("stats after Fire = %+v, want Enqueued=1 Dropped=1", stats)
+	}
+
+	payload := <-forwarder.queue
+	forwarder.forward(payload)
+	stats = forwarder.Stats()
+	if stats.Pushed != 1 || stats.PushErrors != 0 {
+		t.Fatalf("stats after forward = %+v, want Pushed=1 PushErrors=0", stats)
+	}
+}
+
+func TestStartHomeAppLogForwarder_ReusesActiveForwarder(t *testing.T) {
+	first := StartHomeAppLogForwarder(1)
+	defer first.Stop()
+
+	second := StartHomeAppLogForwarder(8)
+	if second != first {
+		t.Fatal("StartHomeAppLogForwarder returned a new active forwarder, want reuse")
+	}
 }
