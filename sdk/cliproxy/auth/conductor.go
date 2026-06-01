@@ -1759,6 +1759,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	opts = ensureRequestedModelMetadata(opts, req.Model)
+	ensureOptionsMetadata(&opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1794,6 +1796,8 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	opts = ensureRequestedModelMetadata(opts, req.Model)
+	ensureOptionsMetadata(&opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1825,6 +1829,8 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	opts = ensureRequestedModelMetadata(opts, req.Model)
+	ensureOptionsMetadata(&opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1864,6 +1870,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	ensureOptionsMetadata(&opts)
 	tried := borrowAuthIDSet()
 	defer releaseAuthIDSet(tried)
 	attempted := borrowAuthIDSet()
@@ -1915,6 +1922,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			m.MarkResult(execCtx, result)
+			forceNewUpstreamSessionForNextCredential(&opts)
 			lastErr = errPrepare
 			continue
 		}
@@ -1948,6 +1956,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
+			forceNewUpstreamSessionForNextCredential(&opts)
 			lastErr = authErr
 			if homeMode {
 				homeAuthCount++
@@ -1963,6 +1972,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	ensureOptionsMetadata(&opts)
 	tried := borrowAuthIDSet()
 	defer releaseAuthIDSet(tried)
 	attempted := borrowAuthIDSet()
@@ -2012,6 +2022,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			m.MarkResult(execCtx, result)
+			forceNewUpstreamSessionForNextCredential(&opts)
 			lastErr = errPrepare
 			continue
 		}
@@ -2045,6 +2056,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
+			forceNewUpstreamSessionForNextCredential(&opts)
 			lastErr = authErr
 			if homeMode {
 				homeAuthCount++
@@ -2060,6 +2072,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	ensureOptionsMetadata(&opts)
 	tried := borrowAuthIDSet()
 	defer releaseAuthIDSet(tried)
 	attempted := borrowAuthIDSet()
@@ -2107,6 +2120,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			m.MarkResult(execCtx, result)
+			forceNewUpstreamSessionForNextCredential(&opts)
 			lastErr = errPrepare
 			continue
 		}
@@ -2119,6 +2133,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			forceNewUpstreamSessionForNextCredential(&opts)
 			lastErr = errStream
 			if homeMode {
 				homeAuthCount++
@@ -2166,12 +2181,10 @@ func withHomeAuthCount(opts cliproxyexecutor.Options, count int) cliproxyexecuto
 	if count <= 0 {
 		count = 1
 	}
-	meta := make(map[string]any, len(opts.Metadata)+1)
-	for k, v := range opts.Metadata {
-		meta[k] = v
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any, 1)
 	}
-	meta[homeAuthCountMetadataKey] = count
-	opts.Metadata = meta
+	opts.Metadata[homeAuthCountMetadataKey] = count
 	return opts
 }
 
@@ -2377,6 +2390,21 @@ func withPinnedAuthMetadata(opts cliproxyexecutor.Options, authID string) clipro
 	return opts
 }
 
+func ensureOptionsMetadata(opts *cliproxyexecutor.Options) {
+	if opts == nil || opts.Metadata != nil {
+		return
+	}
+	opts.Metadata = make(map[string]any, 1)
+}
+
+func forceNewUpstreamSessionForNextCredential(opts *cliproxyexecutor.Options) {
+	if opts == nil {
+		return
+	}
+	ensureOptionsMetadata(opts)
+	opts.Metadata[cliproxyexecutor.ForcedUpstreamSessionMetadataKey] = uuid.NewString()
+}
+
 func isRecoverableAffinityPickError(err error) bool {
 	if err == nil {
 		return false
@@ -2497,12 +2525,10 @@ func withProviderScopeMetadata(opts cliproxyexecutor.Options, providers []string
 	if metadataStringValue(opts.Metadata, cliproxyexecutor.ProviderScopeMetadataKey) == scope {
 		return opts
 	}
-	metadata := make(map[string]any, len(opts.Metadata)+1)
-	for key, value := range opts.Metadata {
-		metadata[key] = value
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any, 1)
 	}
-	metadata[cliproxyexecutor.ProviderScopeMetadataKey] = scope
-	opts.Metadata = metadata
+	opts.Metadata[cliproxyexecutor.ProviderScopeMetadataKey] = scope
 	return opts
 }
 
@@ -4387,6 +4413,7 @@ func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affin
 			return auth, executor, errPick
 		}
 		affinity.cache.Invalidate(cacheKey)
+		forceNewUpstreamSessionForNextCredential(&opts)
 	}
 
 	if fallbackID != "" && fallbackID != primaryID {
@@ -4401,6 +4428,7 @@ func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affin
 				return auth, executor, nil
 			}
 			affinity.cache.Invalidate(fallbackKey)
+			forceNewUpstreamSessionForNextCredential(&opts)
 		}
 	}
 
@@ -4636,6 +4664,7 @@ func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affini
 			return auth, executor, provider, errPick
 		}
 		affinity.cache.Invalidate(cacheKey)
+		forceNewUpstreamSessionForNextCredential(&opts)
 	}
 
 	if fallbackID != "" && fallbackID != primaryID {
@@ -4650,6 +4679,7 @@ func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affini
 				return auth, executor, provider, nil
 			}
 			affinity.cache.Invalidate(fallbackKey)
+			forceNewUpstreamSessionForNextCredential(&opts)
 		}
 	}
 

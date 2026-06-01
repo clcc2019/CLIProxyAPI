@@ -512,6 +512,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = contextWithCodexForcedUpstreamSessionFromOptions(ctx, opts)
 	if isCodexOpenAIImageRequest(opts) {
 		return e.CodexExecutor.executeOpenAIImage(ctx, auth, req, opts)
 	}
@@ -788,6 +789,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = contextWithCodexForcedUpstreamSessionFromOptions(ctx, opts)
 	if isCodexOpenAIImageRequest(opts) {
 		return e.CodexExecutor.executeOpenAIImageStream(ctx, auth, req, opts)
 	}
@@ -1179,8 +1181,13 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	})
 
 	executionSessionID := executionSessionIDFromOptions(opts)
+	body = codexSanitizeForcedUpstreamSessionBody(ctx, body)
 	body, wsHeaders := e.applyCodexPromptCacheHeaders(ctx, opts.SourceFormat, executionSessionID, req, body)
-	explicitTurnMetadata := codexExplicitWebsocketTurnMetadata(ctx, body)
+	codexApplyForcedUpstreamSessionHeaders(ctx, wsHeaders)
+	explicitTurnMetadata := ""
+	if codexForcedUpstreamSessionID(ctx) == "" {
+		explicitTurnMetadata = codexExplicitWebsocketTurnMetadata(ctx, body)
+	}
 	if explicitTurnMetadata != "" && strings.TrimSpace(wsHeaders.Get(codexHeaderTurnMetadata)) == "" {
 		wsHeaders.Set(codexHeaderTurnMetadata, explicitTurnMetadata)
 	}
@@ -1985,11 +1992,12 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					headers.Set("Chatgpt-Account-Id", trimmed)
+					codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, trimmed)
 				}
 			}
 		}
 	}
+	codexEnsureFedrampHeader(headers, ginHeaders, auth)
 
 	var attrs map[string]string
 	if auth != nil {

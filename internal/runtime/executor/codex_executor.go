@@ -77,6 +77,7 @@ func NewCodexExecutor(cfg *config.Config) *CodexExecutor {
 func (e *CodexExecutor) Identifier() string { return "codex" }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	ctx = contextWithCodexForcedUpstreamSessionFromOptions(ctx, opts)
 	if isCodexOpenAIImageRequest(opts) {
 		return e.executeOpenAIImage(ctx, auth, req, opts)
 	}
@@ -265,6 +266,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = contextWithCodexForcedUpstreamSessionFromOptions(ctx, opts)
 	if isCodexOpenAIImageRequest(opts) {
 		return e.executeOpenAIImageStream(ctx, auth, req, opts)
 	}
@@ -272,6 +274,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
 	upstreamCtx, releaseUpstreamCtx := codexDetachUpstreamContext(ctx, e.cfg)
+	upstreamCtx = contextWithCodexForcedUpstreamSessionFromOptions(upstreamCtx, opts)
 	releaseUpstreamCtxOnReturn := true
 	defer func() {
 		if releaseUpstreamCtxOnReturn {

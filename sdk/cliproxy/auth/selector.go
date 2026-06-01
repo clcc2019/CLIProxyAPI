@@ -594,6 +594,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
+		forceNewUpstreamSessionForNextCredential(&opts)
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
 		if err != nil {
 			return nil, err
@@ -613,6 +614,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					return auth, nil
 				}
 			}
+			forceNewUpstreamSessionForNextCredential(&opts)
 		}
 	}
 

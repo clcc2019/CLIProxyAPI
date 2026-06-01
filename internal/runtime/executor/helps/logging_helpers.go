@@ -262,9 +262,80 @@ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status
 	}
 	builder.WriteString("Headers:\n")
 	writeHeaders(builder, headers)
+	appendWebsocketHandshakeMetadata(builder, headers)
 	builder.WriteString("\n")
 
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
+}
+
+func appendWebsocketHandshakeMetadata(builder *strings.Builder, headers http.Header) {
+	if builder == nil || headers == nil {
+		return
+	}
+	metadata := []struct {
+		key      string
+		present  bool
+		value    string
+		presence bool
+	}{
+		{key: "x-codex-turn-state", value: firstHeaderValueCaseInsensitive(headers, "x-codex-turn-state")},
+		{key: "x-reasoning-included", present: headerPresent(headers, "x-reasoning-included"), presence: true},
+		{key: "x-models-etag", value: firstHeaderValueCaseInsensitive(headers, "x-models-etag")},
+		{key: "openai-model", value: firstHeaderValueCaseInsensitive(headers, "openai-model")},
+	}
+
+	wroteHeader := false
+	for _, item := range metadata {
+		value := item.value
+		if item.presence {
+			if !item.present {
+				continue
+			}
+			value = "true"
+		} else if value == "" {
+			continue
+		}
+		if !wroteHeader {
+			builder.WriteString("\nMetadata:\n")
+			wroteHeader = true
+		}
+		builder.WriteString(item.key)
+		builder.WriteString(": ")
+		builder.WriteString(value)
+		builder.WriteByte('\n')
+	}
+}
+
+func firstHeaderValueCaseInsensitive(headers http.Header, key string) string {
+	if headers == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(headers.Get(key)); value != "" {
+		return value
+	}
+	for existing, values := range headers {
+		if !strings.EqualFold(existing, key) || len(values) == 0 {
+			continue
+		}
+		for _, value := range values {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func headerPresent(headers http.Header, key string) bool {
+	if headers == nil {
+		return false
+	}
+	for existing := range headers {
+		if strings.EqualFold(existing, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // RecordAPIWebsocketUpgradeRejection stores a rejected websocket upgrade as an HTTP attempt.

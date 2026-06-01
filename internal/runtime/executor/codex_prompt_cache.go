@@ -47,6 +47,16 @@ func (e *CodexExecutor) resolvePromptCache(ctx context.Context, from sdktranslat
 }
 
 func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from sdktranslator.Format, executionSessionID string, req cliproxyexecutor.Request) codexPromptCacheResolution {
+	if key := codexForcedUpstreamSessionID(ctx); key != "" {
+		key = codexNormalizePromptCacheKey(key)
+		return codexPromptCacheResolution{
+			cache:            helps.CodexCache{ID: key},
+			headerEligibleID: key,
+			sessionHeaderID:  key,
+			threadHeaderID:   key,
+		}
+	}
+
 	// Path 1: the caller already supplied a prompt_cache_key. Trust it; this
 	// is the codex-rs native path (prompt_cache_key == conversation_id).
 	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "prompt_cache_key").String()); key != "" {

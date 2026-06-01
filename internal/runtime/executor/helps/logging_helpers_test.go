@@ -72,6 +72,49 @@ func TestAppendAPIWebsocketResponseRedactsSensitiveJSON(t *testing.T) {
 	}
 }
 
+func TestRecordAPIWebsocketHandshakeLogsCodexMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	ctx := logging.WithResponseHeadersHolder(context.WithValue(context.Background(), "gin", c))
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+	headers := http.Header{
+		"X-Codex-Turn-State":   []string{"turn-state-1"},
+		"X-Reasoning-Included": []string{""},
+		"X-Models-Etag":        []string{"etag-1"},
+		"OpenAI-Model":         []string{"gpt-5-codex"},
+	}
+
+	RecordAPIWebsocketHandshake(ctx, cfg, http.StatusSwitchingProtocols, headers)
+
+	value, exists := c.Get(apiWebsocketTimelineKey)
+	if !exists {
+		t.Fatal("expected websocket timeline to be stored")
+	}
+	timeline, ok := value.([]byte)
+	if !ok {
+		t.Fatalf("websocket timeline type = %T, want []byte", value)
+	}
+	got := string(timeline)
+	for _, want := range []string{
+		"Event: api.websocket.handshake",
+		"Metadata:",
+		"x-codex-turn-state: turn-state-1",
+		"x-reasoning-included: true",
+		"x-models-etag: etag-1",
+		"openai-model: gpt-5-codex",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("websocket handshake log missing %q in %s", want, got)
+		}
+	}
+
+	gotHeaders := logging.GetResponseHeaders(ctx)
+	if got := firstHeaderValueCaseInsensitive(gotHeaders, "openai-model"); got != "gpt-5-codex" {
+		t.Fatalf("stored response headers openai-model = %q, want gpt-5-codex", got)
+	}
+}
+
 func apiResponseLogText(t *testing.T, c *gin.Context) string {
 	t.Helper()
 	value, exists := c.Get(apiResponseKey)

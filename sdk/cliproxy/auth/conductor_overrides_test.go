@@ -155,6 +155,110 @@ func (e *credentialRetryLimitExecutor) Calls() int {
 	return e.calls
 }
 
+type unauthorizedFailoverSessionExecutor struct {
+	failFirstStatus int
+
+	mu     sync.Mutex
+	calls  int
+	forced []string
+}
+
+func (e *unauthorizedFailoverSessionExecutor) Identifier() string { return "codex" }
+
+func (e *unauthorizedFailoverSessionExecutor) Execute(_ context.Context, _ *Auth, _ cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	forced := ""
+	if len(opts.Metadata) > 0 {
+		forced, _ = opts.Metadata[cliproxyexecutor.ForcedUpstreamSessionMetadataKey].(string)
+	}
+	e.mu.Lock()
+	e.calls++
+	call := e.calls
+	e.forced = append(e.forced, strings.TrimSpace(forced))
+	e.mu.Unlock()
+	if call == 1 && e.failFirstStatus > 0 {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: e.failFirstStatus, Message: http.StatusText(e.failFirstStatus)}
+	}
+	if strings.TrimSpace(forced) == "" {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "missing forced upstream session"}
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *unauthorizedFailoverSessionExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: 500, Message: "unused"}
+}
+
+func (e *unauthorizedFailoverSessionExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *unauthorizedFailoverSessionExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "unused"}
+}
+
+func (e *unauthorizedFailoverSessionExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *unauthorizedFailoverSessionExecutor) ForcedSessions() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.forced...)
+}
+
+type outerRetryForcedSessionExecutor struct {
+	mu     sync.Mutex
+	calls  int
+	forced []string
+}
+
+func (e *outerRetryForcedSessionExecutor) Identifier() string { return "codex" }
+
+func (e *outerRetryForcedSessionExecutor) Execute(_ context.Context, _ *Auth, _ cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	forced := ""
+	if len(opts.Metadata) > 0 {
+		forced, _ = opts.Metadata[cliproxyexecutor.ForcedUpstreamSessionMetadataKey].(string)
+	}
+	e.mu.Lock()
+	e.calls++
+	call := e.calls
+	e.forced = append(e.forced, strings.TrimSpace(forced))
+	e.mu.Unlock()
+	if call == 1 {
+		return cliproxyexecutor.Response{}, &retryAfterStatusError{
+			status:     http.StatusTooManyRequests,
+			message:    "quota exhausted",
+			retryAfter: 5 * time.Millisecond,
+		}
+	}
+	if strings.TrimSpace(forced) == "" {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "missing forced upstream session after outer retry"}
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *outerRetryForcedSessionExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: 500, Message: "unused"}
+}
+
+func (e *outerRetryForcedSessionExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *outerRetryForcedSessionExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "unused"}
+}
+
+func (e *outerRetryForcedSessionExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *outerRetryForcedSessionExecutor) ForcedSessions() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.forced...)
+}
+
 type authFallbackExecutor struct {
 	id string
 
@@ -374,6 +478,129 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 				t.Fatalf("expected 2 calls with max-retry-credentials=0, got %d", calls)
 			}
 		})
+	}
+}
+
+func TestManager_CredentialFailoverForcesNewUpstreamSession(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0)
+	executor := &unauthorizedFailoverSessionExecutor{failFirstStatus: http.StatusTooManyRequests}
+	m.RegisterExecutor(executor)
+
+	baseID := uuid.NewString()
+	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "codex"}
+	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "codex"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error: %v", errExecute)
+	}
+	forced := executor.ForcedSessions()
+	if len(forced) != 2 {
+		t.Fatalf("forced sessions = %#v, want two calls", forced)
+	}
+	if forced[0] != "" {
+		t.Fatalf("first call forced session = %q, want empty", forced[0])
+	}
+	if strings.TrimSpace(forced[1]) == "" {
+		t.Fatalf("second call forced session should be set after credential failover: %#v", forced)
+	}
+}
+
+func TestManager_CachedUnavailableAuthReselectForcesNewUpstreamSession(t *testing.T) {
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{})
+	m := NewManager(nil, affinity, nil)
+	m.SetRetryConfig(0, 0, 0)
+	executor := &unauthorizedFailoverSessionExecutor{}
+	m.RegisterExecutor(executor)
+
+	baseID := uuid.NewString()
+	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "codex", Disabled: true, Status: StatusDisabled}
+	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "codex"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+		affinity.Stop()
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	metadata := map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+	}
+	affinity.cache.Set("providers:codex::exec:session-1", auth1.ID)
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{Metadata: metadata})
+	if errExecute != nil {
+		t.Fatalf("Execute error: %v", errExecute)
+	}
+	forced := executor.ForcedSessions()
+	if len(forced) != 1 {
+		t.Fatalf("forced sessions = %#v, want one call", forced)
+	}
+	if strings.TrimSpace(forced[0]) == "" {
+		t.Fatalf("first call forced session should be set after cached auth was reselected: %#v", forced)
+	}
+}
+
+func TestManager_OuterRetryPreservesForcedUpstreamSession(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(1, 100*time.Millisecond, 1)
+	executor := &outerRetryForcedSessionExecutor{}
+	m.RegisterExecutor(executor)
+
+	baseID := uuid.NewString()
+	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "codex"}
+	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "codex"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error: %v", errExecute)
+	}
+	forced := executor.ForcedSessions()
+	if len(forced) != 2 {
+		t.Fatalf("forced sessions = %#v, want two calls", forced)
+	}
+	if forced[0] != "" {
+		t.Fatalf("first call forced session = %q, want empty", forced[0])
+	}
+	if strings.TrimSpace(forced[1]) == "" {
+		t.Fatalf("second outer retry call should preserve forced session: %#v", forced)
 	}
 }
 

@@ -1538,6 +1538,26 @@ func TestApplyCodexWebsocketHeadersNormalizesVersionAndPassesThroughClientIdenti
 	}
 }
 
+func TestApplyCodexWebsocketHeadersSetsFedrampForOAuthAuth(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token": "oauth-token",
+			"account_id":   "account-1",
+			"fedramp":      true,
+		},
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+	}
+
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "oauth-token", nil)
+
+	if got := headers.Get(codexHeaderOpenAIFedramp); got != "true" {
+		t.Fatalf("%s = %q, want true", codexHeaderOpenAIFedramp, got)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersUsesDerivedSessionHeadersWithoutForwardingConversationID(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
@@ -1752,8 +1772,11 @@ func TestApplyCodexHeadersAddsAccountIDForMirroredOAuthAccessToken(t *testing.T)
 
 	applyCodexHeaders(req, auth, "access-token", true, nil)
 
-	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct_123" {
-		t.Fatalf("Chatgpt-Account-Id = %q, want acct_123", got)
+	if got := req.Header[codexHeaderChatGPTAccountID]; len(got) != 1 || got[0] != "acct_123" {
+		t.Fatalf("%s values = %#v, want [acct_123]", codexHeaderChatGPTAccountID, got)
+	}
+	if _, ok := req.Header[codexHeaderChatGPTAccountID]; !ok {
+		t.Fatalf("expected exact %s header key, got %#v", codexHeaderChatGPTAccountID, req.Header)
 	}
 }
 
@@ -1771,8 +1794,11 @@ func TestApplyCodexWebsocketHeadersAddsAccountIDForMirroredOAuthAccessToken(t *t
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "access-token", nil)
 
-	if got := headers.Get("Chatgpt-Account-Id"); got != "acct_123" {
-		t.Fatalf("Chatgpt-Account-Id = %q, want acct_123", got)
+	if got := headers[codexHeaderChatGPTAccountID]; len(got) != 1 || got[0] != "acct_123" {
+		t.Fatalf("%s values = %#v, want [acct_123]", codexHeaderChatGPTAccountID, got)
+	}
+	if _, ok := headers[codexHeaderChatGPTAccountID]; !ok {
+		t.Fatalf("expected exact %s header key, got %#v", codexHeaderChatGPTAccountID, headers)
 	}
 }
 

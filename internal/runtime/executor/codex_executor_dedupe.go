@@ -30,7 +30,7 @@ var codexDedupeIgnoredHeaders = map[string]struct{}{
 // codexDedupeRelevantHeaders lists the headers whose values genuinely
 // influence the upstream response and therefore must separate dedupe buckets.
 var codexDedupeRelevantHeaders = []string{
-	"Chatgpt-Account-Id",
+	codexHeaderChatGPTAccountID,
 	"OpenAI-Beta",
 	"Session_id",
 	codexHeaderThreadID,
@@ -79,7 +79,7 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 func (e *CodexExecutor) prepareCodexRequestWithKind(ctx context.Context, from sdktranslator.Format, executionSessionID string, url string, requestKind codexFinalUpstreamRequestKind, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
 	resolution := e.resolvePromptCacheResolution(ctx, from, executionSessionID, req)
 	cache := resolution.cache
-	body := rawJSON
+	body := codexSanitizeForcedUpstreamSessionBody(ctx, rawJSON)
 	isCompact := requestKind == codexFinalUpstreamCompact
 	if cache.ID != "" {
 		body = codexSetPromptCacheKey(body, cache.ID)
@@ -109,6 +109,7 @@ func (e *CodexExecutor) prepareCodexRequestWithKind(ctx context.Context, from sd
 			httpReq.Header.Set(codexHeaderThreadID, threadHeaderValue)
 		}
 	}
+	codexApplyForcedUpstreamSessionHeaders(ctx, httpReq.Header)
 	return codexPreparedRequest{
 		httpReq:            httpReq,
 		body:               body,

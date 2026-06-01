@@ -80,10 +80,11 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	if !apiKeyAuth && auth != nil && auth.Metadata != nil {
 		if accountID, ok := auth.Metadata["account_id"].(string); ok {
 			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-				headers.Set("Chatgpt-Account-Id", trimmed)
+				codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, trimmed)
 			}
 		}
 	}
+	codexEnsureFedrampHeader(headers, ginHeaders, auth)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -103,6 +104,78 @@ func trimHeaderValue(h http.Header, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(h.Get(key))
+}
+
+func codexSetHeaderCasePreserved(headers http.Header, key string, value string) {
+	if headers == nil {
+		return
+	}
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if key == "" || value == "" {
+		return
+	}
+	for existingKey := range headers {
+		if strings.EqualFold(existingKey, key) {
+			delete(headers, existingKey)
+		}
+	}
+	headers[key] = []string{value}
+}
+
+func codexEnsureFedrampHeader(target http.Header, source http.Header, auth *cliproxyauth.Auth) {
+	if target == nil || codexIsAPIKeyAuth(auth) {
+		return
+	}
+	if value := firstNonEmptyHeaderValue(target, source, codexHeaderOpenAIFedramp); value != "" {
+		if parsed, ok := codexParseBoolLike(value); ok && parsed {
+			target.Set(codexHeaderOpenAIFedramp, "true")
+		}
+		return
+	}
+	if codexAuthBoolValue(auth, []string{"fedramp", "openai_fedramp", "x_openai_fedramp", codexHeaderOpenAIFedramp}) {
+		target.Set(codexHeaderOpenAIFedramp, "true")
+	}
+}
+
+func codexAuthBoolValue(auth *cliproxyauth.Auth, keys []string) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Attributes != nil {
+		for _, key := range keys {
+			if parsed, ok := codexParseBoolLike(auth.Attributes[key]); ok {
+				return parsed
+			}
+		}
+	}
+	if auth.Metadata != nil {
+		for _, key := range keys {
+			if parsed, ok := codexParseBoolLike(auth.Metadata[key]); ok {
+				return parsed
+			}
+		}
+	}
+	return false
+}
+
+func codexParseBoolLike(value any) (bool, bool) {
+	switch v := value.(type) {
+	case bool:
+		return v, true
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return false, false
+		}
+		parsed, err := strconv.ParseBool(trimmed)
+		if err != nil {
+			return false, false
+		}
+		return parsed, true
+	default:
+		return false, false
+	}
 }
 
 func codexDefaultVersionHeader() string {

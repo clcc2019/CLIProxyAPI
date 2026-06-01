@@ -136,6 +136,8 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	}
 	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "request_kind", codexCompactionRequestKind)
 	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "window_id", gotHeaders.Get(codexHeaderWindowID))
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "compaction.implementation", codexDefaultCompactionImplementation)
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "compaction.strategy", codexDefaultCompactionStrategy)
 	if got := gotHeaders.Get(codexHeaderTurnState); got != "" {
 		t.Fatalf("%s should not be sent by default to responses/compact: %q", codexHeaderTurnState, got)
 	}
