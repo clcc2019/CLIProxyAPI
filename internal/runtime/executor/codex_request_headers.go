@@ -27,6 +27,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 
 	ginHeaders := codexGinHeadersFromContext(r.Context())
+	codexPinClientProfileFromFirstRequest(r.Context(), auth, headers, ginHeaders)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
 	codexEnsureVersionHeader(headers, ginHeaders)

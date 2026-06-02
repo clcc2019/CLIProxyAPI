@@ -2004,6 +2004,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	}
 
 	ginHeaders := codexGinHeadersFromContext(ctx)
+	codexPinClientProfileFromFirstRequest(ctx, auth, headers, ginHeaders)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")

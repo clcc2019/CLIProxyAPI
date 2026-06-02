@@ -48,6 +48,34 @@ func (e refreshUpdateExecutor) HttpRequest(context.Context, *Auth, *http.Request
 	return nil, nil
 }
 
+type executionAuthUpdateExecutor struct{}
+
+func (e executionAuthUpdateExecutor) Identifier() string { return "codex" }
+
+func (e executionAuthUpdateExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	updated.Metadata["headers"] = map[string]any{"X-Codex-Beta-Features": "first-feature"}
+	PublishAuthUpdate(ctx, updated)
+	return cliproxyexecutor.Response{Payload: []byte(`{}`)}, nil
+}
+
+func (e executionAuthUpdateExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e executionAuthUpdateExecutor) Refresh(context.Context, *Auth) (*Auth, error) { return nil, nil }
+
+func (e executionAuthUpdateExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e executionAuthUpdateExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
 func TestManagerPersistsExecutionRefreshUpdate(t *testing.T) {
 	store := &refreshUpdateCaptureStore{}
 	manager := NewManager(store, nil, nil)
@@ -72,6 +100,37 @@ func TestManagerPersistsExecutionRefreshUpdate(t *testing.T) {
 	}
 	if got := store.last.Metadata["access_token"]; got != "new-token" {
 		t.Fatalf("persisted access token = %v, want new-token", got)
+	}
+}
+
+func TestManagerPersistsExecutionAuthUpdate(t *testing.T) {
+	store := &refreshUpdateCaptureStore{}
+	manager := NewManager(store, nil, nil)
+	manager.RegisterExecutor(executionAuthUpdateExecutor{})
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "token",
+		},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	store.last = nil
+
+	if _, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if store.last == nil {
+		t.Fatal("expected auth update to be persisted")
+	}
+	headers, ok := store.last.Metadata["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("persisted headers = %T, want map[string]any", store.last.Metadata["headers"])
+	}
+	if got := headers["X-Codex-Beta-Features"]; got != "first-feature" {
+		t.Fatalf("persisted beta features = %v, want first-feature", got)
 	}
 }
 

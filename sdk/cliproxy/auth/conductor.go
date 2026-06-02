@@ -1299,6 +1299,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
 	ctx = WithRefreshUpdateCallback(ctx, m.handleExecutionRefreshUpdate)
+	ctx = WithAuthUpdateCallback(ctx, m.handleExecutionAuthUpdate)
 	ctx = WithRefreshCoordinator(ctx, m.coordinatedRefreshForRequest)
 	var lastErr error
 	for idx, execModel := range execModels {
@@ -2375,6 +2376,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = WithRefreshUpdateCallback(execCtx, m.handleExecutionRefreshUpdate)
+		execCtx = WithAuthUpdateCallback(execCtx, m.handleExecutionAuthUpdate)
 		execCtx = WithRefreshCoordinator(execCtx, m.coordinatedRefreshForRequest)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
@@ -5857,6 +5859,19 @@ func (m *Manager) handleExecutionRefreshUpdate(ctx context.Context, updated *Aut
 	}
 }
 
+func (m *Manager) handleExecutionAuthUpdate(ctx context.Context, updated *Auth) {
+	if m == nil || updated == nil || updated.ID == "" {
+		return
+	}
+	updateCtx := context.Background()
+	if ctx != nil {
+		updateCtx = context.WithoutCancel(ctx)
+	}
+	if _, err := m.Update(updateCtx, updated); err != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", updated.ID).Warnf("failed to persist auth update: %v", err)
+	}
+}
+
 func (m *Manager) persistRuntimeState(ctx context.Context, auth *Auth) error {
 	if m == nil || m.runtimeStateStore == nil || auth == nil || auth.ID == "" {
 		return nil
@@ -7165,5 +7180,8 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 	}
+	execCtx = WithRefreshUpdateCallback(execCtx, m.handleExecutionRefreshUpdate)
+	execCtx = WithAuthUpdateCallback(execCtx, m.handleExecutionAuthUpdate)
+	execCtx = WithRefreshCoordinator(execCtx, m.coordinatedRefreshForRequest)
 	return exec.HttpRequest(execCtx, auth, req)
 }
