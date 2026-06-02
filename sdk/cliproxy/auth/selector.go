@@ -755,7 +755,7 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 
 	// 5. Session_id / session-id header (Codex)
 	if headers != nil {
-		for _, key := range []string{"Session_id", "session-id"} {
+		for _, key := range []string{"Session_id", "session_id", "Session-Id", "session-id"} {
 			if sid := strings.TrimSpace(headers.Get(key)); sid != "" {
 				return "codex:" + sid, ""
 			}

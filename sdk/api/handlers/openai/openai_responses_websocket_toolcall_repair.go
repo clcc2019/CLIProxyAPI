@@ -262,7 +262,7 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 			return sessionID
 		}
 	}
-	for _, key := range []string{"Session_id", "session-id", "X-Session-ID"} {
+	for _, key := range []string{"Session_id", "session_id", "Session-Id", "session-id", "X-Session-ID"} {
 		if sessionID := strings.TrimSpace(req.Header.Get(key)); sessionID != "" {
 			return sessionID
 		}

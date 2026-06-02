@@ -526,7 +526,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
@@ -803,7 +803,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
@@ -1965,6 +1965,9 @@ func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Conte
 		}
 		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, threadFallbackValue); threadHeaderValue != "" {
 			headers.Set(codexHeaderThreadID, threadHeaderValue)
+		}
+		if conversationID := strings.TrimSpace(fallbackHeaderValue); conversationID != "" {
+			headers.Set("Conversation_id", conversationID)
 		}
 	}
 

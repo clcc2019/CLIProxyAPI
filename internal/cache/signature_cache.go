@@ -103,6 +103,7 @@ func purgeExpiredCaches() {
 		}
 		return true
 	})
+	purgeExpiredCodexReasoningReplayCache(now)
 }
 
 func runProtectedCacheCleanupLoop(interval time.Duration, cleanup func(), stop <-chan struct{}) {

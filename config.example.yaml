@@ -197,7 +197,8 @@ routing:
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
   # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
-  # X-Client-Request-Id (PI), prompt_cache_key, conversation_id, or first few messages hash.
+  # X-Client-Request-Id (PI), metadata.user_id, prompt_cache_key,
+  # conversation_id, or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   # With session-affinity enabled, new non-Kiro sessions are assigned by
   # round-robin across same-priority auth files, then remain sticky for the TTL.

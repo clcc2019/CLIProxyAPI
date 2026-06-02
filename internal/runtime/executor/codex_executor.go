@@ -92,7 +92,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
@@ -116,6 +116,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	preparedBody := body
@@ -149,11 +151,13 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 	}
 	if result.statusCode < 200 || result.statusCode >= 300 {
+		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
 		err = newCodexStatusErr(result.statusCode, result.body)
 		return resp, err
 	}
 	if len(result.completedData) > 0 {
+		cacheCodexReasoningReplayFromCompleted(replayScope, result.completedData)
 		if usageOwner {
 			if detail, ok := helps.ParseCodexUsage(result.completedData); ok {
 				reporter.Publish(ctx, detail)
@@ -170,6 +174,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, nil
 	}
 	if len(result.errorBody) > 0 {
+		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.errorStatus, result.errorBody)
 		err = newCodexStatusErr(result.errorStatus, result.errorBody)
 		return resp, err
 	}
@@ -186,7 +191,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
@@ -210,6 +215,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	preparedBody := body
@@ -243,6 +250,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 	if result.statusCode < 200 || result.statusCode >= 300 {
+		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
 		err = newCodexStatusErr(result.statusCode, result.body)
 		return resp, err
@@ -289,7 +297,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(upstreamCtx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(upstreamCtx, e, baseModel, auth)
 	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer func() {
 		if !codexRequestContextDone(ctx, err) {
@@ -317,6 +325,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body, replayScope := applyCodexReasoningReplayCache(upstreamCtx, from, req, opts, body)
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	preparedBody := body
@@ -379,6 +389,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		clearCodexReasoningReplayOnInvalidSignature(replayScope, httpResp.StatusCode, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
@@ -435,6 +446,7 @@ codexStreamResponseOK:
 						return
 					}
 					helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+					clearCodexReasoningReplayOnInvalidSignature(replayScope, httpResp.StatusCode, data)
 					statusErr := newCodexStatusErr(httpResp.StatusCode, data)
 					codexRecordAPIResponseError(ctx, e.cfg, statusErr)
 					reporter.PublishFailureWithError(upstreamCtx, statusErr)
@@ -468,6 +480,9 @@ codexStreamResponseOK:
 					eventType := codexEventType(eventData)
 					if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
 						log.Warnf("codex stream terminated with %s: %s", eventType, terminalErr.Error())
+						if eventType == "response.failed" {
+							clearCodexReasoningReplayOnInvalidSignature(replayScope, terminalErr.StatusCode(), normalizeCodexResponseFailedErrorBody(eventData))
+						}
 						terminalFailure = true
 						terminalFailureErr = terminalErr
 						if !emittedPayload {
@@ -502,6 +517,7 @@ codexStreamResponseOK:
 						if detail, ok := helps.ParseCodexUsage(completed.data); ok {
 							reporter.Publish(upstreamCtx, detail)
 						}
+						cacheCodexReasoningReplayFromCompleted(replayScope, completed.data)
 						if completed.recoveredCount > 0 {
 							log.Warnf(
 								"codex stream completed with empty response.output; recovered_items=%d cached_done_items=%d cached_function_calls=%d",

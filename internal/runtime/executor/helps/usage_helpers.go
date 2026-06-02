@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 
 type UsageReporter struct {
 	provider             string
+	executorType         string
 	model                string
 	alias                string
 	authID               string
@@ -38,6 +40,20 @@ type UsageReporter struct {
 	ttftStart            time.Time
 	ttftSet              bool
 	once                 sync.Once
+}
+
+type usageExecutor interface {
+	Identifier() string
+}
+
+func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	provider := ""
+	if executor != nil {
+		provider = executor.Identifier()
+	}
+	reporter := NewUsageReporter(ctx, provider, model, auth)
+	reporter.executorType = ExecutorTypeName(executor)
+	return reporter
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -77,6 +93,17 @@ func (r *UsageReporter) CaptureModelReasoningEffort(payloads ...[]byte) {
 			return
 		}
 	}
+}
+
+func ExecutorTypeName(executor any) string {
+	if executor == nil {
+		return ""
+	}
+	executorType := reflect.TypeOf(executor)
+	for executorType.Kind() == reflect.Pointer {
+		executorType = executorType.Elem()
+	}
+	return strings.TrimSpace(executorType.Name())
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
@@ -288,6 +315,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	}
 	return usage.Record{
 		Provider:             r.provider,
+		ExecutorType:         r.executorType,
 		Model:                model,
 		Alias:                r.alias,
 		ModelReasoningEffort: r.modelReasoningEffort,

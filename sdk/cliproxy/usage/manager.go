@@ -16,7 +16,9 @@ const DefaultServiceTier = "default"
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider             string
+	Provider string
+	// ExecutorType stores the concrete executor type that handled the request.
+	ExecutorType         string
 	Model                string
 	Alias                string
 	ModelReasoningEffort string
