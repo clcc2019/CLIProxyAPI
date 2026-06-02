@@ -1,6 +1,9 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Store abstracts persistence of Auth state across restarts.
 type Store interface {
@@ -18,4 +21,29 @@ type RuntimeStateStore interface {
 	Load(ctx context.Context) (map[string]AuthRuntimeState, error)
 	Save(ctx context.Context, authID string, state AuthRuntimeState) error
 	Delete(ctx context.Context, authID string) error
+}
+
+// ProxyLease records a stable proxy assignment for an auth file.
+type ProxyLease struct {
+	AuthID     string
+	ProxyURL   string
+	AssignedAt time.Time
+	UpdatedAt  time.Time
+}
+
+// ProxyLeaseFailure records the result of a proxy-pool health update.
+type ProxyLeaseFailure struct {
+	ProxyURL   string
+	Failures   int
+	CooledDown bool
+	RecoverAt  time.Time
+}
+
+// ProxyLeaseStore persists proxy-pool leases to an external store, such as Redis.
+type ProxyLeaseStore interface {
+	AcquireProxyLease(ctx context.Context, authID string, proxyURLs []string) (ProxyLease, bool, error)
+	ReleaseProxyLease(ctx context.Context, authID string) error
+	ReconcileProxyLeases(ctx context.Context, activeAuthIDs []string, proxyURLs []string) error
+	RecordProxyLeaseFailure(ctx context.Context, authID, proxyURL string, threshold int, cooldown time.Duration) (ProxyLeaseFailure, error)
+	ClearProxyLeaseFailure(ctx context.Context, proxyURL string) error
 }

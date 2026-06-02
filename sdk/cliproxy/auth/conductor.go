@@ -177,6 +177,7 @@ func (NoopHook) OnResult(context.Context, Result) {}
 type Manager struct {
 	store             Store
 	runtimeStateStore RuntimeStateStore
+	proxyLeaseStore   ProxyLeaseStore
 	executors         map[string]ProviderExecutor
 	selector          Selector
 	kiroSelector      Selector
@@ -240,6 +241,12 @@ type authRemovalTombstone struct {
 	Path      string
 	RemovedAt time.Time
 }
+
+const (
+	proxyPoolAssignedAttribute  = "proxy_pool_assigned"
+	proxyPoolAssignedValue      = "true"
+	defaultProxyFailureCooldown = 10 * time.Minute
+)
 
 // NewManager constructs a manager with optional custom selector and hook.
 func NewManager(store Store, selector Selector, hook Hook) *Manager {
@@ -520,6 +527,97 @@ func (m *Manager) SetRuntimeStateStore(store RuntimeStateStore) {
 	m.persistEnabled.Store(m.store != nil || m.runtimeStateStore != nil)
 }
 
+// SetProxyLeaseStore swaps the optional persistence store for proxy-pool leases.
+func (m *Manager) SetProxyLeaseStore(store ProxyLeaseStore) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.proxyLeaseStore = store
+	m.mu.Unlock()
+}
+
+// ReconcileProxyPoolLeases ensures already-loaded auths have stable pool leases
+// after config or Redis state becomes available.
+func (m *Manager) ReconcileProxyPoolLeases(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	m.mu.RLock()
+	store := m.proxyLeaseStore
+	auths := make([]*Auth, 0, len(m.auths))
+	activeAuthIDs := make([]string, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth != nil {
+			auths = append(auths, auth.Clone())
+			if authID := strings.TrimSpace(auth.ID); authID != "" {
+				activeAuthIDs = append(activeAuthIDs, authID)
+			}
+		}
+	}
+	m.mu.RUnlock()
+	assignableAuths := proxyPoolSortedAssignableAuths(cfg, auths)
+	leaseAuthIDs := activeAuthIDs
+	selectedLeaseAuthIDs := make(map[string]struct{}, len(assignableAuths))
+	if cfg != nil && cfg.ProxyPool.Enabled {
+		leaseAuthIDs = proxyPoolSelectedLeaseAuthIDs(cfg, assignableAuths)
+		for _, authID := range leaseAuthIDs {
+			selectedLeaseAuthIDs[authID] = struct{}{}
+		}
+	}
+	if store != nil {
+		proxyURLs := []string(nil)
+		if cfg != nil && cfg.ProxyPool.Enabled {
+			proxyURLs = cfg.ProxyPool.Proxies
+		}
+		if len(leaseAuthIDs) > 0 || (cfg != nil && cfg.ProxyPool.Enabled && len(activeAuthIDs) > 0) {
+			if err := store.ReconcileProxyLeases(ctx, leaseAuthIDs, proxyURLs); err != nil {
+				log.Warnf("proxy-pool: failed to reconcile proxy leases: %v", err)
+			}
+		}
+		if len(leaseAuthIDs) == 0 && cfg != nil && !cfg.ProxyPool.Enabled {
+			if err := store.ReconcileProxyLeases(ctx, leaseAuthIDs, proxyURLs); err != nil {
+				log.Warnf("proxy-pool: failed to reconcile proxy leases: %v", err)
+			}
+		}
+	}
+	for _, auth := range auths {
+		if auth == nil || !authProxyPoolAssigned(auth) {
+			continue
+		}
+		if _, selected := selectedLeaseAuthIDs[strings.TrimSpace(auth.ID)]; !selected {
+			m.releaseProxyLease(ctx, auth.ID)
+		}
+	}
+	for _, auth := range assignableAuths {
+		if _, selected := selectedLeaseAuthIDs[strings.TrimSpace(auth.ID)]; !selected {
+			continue
+		}
+		m.applyProxyPoolLease(ctx, auth)
+	}
+}
+
+func (m *Manager) reconcileProxyPoolLeasesAfterAuthChange(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.ProxyPool.Enabled {
+		return
+	}
+	m.mu.RLock()
+	store := m.proxyLeaseStore
+	m.mu.RUnlock()
+	if store == nil {
+		return
+	}
+	m.ReconcileProxyPoolLeases(ctx)
+}
+
 // LoadRuntimeStates reads persisted runtime state and applies it to already
 // loaded auths. Future Register calls also apply the loaded state by auth ID.
 func (m *Manager) LoadRuntimeStates(ctx context.Context) error {
@@ -584,6 +682,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.refreshKiroSelector(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.ReconcileProxyPoolLeases(context.Background())
 }
 
 // HomeEnabled reports whether the home control plane integration is enabled in the runtime config.
@@ -1490,6 +1589,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	applyDefaultRefreshInterval(auth)
 	auth.EnsureIndex()
 	auth.ApplyRuntimeStateFromMetadata()
+	m.applyProxyPoolLease(ctx, auth)
 	m.mu.Lock()
 	if m.shouldSuppressRemovedAuthUpsertLocked(auth) {
 		m.mu.Unlock()
@@ -1509,6 +1609,10 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if errRuntime := m.persistRuntimeState(ctx, auth); errRuntime != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth runtime state: %v", errRuntime)
 	}
+	m.reconcileProxyPoolLeasesAfterAuthChange(ctx)
+	if current, okCurrent := m.GetByID(auth.ID); okCurrent && current != nil {
+		auth = current
+	}
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -1519,6 +1623,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, nil
 	}
 	applyDefaultRefreshInterval(auth)
+	m.applyProxyPoolLease(ctx, auth)
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if isRefreshUpdate(ctx) && (!ok || authRefreshSuppressed(existing)) {
@@ -1561,9 +1666,19 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(authClone.CloneForScheduler())
 	}
 	m.queueRefreshReschedule(auth.ID)
+	if m.shouldReleaseProxyLeaseForAuth(authClone) {
+		m.releaseProxyLease(ctx, auth.ID)
+		clearProxyPoolLease(auth)
+	}
 	persistErr := m.persist(ctx, auth)
 	if errRuntime := m.persistRuntimeState(ctx, auth); errRuntime != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth runtime state: %v", errRuntime)
+	}
+	if !isRefreshUpdate(ctx) {
+		m.reconcileProxyPoolLeasesAfterAuthChange(ctx)
+		if current, okCurrent := m.GetByID(auth.ID); okCurrent && current != nil {
+			auth = current
+		}
 	}
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if persistErr != nil {
@@ -1616,6 +1731,9 @@ func (m *Manager) Remove(ctx context.Context, id string) (*Auth, error) {
 	runtimeStore = m.runtimeStateStore
 	m.mu.Unlock()
 
+	if authProxyPoolAssigned(removed) {
+		m.releaseProxyLease(ctx, id)
+	}
 	m.discardPendingPersistAuthID(id)
 	if loop != nil {
 		loop.remove(id)
@@ -1655,6 +1773,356 @@ func authIDFromModelPoolOffsetKey(key string) string {
 		return key[:idx]
 	}
 	return key
+}
+
+func (m *Manager) applyProxyPoolLease(ctx context.Context, auth *Auth) {
+	if m == nil || auth == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if !proxyPoolCanAssign(cfg, auth) {
+		if authProxyPoolAssigned(auth) {
+			m.releaseProxyLease(ctx, auth.ID)
+			clearProxyPoolLease(auth)
+			return
+		}
+		if strings.TrimSpace(auth.ID) != "" && strings.TrimSpace(auth.ProxyURL) != "" && !authProxyPoolAssigned(auth) {
+			m.releaseProxyLease(ctx, auth.ID)
+		}
+		return
+	}
+	m.mu.RLock()
+	store := m.proxyLeaseStore
+	m.mu.RUnlock()
+	if store == nil {
+		return
+	}
+	lease, ok, err := store.AcquireProxyLease(ctx, auth.ID, cfg.ProxyPool.Proxies)
+	if err != nil {
+		log.WithField("auth_id", auth.ID).Warnf("proxy-pool: failed to acquire proxy lease: %v", err)
+		return
+	}
+	if !ok || strings.TrimSpace(lease.ProxyURL) == "" {
+		if authProxyPoolAssigned(auth) {
+			clearProxyPoolLease(auth)
+			m.clearRuntimeProxyPoolLease(auth.ID)
+		}
+		log.WithField("auth_id", auth.ID).Warn("proxy-pool: no available proxy lease")
+		return
+	}
+	markProxyPoolLease(auth, lease.ProxyURL)
+	var schedulerSnapshot *Auth
+	m.mu.Lock()
+	if current := m.auths[auth.ID]; current != nil {
+		markProxyPoolLease(current, lease.ProxyURL)
+		schedulerSnapshot = current.CloneForScheduler()
+	}
+	m.mu.Unlock()
+	if m.scheduler != nil && schedulerSnapshot != nil {
+		m.scheduler.upsertAuth(schedulerSnapshot)
+	}
+}
+
+func (m *Manager) releaseProxyLease(ctx context.Context, authID string) {
+	if m == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.RLock()
+	store := m.proxyLeaseStore
+	m.mu.RUnlock()
+	if store != nil {
+		if err := store.ReleaseProxyLease(ctx, authID); err != nil {
+			log.WithField("auth_id", authID).Warnf("proxy-pool: failed to release proxy lease: %v", err)
+		}
+	}
+	m.clearRuntimeProxyPoolLease(authID)
+}
+
+func (m *Manager) clearRuntimeProxyPoolLease(authID string) {
+	if m == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	var schedulerSnapshot *Auth
+	m.mu.Lock()
+	if current := m.auths[authID]; current != nil && authProxyPoolAssigned(current) {
+		clearProxyPoolLease(current)
+		schedulerSnapshot = current.CloneForScheduler()
+	}
+	m.mu.Unlock()
+	if m.scheduler != nil && schedulerSnapshot != nil {
+		m.scheduler.upsertAuth(schedulerSnapshot)
+	}
+}
+
+func (m *Manager) shouldReleaseProxyLeaseForAuth(auth *Auth) bool {
+	if m == nil || auth == nil || !authProxyPoolAssigned(auth) {
+		return false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.ProxyPool.Enabled {
+		return true
+	}
+	return cfg.ProxyPool.ReleaseOnAuthDisabled && (auth.Disabled || auth.Status == StatusDisabled)
+}
+
+func (m *Manager) shouldReleaseProxyLeaseForResult(result Result) bool {
+	if m == nil || result.Success || strings.TrimSpace(result.AuthID) == "" {
+		return false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.ProxyPool.Enabled {
+		return false
+	}
+	statusCode := statusCodeFromResult(result.Error)
+	if statusCode == http.StatusTooManyRequests {
+		return cfg.ProxyPool.ReleaseOnAuthCooldown
+	}
+	return result.AuthScoped || isAuthWideResultError(result.Error) || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden
+}
+
+func proxyPoolSortedAssignableAuths(cfg *internalconfig.Config, auths []*Auth) []*Auth {
+	if cfg == nil || !cfg.ProxyPool.Enabled || len(cfg.ProxyPool.Proxies) == 0 || len(auths) == 0 {
+		return nil
+	}
+	out := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if proxyPoolCanAssign(cfg, auth) {
+			out = append(out, auth)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := out[i]
+		right := out[j]
+		leftPriority := authPriority(left)
+		rightPriority := authPriority(right)
+		if leftPriority != rightPriority {
+			return leftPriority > rightPriority
+		}
+		leftID := ""
+		if left != nil {
+			leftID = strings.TrimSpace(left.ID)
+		}
+		rightID := ""
+		if right != nil {
+			rightID = strings.TrimSpace(right.ID)
+		}
+		return leftID < rightID
+	})
+	return out
+}
+
+func proxyPoolSelectedLeaseAuthIDs(cfg *internalconfig.Config, auths []*Auth) []string {
+	if cfg == nil || !cfg.ProxyPool.Enabled || len(cfg.ProxyPool.Proxies) == 0 || len(auths) == 0 {
+		return nil
+	}
+	limit := 0
+	for _, proxyURL := range cfg.ProxyPool.Proxies {
+		if strings.TrimSpace(proxyURL) != "" {
+			limit++
+		}
+	}
+	if limit <= 0 {
+		return nil
+	}
+	out := make([]string, 0, min(len(auths), limit))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		authID := strings.TrimSpace(auth.ID)
+		if authID == "" {
+			continue
+		}
+		out = append(out, authID)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (m *Manager) recordProxyPoolResult(ctx context.Context, result Result) {
+	if m == nil || strings.TrimSpace(result.AuthID) == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.ProxyPool.Enabled {
+		return
+	}
+	proxyURL := m.proxyPoolAssignedProxyURL(result.AuthID)
+	if proxyURL == "" {
+		return
+	}
+	m.mu.RLock()
+	store := m.proxyLeaseStore
+	m.mu.RUnlock()
+	if store == nil {
+		return
+	}
+	if result.Success {
+		if err := store.ClearProxyLeaseFailure(ctx, proxyURL); err != nil {
+			log.WithField("proxy_url", proxyURL).Warnf("proxy-pool: failed to clear proxy failure state: %v", err)
+		}
+		return
+	}
+	threshold := cfg.ProxyPool.ProxyFailureThreshold
+	if threshold <= 0 || !isProxyPoolTransportFailure(result.Error) {
+		return
+	}
+	failure, err := store.RecordProxyLeaseFailure(ctx, result.AuthID, proxyURL, threshold, proxyFailureCooldown(cfg))
+	if err != nil {
+		log.WithFields(log.Fields{
+			"auth_id":   result.AuthID,
+			"proxy_url": proxyURL,
+		}).Warnf("proxy-pool: failed to record proxy failure: %v", err)
+		return
+	}
+	if !failure.CooledDown {
+		return
+	}
+	log.WithFields(log.Fields{
+		"auth_id":    result.AuthID,
+		"proxy_url":  proxyURL,
+		"failures":   failure.Failures,
+		"recover_at": failure.RecoverAt,
+	}).Warn("proxy-pool: proxy entered cooldown after transport failures")
+	m.clearRuntimeProxyPoolLease(result.AuthID)
+}
+
+func (m *Manager) proxyPoolAssignedProxyURL(authID string) string {
+	if m == nil {
+		return ""
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	auth := m.auths[authID]
+	if !authProxyPoolAssigned(auth) {
+		return ""
+	}
+	return strings.TrimSpace(auth.ProxyURL)
+}
+
+func proxyFailureCooldown(cfg *internalconfig.Config) time.Duration {
+	if cfg == nil {
+		return defaultProxyFailureCooldown
+	}
+	raw := strings.TrimSpace(cfg.ProxyPool.ProxyFailureCooldown)
+	if raw == "" {
+		return defaultProxyFailureCooldown
+	}
+	cooldown, err := time.ParseDuration(raw)
+	if err != nil || cooldown <= 0 {
+		return defaultProxyFailureCooldown
+	}
+	return cooldown
+}
+
+func isProxyPoolTransportFailure(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != 0 {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(strings.Join([]string{err.Code, err.Message}, " ")))
+	if raw == "" {
+		return false
+	}
+	patterns := [...]string{
+		"connection refused",
+		"connection reset",
+		"connection timed out",
+		"context deadline exceeded",
+		"dial tcp",
+		"i/o timeout",
+		"net/http: timeout",
+		"network is unreachable",
+		"no such host",
+		"proxyconnect",
+		"proxy connect",
+		"proxy connection",
+		"socks",
+		"socks5",
+		"temporary failure in name resolution",
+		"tls handshake timeout",
+		"use of closed network connection",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(raw, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func proxyPoolCanAssign(cfg *internalconfig.Config, auth *Auth) bool {
+	if cfg == nil || !cfg.ProxyPool.Enabled || len(cfg.ProxyPool.Proxies) == 0 || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return false
+	}
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	if strings.TrimSpace(auth.ProxyURL) != "" && !authProxyPoolAssigned(auth) {
+		return false
+	}
+	kind, _ := auth.AccountInfo()
+	if strings.EqualFold(strings.TrimSpace(kind), "api_key") {
+		return false
+	}
+	return true
+}
+
+func markProxyPoolLease(auth *Auth, proxyURL string) {
+	if auth == nil {
+		return
+	}
+	auth.ProxyURL = strings.TrimSpace(proxyURL)
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string, 1)
+	}
+	auth.Attributes[proxyPoolAssignedAttribute] = proxyPoolAssignedValue
+}
+
+func clearProxyPoolLease(auth *Auth) {
+	if auth == nil {
+		return
+	}
+	auth.ProxyURL = ""
+	if auth.Attributes != nil {
+		delete(auth.Attributes, proxyPoolAssignedAttribute)
+	}
+}
+
+func authProxyPoolAssigned(auth *Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes[proxyPoolAssignedAttribute]), proxyPoolAssignedValue)
+}
+
+func stripProxyPoolLeaseForPersist(auth *Auth) {
+	if !authProxyPoolAssigned(auth) {
+		return
+	}
+	clearProxyPoolLease(auth)
 }
 
 func (m *Manager) shouldSuppressRemovedAuthUpsertLocked(auth *Auth) bool {
@@ -3226,6 +3694,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
 
+	m.recordProxyPoolResult(ctx, result)
+	if m.shouldReleaseProxyLeaseForResult(result) {
+		m.releaseProxyLease(ctx, result.AuthID)
+	}
 	m.hook.OnResult(ctx, result)
 }
 
@@ -3249,6 +3721,7 @@ func (m *Manager) markCleanModelSuccessResult(ctx context.Context, result Result
 		return false
 	}
 	m.enqueuePersistAuthID(ctx, persistAuthID)
+	m.recordProxyPoolResult(ctx, result)
 	m.hook.OnResult(ctx, result)
 	return true
 }
@@ -5329,6 +5802,7 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		return nil
 	}
 	persistAuth := auth.Clone()
+	stripProxyPoolLeaseForPersist(persistAuth)
 	persistAuth.SetRuntimeStateMetadata()
 	_, err := m.store.Save(ctx, persistAuth)
 	return err
@@ -5433,6 +5907,7 @@ var refreshPreservedAttributeKeys = []string{
 	"user_agent",
 	"user-agent",
 	"userAgent",
+	proxyPoolAssignedAttribute,
 }
 
 func preserveEditableAuthFileOptions(existing, auth *Auth) {

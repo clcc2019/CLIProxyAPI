@@ -47,3 +47,14 @@ func (s *Store) Load(_ context.Context) (map[string]coreauth.AuthRuntimeState, e
 }
 func (s *Store) Save(_ context.Context, _ string, _ coreauth.AuthRuntimeState) error { return nil }
 func (s *Store) Delete(_ context.Context, _ string) error                            { return nil }
+func (s *Store) AcquireProxyLease(_ context.Context, _ string, _ []string) (coreauth.ProxyLease, bool, error) {
+	return coreauth.ProxyLease{}, false, nil
+}
+func (s *Store) ReleaseProxyLease(_ context.Context, _ string) error { return nil }
+func (s *Store) ReconcileProxyLeases(_ context.Context, _ []string, _ []string) error {
+	return nil
+}
+func (s *Store) RecordProxyLeaseFailure(_ context.Context, _, _ string, _ int, _ time.Duration) (coreauth.ProxyLeaseFailure, error) {
+	return coreauth.ProxyLeaseFailure{}, nil
+}
+func (s *Store) ClearProxyLeaseFailure(_ context.Context, _ string) error { return nil }

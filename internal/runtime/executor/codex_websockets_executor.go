@@ -1624,14 +1624,54 @@ func codexWebsocketToolSearchOutputCanStandAlone(item []byte) bool {
 }
 
 func codexShouldRetryWithoutPreviousResponse(body []byte, requestBody []byte, errorPayload []byte) bool {
-	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" {
-		return false
-	}
 	if strings.TrimSpace(gjson.GetBytes(requestBody, "previous_response_id").String()) == "" {
 		return false
 	}
-	return codexWebsocketPreviousResponseNotFound(errorPayload) ||
-		codexWebsocketNoToolCallFoundForFunctionOutput(errorPayload)
+	if !codexWebsocketPreviousResponseNotFound(errorPayload) &&
+		!codexWebsocketNoToolCallFoundForFunctionOutput(errorPayload) {
+		return false
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) == "" {
+		return true
+	}
+	return codexExplicitPreviousResponseRetryHasStandaloneContext(body)
+}
+
+func codexExplicitPreviousResponseRetryHasStandaloneContext(body []byte) bool {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return false
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "prompt").String()) != "" {
+		return true
+	}
+	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() && len(messages.Array()) > 0 {
+		return true
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() {
+		return false
+	}
+	if input.Type == gjson.String {
+		return strings.TrimSpace(input.String()) != ""
+	}
+	if !input.IsArray() {
+		return false
+	}
+	hasMessage := false
+	hasToolOutput := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if codexWebsocketIsToolCallOutputType(itemType) {
+			hasToolOutput = true
+			return true
+		}
+		role := strings.TrimSpace(item.Get("role").String())
+		if itemType == "message" || (itemType == "" && role != "") {
+			hasMessage = true
+		}
+		return true
+	})
+	return hasMessage && !hasToolOutput
 }
 
 func buildCodexWebsocketRetryWithoutPreviousResponse(body []byte, turnMetadataHeader string, now time.Time) []byte {

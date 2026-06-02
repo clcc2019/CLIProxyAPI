@@ -22,6 +22,99 @@ const (
 	defaultKeyPrefix = "cliproxyapi"
 )
 
+var acquireProxyLeaseScript = redis.NewScript(`
+local now = tonumber(ARGV[2]) or 0
+local function proxy_in_cooldown(proxy)
+  local recover_at = tonumber(redis.call("HGET", KEYS[3], proxy) or "0")
+  if recover_at and recover_at > 0 then
+    if recover_at > now then
+      return true
+    end
+    redis.call("HDEL", KEYS[3], proxy)
+    redis.call("HDEL", KEYS[4], proxy)
+  end
+  return false
+end
+local existing = redis.call("HGET", KEYS[1], ARGV[1])
+if existing and existing ~= "" then
+  local existingAllowed = false
+  for i = 3, #ARGV do
+    if ARGV[i] == existing then
+      existingAllowed = true
+      if not proxy_in_cooldown(existing) then
+        local owner = redis.call("HGET", KEYS[2], existing)
+        if not owner or owner == "" or owner == ARGV[1] then
+          redis.call("HSET", KEYS[2], existing, ARGV[1])
+          return existing
+        end
+      end
+    end
+  end
+  if not existingAllowed then
+    local owner = redis.call("HGET", KEYS[2], existing)
+    if owner == ARGV[1] then
+      redis.call("HDEL", KEYS[2], existing)
+    end
+  end
+  redis.call("HDEL", KEYS[1], ARGV[1])
+end
+for i = 3, #ARGV do
+  local proxy = ARGV[i]
+  if not proxy_in_cooldown(proxy) then
+    local owner = redis.call("HGET", KEYS[2], proxy)
+    if owner and owner ~= "" and owner ~= ARGV[1] then
+      local ownerLease = redis.call("HGET", KEYS[1], owner)
+      if ownerLease ~= proxy then
+        redis.call("HDEL", KEYS[2], proxy)
+        owner = nil
+      end
+    end
+    if not owner or owner == "" or owner == ARGV[1] then
+      redis.call("HSET", KEYS[1], ARGV[1], proxy)
+      redis.call("HSET", KEYS[2], proxy, ARGV[1])
+      return proxy
+    end
+  end
+end
+return ""
+`)
+
+var releaseProxyLeaseScript = redis.NewScript(`
+local proxy = redis.call("HGET", KEYS[1], ARGV[1])
+if proxy and proxy ~= "" then
+  local owner = redis.call("HGET", KEYS[2], proxy)
+  if owner == ARGV[1] then
+    redis.call("HDEL", KEYS[2], proxy)
+  end
+end
+redis.call("HDEL", KEYS[1], ARGV[1])
+return proxy or ""
+`)
+
+var recordProxyLeaseFailureScript = redis.NewScript(`
+local auth_id = ARGV[1]
+local proxy = ARGV[2]
+local threshold = tonumber(ARGV[3]) or 0
+local recover_at = tonumber(ARGV[4]) or 0
+if auth_id == "" or proxy == "" or threshold <= 0 then
+  return {0, 0}
+end
+local lease = redis.call("HGET", KEYS[1], auth_id)
+local owner = redis.call("HGET", KEYS[2], proxy)
+if lease ~= proxy or owner ~= auth_id then
+  return {0, 0}
+end
+local failures = redis.call("HINCRBY", KEYS[3], proxy, 1)
+if failures >= threshold then
+  redis.call("HDEL", KEYS[3], proxy)
+  redis.call("HSET", KEYS[4], proxy, recover_at)
+  redis.call("HDEL", KEYS[1], auth_id)
+  redis.call("HDEL", KEYS[2], proxy)
+  return {failures, recover_at}
+end
+return {failures, 0}
+`)
+
 type Store struct {
 	client    *redis.Client
 	keyPrefix string
@@ -237,6 +330,196 @@ func (s *Store) Delete(ctx context.Context, authID string) error {
 	return s.client.HDel(ctx, s.key("auth", "runtime"), authID).Err()
 }
 
+func (s *Store) AcquireProxyLease(ctx context.Context, authID string, proxyURLs []string) (coreauth.ProxyLease, bool, error) {
+	if s == nil || s.client == nil {
+		return coreauth.ProxyLease{}, false, nil
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" || len(proxyURLs) == 0 {
+		return coreauth.ProxyLease{}, false, nil
+	}
+	args := make([]any, 0, len(proxyURLs)+2)
+	args = append(args, authID)
+	args = append(args, time.Now().UTC().UnixMilli())
+	for _, proxyURL := range proxyURLs {
+		proxyURL = strings.TrimSpace(proxyURL)
+		if proxyURL != "" {
+			args = append(args, proxyURL)
+		}
+	}
+	if len(args) == 2 {
+		return coreauth.ProxyLease{}, false, nil
+	}
+	result, err := acquireProxyLeaseScript.Run(ctx, s.client, []string{
+		s.key("proxy-pool", "leases"),
+		s.key("proxy-pool", "reverse"),
+		s.key("proxy-pool", "cooldown"),
+		s.key("proxy-pool", "failures"),
+	}, args...).Text()
+	if err != nil {
+		return coreauth.ProxyLease{}, false, err
+	}
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return coreauth.ProxyLease{}, false, nil
+	}
+	now := time.Now().UTC()
+	return coreauth.ProxyLease{AuthID: authID, ProxyURL: result, AssignedAt: now, UpdatedAt: now}, true, nil
+}
+
+func (s *Store) ReleaseProxyLease(ctx context.Context, authID string) error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	return releaseProxyLeaseScript.Run(ctx, s.client, []string{
+		s.key("proxy-pool", "leases"),
+		s.key("proxy-pool", "reverse"),
+	}, authID).Err()
+}
+
+func (s *Store) ReconcileProxyLeases(ctx context.Context, activeAuthIDs []string, proxyURLs []string) error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	leaseKey := s.key("proxy-pool", "leases")
+	reverseKey := s.key("proxy-pool", "reverse")
+	failureKey := s.key("proxy-pool", "failures")
+	cooldownKey := s.key("proxy-pool", "cooldown")
+	leases, err := s.client.HGetAll(ctx, leaseKey).Result()
+	if err != nil {
+		return err
+	}
+	reverse, err := s.client.HGetAll(ctx, reverseKey).Result()
+	if err != nil {
+		return err
+	}
+	failures, err := s.client.HGetAll(ctx, failureKey).Result()
+	if err != nil {
+		return err
+	}
+	cooldowns, err := s.client.HGetAll(ctx, cooldownKey).Result()
+	if err != nil {
+		return err
+	}
+	active := make(map[string]struct{}, len(activeAuthIDs))
+	for _, authID := range activeAuthIDs {
+		authID = strings.TrimSpace(authID)
+		if authID != "" {
+			active[authID] = struct{}{}
+		}
+	}
+	allowed := make(map[string]struct{}, len(proxyURLs))
+	for _, proxyURL := range proxyURLs {
+		proxyURL = strings.TrimSpace(proxyURL)
+		if proxyURL != "" {
+			allowed[proxyURL] = struct{}{}
+		}
+	}
+	pipe := s.client.Pipeline()
+	ops := 0
+	for authID, proxyURL := range leases {
+		authID = strings.TrimSpace(authID)
+		proxyURL = strings.TrimSpace(proxyURL)
+		_, activeOK := active[authID]
+		_, allowedOK := allowed[proxyURL]
+		if authID == "" || proxyURL == "" || !activeOK || !allowedOK {
+			pipe.HDel(ctx, leaseKey, authID)
+			ops++
+			if reverse[proxyURL] == authID {
+				pipe.HDel(ctx, reverseKey, proxyURL)
+				ops++
+			}
+		}
+	}
+	for proxyURL, authID := range reverse {
+		proxyURL = strings.TrimSpace(proxyURL)
+		authID = strings.TrimSpace(authID)
+		_, activeOK := active[authID]
+		_, allowedOK := allowed[proxyURL]
+		if proxyURL == "" || authID == "" || !activeOK || !allowedOK || strings.TrimSpace(leases[authID]) != proxyURL {
+			pipe.HDel(ctx, reverseKey, proxyURL)
+			ops++
+		}
+	}
+	for proxyURL := range failures {
+		proxyURL = strings.TrimSpace(proxyURL)
+		if _, allowedOK := allowed[proxyURL]; proxyURL == "" || !allowedOK {
+			pipe.HDel(ctx, failureKey, proxyURL)
+			ops++
+		}
+	}
+	for proxyURL := range cooldowns {
+		proxyURL = strings.TrimSpace(proxyURL)
+		if _, allowedOK := allowed[proxyURL]; proxyURL == "" || !allowedOK {
+			pipe.HDel(ctx, cooldownKey, proxyURL)
+			ops++
+		}
+	}
+	if ops == 0 {
+		return nil
+	}
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (s *Store) RecordProxyLeaseFailure(ctx context.Context, authID, proxyURL string, threshold int, cooldown time.Duration) (coreauth.ProxyLeaseFailure, error) {
+	if s == nil || s.client == nil {
+		return coreauth.ProxyLeaseFailure{}, nil
+	}
+	authID = strings.TrimSpace(authID)
+	proxyURL = strings.TrimSpace(proxyURL)
+	if authID == "" || proxyURL == "" || threshold <= 0 {
+		return coreauth.ProxyLeaseFailure{}, nil
+	}
+	if cooldown <= 0 {
+		cooldown = time.Minute
+	}
+	recoverAt := time.Now().UTC().Add(cooldown)
+	raw, err := recordProxyLeaseFailureScript.Run(ctx, s.client, []string{
+		s.key("proxy-pool", "leases"),
+		s.key("proxy-pool", "reverse"),
+		s.key("proxy-pool", "failures"),
+		s.key("proxy-pool", "cooldown"),
+	}, authID, proxyURL, threshold, recoverAt.UnixMilli()).Result()
+	if err != nil {
+		return coreauth.ProxyLeaseFailure{}, err
+	}
+	values, ok := raw.([]any)
+	if !ok || len(values) < 2 {
+		return coreauth.ProxyLeaseFailure{}, nil
+	}
+	failures, _ := redisInt(values[0])
+	recoverAtMillis, _ := redisInt64(values[1])
+	result := coreauth.ProxyLeaseFailure{
+		ProxyURL: proxyURL,
+		Failures: failures,
+	}
+	if recoverAtMillis > 0 {
+		result.CooledDown = true
+		result.RecoverAt = time.UnixMilli(recoverAtMillis).UTC()
+	}
+	return result, nil
+}
+
+func (s *Store) ClearProxyLeaseFailure(ctx context.Context, proxyURL string) error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return nil
+	}
+	pipe := s.client.Pipeline()
+	pipe.HDel(ctx, s.key("proxy-pool", "failures"), proxyURL)
+	pipe.HDel(ctx, s.key("proxy-pool", "cooldown"), proxyURL)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 func (s *Store) cacheKey(namespace, cacheKey string) string {
 	namespace = strings.Trim(strings.TrimSpace(namespace), ":")
 	cacheKey = strings.Trim(strings.TrimSpace(cacheKey), ":")
@@ -260,4 +543,26 @@ func (s *Store) key(parts ...string) string {
 		}
 	}
 	return strings.Join(clean, ":")
+}
+
+func redisInt(value any) (int, bool) {
+	out, ok := redisInt64(value)
+	return int(out), ok
+}
+
+func redisInt64(value any) (int64, bool) {
+	switch v := value.(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case string:
+		var out int64
+		if _, err := fmt.Sscanf(v, "%d", &out); err != nil {
+			return 0, false
+		}
+		return out, true
+	default:
+		return 0, false
+	}
 }

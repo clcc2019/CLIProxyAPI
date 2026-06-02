@@ -20,3 +20,17 @@ func TestRoundTripperForDirectBypassesProxy(t *testing.T) {
 		t.Fatal("expected direct transport to disable proxy function")
 	}
 }
+
+func TestRoundTripperForNoneBypassesProxy(t *testing.T) {
+	t.Parallel()
+
+	provider := newDefaultRoundTripperProvider()
+	rt := provider.RoundTripperFor(&coreauth.Auth{ProxyURL: "none"})
+	transport, ok := rt.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", rt)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected none transport to disable proxy function")
+	}
+}

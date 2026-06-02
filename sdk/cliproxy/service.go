@@ -429,12 +429,14 @@ func (s *Service) configureRedisState(ctx context.Context) error {
 	s.usagePersistenceBackend = store
 	if s.coreManager != nil {
 		s.coreManager.SetRuntimeStateStore(store)
+		s.coreManager.SetProxyLeaseStore(store)
 		if errLoad := s.coreManager.LoadRuntimeStates(ctx); errLoad != nil {
 			_ = store.Close()
 			s.redisState = nil
 			s.usagePersistenceBackend = nil
 			return fmt.Errorf("load redis auth runtime state: %w", errLoad)
 		}
+		s.coreManager.ReconcileProxyPoolLeases(ctx)
 	}
 	log.Infof("redis state storage enabled: %s", store.Addr())
 	return nil
@@ -885,6 +887,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
+		s.coreManager.ReconcileProxyPoolLeases(ctx)
 		s.rebindExecutors()
 	}
 

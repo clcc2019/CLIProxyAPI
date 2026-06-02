@@ -63,6 +63,24 @@ func TestNewAuthFromAuthFileMetadataAppliesCommonProjection(t *testing.T) {
 	}
 }
 
+func TestNewAuthFromAuthFileMetadataAppliesProxyAliasesAndLegacyWebsocket(t *testing.T) {
+	auth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":      "codex",
+		"proxy-url": " none ",
+		"websocket": "false",
+	}, AuthFileProjectionOptions{Path: "/auth/codex.json", BaseDir: "/auth"})
+
+	if auth.ProxyURL != "none" {
+		t.Fatalf("ProxyURL = %q, want none", auth.ProxyURL)
+	}
+	if got := auth.Metadata["proxy-url"]; got != " none " {
+		t.Fatalf("proxy-url metadata = %v, want preserved raw value", got)
+	}
+	if got := auth.Attributes["websockets"]; got != "false" {
+		t.Fatalf("websockets attr = %q, want false", got)
+	}
+}
+
 func TestNewAuthFromAuthFileDataNormalizesImportedOpenAISession(t *testing.T) {
 	auth, err := NewAuthFromAuthFileData([]byte(`{
 		"authProvider":"openai",

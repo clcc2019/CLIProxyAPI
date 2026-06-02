@@ -138,6 +138,20 @@ redis:
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
 
+# Proxy pool assigns stable Redis-backed proxy leases to auth-file credentials
+# that do not have an explicit proxy_url/proxy-url configured. Redis must be enabled.
+proxy-pool:
+  enabled: false
+  state-store: "redis"
+  # Keep quota/cooldown accounts on their original IP by default.
+  release-on-auth-cooldown: false
+  release-on-auth-disabled: true
+  proxy-failure-threshold: 3
+  proxy-failure-cooldown: "10m"
+  proxies: []
+  # - "http://[2603:c021:800e:c68f:0:1043:78ac:85e6]:10808"
+  # - "http://[2603:c021:800e:c68f:0:1340:999d:d790]:10808"
+
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 

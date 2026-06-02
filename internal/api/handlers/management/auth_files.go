@@ -2160,14 +2160,20 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 			}
 		}
 	}
-	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
-		entry["proxy_url"] = proxyURL
-	} else if auth.Metadata != nil {
-		if rawProxyURL, ok := auth.Metadata["proxy_url"].(string); ok {
-			if trimmed := strings.TrimSpace(rawProxyURL); trimmed != "" {
-				entry["proxy_url"] = trimmed
-			}
+	fileProxyURL := authFileMetadataProxyURL(auth)
+	runtimeProxyURL := strings.TrimSpace(auth.ProxyURL)
+	if authFileProxyPoolAssigned(auth) {
+		entry["proxy_pool_assigned"] = true
+		if runtimeProxyURL != "" {
+			entry["runtime_proxy_url"] = runtimeProxyURL
 		}
+		if fileProxyURL != "" {
+			entry["proxy_url"] = fileProxyURL
+		}
+	} else if runtimeProxyURL != "" {
+		entry["proxy_url"] = runtimeProxyURL
+	} else if fileProxyURL != "" {
+		entry["proxy_url"] = fileProxyURL
 	}
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
@@ -2948,6 +2954,20 @@ func codexAuthMetadataString(metadata map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func authFileMetadataProxyURL(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return codexAuthMetadataString(auth.Metadata, "proxy_url", "proxy-url", "proxyUrl")
+}
+
+func authFileProxyPoolAssigned(auth *coreauth.Auth) bool {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["proxy_pool_assigned"]), "true")
 }
 
 func codexSubscriptionCacheKey(accessToken, proxyURL string) string {

@@ -26,7 +26,7 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 	if auth == nil || len(auth.Metadata) == 0 {
 		return
 	}
-	if proxyURL, ok := authFileMetadataString(auth.Metadata, "proxy_url"); ok {
+	if proxyURL, ok := authFileMetadataFirstAnyString(auth.Metadata, "proxy_url", "proxy-url", "proxyUrl"); ok {
 		auth.ProxyURL = proxyURL
 	}
 	if prefix, ok := authFileMetadataString(auth.Metadata, "prefix"); ok {
@@ -96,6 +96,15 @@ func authFileMetadataString(metadata map[string]any, key string) (string, bool) 
 func authFileMetadataFirstString(metadata map[string]any, keys ...string) (string, bool) {
 	for _, key := range keys {
 		if value, ok := authFileMetadataStrictString(metadata, key); ok {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func authFileMetadataFirstAnyString(metadata map[string]any, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if value, ok := authFileMetadataString(metadata, key); ok {
 			return value, true
 		}
 	}

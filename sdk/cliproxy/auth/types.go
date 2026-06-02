@@ -747,6 +747,8 @@ func cloneAuthMetadataForManagementSummary(src map[string]any) map[string]any {
 		"startsAt",
 		"prefix",
 		"proxy_url",
+		"proxy-url",
+		"proxyUrl",
 		"priority",
 		"note",
 		"user_agent",
@@ -1008,6 +1010,9 @@ func (a *Auth) ProxyInfo() string {
 	proxyStr := strings.TrimSpace(a.ProxyURL)
 	if proxyStr == "" {
 		return ""
+	}
+	if strings.EqualFold(proxyStr, "direct") || strings.EqualFold(proxyStr, "none") {
+		return "direct"
 	}
 	if idx := strings.Index(proxyStr, "://"); idx > 0 {
 		return "via " + proxyStr[:idx] + " proxy"

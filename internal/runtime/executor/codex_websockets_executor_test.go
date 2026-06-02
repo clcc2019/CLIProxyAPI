@@ -115,7 +115,7 @@ func TestBuildCodexWebsocketSendRetryBodyDropsOnlyInternalPreviousResponseID(t *
 	}
 }
 
-func TestCodexShouldRetryWithoutPreviousResponseOnlyForInternalCompression(t *testing.T) {
+func TestCodexShouldRetryWithoutPreviousResponseWhenContextCanBeReplayed(t *testing.T) {
 	errorPayload := []byte(`{"type":"error","status":400,"error":{"code":"previous_response_not_found","param":"previous_response_id"}}`)
 	noToolCallPayload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"No tool call found for function call output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn."}}`)
 	fullBody := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
@@ -126,6 +126,11 @@ func TestCodexShouldRetryWithoutPreviousResponseOnlyForInternalCompression(t *te
 	}
 	if !codexShouldRetryWithoutPreviousResponse(fullBody, internalIncremental, noToolCallPayload) {
 		t.Fatal("internally compressed tool output should retry with full transcript when upstream loses the tool call")
+	}
+
+	explicitMessageBody := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
+	if !codexShouldRetryWithoutPreviousResponse(explicitMessageBody, explicitMessageBody, errorPayload) {
+		t.Fatal("explicit previous_response_id with standalone message context should retry without previous_response_id")
 	}
 
 	explicitBody := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)

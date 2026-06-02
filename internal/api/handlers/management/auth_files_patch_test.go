@@ -317,6 +317,60 @@ func TestBuildAuthFileEntryExposesUserAgent(t *testing.T) {
 	}
 }
 
+func TestBuildAuthFileEntrySeparatesProxyPoolRuntimeProxy(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-auth.json",
+		FileName: "codex-auth.json",
+		Provider: "codex",
+		ProxyURL: "http://pool-proxy.local:7890",
+		Metadata: map[string]any{
+			"email": "codex@example.com",
+		},
+		Attributes: map[string]string{
+			"path":                "/tmp/codex-auth.json",
+			"proxy_pool_assigned": "true",
+		},
+	}
+
+	entry := h.buildAuthFileEntry(auth)
+	if _, ok := entry["proxy_url"]; ok {
+		t.Fatalf("entry[proxy_url] = %#v, want omitted for proxy-pool lease", entry["proxy_url"])
+	}
+	if got, _ := entry["runtime_proxy_url"].(string); got != "http://pool-proxy.local:7890" {
+		t.Fatalf("entry[runtime_proxy_url] = %q, want pool proxy", got)
+	}
+	if got, ok := entry["proxy_pool_assigned"].(bool); !ok || !got {
+		t.Fatalf("entry[proxy_pool_assigned] = %#v, want true", entry["proxy_pool_assigned"])
+	}
+}
+
+func TestBuildAuthFileEntryKeepsSavedProxyURLForProxyPoolAuth(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-auth.json",
+		FileName: "codex-auth.json",
+		Provider: "codex",
+		ProxyURL: "http://pool-proxy.local:7890",
+		Metadata: map[string]any{
+			"email":     "codex@example.com",
+			"proxy_url": "http://saved-proxy.local:7890",
+		},
+		Attributes: map[string]string{
+			"path":                "/tmp/codex-auth.json",
+			"proxy_pool_assigned": "true",
+		},
+	}
+
+	entry := h.buildAuthFileEntry(auth)
+	if got, _ := entry["proxy_url"].(string); got != "http://saved-proxy.local:7890" {
+		t.Fatalf("entry[proxy_url] = %q, want saved proxy", got)
+	}
+	if got, _ := entry["runtime_proxy_url"].(string); got != "http://pool-proxy.local:7890" {
+		t.Fatalf("entry[runtime_proxy_url] = %q, want pool proxy", got)
+	}
+}
+
 func TestBuildAuthFileEntryExposesWebsockets(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	auth := &coreauth.Auth{

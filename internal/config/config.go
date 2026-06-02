@@ -85,6 +85,10 @@ type Config struct {
 	// request/quota state.
 	Redis RedisConfig `yaml:"redis" json:"redis"`
 
+	// ProxyPool assigns stable proxy leases to auth-file credentials that do not
+	// have an explicit per-auth proxy configured.
+	ProxyPool ProxyPoolConfig `yaml:"proxy-pool" json:"proxy-pool"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -290,6 +294,17 @@ type RedisConfig struct {
 	// MaxRetries caps the number of in-client retries for transient errors.
 	// 0 uses the go-redis default (3); -1 disables retries.
 	MaxRetries int `yaml:"max-retries,omitempty" json:"max-retries,omitempty"`
+}
+
+// ProxyPoolConfig controls automatic stable proxy leases for auth-file credentials.
+type ProxyPoolConfig struct {
+	Enabled               bool     `yaml:"enabled" json:"enabled"`
+	StateStore            string   `yaml:"state-store,omitempty" json:"state-store,omitempty"`
+	ReleaseOnAuthCooldown bool     `yaml:"release-on-auth-cooldown,omitempty" json:"release-on-auth-cooldown,omitempty"`
+	ReleaseOnAuthDisabled bool     `yaml:"release-on-auth-disabled,omitempty" json:"release-on-auth-disabled,omitempty"`
+	ProxyFailureThreshold int      `yaml:"proxy-failure-threshold,omitempty" json:"proxy-failure-threshold,omitempty"`
+	ProxyFailureCooldown  string   `yaml:"proxy-failure-cooldown,omitempty" json:"proxy-failure-cooldown,omitempty"`
+	Proxies               []string `yaml:"proxies" json:"proxies"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -729,6 +744,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.Redis.Addr = "127.0.0.1:6379"
 	cfg.Redis.KeyPrefix = "cliproxyapi"
+	cfg.ProxyPool.StateStore = "redis"
+	cfg.ProxyPool.ReleaseOnAuthDisabled = true
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -810,6 +827,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.Redis.DB < 0 {
 		cfg.Redis.DB = 0
 	}
+	cfg.SanitizeProxyPool()
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
@@ -867,6 +885,40 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeProxyPool normalizes proxy-pool settings and removes duplicate proxy URLs.
+func (cfg *Config) SanitizeProxyPool() {
+	if cfg == nil {
+		return
+	}
+	cfg.ProxyPool.StateStore = strings.ToLower(strings.TrimSpace(cfg.ProxyPool.StateStore))
+	if cfg.ProxyPool.StateStore == "" {
+		cfg.ProxyPool.StateStore = "redis"
+	}
+	if cfg.ProxyPool.ProxyFailureThreshold < 0 {
+		cfg.ProxyPool.ProxyFailureThreshold = 0
+	}
+	cfg.ProxyPool.ProxyFailureCooldown = strings.TrimSpace(cfg.ProxyPool.ProxyFailureCooldown)
+	if len(cfg.ProxyPool.Proxies) > 0 {
+		seen := make(map[string]struct{}, len(cfg.ProxyPool.Proxies))
+		out := make([]string, 0, len(cfg.ProxyPool.Proxies))
+		for _, proxyURL := range cfg.ProxyPool.Proxies {
+			proxyURL = strings.TrimSpace(proxyURL)
+			if proxyURL == "" {
+				continue
+			}
+			if _, ok := seen[proxyURL]; ok {
+				continue
+			}
+			seen[proxyURL] = struct{}{}
+			out = append(out, proxyURL)
+		}
+		cfg.ProxyPool.Proxies = out
+	}
+	if len(cfg.ProxyPool.Proxies) == 0 {
+		cfg.ProxyPool.Enabled = false
+	}
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
