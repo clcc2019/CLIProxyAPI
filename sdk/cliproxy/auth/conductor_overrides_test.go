@@ -564,6 +564,64 @@ func TestManager_CachedUnavailableAuthReselectForcesNewUpstreamSession(t *testin
 	}
 }
 
+func TestManager_AuthWideFailureInvalidatesAffinityAndForcesFreshSession(t *testing.T) {
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{})
+	m := NewManager(nil, affinity, nil)
+	m.SetRetryConfig(0, 0, 0)
+	executor := &unauthorizedFailoverSessionExecutor{}
+	m.RegisterExecutor(executor)
+
+	baseID := uuid.NewString()
+	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "codex"}
+	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "codex"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+		affinity.Stop()
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	metadata := map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+	}
+	cacheKey := "providers:codex::exec:session-1"
+	affinity.cache.Set(cacheKey, auth1.ID)
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth1.ID,
+		Provider: "codex",
+		Model:    "test-model",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+	})
+	if cachedAuthID, ok := affinity.cache.Get(cacheKey); ok {
+		t.Fatalf("expected auth-wide failure to invalidate affinity cache, got %q", cachedAuthID)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{Metadata: metadata})
+	if errExecute != nil {
+		t.Fatalf("Execute error: %v", errExecute)
+	}
+	forced := executor.ForcedSessions()
+	if len(forced) != 1 {
+		t.Fatalf("forced sessions = %#v, want one call", forced)
+	}
+	if strings.TrimSpace(forced[0]) == "" {
+		t.Fatalf("first call after auth-wide affinity invalidation should force a fresh upstream session: %#v", forced)
+	}
+	if cachedAuthID, ok := affinity.cache.Get(cacheKey); !ok || cachedAuthID != auth2.ID {
+		t.Fatalf("expected session to rebind to auth2, got auth=%q ok=%v", cachedAuthID, ok)
+	}
+}
+
 func TestManager_OuterRetryPreservesForcedUpstreamSession(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(1, 100*time.Millisecond, 1)

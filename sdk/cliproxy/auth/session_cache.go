@@ -13,10 +13,11 @@ type sessionEntry struct {
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
 type SessionCache struct {
-	mu      sync.RWMutex
-	entries map[string]sessionEntry
-	ttl     time.Duration
-	stopCh  chan struct{}
+	mu       sync.RWMutex
+	entries  map[string]sessionEntry
+	forceNew map[string]time.Time
+	ttl      time.Duration
+	stopCh   chan struct{}
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -26,9 +27,10 @@ func NewSessionCache(ttl time.Duration) *SessionCache {
 		ttl = 30 * time.Minute
 	}
 	c := &SessionCache{
-		entries: make(map[string]sessionEntry),
-		ttl:     ttl,
-		stopCh:  make(chan struct{}),
+		entries:  make(map[string]sessionEntry),
+		forceNew: make(map[string]time.Time),
+		ttl:      ttl,
+		stopCh:   make(chan struct{}),
 	}
 	go c.cleanupLoop()
 	return c
@@ -107,13 +109,38 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	if authID == "" {
 		return
 	}
+	now := time.Now()
 	c.mu.Lock()
+	if c.forceNew == nil {
+		c.forceNew = make(map[string]time.Time)
+	}
 	for sid, entry := range c.entries {
 		if entry.authID == authID {
 			delete(c.entries, sid)
+			if entry.expiresAt.After(now) {
+				c.forceNew[sid] = entry.expiresAt
+			}
 		}
 	}
 	c.mu.Unlock()
+}
+
+// ConsumeForceNew reports whether the session was recently unbound from an
+// unavailable auth and clears the marker. Callers use this to start a fresh
+// upstream provider session when the same downstream session is rebound to a
+// different credential.
+func (c *SessionCache) ConsumeForceNew(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	expiresAt, ok := c.forceNew[sessionID]
+	if ok {
+		delete(c.forceNew, sessionID)
+	}
+	c.mu.Unlock()
+	return ok && expiresAt.After(now)
 }
 
 // Stop terminates the background cleanup goroutine.
@@ -144,6 +171,11 @@ func (c *SessionCache) cleanup() {
 	for sid, entry := range c.entries {
 		if now.After(entry.expiresAt) {
 			delete(c.entries, sid)
+		}
+	}
+	for sid, expiresAt := range c.forceNew {
+		if now.After(expiresAt) {
+			delete(c.forceNew, sid)
 		}
 	}
 	c.mu.Unlock()
