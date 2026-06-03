@@ -47,16 +47,20 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) bool {
 	}
 	f.pending = append(f.pending, chunk...)
 	wrote := false
+	consumed := 0
 	for {
-		frameLen := responsesSSEFrameLen(f.pending)
+		frameLen := responsesSSEFrameLen(f.pending[consumed:])
 		if frameLen == 0 {
 			break
 		}
-		frame := f.pending[:frameLen]
+		frame := f.pending[consumed : consumed+frameLen]
 		frame = f.processFrame(frame)
 		wrote = writeResponsesSSEChunk(w, frame) || wrote
-		copy(f.pending, f.pending[frameLen:])
-		f.pending = f.pending[:len(f.pending)-frameLen]
+		consumed += frameLen
+	}
+	if consumed > 0 {
+		copy(f.pending, f.pending[consumed:])
+		f.pending = f.pending[:len(f.pending)-consumed]
 	}
 	if len(bytes.TrimSpace(f.pending)) == 0 {
 		f.pending = f.pending[:0]
@@ -226,24 +230,21 @@ func appendResponsesSSEDataLines(out [][]byte, payload []byte) [][]byte {
 }
 
 func responsesSSEFrameLen(chunk []byte) int {
-	if len(chunk) == 0 {
-		return 0
-	}
-	lf := bytes.Index(chunk, []byte("\n\n"))
-	crlf := bytes.Index(chunk, []byte("\r\n\r\n"))
-	switch {
-	case lf < 0:
-		if crlf < 0 {
+	for offset := 0; offset < len(chunk); {
+		idx := bytes.IndexByte(chunk[offset:], '\n')
+		if idx < 0 {
 			return 0
 		}
-		return crlf + 4
-	case crlf < 0:
-		return lf + 2
-	case lf < crlf:
-		return lf + 2
-	default:
-		return crlf + 4
+		i := offset + idx
+		if i+1 < len(chunk) && chunk[i+1] == '\n' {
+			return i + 2
+		}
+		if i > 0 && chunk[i-1] == '\r' && i+2 < len(chunk) && chunk[i+1] == '\r' && chunk[i+2] == '\n' {
+			return i + 3
+		}
+		offset = i + 1
 	}
+	return 0
 }
 
 func responsesSSEDataPayload(frame []byte) ([]byte, bool) {

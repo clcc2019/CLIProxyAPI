@@ -665,7 +665,7 @@ func recordResponsesWebsocketToolCallsFromPayload(sessionKey string, payload []b
 }
 
 func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolOutputCache, sessionKey string, payload []byte) {
-	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	eventType := websocketPayloadEventTypeValue(payload)
 	recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(cache, sessionKey, eventType, payload)
 }
 

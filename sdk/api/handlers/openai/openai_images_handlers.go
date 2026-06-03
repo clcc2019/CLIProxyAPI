@@ -200,63 +200,109 @@ func waitImagesStreamExecution(c *gin.Context, timing *imageStreamTiming, writeK
 }
 
 func (a *sseFrameAccumulator) AddChunk(chunk []byte) [][]byte {
-	if len(chunk) == 0 {
-		return nil
-	}
-
-	if responsesSSENeedsLineBreak(a.pending, chunk) {
-		a.pending = append(a.pending, '\n')
-	}
-	a.pending = append(a.pending, chunk...)
-
 	var frames [][]byte
-	for {
-		frameLen := responsesSSEFrameLen(a.pending)
-		if frameLen == 0 {
-			break
-		}
-		frames = append(frames, a.pending[:frameLen])
-		copy(a.pending, a.pending[frameLen:])
-		a.pending = a.pending[:len(a.pending)-frameLen]
-	}
-
-	if len(bytes.TrimSpace(a.pending)) == 0 {
-		a.pending = a.pending[:0]
-		return frames
-	}
-	if len(a.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(a.pending, false) {
-		return frames
-	}
-	frames = append(frames, a.pending)
-	a.pending = a.pending[:0]
+	a.ForEachChunkFrame(chunk, func(frame []byte) bool {
+		frames = append(frames, append([]byte(nil), frame...))
+		return true
+	})
 	return frames
 }
 
 func (a *sseFrameAccumulator) Flush() [][]byte {
+	var frames [][]byte
+	a.FlushFrames(func(frame []byte) bool {
+		frames = append(frames, append([]byte(nil), frame...))
+		return true
+	})
+	return frames
+}
+
+func (a *sseFrameAccumulator) ForEachChunkFrame(chunk []byte, fn func([]byte) bool) bool {
+	if len(chunk) == 0 {
+		return true
+	}
+	if responsesSSENeedsLineBreak(a.pending, chunk) {
+		a.pending = append(a.pending, '\n')
+	}
+	a.pending = append(a.pending, chunk...)
+	return a.drainFrames(fn, false)
+}
+
+func (a *sseFrameAccumulator) FlushFrames(fn func([]byte) bool) bool {
 	if len(a.pending) == 0 {
-		return nil
+		return true
+	}
+	return a.drainFrames(fn, true)
+}
+
+func (a *sseFrameAccumulator) drainFrames(fn func([]byte) bool, flush bool) bool {
+	if fn == nil {
+		if flush {
+			a.pending = nil
+		}
+		return true
 	}
 
-	var frames [][]byte
+	consumed := 0
 	for {
-		frameLen := responsesSSEFrameLen(a.pending)
+		frameLen := responsesSSEFrameLen(a.pending[consumed:])
 		if frameLen == 0 {
 			break
 		}
-		frames = append(frames, a.pending[:frameLen])
-		copy(a.pending, a.pending[frameLen:])
-		a.pending = a.pending[:len(a.pending)-frameLen]
+		frame := a.pending[consumed : consumed+frameLen]
+		consumed += frameLen
+		if !fn(frame) {
+			a.compactConsumed(consumed, flush)
+			return false
+		}
+	}
+	if consumed > 0 {
+		a.compactConsumed(consumed, false)
 	}
 
 	if len(bytes.TrimSpace(a.pending)) == 0 {
-		a.pending = nil
-		return frames
+		if flush {
+			a.pending = nil
+		} else {
+			a.pending = a.pending[:0]
+		}
+		return true
 	}
 	if responsesSSECanEmitWithoutDelimiter(a.pending, false) {
-		frames = append(frames, a.pending)
+		frame := a.pending
+		if !fn(frame) {
+			a.pending = nil
+			return false
+		}
+		a.pending = nil
+		return true
 	}
-	a.pending = nil
-	return frames
+	if flush {
+		a.pending = nil
+	}
+	return true
+}
+
+func (a *sseFrameAccumulator) compactConsumed(consumed int, clear bool) {
+	if consumed <= 0 {
+		if clear {
+			a.pending = nil
+		}
+		return
+	}
+	if consumed >= len(a.pending) {
+		if clear {
+			a.pending = nil
+		} else {
+			a.pending = a.pending[:0]
+		}
+		return
+	}
+	copy(a.pending, a.pending[consumed:])
+	a.pending = a.pending[:len(a.pending)-consumed]
+	if clear {
+		a.pending = nil
+	}
 }
 
 func imagesModelParts(model string) (prefix string, baseModel string) {
@@ -1835,21 +1881,33 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 			}
 		case chunk, ok := <-data:
 			if !ok {
-				for _, frame := range acc.Flush() {
-					if out, done, errMsg := processFrame(frame); errMsg != nil {
-						return nil, errMsg
-					} else if done {
-						return out, nil
-					}
+				var result []byte
+				var done bool
+				var errMsg *interfaces.ErrorMessage
+				acc.FlushFrames(func(frame []byte) bool {
+					result, done, errMsg = processFrame(frame)
+					return errMsg == nil && !done
+				})
+				if errMsg != nil {
+					return nil, errMsg
+				}
+				if done {
+					return result, nil
 				}
 				return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("stream disconnected before completion")}
 			}
-			for _, frame := range acc.AddChunk(chunk) {
-				if out, done, errMsg := processFrame(frame); errMsg != nil {
-					return nil, errMsg
-				} else if done {
-					return out, nil
-				}
+			var result []byte
+			var done bool
+			var errMsg *interfaces.ErrorMessage
+			acc.ForEachChunkFrame(chunk, func(frame []byte) bool {
+				result, done, errMsg = processFrame(frame)
+				return errMsg == nil && !done
+			})
+			if errMsg != nil {
+				return nil, errMsg
+			}
+			if done {
+				return result, nil
 			}
 		}
 	}
@@ -2193,11 +2251,17 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 		dataIntervalC = timing.dataIntervalC
 	}
 
-	for _, frame := range acc.AddChunk(opts.firstChunk) {
+	firstDone := false
+	acc.ForEachChunkFrame(opts.firstChunk, func(frame []byte) bool {
 		if processFrame(frame) {
-			opts.cancel(nil)
-			return
+			firstDone = true
+			return false
 		}
+		return true
+	})
+	if firstDone {
+		opts.cancel(nil)
+		return
 	}
 
 	for {
@@ -2220,11 +2284,17 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			}
 		case chunk, ok := <-opts.data:
 			if !ok {
-				for _, frame := range acc.Flush() {
+				done := false
+				acc.FlushFrames(func(frame []byte) bool {
 					if processFrame(frame) {
-						opts.cancel(nil)
-						return
+						done = true
+						return false
 					}
+					return true
+				})
+				if done {
+					opts.cancel(nil)
+					return
 				}
 				if pending := state.PendingResults(); len(pending) > 0 {
 					writeImagesCompletedEventsFromResults(pending, nil, responseFormat, opts.streamPrefix, opts.writeEvent)
@@ -2235,11 +2305,17 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			if timing != nil {
 				timing.MarkData()
 			}
-			for _, frame := range acc.AddChunk(chunk) {
+			done := false
+			acc.ForEachChunkFrame(chunk, func(frame []byte) bool {
 				if processFrame(frame) {
-					opts.cancel(nil)
-					return
+					done = true
+					return false
 				}
+				return true
+			})
+			if done {
+				opts.cancel(nil)
+				return
 			}
 		case now := <-keepAliveC:
 			maybeWriteImageStreamKeepAlive(timing, now, opts.writeKeepAlive)

@@ -1112,6 +1112,74 @@ func TestWebsocketJSONPayloadsFromChunkReusesScratch(t *testing.T) {
 	}
 }
 
+func TestWebsocketJSONPayloadsFromChunkEachHandlesMultipleFrames(t *testing.T) {
+	chunk := []byte("event: response.output_text.delta\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"b\"}\n\ndata: [DONE]\n")
+
+	var got []string
+	if ok := websocketJSONPayloadsFromChunkEach(chunk, func(payload []byte) bool {
+		got = append(got, gjson.GetBytes(payload, "delta").String())
+		return true
+	}); !ok {
+		t.Fatal("websocketJSONPayloadsFromChunkEach returned false")
+	}
+
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("payload deltas = %v, want [a b]", got)
+	}
+}
+
+func TestWebsocketJSONPayloadsFromChunkEachCanStopEarly(t *testing.T) {
+	chunk := []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"b\"}\n\n")
+
+	count := 0
+	if ok := websocketJSONPayloadsFromChunkEach(chunk, func(payload []byte) bool {
+		count++
+		return false
+	}); ok {
+		t.Fatal("websocketJSONPayloadsFromChunkEach returned true after callback stopped")
+	}
+	if count != 1 {
+		t.Fatalf("callback count = %d, want 1", count)
+	}
+}
+
+func TestWebsocketPayloadEventTypeValueFastAndFallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		want    string
+	}{
+		{
+			name:    "fast top-level type",
+			payload: []byte(`{"type":"response.output_text.delta","delta":"ok"}`),
+			want:    "response.output_text.delta",
+		},
+		{
+			name:    "ignores nested type before top-level",
+			payload: []byte(`{"item":{"type":"wrong"},"type":"response.completed"}`),
+			want:    wsEventTypeCompleted,
+		},
+		{
+			name:    "falls back for escaped value",
+			payload: []byte(`{"type":"response.output_text.\u0064elta","delta":"ok"}`),
+			want:    "response.output_text.delta",
+		},
+		{
+			name:    "missing top-level type",
+			payload: []byte(`{"item":{"type":"wrong"}}`),
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := websocketPayloadEventTypeValue(tt.payload); got != tt.want {
+				t.Fatalf("websocketPayloadEventTypeValue = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResponseCompletedOutputFromPayload(t *testing.T) {
 	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`)
 
@@ -4513,4 +4581,65 @@ func TestResponsesWebsocketRecordsToolCallsWithoutHandshakeSessionHeaders(t *tes
 		}
 	}
 	t.Fatalf("expected cached tool call for call-1")
+}
+
+func BenchmarkWebsocketJSONPayloadsFromChunkIntoManyFrames(b *testing.B) {
+	frame := []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+	chunk := bytes.Repeat(frame, 32)
+	scratch := make([][]byte, 0, 32)
+
+	b.ReportAllocs()
+	total := 0
+	for i := 0; i < b.N; i++ {
+		payloads := websocketJSONPayloadsFromChunkInto(chunk, scratch)
+		total += len(payloads)
+	}
+	if total == 0 {
+		b.Fatal("expected payloads")
+	}
+}
+
+func BenchmarkWebsocketJSONPayloadsFromChunkEachManyFrames(b *testing.B) {
+	frame := []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+	chunk := bytes.Repeat(frame, 32)
+
+	b.ReportAllocs()
+	total := 0
+	for i := 0; i < b.N; i++ {
+		if ok := websocketJSONPayloadsFromChunkEach(chunk, func(payload []byte) bool {
+			total += len(payload)
+			return true
+		}); !ok {
+			b.Fatal("unexpected stop")
+		}
+	}
+	if total == 0 {
+		b.Fatal("expected payloads")
+	}
+}
+
+func BenchmarkWebsocketPayloadEventTypeValue(b *testing.B) {
+	payload := []byte(`{"type":"response.output_text.delta","sequence_number":42,"delta":"hello"}`)
+
+	b.ReportAllocs()
+	eventType := ""
+	for i := 0; i < b.N; i++ {
+		eventType = websocketPayloadEventTypeValue(payload)
+	}
+	if eventType != "response.output_text.delta" {
+		b.Fatalf("event type = %s", eventType)
+	}
+}
+
+func BenchmarkWebsocketPayloadEventTypeGJSON(b *testing.B) {
+	payload := []byte(`{"type":"response.output_text.delta","sequence_number":42,"delta":"hello"}`)
+
+	b.ReportAllocs()
+	eventType := ""
+	for i := 0; i < b.N; i++ {
+		eventType = strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	}
+	if eventType != "response.output_text.delta" {
+		b.Fatalf("event type = %s", eventType)
+	}
 }

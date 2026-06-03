@@ -51,6 +51,24 @@ const responsesWebsocketTimelineTruncatedMarker = "\n...[websocket timeline trun
 var errResponsesWebsocketNilStreamChannels = errors.New("responses websocket forwarder received nil data and error channels")
 var errResponsesWebsocketRetryFullTranscript = errors.New("responses websocket retry with full transcript")
 
+var (
+	wsDataPrefixBytes             = []byte("data:")
+	wsDoneMarkerBytes             = []byte(wsDoneMarker)
+	wsEventPrefixBytes            = []byte("event:")
+	wsEventTypeCompletedBytes     = []byte(wsEventTypeCompleted)
+	wsEventTypeErrorBytes         = []byte(wsEventTypeError)
+	wsEventTypeOutputItemAdded    = []byte("response.output_item.added")
+	wsEventTypeOutputItemDone     = []byte("response.output_item.done")
+	wsEventTypeOutputTextDelta    = []byte("response.output_text.delta")
+	wsEventTypeOutputTextDone     = []byte("response.output_text.done")
+	wsRequestTypeProcessedBytes   = []byte(wsRequestTypeProcessed)
+	wsTypeKeyBytes                = []byte("type")
+	wsEventTypeContentPartAdded   = []byte("response.content_part.added")
+	wsEventTypeContentPartDone    = []byte("response.content_part.done")
+	wsEventTypeResponseCreated    = []byte("response.created")
+	wsEventTypeResponseInProgress = []byte("response.in_progress")
+)
+
 type websocketTimelineBuilder struct {
 	strings.Builder
 	maxBytes  int
@@ -630,7 +648,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 }
 
 func isResponsesWebsocketControlAck(payload []byte) bool {
-	return strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeProcessed
+	return websocketPayloadEventTypeValue(payload) == wsRequestTypeProcessed
 }
 
 func responsesWebsocketSessionAuthByID(h *OpenAIResponsesAPIHandler, sessionID, authID string) (*coreauth.Auth, bool) {
@@ -1306,7 +1324,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	emittedPayload := false
 	noticeFilter := newResponsesNoticeFilter()
 	requestCtx := c.Request.Context()
-	payloadScratch := make([][]byte, 0, 2)
 	failNilStreamChannels := func() error {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errResponsesWebsocketNilStreamChannels}
 		recordResponsesWebsocketAPIResponseError(h, c, errMsg)
@@ -1402,35 +1419,41 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, completedResponseID, completed, nil
 			}
 
-			payloads := websocketJSONPayloadsFromChunkInto(chunk, payloadScratch)
-			payloadScratch = payloads[:0]
-			for i := range payloads {
-				filteredPayload := payloads[i]
+			var forwardErr error
+			stopForward := false
+			websocketJSONPayloadsFromChunkEach(chunk, func(payload []byte) bool {
+				filteredPayload := payload
 				if noticeFilter != nil {
 					filteredPayload = noticeFilter.FilterPayload(filteredPayload)
 				}
 				if len(filteredPayload) == 0 {
-					continue
+					return true
 				}
-				eventType := strings.TrimSpace(gjson.GetBytes(filteredPayload, "type").String())
+				eventType := websocketPayloadEventTypeValue(filteredPayload)
+				now := time.Now()
 				if eventType == wsEventTypeError {
 					if !emittedPayload && responsesWebsocketPayloadShouldRetryFullTranscript(filteredPayload) {
 						cancel(errResponsesWebsocketRetryFullTranscript)
-						return completedOutput, completedResponseID, completed, errResponsesWebsocketRetryFullTranscript
+						forwardErr = errResponsesWebsocketRetryFullTranscript
+						stopForward = true
+						return false
 					}
-					markAPIResponseTimestamp(c)
-					if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, time.Now(), eventType); errWrite != nil {
+					markAPIResponseTimestampAt(c, now)
+					if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, now, eventType); errWrite != nil {
 						log.Warnf(
 							"responses websocket: downstream_out write failed id=%s event=%s error=%v",
 							sessionID,
-							websocketPayloadEventType(filteredPayload),
+							websocketPayloadEventTypeName(eventType),
 							errWrite,
 						)
 						cancel(errWrite)
-						return completedOutput, completedResponseID, completed, errWrite
+						forwardErr = errWrite
+						stopForward = true
+						return false
 					}
 					cancel(nil)
-					return completedOutput, completedResponseID, completed, nil
+					stopForward = true
+					return false
 				}
 				recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(toolCallCache, downstreamSessionKey, eventType, filteredPayload)
 				if eventType == wsEventTypeCompleted {
@@ -1438,7 +1461,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					completedOutput = responseCompletedOutputFromPayload(filteredPayload)
 					completedResponseID = responseCompletedIDFromPayload(filteredPayload)
 				}
-				markAPIResponseTimestamp(c)
+				markAPIResponseTimestampAt(c, now)
 				// log.Infof(
 				// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 				// 	sessionID,
@@ -1446,17 +1469,23 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// 	websocketPayloadEventType(payloads[i]),
 				// 	websocketPayloadPreview(payloads[i]),
 				// )
-				if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, time.Now(), eventType); errWrite != nil {
+				if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, now, eventType); errWrite != nil {
 					log.Warnf(
 						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
 						sessionID,
-						websocketPayloadEventType(filteredPayload),
+						websocketPayloadEventTypeName(eventType),
 						errWrite,
 					)
 					cancel(errWrite)
-					return completedOutput, completedResponseID, completed, errWrite
+					forwardErr = errWrite
+					stopForward = true
+					return false
 				}
 				emittedPayload = true
+				return true
+			})
+			if stopForward {
+				return completedOutput, completedResponseID, completed, forwardErr
 			}
 		}
 	}
@@ -1507,7 +1536,7 @@ func responsesWebsocketPayloadIsError(payload []byte) bool {
 	if !gjson.ValidBytes(bytes.TrimSpace(payload)) {
 		return false
 	}
-	return strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsEventTypeError
+	return websocketPayloadEventTypeValue(payload) == wsEventTypeError
 }
 
 func responsesWebsocketPayloadShouldRetryFullTranscript(payload []byte) bool {
@@ -1515,7 +1544,7 @@ func responsesWebsocketPayloadShouldRetryFullTranscript(payload []byte) bool {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return false
 	}
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != wsEventTypeError {
+	if websocketPayloadEventTypeValue(payload) != wsEventTypeError {
 		return false
 	}
 	if status := int(gjson.GetBytes(payload, "status").Int()); status > 0 && status != http.StatusBadRequest {
@@ -1556,22 +1585,34 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 
 func websocketJSONPayloadsFromChunkInto(chunk []byte, payloads [][]byte) [][]byte {
 	payloads = payloads[:0]
-	trimmed := bytes.TrimSpace(chunk)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte(wsDoneMarker)) {
-		return payloads
+	websocketJSONPayloadsFromChunkEach(chunk, func(payload []byte) bool {
+		payloads = append(payloads, payload)
+		return true
+	})
+	return payloads
+}
+
+func websocketJSONPayloadsFromChunkEach(chunk []byte, fn func([]byte) bool) bool {
+	if fn == nil {
+		return true
 	}
-	if bytes.HasPrefix(trimmed, []byte("data:")) {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, wsDoneMarkerBytes) {
+		return true
+	}
+	if bytes.HasPrefix(trimmed, wsDataPrefixBytes) {
 		data := bytes.TrimSpace(trimmed[len("data:"):])
 		if len(data) > 0 &&
-			!bytes.Equal(data, []byte(wsDoneMarker)) &&
+			!bytes.Equal(data, wsDoneMarkerBytes) &&
 			!bytes.ContainsAny(data, "\r\n") &&
 			json.Valid(data) {
-			return append(payloads, data)
+			return fn(data)
 		}
 	} else if !bytes.ContainsAny(trimmed, "\r\n") && json.Valid(trimmed) {
-		return append(payloads, trimmed)
+		return fn(trimmed)
 	}
 
+	emitted := false
 	remaining := chunk
 	for len(remaining) > 0 {
 		line := remaining
@@ -1582,31 +1623,34 @@ func websocketJSONPayloadsFromChunkInto(chunk []byte, payloads [][]byte) [][]byt
 			remaining = nil
 		}
 		line = bytes.TrimSpace(line)
-		if len(line) == 0 || bytes.HasPrefix(line, []byte("event:")) {
+		if len(line) == 0 || bytes.HasPrefix(line, wsEventPrefixBytes) {
 			continue
 		}
-		if bytes.HasPrefix(line, []byte("data:")) {
+		if bytes.HasPrefix(line, wsDataPrefixBytes) {
 			line = bytes.TrimSpace(line[len("data:"):])
 		}
-		if len(line) == 0 || bytes.Equal(line, []byte(wsDoneMarker)) {
+		if len(line) == 0 || bytes.Equal(line, wsDoneMarkerBytes) {
 			continue
 		}
 		if json.Valid(line) {
-			payloads = append(payloads, line)
+			emitted = true
+			if !fn(line) {
+				return false
+			}
 		}
 	}
 
-	if len(payloads) > 0 {
-		return payloads
+	if emitted {
+		return true
 	}
 
-	if bytes.HasPrefix(trimmed, []byte("data:")) {
+	if bytes.HasPrefix(trimmed, wsDataPrefixBytes) {
 		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
 	}
-	if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte(wsDoneMarker)) && json.Valid(trimmed) {
-		payloads = append(payloads, trimmed)
+	if len(trimmed) > 0 && !bytes.Equal(trimmed, wsDoneMarkerBytes) && json.Valid(trimmed) {
+		return fn(trimmed)
 	}
-	return payloads
+	return true
 }
 
 func writeResponsesWebsocketError(conn *websocket.Conn, wsTimelineLog *websocketTimelineBuilder, errMsg *interfaces.ErrorMessage) ([]byte, error) {
@@ -1712,11 +1756,135 @@ func appendWebsocketEventWithPayloadType(builder *websocketTimelineBuilder, even
 }
 
 func websocketPayloadEventType(payload []byte) string {
-	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	return websocketPayloadEventTypeName(websocketPayloadEventTypeValue(payload))
+}
+
+func websocketPayloadEventTypeName(eventType string) string {
+	eventType = strings.TrimSpace(eventType)
 	if eventType == "" {
 		return "-"
 	}
 	return eventType
+}
+
+func websocketPayloadEventTypeValue(payload []byte) string {
+	if eventType, ok := websocketPayloadTopLevelType(payload); ok {
+		return strings.TrimSpace(eventType)
+	}
+	return strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+}
+
+func websocketPayloadTopLevelType(payload []byte) (string, bool) {
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 || payload[0] != '{' {
+		return "", false
+	}
+
+	depth := 0
+	for i := 0; i < len(payload); {
+		switch payload[i] {
+		case '{', '[':
+			depth++
+			i++
+		case '}', ']':
+			depth--
+			if depth < 0 {
+				return "", false
+			}
+			i++
+		case '"':
+			keyStart := i + 1
+			keyEnd, keyEscaped := websocketScanJSONString(payload, keyStart)
+			if keyEnd < 0 {
+				return "", false
+			}
+			next := websocketSkipJSONSpaces(payload, keyEnd+1)
+			if depth == 1 && next < len(payload) && payload[next] == ':' {
+				if !keyEscaped && bytes.Equal(payload[keyStart:keyEnd], wsTypeKeyBytes) {
+					valueStart := websocketSkipJSONSpaces(payload, next+1)
+					if valueStart >= len(payload) || payload[valueStart] != '"' {
+						return "", false
+					}
+					valueEnd, valueEscaped := websocketScanJSONString(payload, valueStart+1)
+					if valueEnd < 0 || valueEscaped {
+						return "", false
+					}
+					value := payload[valueStart+1 : valueEnd]
+					if eventType, ok := websocketKnownPayloadEventType(value); ok {
+						return eventType, true
+					}
+					return string(value), true
+				}
+			}
+			i = keyEnd + 1
+		default:
+			i++
+		}
+	}
+	return "", false
+}
+
+func websocketKnownPayloadEventType(value []byte) (string, bool) {
+	if bytes.Equal(value, wsEventTypeOutputTextDelta) {
+		return "response.output_text.delta", true
+	}
+	if bytes.Equal(value, wsEventTypeOutputTextDone) {
+		return "response.output_text.done", true
+	}
+	if bytes.Equal(value, wsEventTypeOutputItemAdded) {
+		return "response.output_item.added", true
+	}
+	if bytes.Equal(value, wsEventTypeOutputItemDone) {
+		return "response.output_item.done", true
+	}
+	if bytes.Equal(value, wsEventTypeContentPartAdded) {
+		return "response.content_part.added", true
+	}
+	if bytes.Equal(value, wsEventTypeContentPartDone) {
+		return "response.content_part.done", true
+	}
+	if bytes.Equal(value, wsEventTypeCompletedBytes) {
+		return wsEventTypeCompleted, true
+	}
+	if bytes.Equal(value, wsEventTypeResponseCreated) {
+		return "response.created", true
+	}
+	if bytes.Equal(value, wsEventTypeResponseInProgress) {
+		return "response.in_progress", true
+	}
+	if bytes.Equal(value, wsRequestTypeProcessedBytes) {
+		return wsRequestTypeProcessed, true
+	}
+	if bytes.Equal(value, wsEventTypeErrorBytes) {
+		return wsEventTypeError, true
+	}
+	return "", false
+}
+
+func websocketScanJSONString(payload []byte, start int) (int, bool) {
+	escaped := false
+	for i := start; i < len(payload); i++ {
+		switch payload[i] {
+		case '\\':
+			escaped = true
+			i++
+		case '"':
+			return i, escaped
+		}
+	}
+	return -1, escaped
+}
+
+func websocketSkipJSONSpaces(payload []byte, start int) int {
+	for start < len(payload) {
+		switch payload[start] {
+		case ' ', '\n', '\r', '\t':
+			start++
+		default:
+			return start
+		}
+	}
+	return start
 }
 
 func websocketPayloadPreview(payload []byte) string {
@@ -1870,11 +2038,18 @@ func websocketTimelineShouldRecordWithPayloadType(builder *websocketTimelineBuil
 }
 
 func markAPIResponseTimestamp(c *gin.Context) {
+	markAPIResponseTimestampAt(c, time.Now())
+}
+
+func markAPIResponseTimestampAt(c *gin.Context, timestamp time.Time) {
 	if c == nil {
 		return
 	}
 	if _, exists := c.Get("API_RESPONSE_TIMESTAMP"); exists {
 		return
 	}
-	c.Set("API_RESPONSE_TIMESTAMP", time.Now())
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	c.Set("API_RESPONSE_TIMESTAMP", timestamp)
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -380,5 +381,89 @@ func TestResponsesSSEFramerTrustedDataStillFiltersUsageWarnings(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte("real output")) {
 		t.Fatalf("normal payload should remain in trusted mode")
+	}
+}
+
+func TestResponsesSSEFrameLenFindsLFAndCRLFDelimiters(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk string
+		want  int
+	}{
+		{
+			name:  "lf",
+			chunk: "data: {}\n\nrest",
+			want:  len("data: {}\n\n"),
+		},
+		{
+			name:  "crlf",
+			chunk: "data: {}\r\n\r\nrest",
+			want:  len("data: {}\r\n\r\n"),
+		},
+		{
+			name:  "none",
+			chunk: "data: {}",
+			want:  0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := responsesSSEFrameLen([]byte(tt.chunk)); got != tt.want {
+				t.Fatalf("frame len = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSSEFrameAccumulatorAddChunkPreservesMultipleFrames(t *testing.T) {
+	var acc sseFrameAccumulator
+	frames := acc.AddChunk([]byte("data: {\"type\":\"first\"}\n\ndata: {\"type\":\"second\"}\n\n"))
+	if len(frames) != 2 {
+		t.Fatalf("len(frames)=%d, want 2", len(frames))
+	}
+	if got, want := string(frames[0]), "data: {\"type\":\"first\"}\n\n"; got != want {
+		t.Fatalf("first frame = %q, want %q", got, want)
+	}
+	if got, want := string(frames[1]), "data: {\"type\":\"second\"}\n\n"; got != want {
+		t.Fatalf("second frame = %q, want %q", got, want)
+	}
+}
+
+func BenchmarkResponsesSSEFrameLen(b *testing.B) {
+	chunk := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if responsesSSEFrameLen(chunk) != len(chunk) {
+			b.Fatal("unexpected frame len")
+		}
+	}
+}
+
+func BenchmarkResponsesSSEFramerWriteChunkManyFrames(b *testing.B) {
+	frame := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+	chunk := bytes.Repeat(frame, 16)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		framer := &responsesSSEFramer{trustedData: true}
+		if !framer.WriteChunk(io.Discard, chunk) {
+			b.Fatal("expected write")
+		}
+	}
+}
+
+func BenchmarkSSEFrameAccumulatorForEachChunkFrameManyFrames(b *testing.B) {
+	frame := []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+	chunk := bytes.Repeat(frame, 16)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var acc sseFrameAccumulator
+		count := 0
+		acc.ForEachChunkFrame(chunk, func(frame []byte) bool {
+			count++
+			return true
+		})
+		if count != 16 {
+			b.Fatalf("count=%d, want 16", count)
+		}
 	}
 }
