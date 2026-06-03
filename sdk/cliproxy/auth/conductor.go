@@ -3514,6 +3514,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	schedulerDirty := false
 	persistAuthID := ""
 	var schedulerSnapshot *Auth
+	invalidateAuthAffinity := false
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -3648,6 +3649,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.AuthScoped {
 					auth.Quota.AuthScope = true
 				}
+				if auth.Unavailable && !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+					invalidateAuthAffinity = true
+				}
 				if result.Model != "" {
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -3683,6 +3687,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if m.scheduler != nil && schedulerSnapshot != nil {
 		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
+	if invalidateAuthAffinity {
+		m.invalidateSessionAffinityForAuth(result.AuthID)
+	}
 
 	if clearModelQuota && result.Model != "" {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
@@ -3701,6 +3708,32 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		m.releaseProxyLease(ctx, result.AuthID)
 	}
 	m.hook.OnResult(ctx, result)
+}
+
+func (m *Manager) invalidateSessionAffinityForAuth(authID string) {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return
+	}
+	seen := make(map[*SessionAffinitySelector]struct{}, 2)
+	invalidate := func(selector Selector) {
+		affinity, ok := selector.(*SessionAffinitySelector)
+		if !ok || affinity == nil {
+			return
+		}
+		if _, okSeen := seen[affinity]; okSeen {
+			return
+		}
+		seen[affinity] = struct{}{}
+		affinity.InvalidateAuth(authID)
+	}
+
+	m.mu.RLock()
+	selector := m.selector
+	kiroSelector := m.kiroSelector
+	m.mu.RUnlock()
+
+	invalidate(selector)
+	invalidate(kiroSelector)
 }
 
 func (m *Manager) markCleanModelSuccessResult(ctx context.Context, result Result) bool {
@@ -4887,6 +4920,7 @@ func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affin
 	}
 
 	cacheKey := sessionAffinityCacheKey(provider, primaryID, opts.Metadata)
+	forceFreshUpstream := false
 	if cachedAuthID, ok := affinity.cache.GetAndRefresh(cacheKey); ok {
 		if auth, executor, okCached, errPick := m.pickCachedSingleWithScheduler(ctx, provider, model, opts, tried, cachedAuthID); errPick != nil || okCached {
 			return auth, executor, errPick
@@ -4895,20 +4929,34 @@ func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affin
 		forceNewUpstreamSessionForNextCredential(&opts)
 	}
 
+	if affinity.cache.ConsumeForceNew(cacheKey) {
+		forceFreshUpstream = true
+	}
+
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, opts.Metadata)
+		if affinity.cache.ConsumeForceNew(fallbackKey) {
+			forceFreshUpstream = true
+		}
 		if cachedAuthID, ok := affinity.cache.Get(fallbackKey); ok {
 			auth, executor, okCached, errPick := m.pickCachedSingleWithScheduler(ctx, provider, model, opts, tried, cachedAuthID)
 			if errPick != nil {
 				return auth, executor, errPick
 			}
 			if okCached {
+				if forceFreshUpstream {
+					forceNewUpstreamSessionForNextCredential(&opts)
+				}
 				affinity.cache.Set(cacheKey, auth.ID)
 				return auth, executor, nil
 			}
 			affinity.cache.Invalidate(fallbackKey)
 			forceNewUpstreamSessionForNextCredential(&opts)
 		}
+	}
+
+	if forceFreshUpstream {
+		forceNewUpstreamSessionForNextCredential(&opts)
 	}
 
 	auth, executor, errPick := m.pickNextSingleStableWithScheduler(ctx, provider, model, opts, tried, cacheKey)
@@ -5141,6 +5189,7 @@ func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affini
 	}
 
 	cacheKey := sessionAffinityCacheKey("mixed", primaryID, opts.Metadata)
+	forceFreshUpstream := false
 	if cachedAuthID, ok := affinity.cache.GetAndRefresh(cacheKey); ok {
 		if auth, executor, provider, okCached, errPick := m.pickCachedMixedWithScheduler(ctx, providers, model, opts, tried, cachedAuthID); errPick != nil || okCached {
 			return auth, executor, provider, errPick
@@ -5149,20 +5198,34 @@ func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affini
 		forceNewUpstreamSessionForNextCredential(&opts)
 	}
 
+	if affinity.cache.ConsumeForceNew(cacheKey) {
+		forceFreshUpstream = true
+	}
+
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey := sessionAffinityCacheKey("mixed", fallbackID, opts.Metadata)
+		if affinity.cache.ConsumeForceNew(fallbackKey) {
+			forceFreshUpstream = true
+		}
 		if cachedAuthID, ok := affinity.cache.Get(fallbackKey); ok {
 			auth, executor, provider, okCached, errPick := m.pickCachedMixedWithScheduler(ctx, providers, model, opts, tried, cachedAuthID)
 			if errPick != nil {
 				return auth, executor, provider, errPick
 			}
 			if okCached {
+				if forceFreshUpstream {
+					forceNewUpstreamSessionForNextCredential(&opts)
+				}
 				affinity.cache.Set(cacheKey, auth.ID)
 				return auth, executor, provider, nil
 			}
 			affinity.cache.Invalidate(fallbackKey)
 			forceNewUpstreamSessionForNextCredential(&opts)
 		}
+	}
+
+	if forceFreshUpstream {
+		forceNewUpstreamSessionForNextCredential(&opts)
 	}
 
 	auth, executor, provider, errPick := m.pickNextMixedStableWithScheduler(ctx, providers, model, opts, tried, cacheKey)
