@@ -314,6 +314,10 @@ func (c *websocketToolSessionRefCounter) release(sessionKey string) bool {
 
 func retainResponsesWebsocketToolCaches(sessionKey string) {
 	_, _, refs := currentDefaultWebsocketToolCaches()
+	retainResponsesWebsocketToolCachesWithRefs(refs, sessionKey)
+}
+
+func retainResponsesWebsocketToolCachesWithRefs(refs *websocketToolSessionRefCounter, sessionKey string) {
 	if refs == nil {
 		return
 	}
@@ -322,6 +326,10 @@ func retainResponsesWebsocketToolCaches(sessionKey string) {
 
 func releaseResponsesWebsocketToolCaches(sessionKey string) {
 	outputCache, callCache, refs := currentDefaultWebsocketToolCaches()
+	releaseResponsesWebsocketToolCachesWithCaches(outputCache, callCache, refs, sessionKey)
+}
+
+func releaseResponsesWebsocketToolCachesWithCaches(outputCache, callCache *websocketToolOutputCache, refs *websocketToolSessionRefCounter, sessionKey string) {
 	if refs == nil {
 		return
 	}
@@ -338,11 +346,15 @@ func releaseResponsesWebsocketToolCaches(sessionKey string) {
 }
 
 func resetResponsesWebsocketToolCaches(sessionKey string) {
+	outputCache, callCache, _ := currentDefaultWebsocketToolCaches()
+	resetResponsesWebsocketToolCachesWithCaches(outputCache, callCache, sessionKey)
+}
+
+func resetResponsesWebsocketToolCachesWithCaches(outputCache, callCache *websocketToolOutputCache, sessionKey string) {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
 		return
 	}
-	outputCache, callCache, _ := currentDefaultWebsocketToolCaches()
 	if outputCache != nil {
 		outputCache.deleteSession(sessionKey)
 	}
@@ -653,12 +665,17 @@ func recordResponsesWebsocketToolCallsFromPayload(sessionKey string, payload []b
 }
 
 func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolOutputCache, sessionKey string, payload []byte) {
+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(cache, sessionKey, eventType, payload)
+}
+
+func recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(cache *websocketToolOutputCache, sessionKey, eventType string, payload []byte) {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" || cache == nil || len(payload) == 0 {
 		return
 	}
 
-	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	eventType = strings.TrimSpace(eventType)
 	switch eventType {
 	case "response.completed":
 		output := gjson.GetBytes(payload, "response.output")

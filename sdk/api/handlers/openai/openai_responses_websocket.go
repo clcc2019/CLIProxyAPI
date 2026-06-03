@@ -210,7 +210,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	if downstreamSessionKey == "" {
 		downstreamSessionKey = connectionID
 	}
-	retainResponsesWebsocketToolCaches(downstreamSessionKey)
+	toolOutputCache, toolCallCache, toolSessionRefs := currentDefaultWebsocketToolCaches()
+	retainResponsesWebsocketToolCachesWithRefs(toolSessionRefs, downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", connectionID, clientIP)
 	wsDone := make(chan struct{})
@@ -312,7 +313,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var wsTerminateErr error
 	wsTimelineLog := newResponsesWebsocketTimelineBuilder(h)
 	defer func() {
-		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
+		releaseResponsesWebsocketToolCachesWithCaches(toolOutputCache, toolCallCache, toolSessionRefs, downstreamSessionKey)
 		if wsTerminateErr != nil {
 			appendWebsocketTimelineDisconnect(&wsTimelineLog, wsTerminateErr, time.Now())
 			// log.Infof("responses websocket: session closing id=%s reason=%v", connectionID, wsTerminateErr)
@@ -495,7 +496,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if h != nil && h.AuthManager != nil {
 				h.AuthManager.ResetExecutionSession(activeExecutionSessionID)
 			}
-			resetResponsesWebsocketToolCaches(downstreamSessionKey)
+			resetResponsesWebsocketToolCachesWithCaches(toolOutputCache, toolCallCache, downstreamSessionKey)
 			toolCachesReset = true
 		}
 		activeExecutionSessionID = currentExecutionSessionID
@@ -519,11 +520,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		if replacesTranscript {
 			if !toolCachesReset {
-				resetResponsesWebsocketToolCaches(downstreamSessionKey)
+				resetResponsesWebsocketToolCachesWithCaches(toolOutputCache, toolCallCache, downstreamSessionKey)
 			}
-			requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+			requestJSON = repairResponsesWebsocketToolCallsWithCaches(toolOutputCache, toolCallCache, downstreamSessionKey, requestJSON)
 		} else {
-			requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+			requestJSON = repairResponsesWebsocketToolCallsWithCaches(toolOutputCache, toolCallCache, downstreamSessionKey, requestJSON)
 		}
 		updatedLastRequest = requestJSON
 		requestStateToCommit := requestJSON
@@ -562,7 +563,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 		subscribeUpstreamDisconnect(currentExecutionSessionID)
 
-		completedOutput, completedResponseID, completedForward, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey)
+		completedOutput, completedResponseID, completedForward, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey, toolCallCache)
 		if errors.Is(errForward, errResponsesWebsocketRetryFullTranscript) &&
 			allowIncrementalInputWithPreviousResponseID &&
 			strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" {
@@ -590,7 +591,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if stripped, errDelete := sjson.DeleteBytes(retryJSON, "previous_response_id"); errDelete == nil {
 				retryJSON = stripped
 			}
-			retryJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, retryJSON)
+			retryJSON = repairResponsesWebsocketToolCallsWithCaches(toolOutputCache, toolCallCache, downstreamSessionKey, retryJSON)
 			requestStateToCommit = retryJSON
 			modelName = gjson.GetBytes(retryJSON, "model").String()
 			cliCtx, cliCancel = h.GetContextWithCancel(h, c, context.Background())
@@ -603,7 +604,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			dataChan, _, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, retryJSON, "")
 			subscribeUpstreamDisconnect(currentExecutionSessionID)
-			completedOutput, completedResponseID, completedForward, errForward = h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey)
+			completedOutput, completedResponseID, completedForward, errForward = h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey, toolCallCache)
 		}
 		if errForward != nil {
 			wsTerminateErr = errForward
@@ -1293,7 +1294,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	wsTimelineLog *websocketTimelineBuilder,
 	sessionID string,
 	downstreamSessionKey string,
+	toolCallCaches ...*websocketToolOutputCache,
 ) ([]byte, string, bool, error) {
+	var toolCallCache *websocketToolOutputCache
+	if len(toolCallCaches) > 0 {
+		toolCallCache = toolCallCaches[0]
+	}
 	completed := false
 	completedOutput := []byte("[]")
 	completedResponseID := ""
@@ -1404,7 +1410,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if len(filteredPayload) == 0 {
 					continue
 				}
-				if responsesWebsocketPayloadIsError(filteredPayload) {
+				eventType := strings.TrimSpace(gjson.GetBytes(filteredPayload, "type").String())
+				if eventType == wsEventTypeError {
 					if !emittedPayload && responsesWebsocketPayloadShouldRetryFullTranscript(filteredPayload) {
 						cancel(errResponsesWebsocketRetryFullTranscript)
 						return completedOutput, completedResponseID, completed, errResponsesWebsocketRetryFullTranscript
@@ -1423,8 +1430,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					cancel(nil)
 					return completedOutput, completedResponseID, completed, nil
 				}
-				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, filteredPayload)
-				eventType := gjson.GetBytes(filteredPayload, "type").String()
+				recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(toolCallCache, downstreamSessionKey, eventType, filteredPayload)
 				if eventType == wsEventTypeCompleted {
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(filteredPayload)
