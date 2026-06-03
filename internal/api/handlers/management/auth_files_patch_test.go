@@ -317,6 +317,54 @@ func TestBuildAuthFileEntryExposesUserAgent(t *testing.T) {
 	}
 }
 
+func TestBuildAuthFileEntryExposesCodexClientProfile(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-auth.json",
+		FileName: "codex-auth.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"codex_client_profile_pinned": true,
+			"email":                       "codex@example.com",
+			"originator":                  "codex_vscode",
+			"user_agent":                  "codex-cli-test/1.0",
+			"headers": map[string]any{
+				"X-Codex-Installation-Id": "install-1",
+				"X-Codex-Beta-Features":   "feature-1",
+				"empty":                   "",
+			},
+		},
+		Attributes: map[string]string{
+			"path": "/tmp/codex-auth.json",
+		},
+	}
+
+	entry := h.buildAuthFileEntry(auth)
+	profile, ok := entry["client_profile"].(gin.H)
+	if !ok {
+		t.Fatalf("entry[client_profile] = %T, want gin.H", entry["client_profile"])
+	}
+	if got, _ := profile["pinned"].(bool); !got {
+		t.Fatalf("client_profile[pinned] = %#v, want true", profile["pinned"])
+	}
+	if got, _ := profile["user_agent"].(string); got != "codex-cli-test/1.0" {
+		t.Fatalf("client_profile[user_agent] = %q, want %q", got, "codex-cli-test/1.0")
+	}
+	if got, _ := profile["originator"].(string); got != "codex_vscode" {
+		t.Fatalf("client_profile[originator] = %q, want codex_vscode", got)
+	}
+	headers, ok := profile["headers"].(map[string]string)
+	if !ok {
+		t.Fatalf("client_profile[headers] = %T, want map[string]string", profile["headers"])
+	}
+	if got := headers["X-Codex-Installation-Id"]; got != "install-1" {
+		t.Fatalf("client_profile headers installation id = %q, want install-1", got)
+	}
+	if _, ok := headers["empty"]; ok {
+		t.Fatalf("client_profile headers should omit empty values")
+	}
+}
+
 func TestBuildAuthFileEntrySeparatesProxyPoolRuntimeProxy(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	auth := &coreauth.Auth{

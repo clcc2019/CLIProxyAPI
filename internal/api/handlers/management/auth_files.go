@@ -2209,6 +2209,9 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	if userAgent := authFileUserAgent(auth); userAgent != "" {
 		entry["user_agent"] = userAgent
 	}
+	if clientProfile := authFileClientProfile(auth); len(clientProfile) > 0 {
+		entry["client_profile"] = clientProfile
+	}
 	if websockets, ok := authFileWebsockets(auth); ok {
 		entry["websockets"] = websockets
 	}
@@ -3595,6 +3598,69 @@ func authFileWebsockets(auth *coreauth.Auth) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func authFileClientProfile(auth *coreauth.Auth) gin.H {
+	if auth == nil {
+		return nil
+	}
+	profile := gin.H{}
+	if auth.Metadata != nil {
+		if pinned, ok := auth.Metadata["codex_client_profile_pinned"].(bool); ok {
+			profile["pinned"] = pinned
+		}
+		if originator, ok := auth.Metadata["originator"].(string); ok {
+			if trimmed := strings.TrimSpace(originator); trimmed != "" {
+				profile["originator"] = trimmed
+			}
+		}
+		if headers := authFileMetadataHeaders(auth.Metadata); len(headers) > 0 {
+			profile["headers"] = headers
+		}
+	}
+	if userAgent := authFileUserAgent(auth); userAgent != "" {
+		profile["user_agent"] = userAgent
+	}
+	return profile
+}
+
+func authFileMetadataHeaders(metadata map[string]any) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	raw, ok := metadata["headers"]
+	if !ok || raw == nil {
+		return nil
+	}
+	out := make(map[string]string)
+	switch headers := raw.(type) {
+	case map[string]any:
+		for key, value := range headers {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if typed, ok := value.(string); ok {
+				if trimmed := strings.TrimSpace(typed); trimmed != "" {
+					out[key] = trimmed
+				}
+			}
+		}
+	case map[string]string:
+		for key, value := range headers {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				out[key] = trimmed
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
