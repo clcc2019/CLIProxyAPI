@@ -3644,9 +3644,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				// triggering model. Kiro auth-scoped quota errors and generic 401s
 				// both need future routing to move to a different auth file.
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
-				// Mark explicit auth-scoped failures so isAuthBlockedForModel treats
-				// every model as unavailable, even ones with no per-model state.
-				if result.AuthScoped {
+				// Mark auth-scoped failures so isAuthBlockedForModel treats every
+				// model as unavailable, even ones with no per-model state.
+				if result.AuthScoped || isAuthWideResultError(result.Error) {
 					auth.Quota.AuthScope = true
 				}
 				if auth.Unavailable && !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
@@ -4127,11 +4127,20 @@ func statusCodeFromResult(err *Error) int {
 }
 
 func isAuthWideResultError(err *Error) bool {
-	return statusCodeFromResult(err) == http.StatusUnauthorized
+	switch statusCodeFromResult(err) {
+	case http.StatusUnauthorized:
+		return true
+	case http.StatusBadRequest:
+		return !isModelSupportResultError(err) && !isRequestInvalidResultError(err)
+	default:
+		return false
+	}
 }
 
 func authWideSuspendReason(err *Error, explicitAuthScoped bool) string {
 	switch statusCodeFromResult(err) {
+	case http.StatusBadRequest:
+		return "bad_request"
 	case http.StatusUnauthorized:
 		return "unauthorized"
 	case http.StatusPaymentRequired, http.StatusForbidden:
@@ -4212,6 +4221,33 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+func isRequestInvalidResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if isModelSupportResultError(err) {
+		return false
+	}
+	switch statusCodeFromResult(err) {
+	case http.StatusBadRequest:
+		msg := err.Error()
+		return strings.Contains(msg, "invalid_request_error") ||
+			strings.Contains(msg, "INVALID_ARGUMENT") ||
+			strings.Contains(msg, "FAILED_PRECONDITION") ||
+			isMalformedRequestErrorMessage(msg)
+	case http.StatusNotFound:
+		return isRequestScopedNotFoundMessage(err.Error())
+	case http.StatusUnprocessableEntity:
+		return true
+	case http.StatusInternalServerError:
+		msg := err.Error()
+		return strings.Contains(msg, "\"status\":\"UNKNOWN\"") ||
+			strings.Contains(msg, "\"status\": \"UNKNOWN\"")
+	default:
+		return false
+	}
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
@@ -4221,6 +4257,10 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var resultErr *Error
+	if errors.As(err, &resultErr) && resultErr != nil {
+		return isRequestInvalidResultError(resultErr)
 	}
 	if isModelSupportError(err) {
 		return false
@@ -4291,6 +4331,13 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	}
 	statusCode := statusCodeFromResult(resultErr)
 	switch statusCode {
+	case 400:
+		auth.StatusMessage = "bad_request"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
 	case 401:
 		auth.StatusMessage = "unauthorized"
 		// disable_cooling is intended for quota/capacity retry loops. A 401 means

@@ -1160,6 +1160,75 @@ func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	}
 }
 
+func TestManager_AuthWideBadRequestFallsBackAndSuspendsAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-bad-auth": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    "auth file rejected by upstream account policy",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	for i := 0; i < 2; i++ {
+		resp, errExecute := m.Execute(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute %d error = %v, want success", i, errExecute)
+		}
+		if string(resp.Payload) != goodAuth.ID {
+			t.Fatalf("execute %d payload = %q, want %q", i, string(resp.Payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if !updatedBad.Unavailable {
+		t.Fatal("expected 400 auth-wide failure to suspend the whole auth file")
+	}
+	if updatedBad.LastError == nil || updatedBad.LastError.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("bad auth LastError = %#v, want 400", updatedBad.LastError)
+	}
+	if AuthAvailableForModel(updatedBad, "unrelated-model", time.Now()) {
+		t.Fatal("expected auth-wide 400 to make unrelated models unavailable on the bad auth")
+	}
+}
+
 func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
