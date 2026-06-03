@@ -808,6 +808,7 @@ func TestGetCodexUsageMarksAuthScopedQuotaCooldown(t *testing.T) {
 			"access_token": "usage-access-token",
 			"account_id":   "acct_123",
 		},
+		Attributes: map[string]string{"path": "/tmp/codex.json"},
 	}); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
