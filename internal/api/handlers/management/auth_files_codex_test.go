@@ -834,12 +834,18 @@ func TestGetCodexUsageMarksAuthScopedQuotaCooldown(t *testing.T) {
 	if got := authFile["unavailable"]; got != true {
 		t.Fatalf("auth_file.unavailable = %#v, want true", got)
 	}
-	quota, ok := authFile["quota"].(map[string]any)
-	if !ok {
-		t.Fatalf("auth_file.quota missing: %#v", authFile)
+	if got := authFile["status"]; got != "error" {
+		t.Fatalf("auth_file.status = %#v, want error", got)
 	}
-	if got := quota["exceeded"]; got != true {
-		t.Fatalf("auth_file.quota.exceeded = %#v, want true", got)
+	if _, ok := authFile["next_retry_after"]; !ok {
+		t.Fatalf("auth_file.next_retry_after missing: %#v", authFile)
+	}
+	lastError, ok := authFile["last_error"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth_file.last_error missing: %#v", authFile)
+	}
+	if got := lastError["code"]; got != "rate_limited" {
+		t.Fatalf("auth_file.last_error.code = %#v, want rate_limited", got)
 	}
 	updated, ok := manager.GetByID("codex.json")
 	if !ok || updated == nil {
