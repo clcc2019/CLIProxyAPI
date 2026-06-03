@@ -1096,6 +1096,22 @@ func TestWebsocketJSONPayloadsFromPlainJSONChunk(t *testing.T) {
 	}
 }
 
+func TestWebsocketJSONPayloadsFromChunkReusesScratch(t *testing.T) {
+	chunk := []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+	scratch := make([][]byte, 0, 8)
+
+	payloads := websocketJSONPayloadsFromChunkInto(chunk, scratch)
+	if len(payloads) != 1 {
+		t.Fatalf("payloads len = %d, want 1", len(payloads))
+	}
+	if cap(payloads) != cap(scratch) {
+		t.Fatalf("payload cap = %d, want scratch cap %d", cap(payloads), cap(scratch))
+	}
+	if gjson.GetBytes(payloads[0], "type").String() != "response.output_text.delta" {
+		t.Fatalf("unexpected payload type: %s", gjson.GetBytes(payloads[0], "type").String())
+	}
+}
+
 func TestResponseCompletedOutputFromPayload(t *testing.T) {
 	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`)
 

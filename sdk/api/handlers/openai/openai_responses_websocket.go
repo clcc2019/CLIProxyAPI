@@ -1306,6 +1306,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	emittedPayload := false
 	noticeFilter := newResponsesNoticeFilter()
 	requestCtx := c.Request.Context()
+	payloadScratch := make([][]byte, 0, 2)
 	failNilStreamChannels := func() error {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errResponsesWebsocketNilStreamChannels}
 		recordResponsesWebsocketAPIResponseError(h, c, errMsg)
@@ -1401,7 +1402,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, completedResponseID, completed, nil
 			}
 
-			payloads := websocketJSONPayloadsFromChunk(chunk)
+			payloads := websocketJSONPayloadsFromChunkInto(chunk, payloadScratch)
+			payloadScratch = payloads[:0]
 			for i := range payloads {
 				filteredPayload := payloads[i]
 				if noticeFilter != nil {
@@ -1549,7 +1551,27 @@ func responsesWebsocketPreviousResponseNotFoundText(text string) bool {
 }
 
 func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
-	payloads := make([][]byte, 0, 2)
+	return websocketJSONPayloadsFromChunkInto(chunk, nil)
+}
+
+func websocketJSONPayloadsFromChunkInto(chunk []byte, payloads [][]byte) [][]byte {
+	payloads = payloads[:0]
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte(wsDoneMarker)) {
+		return payloads
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		data := bytes.TrimSpace(trimmed[len("data:"):])
+		if len(data) > 0 &&
+			!bytes.Equal(data, []byte(wsDoneMarker)) &&
+			!bytes.ContainsAny(data, "\r\n") &&
+			json.Valid(data) {
+			return append(payloads, data)
+		}
+	} else if !bytes.ContainsAny(trimmed, "\r\n") && json.Valid(trimmed) {
+		return append(payloads, trimmed)
+	}
+
 	remaining := chunk
 	for len(remaining) > 0 {
 		line := remaining
@@ -1578,7 +1600,6 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 		return payloads
 	}
 
-	trimmed := bytes.TrimSpace(chunk)
 	if bytes.HasPrefix(trimmed, []byte("data:")) {
 		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
 	}
