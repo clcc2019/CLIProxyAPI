@@ -97,6 +97,25 @@ func TestNewCodexStatusErrTreatsInvalidatedTokenAsUnauthorized(t *testing.T) {
 	}
 }
 
+func TestNewCodexStatusErrTreatsUsageLimitReachedAsAuthScopedFailover(t *testing.T) {
+	body := []byte(`{"error":{"message":"The usage limit has been reached","resets_in_seconds":300}}`)
+
+	err := newCodexStatusErr(http.StatusTooManyRequests, body)
+
+	if got := err.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if retryAfter := err.RetryAfter(); retryAfter == nil || *retryAfter != 300*time.Second {
+		t.Fatalf("retryAfter = %v, want %v", retryAfter, 300*time.Second)
+	}
+	if !err.IsAuthScopedFailure() {
+		t.Fatalf("expected usage limit error to be auth-scoped")
+	}
+	if !err.IsCredentialFailoverFailure() {
+		t.Fatalf("expected usage limit error to request credential failover")
+	}
+}
+
 func TestParseCodexWebsocketErrorInfersUsageLimitStatus(t *testing.T) {
 	payload := []byte(`{"type":"error","error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex.","resets_in_seconds":30}}`)
 

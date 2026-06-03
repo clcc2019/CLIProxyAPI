@@ -882,6 +882,152 @@ func TestManager_Execute_KiroMonthlyRequestCountFailsOverCredential(t *testing.T
 	}
 }
 
+func TestManager_Execute_CodexUsageLimitFailsOverCredential(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"aa-codex-usage-limit": &credentialFailoverStatusError{
+				status:  http.StatusTooManyRequests,
+				message: "HTTP 429: The usage limit has been reached",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-codex-usage-limit-failover"
+	limitedAuth := &Auth{ID: "aa-codex-usage-limit", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	backupAuth := &Auth{ID: "bb-codex-backup", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(limitedAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(backupAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(limitedAuth.ID)
+		reg.UnregisterClient(backupAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), limitedAuth); errRegister != nil {
+		t.Fatalf("register limited auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), backupAuth); errRegister != nil {
+		t.Fatalf("register backup auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want failover success", errExecute)
+	}
+	if string(resp.Payload) != backupAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), backupAuth.ID)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{limitedAuth.ID, backupAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_Execute_CodexUsageLimitDoesNotLeakWhenCredentialsExhausted(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	usageLimitErr := &credentialFailoverStatusError{
+		status:  http.StatusTooManyRequests,
+		message: "HTTP 429: The usage limit has been reached",
+	}
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"aa-codex-usage-limit-exhausted": usageLimitErr,
+			"bb-codex-usage-limit-exhausted": usageLimitErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-codex-usage-limit-exhausted"
+	auth1 := &Auth{ID: "aa-codex-usage-limit-exhausted", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	auth2 := &Auth{ID: "bb-codex-usage-limit-exhausted", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatalf("expected exhausted credentials error")
+	}
+	if strings.Contains(errExecute.Error(), "The usage limit has been reached") {
+		t.Fatalf("exhausted credential error leaked upstream usage-limit message: %v", errExecute)
+	}
+	if calls := executor.ExecuteCalls(); len(calls) != 2 {
+		t.Fatalf("execute calls = %v, want both credentials attempted", calls)
+	}
+}
+
+func TestManager_Execute_CodexUsageLimitDoesNotLeakWhenMaxRetryCredentialsStopsFailover(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 1)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"aa-codex-usage-limit-max-retry": &credentialFailoverStatusError{
+				status:  http.StatusTooManyRequests,
+				message: "HTTP 429: The usage limit has been reached",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-codex-usage-limit-max-retry"
+	auth1 := &Auth{ID: "aa-codex-usage-limit-max-retry", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	auth2 := &Auth{ID: "bb-codex-usage-limit-max-retry", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatalf("expected max-retry credentials error")
+	}
+	if strings.Contains(errExecute.Error(), "The usage limit has been reached") {
+		t.Fatalf("max-retry credential error leaked upstream usage-limit message: %v", errExecute)
+	}
+	if !strings.Contains(errExecute.Error(), "max-retry-credentials=1") {
+		t.Fatalf("max-retry credential error = %v, want max-retry diagnostic", errExecute)
+	}
+	if calls := executor.ExecuteCalls(); len(calls) != 1 {
+		t.Fatalf("execute calls = %v, want one credential attempted", calls)
+	}
+}
+
 func TestManager_ExecuteStream_KiroMonthlyRequestCountFailsOverCredential(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
@@ -915,6 +1061,65 @@ func TestManager_ExecuteStream_KiroMonthlyRequestCountFailsOverCredential(t *tes
 	}
 
 	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"kiro"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want failover success", errExecute)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v, want success", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != backupAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(payload), backupAuth.ID)
+	}
+
+	got := executor.StreamCalls()
+	want := []string{limitedAuth.ID, backupAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_ExecuteStream_CodexUsageLimitBootstrapFailsOverCredential(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		streamFirstErrors: map[string]error{
+			"aa-codex-usage-limit-stream": &credentialFailoverStatusError{
+				status:  http.StatusTooManyRequests,
+				message: "HTTP 429: The usage limit has been reached",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-codex-usage-limit-stream-failover"
+	limitedAuth := &Auth{ID: "aa-codex-usage-limit-stream", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	backupAuth := &Auth{ID: "bb-codex-backup-stream", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(limitedAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(backupAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(limitedAuth.ID)
+		reg.UnregisterClient(backupAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), limitedAuth); errRegister != nil {
+		t.Fatalf("register limited auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), backupAuth); errRegister != nil {
+		t.Fatalf("register backup auth: %v", errRegister)
+	}
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if errExecute != nil {
 		t.Fatalf("execute stream error = %v, want failover success", errExecute)
 	}

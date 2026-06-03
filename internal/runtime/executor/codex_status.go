@@ -13,11 +13,16 @@ import (
 var codexOrdinalDaySuffixRE = regexp.MustCompile(`\b(\d{1,2})(st|nd|rd|th)\b`)
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
+	usageLimit := isCodexUsageLimitError(body)
 	errCode := codexStatusCode(statusCode, body)
 	if errCode <= 0 {
 		errCode = http.StatusInternalServerError
 	}
 	err := statusErr{code: errCode, msg: string(body)}
+	if usageLimit && errCode == http.StatusTooManyRequests {
+		err.authScopedFailure = true
+		err.credentialFailoverFailure = true
+	}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
@@ -69,6 +74,7 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 			strings.Contains(lower, "usage_not_included") ||
 			strings.Contains(lower, "insufficient_quota") ||
 			strings.Contains(lower, "rate_limit_exceeded") ||
+			strings.Contains(lower, "usage limit has been reached") ||
 			strings.Contains(lower, "you've hit your usage limit") ||
 			strings.Contains(lower, "upgrade to plus") ||
 			strings.Contains(lower, "continue using codex") {

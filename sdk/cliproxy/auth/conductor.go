@@ -1351,8 +1351,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
-			rerr := resultErrorFromError(bootstrapErr)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
+			applyResultError(&result, bootstrapErr)
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			if isRequestInvalidError(bootstrapErr) {
 				m.MarkResult(ctx, result)
@@ -1362,7 +1362,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if result.AuthScoped || isAuthWideResultError(result.Error) {
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
-				return nil, bootstrapErr
+				if statusCodeFromResult(result.Error) == http.StatusBadRequest {
+					return nil, bootstrapErr
+				}
+				return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			}
 			if idx < len(execModels)-1 {
 				m.MarkResult(ctx, result)
@@ -5406,6 +5409,9 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	if lastErr == nil {
 		return false
 	}
+	if isCredentialFailoverFailure(lastErr) {
+		return false
+	}
 	if !homeMode {
 		return true
 	}
@@ -6783,6 +6789,13 @@ func (m *Manager) credentialRetryLimitReachedError(ctx context.Context, mode str
 	entry := logEntryWithRequestID(ctx).WithFields(fields)
 	if lastErr != nil {
 		entry.Warnf("auth failover stopped by max-retry-credentials: %v", lastErr)
+		if isCredentialFailoverFailure(lastErr) {
+			return &Error{
+				Code:       "auth_unavailable",
+				Message:    fmt.Sprintf("credential failover stopped during %s after %d credential(s) (max-retry-credentials=%d)", mode, attemptedCount, maxRetryCredentials),
+				HTTPStatus: http.StatusServiceUnavailable,
+			}
+		}
 		return &credentialRetryLimitError{
 			cause:        lastErr,
 			mode:         mode,

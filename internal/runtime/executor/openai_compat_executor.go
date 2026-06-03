@@ -960,9 +960,11 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 }
 
 type statusErr struct {
-	code       int
-	msg        string
-	retryAfter *time.Duration
+	code                      int
+	msg                       string
+	retryAfter                *time.Duration
+	authScopedFailure         bool
+	credentialFailoverFailure bool
 }
 
 func (e statusErr) Error() string {
@@ -973,3 +975,7 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+func (e statusErr) IsAuthScopedFailure() bool  { return e.authScopedFailure }
+func (e statusErr) IsCredentialFailoverFailure() bool {
+	return e.credentialFailoverFailure
+}
