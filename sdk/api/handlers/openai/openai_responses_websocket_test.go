@@ -1400,6 +1400,23 @@ func TestResponsesWebsocketTimelineErrorOnlyWhenRequestLogDisabled(t *testing.T)
 	}
 }
 
+func TestResponsesWebsocketTimelineUsesKnownPayloadType(t *testing.T) {
+	builder := newWebsocketTimelineBuilder(maxResponsesWebsocketTimelineBytes)
+	builder.errorOnly = true
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+
+	appendWebsocketTimelineEventWithPayloadType(&builder, "response", []byte(`{"type":"response.created"}`), ts, "response.created")
+	if got := builder.String(); got != "" {
+		t.Fatalf("normal response should not be retained in error-only timeline: %s", got)
+	}
+
+	appendWebsocketTimelineEventWithPayloadType(&builder, "response", []byte(`{"type":"error","error":{"message":"failed"}}`), ts, wsEventTypeError)
+	got := builder.String()
+	if !strings.Contains(got, "Event: websocket.response") || !strings.Contains(got, `"type":"error"`) {
+		t.Fatalf("known error payload type should be retained: %s", got)
+	}
+}
+
 func TestSetWebsocketTimelineBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

@@ -1419,7 +1419,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						return completedOutput, completedResponseID, completed, errResponsesWebsocketRetryFullTranscript
 					}
 					markAPIResponseTimestamp(c)
-					if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, filteredPayload, time.Now()); errWrite != nil {
+					if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, time.Now(), eventType); errWrite != nil {
 						log.Warnf(
 							"responses websocket: downstream_out write failed id=%s event=%s error=%v",
 							sessionID,
@@ -1446,7 +1446,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// 	websocketPayloadEventType(payloads[i]),
 				// 	websocketPayloadPreview(payloads[i]),
 				// )
-				if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, filteredPayload, time.Now()); errWrite != nil {
+				if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, time.Now(), eventType); errWrite != nil {
 					log.Warnf(
 						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
 						sessionID,
@@ -1683,17 +1683,21 @@ func writeResponsesWebsocketError(conn *websocket.Conn, wsTimelineLog *websocket
 }
 
 func appendWebsocketEvent(builder *websocketTimelineBuilder, eventType string, payload []byte) {
+	appendWebsocketEventWithPayloadType(builder, eventType, payload, "")
+}
+
+func appendWebsocketEventWithPayloadType(builder *websocketTimelineBuilder, eventType string, payload []byte, payloadType string) {
 	if builder == nil {
+		return
+	}
+	if !websocketTimelineShouldRecordWithPayloadType(builder, eventType, payload, payloadType) {
+		return
+	}
+	if websocketTimelineTruncated(builder) {
 		return
 	}
 	trimmedPayload := bytes.TrimSpace(payload)
 	if len(trimmedPayload) == 0 {
-		return
-	}
-	if !websocketTimelineShouldRecord(builder, eventType, trimmedPayload) {
-		return
-	}
-	if websocketTimelineTruncated(builder) {
 		return
 	}
 	trimmedPayload = util.RedactSensitiveLogBytes(trimmedPayload)
@@ -1741,7 +1745,11 @@ func setWebsocketBody(c *gin.Context, key string, body string) {
 }
 
 func writeResponsesWebsocketPayload(conn *websocket.Conn, wsTimelineLog *websocketTimelineBuilder, payload []byte, timestamp time.Time) error {
-	appendWebsocketTimelineEvent(wsTimelineLog, "response", payload, timestamp)
+	return writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, payload, timestamp, "")
+}
+
+func writeResponsesWebsocketPayloadWithEventType(conn *websocket.Conn, wsTimelineLog *websocketTimelineBuilder, payload []byte, timestamp time.Time, payloadType string) error {
+	appendWebsocketTimelineEventWithPayloadType(wsTimelineLog, "response", payload, timestamp, payloadType)
 	if conn == nil {
 		return fmt.Errorf("responses websocket: downstream websocket conn is nil")
 	}
@@ -1767,17 +1775,21 @@ func recordResponsesWebsocketAPIResponseError(h *OpenAIResponsesAPIHandler, c *g
 }
 
 func appendWebsocketTimelineEvent(builder *websocketTimelineBuilder, eventType string, payload []byte, timestamp time.Time) {
+	appendWebsocketTimelineEventWithPayloadType(builder, eventType, payload, timestamp, "")
+}
+
+func appendWebsocketTimelineEventWithPayloadType(builder *websocketTimelineBuilder, eventType string, payload []byte, timestamp time.Time, payloadType string) {
 	if builder == nil {
+		return
+	}
+	if !websocketTimelineShouldRecordWithPayloadType(builder, eventType, payload, payloadType) {
+		return
+	}
+	if websocketTimelineTruncated(builder) {
 		return
 	}
 	trimmedPayload := bytes.TrimSpace(payload)
 	if len(trimmedPayload) == 0 {
-		return
-	}
-	if !websocketTimelineShouldRecord(builder, eventType, trimmedPayload) {
-		return
-	}
-	if websocketTimelineTruncated(builder) {
 		return
 	}
 	trimmedPayload = util.RedactSensitiveLogBytes(trimmedPayload)
@@ -1836,6 +1848,10 @@ func websocketTimelineTruncated(builder *websocketTimelineBuilder) bool {
 }
 
 func websocketTimelineShouldRecord(builder *websocketTimelineBuilder, eventType string, payload []byte) bool {
+	return websocketTimelineShouldRecordWithPayloadType(builder, eventType, payload, "")
+}
+
+func websocketTimelineShouldRecordWithPayloadType(builder *websocketTimelineBuilder, eventType string, payload []byte, payloadType string) bool {
 	if builder == nil || !builder.errorOnly {
 		return true
 	}
@@ -1843,7 +1859,10 @@ func websocketTimelineShouldRecord(builder *websocketTimelineBuilder, eventType 
 	case "disconnect", "error":
 		return true
 	}
-	payloadType := websocketPayloadEventType(payload)
+	payloadType = strings.TrimSpace(payloadType)
+	if payloadType == "" {
+		payloadType = websocketPayloadEventType(payload)
+	}
 	if payloadType == wsEventTypeError {
 		return true
 	}
