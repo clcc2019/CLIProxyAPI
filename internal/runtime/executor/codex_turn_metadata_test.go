@@ -3,6 +3,7 @@ package executor
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -239,6 +240,32 @@ func TestCodexMergeResponsesAPIClientMetadataDoesNotReplaceExistingCustomFields(
 	}
 	if got, _ := parsed["fiber_run_id"].(string); got != "fiber-123" {
 		t.Fatalf("fiber_run_id = %q, want fiber-123 in %s", got, headers.Get(codexHeaderTurnMetadata))
+	}
+}
+
+func TestCodexMergeResponsesAPIClientMetadataEscapesHeaderAsASCII(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(codexHeaderTurnMetadata, `{"session_id":"session-1"}`)
+
+	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(headers, map[string]string{
+		"origin": "東京",
+	})
+
+	header := headers.Get(codexHeaderTurnMetadata)
+	if strings.Contains(header, "東京") {
+		t.Fatalf("turn metadata header should escape non-ASCII bytes: %s", header)
+	}
+	for _, b := range []byte(header) {
+		if b >= 0x80 {
+			t.Fatalf("turn metadata header contains non-ASCII byte %#x: %s", b, header)
+		}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(header), &parsed); err != nil {
+		t.Fatalf("turn metadata should be valid JSON: %v", err)
+	}
+	if got, _ := parsed["origin"].(string); got != "東京" {
+		t.Fatalf("origin = %q, want 東京 in %s", got, header)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -341,6 +342,7 @@ func codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(headers http.Hea
 		return
 	}
 	if updated, err := json.Marshal(metadata); err == nil && len(updated) > 0 {
+		updated = codexEscapeNonASCIIJSONBytes(updated)
 		headers.Set(codexHeaderTurnMetadata, string(updated))
 	}
 }
@@ -354,6 +356,45 @@ func codexShouldSkipResponsesAPIClientMetadataForTurnMetadata(key string) bool {
 		return true
 	}
 	return false
+}
+
+func codexEscapeNonASCIIJSONBytes(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	var builder strings.Builder
+	changed := false
+	for _, r := range string(raw) {
+		if r < 0x80 {
+			builder.WriteRune(r)
+			continue
+		}
+		changed = true
+		if r <= 0xffff {
+			builder.WriteString(`\u`)
+			builder.WriteString(codexHex4(uint16(r)))
+			continue
+		}
+		r1, r2 := utf16.EncodeRune(r)
+		builder.WriteString(`\u`)
+		builder.WriteString(codexHex4(uint16(r1)))
+		builder.WriteString(`\u`)
+		builder.WriteString(codexHex4(uint16(r2)))
+	}
+	if !changed {
+		return raw
+	}
+	return []byte(builder.String())
+}
+
+func codexHex4(value uint16) string {
+	const digits = "0123456789abcdef"
+	return string([]byte{
+		digits[value>>12&0xf],
+		digits[value>>8&0xf],
+		digits[value>>4&0xf],
+		digits[value&0xf],
+	})
 }
 
 func codexSetTurnMetadataString(raw string, path string, value string, overwrite bool) string {
