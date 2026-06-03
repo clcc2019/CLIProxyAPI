@@ -3648,10 +3648,9 @@ func TestResponsesWebsocketClearsPinnedAuthBeforeNormalizingIncrementalRequest(t
 		Attributes: map[string]string{"websockets": "true"},
 	}
 	authFallback := &coreauth.Auth{
-		ID:         "auth-fallback",
-		Provider:   executor.Identifier(),
-		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"websockets": "true"},
+		ID:       "auth-fallback",
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
 	}
 	if _, err := manager.Register(context.Background(), authWS); err != nil {
 		t.Fatalf("Register websocket auth: %v", err)
@@ -3702,24 +3701,31 @@ func TestResponsesWebsocketClearsPinnedAuthBeforeNormalizingIncrementalRequest(t
 		t.Fatalf("mark websocket auth unavailable: %v", err)
 	}
 
-	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","previous_response_id":"resp-upstream","input":[{"type":"message","id":"msg-2"}]}`)); errWrite != nil {
-		t.Fatalf("write second websocket message: %v", errWrite)
-	}
-	if _, payload, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
-		t.Fatalf("read second websocket message: %v", errReadMessage)
-	} else if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
-		t.Fatalf("second payload type = %s, want %s; payload=%s", got, wsEventTypeCompleted, payload)
+	for index, request := range []string{
+		`{"type":"response.create","previous_response_id":"resp-upstream","input":[{"type":"message","id":"msg-2"}]}`,
+		`{"type":"response.create","previous_response_id":"resp-upstream","input":[{"type":"message","id":"msg-3"}]}`,
+	} {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+			t.Fatalf("write fallback websocket message %d: %v", index+1, errWrite)
+		}
+		if _, payload, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
+			t.Fatalf("read fallback websocket message %d: %v", index+1, errReadMessage)
+		} else if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+			t.Fatalf("fallback payload %d type = %s, want %s; payload=%s", index+1, got, wsEventTypeCompleted, payload)
+		}
 	}
 
-	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth-ws" || got[1] != "auth-fallback" {
-		t.Fatalf("selected auth IDs = %v, want [auth-ws auth-fallback]", got)
-	}
 	payloads := executor.Payloads()
-	if len(payloads) != 2 {
-		t.Fatalf("captured payload count = %d, want 2", len(payloads))
+	if len(payloads) != 3 {
+		t.Fatalf("captured payload count = %d, want 3", len(payloads))
 	}
-	if gjson.GetBytes(payloads[1], "previous_response_id").Exists() {
-		t.Fatalf("fallback auth request must not preserve previous_response_id: %s", payloads[1])
+	if got := executor.AuthIDs(); len(got) != 3 || got[0] != "auth-ws" || got[1] != "auth-fallback" || got[2] != "auth-fallback" {
+		t.Fatalf("selected auth IDs = %v, want [auth-ws auth-fallback auth-fallback]; payloads=%q", got, payloads)
+	}
+	for index, payload := range payloads[1:] {
+		if gjson.GetBytes(payload, "previous_response_id").Exists() {
+			t.Fatalf("fallback auth request %d must not preserve previous_response_id: %s", index+1, payload)
+		}
 	}
 }
 

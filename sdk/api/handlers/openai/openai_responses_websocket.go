@@ -340,13 +340,22 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	lastResponseID := ""
+	lastResponseIDIncrementalEligible := false
 	pinnedAuthID := ""
+	incrementalInputSupportByModel := make(map[string]bool)
+	requireFreshFullTranscriptBeforeIncremental := false
+	resetIncrementalInputSupportCache := func() {
+		incrementalInputSupportByModel = make(map[string]bool)
+	}
 	clearPinnedAuthIfUnusable := func(sessionID, reason string) bool {
 		if pinnedAuthID == "" {
 			return false
 		}
 		if h == nil || h.AuthManager == nil {
 			pinnedAuthID = ""
+			resetIncrementalInputSupportCache()
+			requireFreshFullTranscriptBeforeIncremental = true
+			lastResponseIDIncrementalEligible = false
 			return true
 		}
 		if h.responsesWebsocketPinnedAuthReusable(pinnedAuthID) {
@@ -354,6 +363,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		authID := pinnedAuthID
 		pinnedAuthID = ""
+		resetIncrementalInputSupportCache()
+		requireFreshFullTranscriptBeforeIncremental = true
+		lastResponseIDIncrementalEligible = false
 		sessionID = strings.TrimSpace(sessionID)
 		if sessionID != "" {
 			suppressNextUpstreamDisconnect(sessionID)
@@ -364,7 +376,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		log.Infof("responses websocket: unpinned auth id=%s session=%s reason=%s", authID, sessionID, reason)
 		return true
 	}
-	incrementalInputSupportByModel := make(map[string]bool)
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -413,14 +424,19 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			normalizationLastRequest = nil
 			normalizationLastResponseOutput = []byte("[]")
 			normalizationLastResponseID = ""
+			lastResponseIDIncrementalEligible = false
 		}
 
 		allowIncrementalInputWithPreviousResponseID := false
 		payloadPreviousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
 		if pinnedAuthClearedBeforeNormalize {
 			allowIncrementalInputWithPreviousResponseID = false
-		} else if payloadPreviousResponseID != "" && payloadPreviousResponseID != normalizationLastResponseID {
+		} else if requireFreshFullTranscriptBeforeIncremental {
 			allowIncrementalInputWithPreviousResponseID = false
+		} else if payloadPreviousResponseID != "" {
+			allowIncrementalInputWithPreviousResponseID = pinnedAuthID != "" &&
+				lastResponseIDIncrementalEligible &&
+				payloadPreviousResponseID == normalizationLastResponseID
 		} else if pinnedAuthID != "" {
 			allowIncrementalInputWithPreviousResponseID = true
 		} else {
@@ -465,6 +481,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				return
 			}
 			continue
+		}
+		if !allowIncrementalInputWithPreviousResponseID {
+			if stripped, errDelete := sjson.DeleteBytes(requestJSON, "previous_response_id"); errDelete == nil {
+				requestJSON = stripped
+				updatedLastRequest = stripped
+			}
 		}
 
 		toolCachesReset := false
@@ -511,10 +533,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, currentExecutionSessionID)
 		clearPinnedAuthIfUnusable(currentExecutionSessionID, "pre_request")
+		requestSelectedIncrementalAuth := false
 		if pinnedAuthID != "" {
+			requestSelectedIncrementalAuth = h.responsesWebsocketPinnedAuthReusable(pinnedAuthID)
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 		} else {
 			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+				requestSelectedIncrementalAuth = false
 				authID = strings.TrimSpace(authID)
 				if authID == "" || h == nil || h.AuthManager == nil {
 					return
@@ -523,8 +548,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !ok || selectedAuth == nil {
 					return
 				}
+				if selectedAuth.Disabled || selectedAuth.Unavailable || selectedAuth.Status == coreauth.StatusDisabled {
+					return
+				}
 				if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
 					pinnedAuthID = authID
+					if !requireFreshFullTranscriptBeforeIncremental {
+						requestSelectedIncrementalAuth = true
+					}
 				}
 			})
 		}
@@ -556,6 +587,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 				continue
 			}
+			if stripped, errDelete := sjson.DeleteBytes(retryJSON, "previous_response_id"); errDelete == nil {
+				retryJSON = stripped
+			}
 			retryJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, retryJSON)
 			requestStateToCommit = retryJSON
 			modelName = gjson.GetBytes(retryJSON, "model").String()
@@ -564,6 +598,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			cliCtx = handlers.WithExecutionSessionID(cliCtx, currentExecutionSessionID)
 			clearPinnedAuthIfUnusable(currentExecutionSessionID, "pre_retry")
 			if pinnedAuthID != "" && h.responsesWebsocketPinnedAuthReusable(pinnedAuthID) {
+				requestSelectedIncrementalAuth = true
 				cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 			}
 			dataChan, _, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, retryJSON, "")
@@ -575,11 +610,20 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Warnf("responses websocket: forward failed id=%s error=%v", connectionID, errForward)
 			return
 		}
-		clearPinnedAuthIfUnusable(currentExecutionSessionID, "post_forward")
+		if clearPinnedAuthIfUnusable(currentExecutionSessionID, "post_forward") {
+			requestSelectedIncrementalAuth = false
+		}
 		if completedForward {
 			lastRequest = requestStateToCommit
 			lastResponseOutput = completedOutput
-			lastResponseID = strings.TrimSpace(completedResponseID)
+			if requestSelectedIncrementalAuth {
+				lastResponseID = strings.TrimSpace(completedResponseID)
+				lastResponseIDIncrementalEligible = lastResponseID != ""
+				requireFreshFullTranscriptBeforeIncremental = false
+			} else {
+				lastResponseID = ""
+				lastResponseIDIncrementalEligible = false
+			}
 		}
 	}
 }
@@ -1019,6 +1063,9 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 		modelKey = strings.TrimSpace(resolvedModelName)
 	}
 	return h.AuthManager.AnyAvailableAuthForModel(providers, modelKey, func(auth *coreauth.Auth) bool {
+		if auth == nil || auth.Disabled || auth.Unavailable || auth.Status == coreauth.StatusDisabled {
+			return false
+		}
 		return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
 	})
 }
