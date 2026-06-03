@@ -156,7 +156,8 @@ func (e *credentialRetryLimitExecutor) Calls() int {
 }
 
 type unauthorizedFailoverSessionExecutor struct {
-	failFirstStatus int
+	failFirstStatus  int
+	failFirstMessage string
 
 	mu     sync.Mutex
 	calls  int
@@ -176,7 +177,11 @@ func (e *unauthorizedFailoverSessionExecutor) Execute(_ context.Context, _ *Auth
 	e.forced = append(e.forced, strings.TrimSpace(forced))
 	e.mu.Unlock()
 	if call == 1 && e.failFirstStatus > 0 {
-		return cliproxyexecutor.Response{}, &Error{HTTPStatus: e.failFirstStatus, Message: http.StatusText(e.failFirstStatus)}
+		message := strings.TrimSpace(e.failFirstMessage)
+		if message == "" {
+			message = http.StatusText(e.failFirstStatus)
+		}
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: e.failFirstStatus, Message: message}
 	}
 	if strings.TrimSpace(forced) == "" {
 		return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "missing forced upstream session"}
@@ -518,6 +523,49 @@ func TestManager_CredentialFailoverForcesNewUpstreamSession(t *testing.T) {
 	}
 	if strings.TrimSpace(forced[1]) == "" {
 		t.Fatalf("second call forced session should be set after credential failover: %#v", forced)
+	}
+}
+
+func TestManager_BadRequestCredentialFailoverForcesNewUpstreamSession(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0)
+	executor := &unauthorizedFailoverSessionExecutor{
+		failFirstStatus:  http.StatusBadRequest,
+		failFirstMessage: "invalid_request_error: session is polluted for this auth",
+	}
+	m.RegisterExecutor(executor)
+
+	baseID := uuid.NewString()
+	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "codex"}
+	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "codex"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error: %v", errExecute)
+	}
+	forced := executor.ForcedSessions()
+	if len(forced) != 2 {
+		t.Fatalf("forced sessions = %#v, want two calls", forced)
+	}
+	if forced[0] != "" {
+		t.Fatalf("first call forced session = %q, want empty", forced[0])
+	}
+	if strings.TrimSpace(forced[1]) == "" {
+		t.Fatalf("second call after 400 credential failover should force a fresh upstream session: %#v", forced)
 	}
 }
 
@@ -1521,13 +1569,13 @@ func TestManagerExecuteStream_UnauthorizedBootstrapSuspendsAuthFileAcrossModels(
 	}
 }
 
-func TestIsRequestInvalidError_KiroMalformedRequest(t *testing.T) {
+func TestIsRequestInvalidError_BadRequestDoesNotBlockCredentialFailover(t *testing.T) {
 	err := &Error{
 		HTTPStatus: http.StatusBadRequest,
 		Message:    "kiro API error: ValidationException: Improperly formed request: missing currentMessage.content",
 	}
-	if !isRequestInvalidError(err) {
-		t.Fatal("expected Kiro malformed request to be treated as request-invalid")
+	if isRequestInvalidError(err) {
+		t.Fatal("400 errors should not block credential failover and fresh upstream session creation")
 	}
 }
 

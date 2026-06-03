@@ -1319,6 +1319,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			if result.AuthScoped || isAuthWideResultError(result.Error) {
+				return nil, errStream
+			}
 			lastErr = errStream
 			continue
 		}
@@ -1349,26 +1352,25 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
+			rerr := resultErrorFromError(bootstrapErr)
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			if isRequestInvalidError(bootstrapErr) {
-				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				m.MarkResult(ctx, result)
+				discardStreamChunks(streamResult.Chunks)
+				return nil, bootstrapErr
+			}
+			if result.AuthScoped || isAuthWideResultError(result.Error) {
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
 			if idx < len(execModels)-1 {
-				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
 				continue
 			}
-			rerr := resultErrorFromError(bootstrapErr)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
 			discardStreamChunks(streamResult.Chunks)
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
@@ -2417,6 +2419,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if result.AuthScoped || isAuthWideResultError(result.Error) {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -2517,6 +2522,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if result.AuthScoped || isAuthWideResultError(result.Error) {
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -4229,12 +4237,6 @@ func isRequestInvalidResultError(err *Error) bool {
 		return false
 	}
 	switch statusCodeFromResult(err) {
-	case http.StatusBadRequest:
-		msg := err.Error()
-		return strings.Contains(msg, "invalid_request_error") ||
-			strings.Contains(msg, "INVALID_ARGUMENT") ||
-			strings.Contains(msg, "FAILED_PRECONDITION") ||
-			isMalformedRequestErrorMessage(msg)
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
@@ -4249,11 +4251,11 @@ func isRequestInvalidResultError(err *Error) bool {
 }
 
 // isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it treats 400 responses with
-// "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// error that should not be retried. Specifically, it treats request-scoped 404
+// item misses caused by `store=false` and all 422 responses as request-shape
+// failures, where switching auths or pooled upstream models will not help. 400s
+// deliberately fall through to credential failover so the next auth starts with
+// a fresh upstream session instead of reusing polluted provider state.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -4267,12 +4269,6 @@ func isRequestInvalidError(err error) bool {
 	}
 	status := statusCodeFromError(err)
 	switch status {
-	case http.StatusBadRequest:
-		msg := err.Error()
-		return strings.Contains(msg, "invalid_request_error") ||
-			strings.Contains(msg, "INVALID_ARGUMENT") ||
-			strings.Contains(msg, "FAILED_PRECONDITION") ||
-			isMalformedRequestErrorMessage(msg)
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
