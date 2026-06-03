@@ -27,10 +27,16 @@ func newResponsesNoticeFilter() *responsesNoticeFilter {
 }
 
 func (f *responsesNoticeFilter) FilterPayload(payload []byte) []byte {
-	if len(payload) == 0 || !json.Valid(payload) {
+	if len(payload) == 0 {
 		return payload
 	}
 	if f == nil {
+		return payload
+	}
+	if len(f.suppressedItemIDs) == 0 && !responsesNoticeMayNeedFiltering(payload) {
+		return payload
+	}
+	if !json.Valid(payload) {
 		return payload
 	}
 
