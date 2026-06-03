@@ -372,10 +372,10 @@ func TestResponsesSSEFramerTrustedDataStillFiltersUsageWarnings(t *testing.T) {
 		trustedData:  true,
 	}
 
-	framer.WriteChunk(&out, []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"delta\":\"Heads up, you have less than 5% of your weekly limit left. Run /status for a breakdown\"}\n\n"))
+	framer.WriteChunk(&out, []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"delta\":\"Heads up, you have less than 25% of your 5h limit left. Run /status for a breakdown.\"}\n\n"))
 	framer.WriteChunk(&out, []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"id\":\"msg-2\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"real output\"}]}]}}\n\n"))
 
-	if bytes.Contains(out.Bytes(), []byte("weekly limit left")) {
+	if bytes.Contains(out.Bytes(), []byte("5h limit left")) {
 		t.Fatalf("usage warning should still be filtered in trusted mode")
 	}
 	if !bytes.Contains(out.Bytes(), []byte("real output")) {

@@ -227,7 +227,10 @@ func responsesUsageWarningText(text string) bool {
 	if normalized == "" {
 		return false
 	}
-	if !strings.Contains(normalized, "weekly limit left") {
+	if !strings.Contains(normalized, "heads up, you have less than") {
+		return false
+	}
+	if !strings.Contains(normalized, " limit left") {
 		return false
 	}
 	if !strings.Contains(normalized, "run /status for a breakdown") {
