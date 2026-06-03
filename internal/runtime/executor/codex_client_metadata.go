@@ -252,7 +252,7 @@ func codexClientMetadataStringMapRaw(metadata gjson.Result) ([]byte, map[string]
 }
 
 func codexResolvedInstallationID(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) string {
-	if id := firstNonEmptyHeaderValue(target, source, codexHeaderInstallationID); id != "" {
+	if id := firstNonEmptyHeaderValue(target, nil, codexHeaderInstallationID); id != "" {
 		return id
 	}
 	if cfg != nil {
@@ -267,6 +267,9 @@ func codexResolvedInstallationID(target http.Header, source http.Header, auth *c
 		"installation_id",
 		"codex_installation_id",
 	}); id != "" {
+		return id
+	}
+	if id := firstNonEmptyHeaderValue(nil, source, codexHeaderInstallationID); id != "" {
 		return id
 	}
 	if id := strings.TrimSpace(os.Getenv("CODEX_INSTALLATION_ID")); id != "" {

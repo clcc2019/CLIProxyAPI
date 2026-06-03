@@ -5,19 +5,40 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 const codexPinnedBetaFeaturesHeader = "X-Codex-Beta-Features"
+const codexClientProfilePinnedMetadataKey = "codex_client_profile_pinned"
 
-func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyauth.Auth, target http.Header, source http.Header) {
-	if auth == nil || (target == nil && source == nil) || codexIsAPIKeyAuth(auth) {
+var codexPinnedClientProfileHeaders = []string{
+	codexPinnedBetaFeaturesHeader,
+	"Version",
+	codexHeaderInstallationID,
+	"X-OpenAI-Subagent",
+	codexHeaderOAIAttestation,
+	"Traceparent",
+	"Tracestate",
+	misc.CodexResidencyHeader,
+	codexHeaderOpenAIFedramp,
+	"x-responsesapi-include-timing-metrics",
+}
+
+func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyauth.Auth, target http.Header, source http.Header, cfg *config.Config) {
+	if auth == nil || (target == nil && source == nil) || codexClientProfilePinned(auth) {
 		return
 	}
 
 	changed := false
+	codexEnsureAuthMetadata(auth)
+	if pinned, ok := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool); !ok || !pinned {
+		auth.Metadata[codexClientProfilePinnedMetadataKey] = true
+		changed = true
+	}
 	if value := firstNonEmptyHeaderValue(target, source, "User-Agent"); value != "" && codexAuthUserAgent(auth) == "" {
-		codexEnsureAuthMetadata(auth)
 		auth.Metadata["user_agent"] = value
 		codexSetAuthAttribute(auth, "header:User-Agent", value)
 		changed = true
@@ -28,9 +49,27 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 		codexSetAuthAttribute(auth, "originator", value)
 		changed = true
 	}
-	if value := firstNonEmptyHeaderValue(target, source, codexPinnedBetaFeaturesHeader); value != "" && !codexAuthHeaderFixed(auth, codexPinnedBetaFeaturesHeader) {
-		codexSetAuthMetadataHeader(auth, codexPinnedBetaFeaturesHeader, value)
-		codexSetAuthAttribute(auth, "header:"+codexPinnedBetaFeaturesHeader, value)
+	for _, headerName := range codexPinnedClientProfileHeaders {
+		if codexAuthHeaderFixed(auth, headerName) {
+			continue
+		}
+		value := firstNonEmptyHeaderValue(target, source, headerName)
+		if value != "" && strings.EqualFold(headerName, "Version") && !codexVersionAtLeast(value, codexDefaultVersionHeader()) {
+			value = codexDefaultVersionHeader()
+		}
+		if value == "" && strings.EqualFold(headerName, codexHeaderInstallationID) {
+			if cfg != nil {
+				value = strings.TrimSpace(cfg.CodexHeaderDefaults.InstallationID)
+			}
+			if value == "" {
+				value = uuid.NewString()
+			}
+		}
+		if value == "" {
+			continue
+		}
+		codexSetAuthMetadataHeader(auth, headerName, value)
+		codexSetAuthAttribute(auth, "header:"+headerName, value)
 		changed = true
 	}
 	if !changed {
@@ -38,6 +77,38 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 	}
 
 	cliproxyauth.PublishAuthUpdate(ctx, auth)
+}
+
+func codexClientProfilePinned(auth *cliproxyauth.Auth) bool {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return false
+	}
+	pinned, _ := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool)
+	return pinned
+}
+
+func codexClientProfileSourceHeaders(auth *cliproxyauth.Auth, source http.Header) http.Header {
+	if codexClientProfilePinned(auth) {
+		return nil
+	}
+	return source
+}
+
+func codexPreparePinnedClientProfileHeaders(headers http.Header, auth *cliproxyauth.Auth) {
+	if headers == nil || !codexClientProfilePinned(auth) {
+		return
+	}
+	if codexAuthUserAgent(auth) == "" && !codexAuthHeaderFixed(auth, "User-Agent") {
+		headers.Del("User-Agent")
+	}
+	if codexAuthOriginator(auth) == "" && !codexAuthHeaderFixed(auth, "Originator") {
+		headers.Del("Originator")
+	}
+	for _, headerName := range codexPinnedClientProfileHeaders {
+		if !codexAuthHeaderFixed(auth, headerName) {
+			headers.Del(headerName)
+		}
+	}
 }
 
 func codexEnsureAuthMetadata(auth *cliproxyauth.Auth) {

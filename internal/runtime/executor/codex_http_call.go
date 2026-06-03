@@ -120,8 +120,10 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	// Resolve gin headers once and reuse across subsequent helpers to avoid
 	// repeated context value lookups in the per-request hot path.
 	ginHeaders := codexGinHeadersFromContext(ctx)
+	codexPinClientProfileFromFirstRequest(ctx, auth, nil, ginHeaders, e.cfg)
+	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
 	if requestKind != codexFinalUpstreamCompact {
-		body = codexApplyHTTPClientMetadataWithSource(body, nil, ginHeaders, auth, e.cfg)
+		body = codexApplyHTTPClientMetadataWithSource(body, nil, profileHeaders, auth, e.cfg)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	prepared, err := e.prepareCodexRequestWithKind(ctx, from, executionSessionID, url, requestKind, req, body)

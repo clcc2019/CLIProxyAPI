@@ -1198,6 +1198,8 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		turnStateScope = explicitTurnMetadata
 	}
 	body = codexApplyWebsocketClientMetadata(ctx, body, wsHeaders, auth, e.cfg)
+	wsHeaders.Del("Traceparent")
+	wsHeaders.Del("Tracestate")
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -2004,19 +2006,21 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	}
 
 	ginHeaders := codexGinHeadersFromContext(ctx)
-	codexPinClientProfileFromFirstRequest(ctx, auth, headers, ginHeaders)
+	codexPinClientProfileFromFirstRequest(ctx, auth, headers, ginHeaders, cfg)
+	codexPreparePinnedClientProfileHeaders(headers, auth)
+	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
-	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
+	ensureHeaderWithPriority(headers, profileHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
+	misc.EnsureHeader(headers, profileHeaders, "x-responsesapi-include-timing-metrics", "")
 	if codexIncludeTimingMetrics(cfg) {
 		headers.Set("x-responsesapi-include-timing-metrics", "true")
 	}
-	codexEnsureVersionHeader(headers, ginHeaders)
-	misc.EnsureHeader(headers, ginHeaders, "x-openai-subagent", "")
-	misc.EnsureHeader(headers, ginHeaders, codexHeaderOAIAttestation, "")
+	codexEnsureVersionHeader(headers, profileHeaders)
+	misc.EnsureHeader(headers, profileHeaders, "x-openai-subagent", "")
+	misc.EnsureHeader(headers, profileHeaders, codexHeaderOAIAttestation, "")
 
 	headers.Set("OpenAI-Beta", codexResponsesWebsocketBetaHeaderValue)
-	identity := codexResolvedIdentity(headers, ginHeaders, auth, cfg)
+	identity := codexResolvedIdentity(headers, profileHeaders, auth, cfg)
 	headers.Set("User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: true,
@@ -2041,13 +2045,14 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 			}
 		}
 	}
-	codexEnsureFedrampHeader(headers, ginHeaders, auth)
+	codexEnsureFedrampHeader(headers, profileHeaders, auth)
 
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	codexEnsureVersionHeader(headers, nil)
 	if cfgUserAgent != "" {
 		headers.Set("User-Agent", cfgUserAgent)
 	}

@@ -101,6 +101,26 @@ func TestCodexApplyHTTPClientMetadataOverwritesReservedInstallationID(t *testing
 	}
 }
 
+func TestCodexApplyHTTPClientMetadataUsesPinnedAuthInstallationID(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
+	auth := &cliproxyauth.Auth{
+		Provider:   "codex",
+		Metadata:   map[string]any{"access_token": "oauth-token"},
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	firstHeaders := http.Header{}
+	firstHeaders.Set(codexHeaderInstallationID, "first-install")
+	codexPinClientProfileFromFirstRequest(context.Background(), auth, nil, firstHeaders, nil)
+
+	secondHeaders := http.Header{}
+	secondHeaders.Set(codexHeaderInstallationID, "second-install")
+	got := codexApplyHTTPClientMetadataWithSource(body, nil, codexClientProfileSourceHeaders(auth, secondHeaders), auth, nil)
+
+	if id := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); id != "first-install" {
+		t.Fatalf("client_metadata.x-codex-installation-id = %q, want first-install; body=%s", id, got)
+	}
+}
+
 func TestCodexApplyWebsocketClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	resetCodexWindowStateStore()
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)

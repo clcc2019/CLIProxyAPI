@@ -27,15 +27,17 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 
 	ginHeaders := codexGinHeadersFromContext(r.Context())
-	codexPinClientProfileFromFirstRequest(r.Context(), auth, headers, ginHeaders)
+	codexPinClientProfileFromFirstRequest(r.Context(), auth, headers, ginHeaders, cfg)
+	codexPreparePinnedClientProfileHeaders(headers, auth)
+	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithPriority(headers, ginHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
-	codexEnsureVersionHeader(headers, ginHeaders)
-	misc.EnsureHeader(headers, ginHeaders, "X-OpenAI-Subagent", "")
-	misc.EnsureHeader(headers, ginHeaders, codexHeaderOAIAttestation, "")
-	misc.EnsureHeader(headers, ginHeaders, "Traceparent", "")
-	misc.EnsureHeader(headers, ginHeaders, "Tracestate", "")
-	identity := codexResolvedIdentity(headers, ginHeaders, auth, cfg)
+	ensureHeaderWithPriority(headers, profileHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
+	codexEnsureVersionHeader(headers, profileHeaders)
+	misc.EnsureHeader(headers, profileHeaders, "X-OpenAI-Subagent", "")
+	misc.EnsureHeader(headers, profileHeaders, codexHeaderOAIAttestation, "")
+	misc.EnsureHeader(headers, profileHeaders, "Traceparent", "")
+	misc.EnsureHeader(headers, profileHeaders, "Tracestate", "")
+	identity := codexResolvedIdentity(headers, profileHeaders, auth, cfg)
 	headers.Set("User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: requestKind != codexFinalUpstreamCompact,
@@ -73,7 +75,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	// unnecessary target re-check from the previous implementation; we always
 	// enter this block with a freshly applied `Originator` and never set the
 	// residency header earlier, so target.Get is guaranteed empty here.
-	if residency := trimHeaderValue(ginHeaders, misc.CodexResidencyHeader); residency != "" {
+	if residency := trimHeaderValue(profileHeaders, misc.CodexResidencyHeader); residency != "" {
 		headers.Set(misc.CodexResidencyHeader, residency)
 	} else if residency := codexResidencyFor(cfg); residency != "" {
 		headers.Set(misc.CodexResidencyHeader, residency)
@@ -85,12 +87,13 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 			}
 		}
 	}
-	codexEnsureFedrampHeader(headers, ginHeaders, auth)
+	codexEnsureFedrampHeader(headers, profileHeaders, auth)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	codexEnsureVersionHeader(headers, nil)
 	if cfgUserAgent != "" {
 		headers.Set("User-Agent", cfgUserAgent)
 	}
