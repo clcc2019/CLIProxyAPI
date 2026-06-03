@@ -43,6 +43,25 @@ func TestCodexBuildTurnMetadataHeaderKeepsBaseFields(t *testing.T) {
 	}
 }
 
+func TestCodexBuildTurnMetadataHeaderEscapesStringFields(t *testing.T) {
+	header := codexBuildTurnMetadataHeader(codexTurnRequestKind, `session-"quoted"`, `thread-\slash`, "", "", "", "source\nline", "turn-\t1", codexDefaultSandboxTag, "window-1", 1700000000123)
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(header), &parsed); err != nil {
+		t.Fatalf("Unmarshal() error = %v; header=%s", err, header)
+	}
+	for key, want := range map[string]string{
+		"session_id":    `session-"quoted"`,
+		"thread_id":     `thread-\slash`,
+		"thread_source": "source\nline",
+		"turn_id":       "turn-\t1",
+	} {
+		if got, _ := parsed[key].(string); got != want {
+			t.Fatalf("%s = %q, want %q in %s", key, got, want, header)
+		}
+	}
+}
+
 func TestCodexBuildTurnMetadataHeaderIncludesOfficialLineageFields(t *testing.T) {
 	header := codexBuildTurnMetadataHeader(codexTurnRequestKind, "session-1", "thread-1", "fork-1", "parent-1", "review", "", "turn-1", codexDefaultSandboxTag, "window-1", 1700000000123)
 

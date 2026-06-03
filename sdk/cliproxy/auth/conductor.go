@@ -80,13 +80,14 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval   = 5 * time.Second
-	refreshMaxConcurrency  = 16
-	refreshPendingBackoff  = time.Minute
-	refreshFailureBackoff  = 5 * time.Minute
-	refreshBatchDrainDelay = time.Second
-	quotaRefreshInterval   = 5 * time.Hour
-	persistDebounceWindow  = time.Second
+	refreshCheckInterval             = 5 * time.Second
+	refreshMaxConcurrency            = 16
+	refreshPendingBackoff            = time.Minute
+	refreshFailureBackoff            = 5 * time.Minute
+	refreshBatchDrainDelay           = time.Second
+	quotaRefreshInterval             = 5 * time.Hour
+	persistDebounceWindow            = time.Second
+	proxyPoolReconcileDebounceWindow = 100 * time.Millisecond
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -234,6 +235,13 @@ type Manager struct {
 	persistCancel  context.CancelFunc
 	persistWG      sync.WaitGroup
 	persistIDs     map[string]struct{}
+
+	// Debounced proxy-pool reconciliation after auth changes.
+	proxyReconcileMu      sync.Mutex
+	proxyReconcileWake    chan struct{}
+	proxyReconcileCancel  context.CancelFunc
+	proxyReconcileWG      sync.WaitGroup
+	proxyReconcilePending bool
 }
 
 type authRemovalTombstone struct {
@@ -545,58 +553,120 @@ func (m *Manager) ReconcileProxyPoolLeases(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	m.clearPendingProxyPoolReconcile()
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	m.mu.RLock()
 	store := m.proxyLeaseStore
-	auths := make([]*Auth, 0, len(m.auths))
 	activeAuthIDs := make([]string, 0, len(m.auths))
+	var assignedAuthIDs []string
+	var assignableAuths []proxyPoolAuthSnapshot
+	usableProxyCount := proxyPoolUsableProxyCount(cfg)
+	collectAssignable := cfg != nil && cfg.ProxyPool.Enabled && usableProxyCount > 0
+	if collectAssignable {
+		assignedAuthIDs = make([]string, 0, min(len(m.auths), usableProxyCount))
+		assignableAuths = make([]proxyPoolAuthSnapshot, 0, len(m.auths))
+	}
 	for _, auth := range m.auths {
 		if auth != nil {
-			auths = append(auths, auth.Clone())
-			if authID := strings.TrimSpace(auth.ID); authID != "" {
-				activeAuthIDs = append(activeAuthIDs, authID)
+			if !collectAssignable {
+				authID := strings.TrimSpace(auth.ID)
+				if authID != "" {
+					activeAuthIDs = append(activeAuthIDs, authID)
+					if authProxyPoolAssigned(auth) {
+						assignedAuthIDs = append(assignedAuthIDs, authID)
+					}
+				}
+				continue
+			}
+			snapshot := proxyPoolAuthSnapshotFromAuth(auth)
+			if snapshot.id != "" {
+				activeAuthIDs = append(activeAuthIDs, snapshot.id)
+			}
+			if snapshot.assigned && snapshot.id != "" {
+				assignedAuthIDs = append(assignedAuthIDs, snapshot.id)
+			}
+			if collectAssignable && proxyPoolCanAssignSnapshot(cfg, snapshot) {
+				assignableAuths = append(assignableAuths, snapshot)
 			}
 		}
 	}
 	m.mu.RUnlock()
-	assignableAuths := proxyPoolSortedAssignableAuths(cfg, auths)
+	proxyPoolSortAuthSnapshots(assignableAuths)
 	leaseAuthIDs := activeAuthIDs
-	selectedLeaseAuthIDs := make(map[string]struct{}, len(assignableAuths))
+	var selectedLeaseAuthIDs map[string]struct{}
 	if cfg != nil && cfg.ProxyPool.Enabled {
-		leaseAuthIDs = proxyPoolSelectedLeaseAuthIDs(cfg, assignableAuths)
+		leaseAuthIDs = proxyPoolSelectedLeaseSnapshotAuthIDs(assignableAuths, usableProxyCount)
+		selectedLeaseAuthIDs = make(map[string]struct{}, len(leaseAuthIDs))
 		for _, authID := range leaseAuthIDs {
 			selectedLeaseAuthIDs[authID] = struct{}{}
 		}
 	}
+	reconciledProxyLeases := false
 	if store != nil {
 		proxyURLs := []string(nil)
 		if cfg != nil && cfg.ProxyPool.Enabled {
 			proxyURLs = cfg.ProxyPool.Proxies
 		}
-		if len(leaseAuthIDs) > 0 || (cfg != nil && cfg.ProxyPool.Enabled && len(activeAuthIDs) > 0) {
+		shouldReconcile := len(leaseAuthIDs) > 0
+		if cfg != nil {
+			shouldReconcile = shouldReconcile ||
+				(cfg.ProxyPool.Enabled && len(activeAuthIDs) > 0) ||
+				!cfg.ProxyPool.Enabled
+		}
+		if shouldReconcile {
 			if err := store.ReconcileProxyLeases(ctx, leaseAuthIDs, proxyURLs); err != nil {
 				log.Warnf("proxy-pool: failed to reconcile proxy leases: %v", err)
+			} else {
+				reconciledProxyLeases = true
 			}
 		}
-		if len(leaseAuthIDs) == 0 && cfg != nil && !cfg.ProxyPool.Enabled {
-			if err := store.ReconcileProxyLeases(ctx, leaseAuthIDs, proxyURLs); err != nil {
-				log.Warnf("proxy-pool: failed to reconcile proxy leases: %v", err)
+	}
+	for _, authID := range assignedAuthIDs {
+		if _, selected := selectedLeaseAuthIDs[authID]; !selected {
+			if reconciledProxyLeases {
+				m.clearRuntimeProxyPoolLease(authID)
+				continue
 			}
+			m.releaseProxyLease(ctx, authID)
 		}
+	}
+	m.applyProxyPoolLeaseSnapshots(ctx, cfg, store, assignableAuths, selectedLeaseAuthIDs, leaseAuthIDs)
+}
+
+func (m *Manager) applyProxyPoolLeaseSnapshots(ctx context.Context, cfg *internalconfig.Config, store ProxyLeaseStore, auths []proxyPoolAuthSnapshot, selected map[string]struct{}, selectedAuthIDs []string) {
+	if m == nil || store == nil || cfg == nil || len(auths) == 0 {
+		return
+	}
+	if len(selectedAuthIDs) == 0 {
+		return
+	}
+	if batchStore, ok := store.(ProxyLeaseBatchStore); ok {
+		leases, err := batchStore.AcquireProxyLeases(ctx, selectedAuthIDs, cfg.ProxyPool.Proxies)
+		if err != nil {
+			log.Warnf("proxy-pool: failed to acquire proxy leases in batch: %v", err)
+			return
+		}
+		leaseIndex := 0
+		for _, auth := range auths {
+			if _, ok := selected[auth.id]; !ok {
+				continue
+			}
+			var lease ProxyLease
+			if leaseIndex < len(leases) {
+				lease = leases[leaseIndex]
+			}
+			leaseIndex++
+			leaseAuthID := strings.TrimSpace(lease.AuthID)
+			ok := strings.TrimSpace(lease.ProxyURL) != "" && (leaseAuthID == "" || leaseAuthID == auth.id)
+			m.applyProxyPoolLeaseSnapshotResult(auth, lease, ok)
+		}
+		return
 	}
 	for _, auth := range auths {
-		if auth == nil || !authProxyPoolAssigned(auth) {
+		if _, ok := selected[auth.id]; !ok {
 			continue
 		}
-		if _, selected := selectedLeaseAuthIDs[strings.TrimSpace(auth.ID)]; !selected {
-			m.releaseProxyLease(ctx, auth.ID)
-		}
-	}
-	for _, auth := range assignableAuths {
-		if _, selected := selectedLeaseAuthIDs[strings.TrimSpace(auth.ID)]; !selected {
-			continue
-		}
-		m.applyProxyPoolLease(ctx, auth)
+		m.applyProxyPoolLeaseSnapshot(ctx, cfg, store, auth)
 	}
 }
 
@@ -614,6 +684,155 @@ func (m *Manager) reconcileProxyPoolLeasesAfterAuthChange(ctx context.Context) {
 	if store == nil {
 		return
 	}
+	m.enqueueProxyPoolReconcile(ctx)
+}
+
+func (m *Manager) enqueueProxyPoolReconcile(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.proxyReconcileMu.Lock()
+	m.proxyReconcilePending = true
+	if m.proxyReconcileWake == nil || m.proxyReconcileCancel == nil {
+		m.startProxyPoolReconcileLoopLocked()
+	}
+	wake := m.proxyReconcileWake
+	m.proxyReconcileMu.Unlock()
+
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) clearPendingProxyPoolReconcile() {
+	if m == nil {
+		return
+	}
+	m.proxyReconcileMu.Lock()
+	m.proxyReconcilePending = false
+	m.proxyReconcileMu.Unlock()
+}
+
+func (m *Manager) startProxyPoolReconcileLoopLocked() {
+	if m == nil {
+		return
+	}
+	if m.proxyReconcileWake != nil && m.proxyReconcileCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	wake := make(chan struct{}, 1)
+	m.proxyReconcileWake = wake
+	m.proxyReconcileCancel = cancel
+	m.proxyReconcileWG.Add(1)
+	go m.runProxyPoolReconcileLoop(ctx, wake)
+}
+
+func (m *Manager) stopProxyPoolReconcileLoop() {
+	if m == nil {
+		return
+	}
+	m.proxyReconcileMu.Lock()
+	cancel := m.proxyReconcileCancel
+	m.proxyReconcileCancel = nil
+	m.proxyReconcileWake = nil
+	m.proxyReconcileMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+		m.proxyReconcileWG.Wait()
+	}
+}
+
+func (m *Manager) runProxyPoolReconcileLoop(ctx context.Context, wake chan struct{}) {
+	defer m.proxyReconcileWG.Done()
+
+	var (
+		timer  *time.Timer
+		timerC <-chan time.Time
+	)
+
+	resetTimer := func() {
+		if timer == nil {
+			timer = time.NewTimer(proxyPoolReconcileDebounceWindow)
+			timerC = timer.C
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(proxyPoolReconcileDebounceWindow)
+	}
+
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer = nil
+		timerC = nil
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			stopTimer()
+			m.flushProxyPoolReconcileQueue(context.Background())
+			return
+		case <-wake:
+			resetTimer()
+		case <-timerC:
+			stopTimer()
+			m.flushProxyPoolReconcileQueue(context.Background())
+			if m.stopProxyPoolReconcileLoopIfIdle(wake) {
+				return
+			}
+		}
+	}
+}
+
+func (m *Manager) stopProxyPoolReconcileLoopIfIdle(wake chan struct{}) bool {
+	if m == nil {
+		return true
+	}
+	m.proxyReconcileMu.Lock()
+	if m.proxyReconcileWake != wake || m.proxyReconcilePending {
+		m.proxyReconcileMu.Unlock()
+		return false
+	}
+	cancel := m.proxyReconcileCancel
+	m.proxyReconcileWake = nil
+	m.proxyReconcileCancel = nil
+	m.proxyReconcileMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return true
+}
+
+func (m *Manager) flushProxyPoolReconcileQueue(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.proxyReconcileMu.Lock()
+	if !m.proxyReconcilePending {
+		m.proxyReconcileMu.Unlock()
+		return
+	}
+	m.proxyReconcilePending = false
+	m.proxyReconcileMu.Unlock()
 	m.ReconcileProxyPoolLeases(ctx)
 }
 
@@ -1818,16 +2037,82 @@ func (m *Manager) applyProxyPoolLease(ctx context.Context, auth *Auth) {
 		log.WithField("auth_id", auth.ID).Warn("proxy-pool: no available proxy lease")
 		return
 	}
-	markProxyPoolLease(auth, lease.ProxyURL)
+	proxyURL := strings.TrimSpace(lease.ProxyURL)
+	markProxyPoolLease(auth, proxyURL)
 	var schedulerSnapshot *Auth
+	scheduler := m.scheduler
 	m.mu.Lock()
 	if current := m.auths[auth.ID]; current != nil {
-		markProxyPoolLease(current, lease.ProxyURL)
-		schedulerSnapshot = current.CloneForScheduler()
+		changed := !authProxyPoolAssigned(current) || strings.TrimSpace(current.ProxyURL) != proxyURL
+		markProxyPoolLease(current, proxyURL)
+		if changed && scheduler != nil {
+			schedulerSnapshot = current.CloneForScheduler()
+		}
 	}
 	m.mu.Unlock()
-	if m.scheduler != nil && schedulerSnapshot != nil {
-		m.scheduler.upsertAuth(schedulerSnapshot)
+	if scheduler != nil && schedulerSnapshot != nil {
+		scheduler.upsertAuth(schedulerSnapshot)
+	}
+}
+
+func (m *Manager) applyProxyPoolLeaseSnapshot(ctx context.Context, cfg *internalconfig.Config, store ProxyLeaseStore, auth proxyPoolAuthSnapshot) {
+	if m == nil || store == nil || !proxyPoolCanAssignSnapshot(cfg, auth) {
+		return
+	}
+	lease, ok, err := store.AcquireProxyLease(ctx, auth.id, cfg.ProxyPool.Proxies)
+	if err != nil {
+		log.WithField("auth_id", auth.id).Warnf("proxy-pool: failed to acquire proxy lease: %v", err)
+		return
+	}
+	proxyURL := strings.TrimSpace(lease.ProxyURL)
+	if !ok || proxyURL == "" {
+		if auth.assigned {
+			m.clearRuntimeProxyPoolLease(auth.id)
+		}
+		log.WithField("auth_id", auth.id).Warn("proxy-pool: no available proxy lease")
+		return
+	}
+	var schedulerSnapshot *Auth
+	scheduler := m.scheduler
+	m.mu.Lock()
+	if current := m.auths[auth.id]; current != nil {
+		changed := !authProxyPoolAssigned(current) || strings.TrimSpace(current.ProxyURL) != proxyURL
+		markProxyPoolLease(current, proxyURL)
+		if changed && scheduler != nil {
+			schedulerSnapshot = current.CloneForScheduler()
+		}
+	}
+	m.mu.Unlock()
+	if scheduler != nil && schedulerSnapshot != nil {
+		scheduler.upsertAuth(schedulerSnapshot)
+	}
+}
+
+func (m *Manager) applyProxyPoolLeaseSnapshotResult(auth proxyPoolAuthSnapshot, lease ProxyLease, ok bool) {
+	if m == nil {
+		return
+	}
+	proxyURL := strings.TrimSpace(lease.ProxyURL)
+	if !ok || proxyURL == "" {
+		if auth.assigned {
+			m.clearRuntimeProxyPoolLease(auth.id)
+		}
+		log.WithField("auth_id", auth.id).Warn("proxy-pool: no available proxy lease")
+		return
+	}
+	var schedulerSnapshot *Auth
+	scheduler := m.scheduler
+	m.mu.Lock()
+	if current := m.auths[auth.id]; current != nil {
+		changed := !authProxyPoolAssigned(current) || strings.TrimSpace(current.ProxyURL) != proxyURL
+		markProxyPoolLease(current, proxyURL)
+		if changed && scheduler != nil {
+			schedulerSnapshot = current.CloneForScheduler()
+		}
+	}
+	m.mu.Unlock()
+	if scheduler != nil && schedulerSnapshot != nil {
+		scheduler.upsertAuth(schedulerSnapshot)
 	}
 }
 
@@ -1862,14 +2147,17 @@ func (m *Manager) clearRuntimeProxyPoolLease(authID string) {
 		return
 	}
 	var schedulerSnapshot *Auth
+	scheduler := m.scheduler
 	m.mu.Lock()
 	if current := m.auths[authID]; current != nil && authProxyPoolAssigned(current) {
 		clearProxyPoolLease(current)
-		schedulerSnapshot = current.CloneForScheduler()
+		if scheduler != nil {
+			schedulerSnapshot = current.CloneForScheduler()
+		}
 	}
 	m.mu.Unlock()
-	if m.scheduler != nil && schedulerSnapshot != nil {
-		m.scheduler.upsertAuth(schedulerSnapshot)
+	if scheduler != nil && schedulerSnapshot != nil {
+		scheduler.upsertAuth(schedulerSnapshot)
 	}
 }
 
@@ -1899,65 +2187,98 @@ func (m *Manager) shouldReleaseProxyLeaseForResult(result Result) bool {
 	return result.AuthScoped || isAuthWideResultError(result.Error) || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden
 }
 
-func proxyPoolSortedAssignableAuths(cfg *internalconfig.Config, auths []*Auth) []*Auth {
-	if cfg == nil || !cfg.ProxyPool.Enabled || len(cfg.ProxyPool.Proxies) == 0 || len(auths) == 0 {
-		return nil
-	}
-	out := make([]*Auth, 0, len(auths))
-	for _, auth := range auths {
-		if proxyPoolCanAssign(cfg, auth) {
-			out = append(out, auth)
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		left := out[i]
-		right := out[j]
-		leftPriority := authPriority(left)
-		rightPriority := authPriority(right)
-		if leftPriority != rightPriority {
-			return leftPriority > rightPriority
-		}
-		leftID := ""
-		if left != nil {
-			leftID = strings.TrimSpace(left.ID)
-		}
-		rightID := ""
-		if right != nil {
-			rightID = strings.TrimSpace(right.ID)
-		}
-		return leftID < rightID
-	})
-	return out
+type proxyPoolAuthSnapshot struct {
+	id       string
+	proxyURL string
+	priority int
+	status   Status
+	assigned bool
+	disabled bool
+	apiKey   bool
 }
 
-func proxyPoolSelectedLeaseAuthIDs(cfg *internalconfig.Config, auths []*Auth) []string {
-	if cfg == nil || !cfg.ProxyPool.Enabled || len(cfg.ProxyPool.Proxies) == 0 || len(auths) == 0 {
-		return nil
+func proxyPoolAuthSnapshotFromAuth(auth *Auth) proxyPoolAuthSnapshot {
+	if auth == nil {
+		return proxyPoolAuthSnapshot{}
 	}
-	limit := 0
-	for _, proxyURL := range cfg.ProxyPool.Proxies {
-		if strings.TrimSpace(proxyURL) != "" {
-			limit++
+	return proxyPoolAuthSnapshot{
+		id:       strings.TrimSpace(auth.ID),
+		proxyURL: strings.TrimSpace(auth.ProxyURL),
+		priority: authPriority(auth),
+		status:   auth.Status,
+		assigned: authProxyPoolAssigned(auth),
+		disabled: auth.Disabled,
+		apiKey:   proxyPoolAuthIsAPIKey(auth),
+	}
+}
+
+func proxyPoolAuthIsAPIKey(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Metadata != nil {
+		if email, ok := auth.Metadata["email"].(string); ok && strings.TrimSpace(email) != "" {
+			return false
 		}
 	}
-	if limit <= 0 {
+	return auth.Attributes != nil && auth.Attributes["api_key"] != ""
+}
+
+func proxyPoolCanAssignSnapshot(cfg *internalconfig.Config, auth proxyPoolAuthSnapshot) bool {
+	if cfg == nil || !cfg.ProxyPool.Enabled || len(cfg.ProxyPool.Proxies) == 0 || auth.id == "" {
+		return false
+	}
+	if auth.disabled || auth.status == StatusDisabled {
+		return false
+	}
+	if auth.proxyURL != "" && !auth.assigned {
+		return false
+	}
+	return !auth.apiKey
+}
+
+func proxyPoolSortAuthSnapshots(auths []proxyPoolAuthSnapshot) {
+	if len(auths) < 2 {
+		return
+	}
+	sort.Slice(auths, func(i, j int) bool {
+		left := auths[i]
+		right := auths[j]
+		if left.priority != right.priority {
+			return left.priority > right.priority
+		}
+		return left.id < right.id
+	})
+}
+
+func proxyPoolSelectedLeaseSnapshotAuthIDs(auths []proxyPoolAuthSnapshot, limit int) []string {
+	if limit <= 0 || len(auths) == 0 {
 		return nil
 	}
 	out := make([]string, 0, min(len(auths), limit))
 	for _, auth := range auths {
-		if auth == nil {
+		if auth.id == "" {
 			continue
 		}
-		authID := strings.TrimSpace(auth.ID)
-		if authID == "" {
-			continue
-		}
-		out = append(out, authID)
+		out = append(out, auth.id)
 		if len(out) >= limit {
 			break
 		}
 	}
 	return out
+}
+
+func proxyPoolUsableProxyCount(cfg *internalconfig.Config) int {
+	if cfg == nil || len(cfg.ProxyPool.Proxies) == 0 {
+		return 0
+	}
+	count := 0
+	for _, proxyURL := range cfg.ProxyPool.Proxies {
+		if strings.TrimSpace(proxyURL) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func (m *Manager) recordProxyPoolResult(ctx context.Context, result Result) {
@@ -2043,56 +2364,156 @@ func proxyFailureCooldown(cfg *internalconfig.Config) time.Duration {
 	return cooldown
 }
 
+var proxyPoolTransportFailurePatterns = [...]string{
+	"connection refused",
+	"connection reset",
+	"connection timed out",
+	"context deadline exceeded",
+	"dial tcp",
+	"i/o timeout",
+	"net/http: timeout",
+	"network is unreachable",
+	"no such host",
+	"proxyconnect",
+	"proxy connect",
+	"proxy connection",
+	"socks",
+	"socks5",
+	"temporary failure in name resolution",
+	"tls handshake timeout",
+	"use of closed network connection",
+}
+
 func isProxyPoolTransportFailure(err *Error) bool {
 	if err == nil || statusCodeFromResult(err) != 0 {
 		return false
 	}
-	raw := strings.ToLower(strings.TrimSpace(strings.Join([]string{err.Code, err.Message}, " ")))
-	if raw == "" {
+	code := err.Code
+	message := err.Message
+	if strings.TrimSpace(code) == "" && strings.TrimSpace(message) == "" {
 		return false
 	}
-	patterns := [...]string{
-		"connection refused",
-		"connection reset",
-		"connection timed out",
-		"context deadline exceeded",
-		"dial tcp",
-		"i/o timeout",
-		"net/http: timeout",
-		"network is unreachable",
-		"no such host",
-		"proxyconnect",
-		"proxy connect",
-		"proxy connection",
-		"socks",
-		"socks5",
-		"temporary failure in name resolution",
-		"tls handshake timeout",
-		"use of closed network connection",
-	}
-	for _, pattern := range patterns {
-		if strings.Contains(raw, pattern) {
+	fold := hasUpperASCII(code) || hasUpperASCII(message)
+	for _, pattern := range proxyPoolTransportFailurePatterns {
+		if containsProxyPoolFailurePattern(code, message, pattern, fold) {
 			return true
 		}
 	}
 	return false
 }
 
-func proxyPoolCanAssign(cfg *internalconfig.Config, auth *Auth) bool {
-	if cfg == nil || !cfg.ProxyPool.Enabled || len(cfg.ProxyPool.Proxies) == 0 || auth == nil || strings.TrimSpace(auth.ID) == "" {
+func containsProxyPoolFailurePattern(code, message, pattern string, fold bool) bool {
+	if !fold {
+		if strings.Contains(code, pattern) || strings.Contains(message, pattern) {
+			return true
+		}
+	} else if containsASCIIFold(code, pattern) || containsASCIIFold(message, pattern) {
+		return true
+	}
+	if code == "" || message == "" || !strings.Contains(pattern, " ") {
 		return false
 	}
-	if auth.Disabled || auth.Status == StatusDisabled {
+	return containsJoinedWithSpace(code, message, pattern, fold)
+}
+
+func hasUpperASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 'A' && value[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+func containsASCIIFold(value, needle string) bool {
+	if needle == "" {
+		return true
+	}
+	if len(needle) > len(value) {
 		return false
 	}
-	if strings.TrimSpace(auth.ProxyURL) != "" && !authProxyPoolAssigned(auth) {
+	for start := 0; start <= len(value)-len(needle); start++ {
+		matched := true
+		for offset := 0; offset < len(needle); offset++ {
+			if lowerASCII(value[start+offset]) != needle[offset] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func containsJoinedWithSpace(left, right, needle string, fold bool) bool {
+	for split := 0; split < len(needle); split++ {
+		if needle[split] != ' ' {
+			continue
+		}
+		prefix := needle[:split]
+		suffix := needle[split+1:]
+		if len(prefix) > len(left) || len(suffix) > len(right) {
+			continue
+		}
+		if hasSuffixASCIIFold(left, prefix, fold) && hasPrefixASCIIFold(right, suffix, fold) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSuffixASCIIFold(value, suffix string, fold bool) bool {
+	if !fold {
+		return strings.HasSuffix(value, suffix)
+	}
+	if len(suffix) > len(value) {
 		return false
 	}
-	kind, _ := auth.AccountInfo()
-	if strings.EqualFold(strings.TrimSpace(kind), "api_key") {
-		return false
+	start := len(value) - len(suffix)
+	for i := 0; i < len(suffix); i++ {
+		if lowerASCII(value[start+i]) != suffix[i] {
+			return false
+		}
 	}
 	return true
+}
+
+func hasPrefixASCIIFold(value, prefix string, fold bool) bool {
+	if !fold {
+		return strings.HasPrefix(value, prefix)
+	}
+	if len(prefix) > len(value) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if lowerASCII(value[i]) != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func lowerASCII(value byte) byte {
+	if value >= 'A' && value <= 'Z' {
+		return value + ('a' - 'A')
+	}
+	return value
+}
+
+func proxyPoolCanAssign(cfg *internalconfig.Config, auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	return proxyPoolCanAssignSnapshot(cfg, proxyPoolAuthSnapshot{
+		id:       strings.TrimSpace(auth.ID),
+		proxyURL: strings.TrimSpace(auth.ProxyURL),
+		status:   auth.Status,
+		assigned: authProxyPoolAssigned(auth),
+		disabled: auth.Disabled,
+		apiKey:   proxyPoolAuthIsAPIKey(auth),
+	})
 }
 
 func markProxyPoolLease(auth *Auth, proxyURL string) {
@@ -6418,6 +6839,7 @@ func (m *Manager) StopAutoRefresh() {
 		cancel()
 	}
 	m.stopPersistLoop()
+	m.stopProxyPoolReconcileLoop()
 	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
 	if stoppable, ok := mainSelector.(StoppableSelector); ok {
 		stoppable.Stop()

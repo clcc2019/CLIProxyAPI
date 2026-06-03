@@ -107,3 +107,77 @@ func TestRedisOptions_MaxRetriesNegativeOneDisables(t *testing.T) {
 		t.Errorf("MaxRetries=%d, want -1 (disabled)", opts.MaxRetries)
 	}
 }
+
+func TestReconcileProxyLeaseArgsTrimsAndCounts(t *testing.T) {
+	args := reconcileProxyLeaseArgs(
+		[]string{" auth-a ", "", "\tauth-b\n"},
+		[]string{" http://proxy-a.example.com:8080 ", " ", "http://proxy-b.example.com:8080"},
+	)
+	want := []any{
+		2,
+		2,
+		"auth-a",
+		"auth-b",
+		"http://proxy-a.example.com:8080",
+		"http://proxy-b.example.com:8080",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("len(args)=%d, want %d: %#v", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d]=%#v, want %#v; args=%#v", i, args[i], want[i], args)
+		}
+	}
+}
+
+func TestReconcileProxyLeaseArgsKeepsEmptyCounts(t *testing.T) {
+	args := reconcileProxyLeaseArgs([]string{" ", ""}, []string{"\t"})
+	want := []any{0, 0}
+	if len(args) != len(want) {
+		t.Fatalf("len(args)=%d, want %d: %#v", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d]=%#v, want %#v; args=%#v", i, args[i], want[i], args)
+		}
+	}
+}
+
+func TestAcquireProxyLeasesArgsTrimsAndCounts(t *testing.T) {
+	args := acquireProxyLeasesArgs(
+		[]string{" auth-a ", "", "\tauth-b\n"},
+		[]string{" http://proxy-a.example.com:8080 ", " ", "http://proxy-b.example.com:8080"},
+		12345,
+	)
+	want := []any{
+		2,
+		2,
+		int64(12345),
+		"auth-a",
+		"auth-b",
+		"http://proxy-a.example.com:8080",
+		"http://proxy-b.example.com:8080",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("len(args)=%d, want %d: %#v", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d]=%#v, want %#v; args=%#v", i, args[i], want[i], args)
+		}
+	}
+}
+
+func TestAcquireProxyLeasesArgsKeepsEmptyCounts(t *testing.T) {
+	args := acquireProxyLeasesArgs([]string{" ", ""}, []string{"\t"}, 67890)
+	want := []any{0, 0, int64(67890)}
+	if len(args) != len(want) {
+		t.Fatalf("len(args)=%d, want %d: %#v", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d]=%#v, want %#v; args=%#v", i, args[i], want[i], args)
+		}
+	}
+}

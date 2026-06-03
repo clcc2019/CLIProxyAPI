@@ -60,6 +60,9 @@ func (s *Store) Delete(_ context.Context, _ string) error                       
 func (s *Store) AcquireProxyLease(_ context.Context, _ string, _ []string) (coreauth.ProxyLease, bool, error) {
 	return coreauth.ProxyLease{}, false, nil
 }
+func (s *Store) AcquireProxyLeases(_ context.Context, _ []string, _ []string) ([]coreauth.ProxyLease, error) {
+	return nil, nil
+}
 func (s *Store) ReleaseProxyLease(_ context.Context, _ string) error { return nil }
 func (s *Store) ReconcileProxyLeases(_ context.Context, _ []string, _ []string) error {
 	return nil

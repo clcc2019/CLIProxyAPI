@@ -585,6 +585,37 @@ func TestPatchCodexCompletedOutputRecoversFunctionCallDeltaArguments(t *testing.
 	}
 }
 
+func TestCodexEventTypeUsesTopLevelType(t *testing.T) {
+	eventData := []byte(`{"nested":{"type":"response.completed"},"type":"response.function_call_arguments.delta"}`)
+	if got := codexEventType(eventData); got != codexEventFunctionCallArgumentsDelta {
+		t.Fatalf("codexEventType() = %q, want %q", got, codexEventFunctionCallArgumentsDelta)
+	}
+
+	if got := codexEventType([]byte(`{"nested":{"type":"response.completed"}}`)); got != "" {
+		t.Fatalf("codexEventType() for nested-only type = %q, want empty", got)
+	}
+}
+
+func TestCodexStreamArgumentDeltaRecordsEscapedWhitespacePayload(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
+	streamState.recordEventWithType(codexEventFunctionCallArgumentsDelta, []byte(`{ "output_index" : 0, "delta" : "{\"q\":\"hello world\"}" }`))
+
+	if got := streamState.functionCallsByItem["fc_item_1"].arguments(); got != `{"q":"hello world"}` {
+		t.Fatalf("arguments = %q, want escaped JSON payload", got)
+	}
+}
+
+func BenchmarkCodexEventTypeFirstField(b *testing.B) {
+	eventData := []byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"chunk"}`)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if got := codexEventType(eventData); got != codexEventFunctionCallArgumentsDelta {
+			b.Fatalf("codexEventType() = %q", got)
+		}
+	}
+}
+
 func TestPatchCodexCompletedOutputRecoversCustomToolCallInputDeltas(t *testing.T) {
 	streamState := newCodexStreamCompletionState()
 	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"ctc_1","type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":""}}`))

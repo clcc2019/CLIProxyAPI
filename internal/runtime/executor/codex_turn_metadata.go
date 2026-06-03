@@ -210,7 +210,7 @@ func codexBuildTurnMetadataHeader(requestKind string, sessionID string, threadID
 		builder.WriteByte('"')
 		builder.WriteString(name)
 		builder.WriteString(`":`)
-		builder.WriteString(strconv.Quote(value))
+		codexWriteJSONString(&builder, value)
 	}
 	appendInt64JSONField := func(name string, value int64) {
 		if value <= 0 {
@@ -223,7 +223,8 @@ func codexBuildTurnMetadataHeader(requestKind string, sessionID string, threadID
 		builder.WriteByte('"')
 		builder.WriteString(name)
 		builder.WriteString(`":`)
-		builder.WriteString(strconv.FormatInt(value, 10))
+		var intBuf [20]byte
+		_, _ = builder.Write(strconv.AppendInt(intBuf[:0], value, 10))
 	}
 
 	appendQuotedJSONField("request_kind", requestKind)
@@ -239,6 +240,55 @@ func codexBuildTurnMetadataHeader(requestKind string, sessionID string, threadID
 	appendInt64JSONField("turn_started_at_unix_ms", turnStartedAtUnixMilli)
 	builder.WriteByte('}')
 	return builder.String()
+}
+
+func codexWriteJSONString(builder *strings.Builder, value string) {
+	if builder == nil {
+		return
+	}
+	const hex = "0123456789abcdef"
+	builder.WriteByte('"')
+	start := 0
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch c {
+		case '\\', '"':
+			builder.WriteString(value[start:i])
+			builder.WriteByte('\\')
+			builder.WriteByte(c)
+			start = i + 1
+		case '\b':
+			builder.WriteString(value[start:i])
+			builder.WriteString(`\b`)
+			start = i + 1
+		case '\f':
+			builder.WriteString(value[start:i])
+			builder.WriteString(`\f`)
+			start = i + 1
+		case '\n':
+			builder.WriteString(value[start:i])
+			builder.WriteString(`\n`)
+			start = i + 1
+		case '\r':
+			builder.WriteString(value[start:i])
+			builder.WriteString(`\r`)
+			start = i + 1
+		case '\t':
+			builder.WriteString(value[start:i])
+			builder.WriteString(`\t`)
+			start = i + 1
+		default:
+			if c < 0x20 {
+				builder.WriteString(value[start:i])
+				builder.WriteString(`\u00`)
+				builder.WriteByte(hex[c>>4])
+				builder.WriteByte(hex[c&0x0f])
+				start = i + 1
+			}
+		}
+	}
+	builder.WriteString(value[start:])
+	builder.WriteByte('"')
 }
 
 func codexAugmentTurnMetadataHeader(raw string, defaults codexTurnMetadataDefaults) string {

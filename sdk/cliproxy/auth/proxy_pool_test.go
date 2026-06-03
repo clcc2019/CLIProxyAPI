@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -10,13 +12,83 @@ import (
 )
 
 type fakeProxyLeaseStore struct {
-	leases   map[string]string
-	released []string
-	failures map[string]int
-	cooldown map[string]time.Time
+	leases        map[string]string
+	released      []string
+	failures      map[string]int
+	cooldown      map[string]time.Time
+	reconciles    int
+	acquires      int
+	batchAcquires int
+}
+
+type failingReconcileProxyLeaseStore struct {
+	fakeProxyLeaseStore
+}
+
+func (s *failingReconcileProxyLeaseStore) ReconcileProxyLeases(_ context.Context, _ []string, _ []string) error {
+	return errors.New("reconcile failed")
+}
+
+type benchmarkProxyLeaseStore struct{}
+
+func (s benchmarkProxyLeaseStore) AcquireProxyLease(_ context.Context, authID string, proxyURLs []string) (ProxyLease, bool, error) {
+	if len(proxyURLs) == 0 {
+		return ProxyLease{}, false, nil
+	}
+	return ProxyLease{AuthID: authID, ProxyURL: proxyURLs[0]}, true, nil
+}
+
+func (s benchmarkProxyLeaseStore) AcquireProxyLeases(_ context.Context, authIDs []string, proxyURLs []string) ([]ProxyLease, error) {
+	if len(authIDs) == 0 || len(proxyURLs) == 0 {
+		return nil, nil
+	}
+	leases := make([]ProxyLease, len(authIDs))
+	for i, authID := range authIDs {
+		if i >= len(proxyURLs) {
+			break
+		}
+		leases[i] = ProxyLease{AuthID: authID, ProxyURL: proxyURLs[i]}
+	}
+	return leases, nil
+}
+
+func (s benchmarkProxyLeaseStore) ReleaseProxyLease(_ context.Context, _ string) error {
+	return nil
+}
+
+func (s benchmarkProxyLeaseStore) ReconcileProxyLeases(_ context.Context, _ []string, _ []string) error {
+	return nil
+}
+
+func (s benchmarkProxyLeaseStore) RecordProxyLeaseFailure(_ context.Context, _, _ string, _ int, _ time.Duration) (ProxyLeaseFailure, error) {
+	return ProxyLeaseFailure{}, nil
+}
+
+func (s benchmarkProxyLeaseStore) ClearProxyLeaseFailure(_ context.Context, _ string) error {
+	return nil
 }
 
 func (s *fakeProxyLeaseStore) AcquireProxyLease(_ context.Context, authID string, proxyURLs []string) (ProxyLease, bool, error) {
+	s.acquires++
+	return s.acquireProxyLease(authID, proxyURLs)
+}
+
+func (s *fakeProxyLeaseStore) AcquireProxyLeases(_ context.Context, authIDs []string, proxyURLs []string) ([]ProxyLease, error) {
+	s.batchAcquires++
+	leases := make([]ProxyLease, len(authIDs))
+	for i, authID := range authIDs {
+		lease, ok, err := s.acquireProxyLease(authID, proxyURLs)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			leases[i] = lease
+		}
+	}
+	return leases, nil
+}
+
+func (s *fakeProxyLeaseStore) acquireProxyLease(authID string, proxyURLs []string) (ProxyLease, bool, error) {
 	if s.leases == nil {
 		s.leases = make(map[string]string)
 	}
@@ -83,6 +155,7 @@ func (s *fakeProxyLeaseStore) ClearProxyLeaseFailure(_ context.Context, proxyURL
 }
 
 func (s *fakeProxyLeaseStore) ReconcileProxyLeases(_ context.Context, activeAuthIDs []string, proxyURLs []string) error {
+	s.reconciles++
 	active := make(map[string]struct{}, len(activeAuthIDs))
 	for _, authID := range activeAuthIDs {
 		active[authID] = struct{}{}
@@ -309,9 +382,13 @@ func TestProxyPoolReassignsLimitedProxyByAuthPriority(t *testing.T) {
 		"access_token": "high-token",
 		"priority":     10,
 	}, AuthFileProjectionOptions{ID: "oauth-high"})
-	registeredHigh, err := mgr.Register(WithSkipPersist(context.Background()), high)
-	if err != nil {
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), high); err != nil {
 		t.Fatalf("Register high error: %v", err)
+	}
+	mgr.flushProxyPoolReconcileQueue(context.Background())
+	registeredHigh, ok := mgr.GetByID("oauth-high")
+	if !ok {
+		t.Fatal("oauth-high missing")
 	}
 	if registeredHigh.ProxyURL != "http://proxy-a.example.com:8080" {
 		t.Fatalf("high ProxyURL = %q, want priority lease", registeredHigh.ProxyURL)
@@ -328,6 +405,68 @@ func TestProxyPoolReassignsLimitedProxyByAuthPriority(t *testing.T) {
 	}
 	if _, ok := leaseStore.leases["oauth-low"]; ok {
 		t.Fatalf("low lease still present: %#v", leaseStore.leases)
+	}
+}
+
+func TestProxyPoolAuthChangeReconcileIsDebounced(t *testing.T) {
+	leaseStore := &fakeProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetProxyLeaseStore(leaseStore)
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.Proxies = []string{"http://proxy-a.example.com:8080"}
+	mgr.SetConfig(cfg)
+
+	for i := 0; i < 3; i++ {
+		auth := NewAuthFromAuthFileMetadata(map[string]any{
+			"type":         "codex",
+			"access_token": "token-" + strconv.Itoa(i),
+			"priority":     i,
+		}, AuthFileProjectionOptions{ID: "oauth-" + strconv.Itoa(i)})
+		if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
+			t.Fatalf("Register #%d error: %v", i, err)
+		}
+	}
+
+	mgr.flushProxyPoolReconcileQueue(context.Background())
+	if leaseStore.reconciles != 1 {
+		t.Fatalf("reconciles = %d, want 1", leaseStore.reconciles)
+	}
+}
+
+func TestProxyPoolReconcileUsesBatchAcquireWhenAvailable(t *testing.T) {
+	leaseStore := &fakeProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetProxyLeaseStore(leaseStore)
+	cfg := proxyPoolTestConfig()
+	mgr.runtimeConfig.Store(cfg)
+
+	mgr.mu.Lock()
+	mgr.auths["oauth-1"] = &Auth{
+		ID:       "oauth-1",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "codex", "access_token": "token-1"},
+	}
+	mgr.auths["oauth-2"] = &Auth{
+		ID:       "oauth-2",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "codex", "access_token": "token-2"},
+	}
+	mgr.mu.Unlock()
+
+	mgr.ReconcileProxyPoolLeases(context.Background())
+	if leaseStore.batchAcquires != 1 {
+		t.Fatalf("batch acquires = %d, want 1", leaseStore.batchAcquires)
+	}
+	if leaseStore.acquires != 0 {
+		t.Fatalf("single acquires = %d, want 0", leaseStore.acquires)
+	}
+	if got := leaseStore.leases["oauth-1"]; got != "http://proxy-a.example.com:8080" {
+		t.Fatalf("oauth-1 lease = %q, want proxy-a", got)
+	}
+	if got := leaseStore.leases["oauth-2"]; got != "http://proxy-b.example.com:8080" {
+		t.Fatalf("oauth-2 lease = %q, want proxy-b", got)
 	}
 }
 
@@ -378,6 +517,28 @@ func TestProxyPoolReleasesWhenConfigDisabled(t *testing.T) {
 	if current.ProxyURL != "" {
 		t.Fatalf("ProxyURL = %q, want cleared", current.ProxyURL)
 	}
+	if _, ok := leaseStore.leases[auth.ID]; ok {
+		t.Fatalf("lease still present after config disabled: %#v", leaseStore.leases)
+	}
+}
+
+func TestProxyPoolReconcileFailureFallsBackToRelease(t *testing.T) {
+	leaseStore := &failingReconcileProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetProxyLeaseStore(leaseStore)
+	mgr.SetConfig(proxyPoolTestConfig())
+
+	auth := &Auth{
+		ID:       "oauth-1",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "codex", "access_token": "token"},
+	}
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+	mgr.SetConfig(&internalconfig.Config{})
+
 	if len(leaseStore.released) != 1 || leaseStore.released[0] != auth.ID {
 		t.Fatalf("released = %#v, want %q", leaseStore.released, auth.ID)
 	}
@@ -570,6 +731,29 @@ func TestProxyPoolHTTPStatusDoesNotCountAsProxyFailure(t *testing.T) {
 	}
 }
 
+func TestProxyPoolTransportFailureMatchesMixedCaseAndJoinedFields(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *Error
+	}{
+		{
+			name: "mixed case message",
+			err:  &Error{Message: "ProxyConnect TCP: Dial TCP 127.0.0.1:1080: I/O Timeout"},
+		},
+		{
+			name: "code message boundary",
+			err:  &Error{Code: "proxy", Message: "connect tcp: connection refused"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !isProxyPoolTransportFailure(tt.err) {
+				t.Fatal("expected proxy transport failure")
+			}
+		})
+	}
+}
+
 func TestProxyPoolSuccessClearsProxyFailureCount(t *testing.T) {
 	leaseStore := &fakeProxyLeaseStore{}
 	mgr := NewManager(nil, nil, nil)
@@ -597,5 +781,91 @@ func TestProxyPoolSuccessClearsProxyFailureCount(t *testing.T) {
 	mgr.MarkResult(context.Background(), Result{AuthID: "oauth-1", Success: true})
 	if got := leaseStore.failures["http://proxy-a.example.com:8080"]; got != 0 {
 		t.Fatalf("failures after success = %d, want 0", got)
+	}
+}
+
+func BenchmarkProxyFailureCooldown(b *testing.B) {
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.ProxyFailureCooldown = "30m"
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if got := proxyFailureCooldown(cfg); got != 30*time.Minute {
+			b.Fatalf("cooldown = %v", got)
+		}
+	}
+}
+
+func BenchmarkProxyPoolTransportFailureMatch(b *testing.B) {
+	err := &Error{Message: "proxyconnect tcp: dial tcp 127.0.0.1:1080: i/o timeout"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if !isProxyPoolTransportFailure(err) {
+			b.Fatal("expected proxy transport failure")
+		}
+	}
+}
+
+func BenchmarkProxyPoolTransportFailureNoMatch(b *testing.B) {
+	err := &Error{
+		Code:    "upstream_error",
+		Message: "the upstream response ended before a valid completion was produced",
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if isProxyPoolTransportFailure(err) {
+			b.Fatal("unexpected proxy transport failure")
+		}
+	}
+}
+
+func BenchmarkProxyPoolReconcileLargePool(b *testing.B) {
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetProxyLeaseStore(benchmarkProxyLeaseStore{})
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.Proxies = make([]string, 128)
+	for i := range cfg.ProxyPool.Proxies {
+		cfg.ProxyPool.Proxies[i] = "http://proxy-" + strconv.Itoa(i) + ".example.com:8080"
+	}
+	mgr.runtimeConfig.Store(cfg)
+
+	mgr.mu.Lock()
+	for i := 0; i < 1000; i++ {
+		authID := "oauth-" + strconv.Itoa(i)
+		attrs := map[string]string{"priority": strconv.Itoa(i % 16)}
+		metadata := map[string]any{
+			"type":          "codex",
+			"email":         "user-" + strconv.Itoa(i) + "@example.com",
+			"access_token":  strings.Repeat("token", 8),
+			"refresh_token": strings.Repeat("refresh", 8),
+		}
+		modelStates := make(map[string]*ModelState, 4)
+		for modelIndex := 0; modelIndex < 4; modelIndex++ {
+			modelStates["model-"+strconv.Itoa(modelIndex)] = &ModelState{
+				Status:        StatusActive,
+				StatusMessage: "ready",
+				UpdatedAt:     time.Unix(int64(i+modelIndex), 0),
+			}
+		}
+		if i%20 == 0 {
+			attrs["api_key"] = "sk-" + strconv.Itoa(i)
+			delete(metadata, "email")
+			metadata["type"] = "api_key"
+		}
+		mgr.auths[authID] = &Auth{
+			ID:          authID,
+			Provider:    "codex",
+			Status:      StatusActive,
+			Attributes:  attrs,
+			Metadata:    metadata,
+			ModelStates: modelStates,
+		}
+	}
+	mgr.mu.Unlock()
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		mgr.ReconcileProxyPoolLeases(ctx)
 	}
 }

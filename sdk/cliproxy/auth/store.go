@@ -47,3 +47,9 @@ type ProxyLeaseStore interface {
 	RecordProxyLeaseFailure(ctx context.Context, authID, proxyURL string, threshold int, cooldown time.Duration) (ProxyLeaseFailure, error)
 	ClearProxyLeaseFailure(ctx context.Context, proxyURL string) error
 }
+
+// ProxyLeaseBatchStore is an optional extension for stores that can acquire
+// leases for multiple auth records in one backend operation.
+type ProxyLeaseBatchStore interface {
+	AcquireProxyLeases(ctx context.Context, authIDs []string, proxyURLs []string) ([]ProxyLease, error)
+}
