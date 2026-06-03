@@ -749,7 +749,7 @@ func TestManager_AuthWideFailureForceNewSurvivesFailedRebind(t *testing.T) {
 
 func TestManager_OuterRetryPreservesForcedUpstreamSession(t *testing.T) {
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(1, 100*time.Millisecond, 1)
+	m.SetRetryConfig(1, 100*time.Millisecond, 0)
 	executor := &outerRetryForcedSessionExecutor{}
 	m.RegisterExecutor(executor)
 

@@ -74,6 +74,9 @@ func TestMarkResult_AuthScoped429_SuspendsEntireAuth(t *testing.T) {
 	if stored.NextRetryAfter.Before(time.Now().Add(500 * time.Millisecond)) {
 		t.Fatalf("expected NextRetryAfter to be scheduled in the future, got %v", stored.NextRetryAfter)
 	}
+	if stored.Quota.NextRecoverAt.Before(time.Now().Add(quotaRefreshInterval - time.Minute)) {
+		t.Fatalf("expected auth quota recover time near 5h refresh window, got %v", stored.Quota.NextRecoverAt)
+	}
 	// auth-scope quota marker must be set so the selector treats the whole
 	// credential as exhausted and session affinity moves on.
 	if !stored.Quota.Exceeded {
@@ -129,8 +132,36 @@ func TestMarkResult_ModelScoped429_OtherModelsStillRoutable(t *testing.T) {
 	if AuthAvailableForModel(stored, "gemini-2.5-pro", now) {
 		t.Fatal("triggering model should be blocked after 429")
 	}
+	state := stored.ModelStates["gemini-2.5-pro"]
+	if state == nil {
+		t.Fatal("triggering model state missing")
+	}
+	if state.Quota.NextRecoverAt.Before(now.Add(quotaRefreshInterval - time.Minute)) {
+		t.Fatalf("expected model quota recover time near 5h refresh window, got %v", state.Quota.NextRecoverAt)
+	}
+	if !state.NextRetryAfter.Equal(state.Quota.NextRecoverAt) {
+		t.Fatalf("NextRetryAfter = %v, want quota recover time %v", state.NextRetryAfter, state.Quota.NextRecoverAt)
+	}
 	if !AuthAvailableForModel(stored, "gemini-2.5-flash", now) {
 		t.Fatal("unrelated model with clean per-model state should remain routable")
+	}
+}
+
+func TestQuotaRecoverAtUsesFiveHourRefreshWindow(t *testing.T) {
+	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
+
+	if got, want := quotaRecoverAt(now, nil), now.Add(quotaRefreshInterval); !got.Equal(want) {
+		t.Fatalf("quotaRecoverAt() = %v, want %v", got, want)
+	}
+
+	shortRetryAfter := 2 * time.Minute
+	if got, want := quotaRecoverAt(now, &shortRetryAfter), now.Add(quotaRefreshInterval); !got.Equal(want) {
+		t.Fatalf("quotaRecoverAt(short retry-after) = %v, want %v", got, want)
+	}
+
+	longRetryAfter := 6 * time.Hour
+	if got, want := quotaRecoverAt(now, &longRetryAfter), now.Add(longRetryAfter); !got.Equal(want) {
+		t.Fatalf("quotaRecoverAt(long retry-after) = %v, want %v", got, want)
 	}
 }
 

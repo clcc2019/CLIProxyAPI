@@ -85,8 +85,7 @@ const (
 	refreshPendingBackoff  = time.Minute
 	refreshFailureBackoff  = 5 * time.Minute
 	refreshBatchDrainDelay = time.Second
-	quotaBackoffBase       = time.Second
-	quotaBackoffMax        = 30 * time.Minute
+	quotaRefreshInterval   = 5 * time.Hour
 	persistDebounceWindow  = time.Second
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
@@ -3606,24 +3605,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						case 429:
 							var next time.Time
-							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
-								if result.RetryAfter != nil {
-									next = now.Add(*result.RetryAfter)
-								} else {
-									cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
-									if cooldown > 0 {
-										next = now.Add(cooldown)
-									}
-									backoffLevel = nextLevel
-								}
+								next = quotaRecoverAt(now, result.RetryAfter)
 							}
 							state.NextRetryAfter = next
 							state.Quota = QuotaState{
 								Exceeded:      true,
 								Reason:        "quota",
 								NextRecoverAt: next,
-								BackoffLevel:  backoffLevel,
 							}
 							if !disableCooling {
 								suspendReason = "quota"
@@ -4388,15 +4377,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.Reason = "quota"
 		var next time.Time
 		if !disableCooling {
-			if retryAfter != nil {
-				next = now.Add(*retryAfter)
-			} else {
-				cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, disableCooling)
-				if cooldown > 0 {
-					next = now.Add(cooldown)
-				}
-				auth.Quota.BackoffLevel = nextLevel
-			}
+			next = quotaRecoverAt(now, retryAfter)
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
@@ -4414,22 +4395,17 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	}
 }
 
-// nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
-func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
-	if prevLevel < 0 {
-		prevLevel = 0
+func quotaRecoverAt(now time.Time, retryAfter *time.Duration) time.Time {
+	if now.IsZero() {
+		now = time.Now()
 	}
-	if disableCooling {
-		return 0, prevLevel
+	recoverAt := now.Add(quotaRefreshInterval)
+	if retryAfter != nil && *retryAfter > 0 {
+		if hinted := now.Add(*retryAfter); hinted.After(recoverAt) {
+			recoverAt = hinted
+		}
 	}
-	cooldown := quotaBackoffBase * time.Duration(1<<prevLevel)
-	if cooldown < quotaBackoffBase {
-		cooldown = quotaBackoffBase
-	}
-	if cooldown >= quotaBackoffMax {
-		return quotaBackoffMax, prevLevel
-	}
-	return cooldown, prevLevel + 1
+	return recoverAt
 }
 
 // List returns all auth entries currently known by the manager.

@@ -156,7 +156,8 @@ type QuotaState struct {
 	Reason string `json:"reason,omitempty"`
 	// NextRecoverAt is when the credential may become available again.
 	NextRecoverAt time.Time `json:"next_recover_at"`
-	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
+	// BackoffLevel is retained for backward compatibility with older persisted
+	// runtime metadata; new quota cooldowns use NextRecoverAt directly.
 	BackoffLevel int `json:"backoff_level,omitempty"`
 	// AuthScope is set on the auth-level QuotaState (not per-model) when the
 	// failure that tripped the quota was auth-scoped — e.g. Kiro's shared

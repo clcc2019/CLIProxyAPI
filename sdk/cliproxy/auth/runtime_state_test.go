@@ -206,6 +206,7 @@ func TestManagerPersistEmbedsRuntimeStateInAuthMetadata(t *testing.T) {
 	store.saved = nil
 
 	retryAfter := time.Hour
+	before := time.Now()
 	mgr.MarkResult(context.Background(), Result{
 		AuthID:     "auth-1",
 		Provider:   "codex",
@@ -234,6 +235,10 @@ func TestManagerPersistEmbedsRuntimeStateInAuthMetadata(t *testing.T) {
 	}
 	if state.ModelStates["gpt-5-codex"] == nil || !state.ModelStates["gpt-5-codex"].Quota.Exceeded {
 		t.Fatalf("persisted runtime metadata missing quota state: %#v", state.ModelStates)
+	}
+	modelState := state.ModelStates["gpt-5-codex"]
+	if modelState.Quota.NextRecoverAt.Before(before.Add(quotaRefreshInterval - time.Minute)) {
+		t.Fatalf("persisted quota recover time = %v, want near 5h refresh window", modelState.Quota.NextRecoverAt)
 	}
 }
 
