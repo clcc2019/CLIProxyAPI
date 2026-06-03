@@ -4920,7 +4920,7 @@ func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affin
 	}
 
 	cacheKey := sessionAffinityCacheKey(provider, primaryID, opts.Metadata)
-	forceFreshUpstream := false
+	forceFreshUpstream := affinity.cache.ForceNewPending(cacheKey)
 	if cachedAuthID, ok := affinity.cache.GetAndRefresh(cacheKey); ok {
 		if auth, executor, okCached, errPick := m.pickCachedSingleWithScheduler(ctx, provider, model, opts, tried, cachedAuthID); errPick != nil || okCached {
 			return auth, executor, errPick
@@ -4929,13 +4929,10 @@ func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affin
 		forceNewUpstreamSessionForNextCredential(&opts)
 	}
 
-	if affinity.cache.ConsumeForceNew(cacheKey) {
-		forceFreshUpstream = true
-	}
-
+	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, opts.Metadata)
-		if affinity.cache.ConsumeForceNew(fallbackKey) {
+		fallbackKey = sessionAffinityCacheKey(provider, fallbackID, opts.Metadata)
+		if affinity.cache.ForceNewPending(fallbackKey) {
 			forceFreshUpstream = true
 		}
 		if cachedAuthID, ok := affinity.cache.Get(fallbackKey); ok {
@@ -4946,6 +4943,7 @@ func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affin
 			if okCached {
 				if forceFreshUpstream {
 					forceNewUpstreamSessionForNextCredential(&opts)
+					consumeForceNewMarkers(affinity.cache, cacheKey, fallbackKey)
 				}
 				affinity.cache.Set(cacheKey, auth.ID)
 				return auth, executor, nil
@@ -4964,6 +4962,9 @@ func (m *Manager) pickNextSingleWithSchedulerAffinity(ctx context.Context, affin
 		return nil, nil, errPick
 	}
 	if auth != nil {
+		if forceFreshUpstream {
+			consumeForceNewMarkers(affinity.cache, cacheKey, fallbackKey)
+		}
 		affinity.cache.Set(cacheKey, auth.ID)
 	}
 	return auth, executor, nil
@@ -5189,7 +5190,7 @@ func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affini
 	}
 
 	cacheKey := sessionAffinityCacheKey("mixed", primaryID, opts.Metadata)
-	forceFreshUpstream := false
+	forceFreshUpstream := affinity.cache.ForceNewPending(cacheKey)
 	if cachedAuthID, ok := affinity.cache.GetAndRefresh(cacheKey); ok {
 		if auth, executor, provider, okCached, errPick := m.pickCachedMixedWithScheduler(ctx, providers, model, opts, tried, cachedAuthID); errPick != nil || okCached {
 			return auth, executor, provider, errPick
@@ -5198,13 +5199,10 @@ func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affini
 		forceNewUpstreamSessionForNextCredential(&opts)
 	}
 
-	if affinity.cache.ConsumeForceNew(cacheKey) {
-		forceFreshUpstream = true
-	}
-
+	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey := sessionAffinityCacheKey("mixed", fallbackID, opts.Metadata)
-		if affinity.cache.ConsumeForceNew(fallbackKey) {
+		fallbackKey = sessionAffinityCacheKey("mixed", fallbackID, opts.Metadata)
+		if affinity.cache.ForceNewPending(fallbackKey) {
 			forceFreshUpstream = true
 		}
 		if cachedAuthID, ok := affinity.cache.Get(fallbackKey); ok {
@@ -5215,6 +5213,7 @@ func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affini
 			if okCached {
 				if forceFreshUpstream {
 					forceNewUpstreamSessionForNextCredential(&opts)
+					consumeForceNewMarkers(affinity.cache, cacheKey, fallbackKey)
 				}
 				affinity.cache.Set(cacheKey, auth.ID)
 				return auth, executor, provider, nil
@@ -5233,6 +5232,9 @@ func (m *Manager) pickNextMixedWithSchedulerAffinity(ctx context.Context, affini
 		return nil, nil, "", errPick
 	}
 	if auth != nil {
+		if forceFreshUpstream {
+			consumeForceNewMarkers(affinity.cache, cacheKey, fallbackKey)
+		}
 		affinity.cache.Set(cacheKey, auth.ID)
 	}
 	return auth, executor, provider, nil

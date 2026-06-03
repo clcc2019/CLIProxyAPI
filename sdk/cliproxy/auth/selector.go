@@ -585,7 +585,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	cacheKey := sessionAffinityCacheKey(provider, primaryID, opts.Metadata)
-	forceFreshUpstream := false
+	forceFreshUpstream := s.cache.ForceNewPending(cacheKey)
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
@@ -605,13 +605,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return auth, nil
 	}
 
-	if s.cache.ConsumeForceNew(cacheKey) {
-		forceFreshUpstream = true
-	}
-
+	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, opts.Metadata)
-		if s.cache.ConsumeForceNew(fallbackKey) {
+		fallbackKey = sessionAffinityCacheKey(provider, fallbackID, opts.Metadata)
+		if s.cache.ForceNewPending(fallbackKey) {
 			forceFreshUpstream = true
 		}
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
@@ -619,6 +616,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				if auth.ID == cachedAuthID {
 					if forceFreshUpstream {
 						forceNewUpstreamSessionForNextCredential(&opts)
+						consumeForceNewMarkers(s.cache, cacheKey, fallbackKey)
 					}
 					s.cache.Set(cacheKey, auth.ID)
 					infoLog("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
@@ -636,6 +634,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
 	if err != nil {
 		return nil, err
+	}
+	if forceFreshUpstream {
+		consumeForceNewMarkers(s.cache, cacheKey, fallbackKey)
 	}
 	s.cache.Set(cacheKey, auth.ID)
 	infoLog("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)

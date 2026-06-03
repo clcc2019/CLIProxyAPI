@@ -143,6 +143,29 @@ func (c *SessionCache) ConsumeForceNew(sessionID string) bool {
 	return ok && expiresAt.After(now)
 }
 
+// ForceNewPending reports whether a still-valid fresh-upstream marker exists
+// without clearing it. Callers should clear the marker only after successfully
+// rebinding the downstream session to a credential.
+func (c *SessionCache) ForceNewPending(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	now := time.Now()
+	c.mu.RLock()
+	expiresAt, ok := c.forceNew[sessionID]
+	c.mu.RUnlock()
+	return ok && expiresAt.After(now)
+}
+
+func consumeForceNewMarkers(cache *SessionCache, sessionIDs ...string) {
+	if cache == nil {
+		return
+	}
+	for _, sessionID := range sessionIDs {
+		cache.ConsumeForceNew(sessionID)
+	}
+}
+
 // Stop terminates the background cleanup goroutine.
 func (c *SessionCache) Stop() {
 	select {

@@ -622,6 +622,83 @@ func TestManager_AuthWideFailureInvalidatesAffinityAndForcesFreshSession(t *test
 	}
 }
 
+func TestManager_AuthWideFailureForceNewSurvivesFailedRebind(t *testing.T) {
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{})
+	m := NewManager(nil, affinity, nil)
+	m.SetRetryConfig(0, 0, 0)
+	executor := &unauthorizedFailoverSessionExecutor{}
+	m.RegisterExecutor(executor)
+
+	baseID := uuid.NewString()
+	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "codex"}
+	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "codex", Disabled: true, Status: StatusDisabled}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+		affinity.Stop()
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
+		t.Fatalf("register auth1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
+		t.Fatalf("register auth2: %v", errRegister)
+	}
+
+	metadata := map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+	}
+	cacheKey := "providers:codex::exec:session-1"
+	affinity.cache.Set(cacheKey, auth1.ID)
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth1.ID,
+		Provider: "codex",
+		Model:    "test-model",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+	})
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{Metadata: metadata})
+	if errExecute == nil {
+		t.Fatalf("expected Execute to fail while no replacement auth is available")
+	}
+	if !affinity.cache.ForceNewPending(cacheKey) {
+		t.Fatalf("force-new marker should survive a failed rebind")
+	}
+
+	m.mu.Lock()
+	if current := m.auths[auth2.ID]; current != nil {
+		current.Disabled = false
+		current.Status = StatusActive
+		current.Unavailable = false
+		current.NextRetryAfter = time.Time{}
+		current.UpdatedAt = time.Now()
+		auth2 = current.Clone()
+	}
+	m.mu.Unlock()
+	if m.scheduler != nil && auth2 != nil {
+		m.scheduler.upsertAuth(auth2.CloneForScheduler())
+	}
+
+	_, errExecute = m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{Metadata: metadata})
+	if errExecute != nil {
+		t.Fatalf("Execute after replacement auth recovery: %v", errExecute)
+	}
+	forced := executor.ForcedSessions()
+	if len(forced) != 1 {
+		t.Fatalf("forced sessions = %#v, want one call", forced)
+	}
+	if strings.TrimSpace(forced[0]) == "" {
+		t.Fatalf("force-new marker should force a fresh upstream session after recovery: %#v", forced)
+	}
+	if affinity.cache.ForceNewPending(cacheKey) {
+		t.Fatalf("force-new marker should be cleared after successful rebind")
+	}
+}
+
 func TestManager_OuterRetryPreservesForcedUpstreamSession(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(1, 100*time.Millisecond, 1)
