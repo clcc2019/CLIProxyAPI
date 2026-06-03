@@ -3710,6 +3710,64 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.hook.OnResult(ctx, result)
 }
 
+// MarkAuthQuotaCooldown marks a credential as auth-scoped quota exhausted using
+// a known recovery time, such as the reset_at value returned by a usage API.
+func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, recoverAt time.Time) {
+	if m == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	now := time.Now()
+	if recoverAt.IsZero() {
+		recoverAt = now.Add(quotaRefreshInterval)
+	}
+	if !recoverAt.After(now) {
+		return
+	}
+
+	persistAuthID := ""
+	var schedulerSnapshot *Auth
+	m.mu.Lock()
+	if auth, ok := m.auths[authID]; ok && auth != nil {
+		if quotaCooldownDisabledForAuth(auth) {
+			m.mu.Unlock()
+			return
+		}
+		auth.Unavailable = true
+		auth.Status = StatusError
+		auth.StatusMessage = "quota exhausted"
+		auth.NextRetryAfter = recoverAt
+		auth.Quota = QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: recoverAt,
+			AuthScope:     true,
+		}
+		auth.LastError = &Error{
+			Code:       "rate_limited",
+			Message:    "codex usage quota exhausted",
+			HTTPStatus: http.StatusTooManyRequests,
+		}
+		auth.UpdatedAt = now
+		persistAuthID = auth.ID
+		schedulerSnapshot = auth.CloneForScheduler()
+	}
+	m.mu.Unlock()
+
+	if persistAuthID != "" {
+		m.enqueuePersistAuthID(ctx, persistAuthID)
+	}
+	if m.scheduler != nil && schedulerSnapshot != nil {
+		m.scheduler.upsertAuth(schedulerSnapshot)
+	}
+	if persistAuthID != "" {
+		m.invalidateSessionAffinityForAuth(persistAuthID)
+	}
+}
+
 func (m *Manager) invalidateSessionAffinityForAuth(authID string) {
 	if m == nil || strings.TrimSpace(authID) == "" {
 		return

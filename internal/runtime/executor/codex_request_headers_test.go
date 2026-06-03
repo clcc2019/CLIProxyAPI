@@ -38,6 +38,34 @@ func TestApplyCodexHeadersAllowsCustomAuthorizationWithoutToken(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeadersUsesAuthFileClientProfileAttributes(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	auth := cliproxyauth.NewAuthFromAuthFileMetadata(map[string]any{
+		"type":                   "codex",
+		"access_token":           "oauth-token",
+		"originator":             "codex_vscode",
+		"beta_features":          "feature-a,feature-b",
+		"installation_id":        "install-1",
+		"include_timing_metrics": true,
+	}, cliproxyauth.AuthFileProjectionOptions{ID: "codex.json"})
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	for header, want := range map[string]string{
+		"Originator":                            "codex_vscode",
+		"X-Codex-Beta-Features":                 "feature-a,feature-b",
+		"X-Codex-Installation-Id":               "install-1",
+		"x-responsesapi-include-timing-metrics": "true",
+	} {
+		if got := req.Header.Get(header); got != want {
+			t.Fatalf("%s = %q, want %q; headers=%#v", header, got, want, req.Header)
+		}
+	}
+}
+
 func TestApplyCodexHeadersSetsFedrampForOAuthAuth(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {

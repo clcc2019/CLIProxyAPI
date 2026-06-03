@@ -116,6 +116,7 @@ func LoadPersistedStateBytes(data []byte, stats *RequestStatistics) (bool, error
 	stats.restorePersistedState(state)
 	if state.ClientAPIKeyQuota != nil {
 		defaultClientAPIKeyQuotaTracker.restorePersistedState(*state.ClientAPIKeyQuota, time.Now().UTC())
+		seedCurrentClientAPIKeyQuotaStore()
 	}
 	return true, nil
 }

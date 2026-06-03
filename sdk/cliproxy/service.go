@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
@@ -879,6 +880,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.loadUsagePersistence(); err != nil {
 		log.Warnf("failed to load persisted usage statistics: %v", err)
 	}
+	if s.redisState != nil {
+		internalusage.SetClientAPIKeyQuotaStore(s.redisState)
+	}
 	s.startUsagePersistence()
 
 	s.applyRetryConfig(s.cfg)
@@ -1152,6 +1156,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 		if s.redisState != nil {
+			internalusage.SetClientAPIKeyQuotaStore(nil)
 			if errClose := s.redisState.Close(); errClose != nil {
 				log.Errorf("failed to close redis state storage: %v", errClose)
 				if shutdownErr == nil {

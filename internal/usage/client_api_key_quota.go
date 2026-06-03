@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 type clientAPIKeyQuotaPlugin struct{}
@@ -16,8 +17,28 @@ func init() {
 	coreusage.RegisterPlugin(clientAPIKeyQuotaPlugin{})
 }
 
-func (clientAPIKeyQuotaPlugin) HandleUsage(_ context.Context, record coreusage.Record) {
-	defaultClientAPIKeyQuotaTracker.record(record)
+func (clientAPIKeyQuotaPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
+	cost := defaultClientAPIKeyQuotaTracker.record(record)
+	if cost <= 0 {
+		return
+	}
+	store := clientAPIKeyQuotaStoreSnapshot()
+	if store == nil {
+		return
+	}
+	apiKey := strings.TrimSpace(record.APIKey)
+	if apiKey == "" {
+		return
+	}
+	timestamp := record.RequestedAt.UTC()
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	storeCtx, cancel := clientAPIKeyQuotaStoreContext(ctx)
+	defer cancel()
+	if err := store.AddClientAPIKeyQuotaUsage(storeCtx, apiKey, timestamp, cost); err != nil {
+		log.WithError(err).Debug("client api key quota redis update failed")
+	}
 }
 
 // ClientAPIKeyQuotaUsage is the quota-relevant usage already recorded for one API key.
@@ -55,6 +76,32 @@ type clientAPIKeyQuotaCounters struct {
 	cost float64
 }
 
+// ClientAPIKeyQuotaState is the portable persisted state used to seed external
+// quota backends after usage persistence has been restored.
+type ClientAPIKeyQuotaState struct {
+	Total   map[string]float64            `json:"total,omitempty"`
+	Daily   map[string]map[string]float64 `json:"daily,omitempty"`
+	Monthly map[string]map[string]float64 `json:"monthly,omitempty"`
+}
+
+func (state ClientAPIKeyQuotaState) isZero() bool {
+	return len(state.Total) == 0 && len(state.Daily) == 0 && len(state.Monthly) == 0
+}
+
+// IsZero reports whether the state contains any quota counters.
+func (state ClientAPIKeyQuotaState) IsZero() bool {
+	return state.isZero()
+}
+
+// ClientAPIKeyQuotaStore provides optional shared quota counters. Redis uses
+// this so clustered instances evaluate the same API key budget instead of only
+// their local in-process counters.
+type ClientAPIKeyQuotaStore interface {
+	LoadClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, now time.Time) (ClientAPIKeyQuotaUsage, bool, error)
+	AddClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, timestamp time.Time, cost float64) error
+	SeedClientAPIKeyQuotaState(ctx context.Context, state ClientAPIKeyQuotaState) error
+}
+
 type clientAPIKeyQuotaTracker struct {
 	mu          sync.RWMutex
 	modelPrices config.ModelPrices
@@ -63,13 +110,16 @@ type clientAPIKeyQuotaTracker struct {
 	monthly     map[string]map[string]clientAPIKeyQuotaCounters
 }
 
-type persistedClientAPIKeyQuotaState struct {
-	Total   map[string]float64            `json:"total,omitempty"`
-	Daily   map[string]map[string]float64 `json:"daily,omitempty"`
-	Monthly map[string]map[string]float64 `json:"monthly,omitempty"`
-}
+type persistedClientAPIKeyQuotaState = ClientAPIKeyQuotaState
 
 var defaultClientAPIKeyQuotaTracker = newClientAPIKeyQuotaTracker()
+
+var clientAPIKeyQuotaStore struct {
+	mu    sync.RWMutex
+	store ClientAPIKeyQuotaStore
+}
+
+const clientAPIKeyQuotaStoreTimeout = 2 * time.Second
 
 func newClientAPIKeyQuotaTracker() *clientAPIKeyQuotaTracker {
 	return &clientAPIKeyQuotaTracker{
@@ -81,7 +131,41 @@ func newClientAPIKeyQuotaTracker() *clientAPIKeyQuotaTracker {
 
 // CheckClientAPIKeyQuota evaluates the configured quota for a client API key.
 func CheckClientAPIKeyQuota(apiKey string, quota config.ClientAPIKeyQuota, now time.Time) *ClientAPIKeyQuotaExceeded {
+	apiKey = strings.TrimSpace(apiKey)
+	quota = config.NormalizeClientAPIKeyQuota(quota)
+	if apiKey == "" || !quota.HasLimits() {
+		return nil
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if store := clientAPIKeyQuotaStoreSnapshot(); store != nil {
+		ctx, cancel := clientAPIKeyQuotaStoreContext(context.Background())
+		usage, ok, err := store.LoadClientAPIKeyQuotaUsage(ctx, apiKey, now)
+		cancel()
+		if err == nil && ok {
+			return evaluateClientAPIKeyQuota(quota, usage, now)
+		}
+		if err != nil {
+			log.WithError(err).Debug("client api key quota redis lookup failed")
+		}
+	}
 	return defaultClientAPIKeyQuotaTracker.check(apiKey, quota, now)
+}
+
+// SetClientAPIKeyQuotaStore swaps the optional shared quota counter backend.
+func SetClientAPIKeyQuotaStore(store ClientAPIKeyQuotaStore) {
+	clientAPIKeyQuotaStore.mu.Lock()
+	clientAPIKeyQuotaStore.store = store
+	clientAPIKeyQuotaStore.mu.Unlock()
+	seedCurrentClientAPIKeyQuotaStore()
+}
+
+func clientAPIKeyQuotaStoreSnapshot() ClientAPIKeyQuotaStore {
+	clientAPIKeyQuotaStore.mu.RLock()
+	defer clientAPIKeyQuotaStore.mu.RUnlock()
+	return clientAPIKeyQuotaStore.store
 }
 
 // SetClientAPIKeyQuotaModelPrices updates server-side model prices used for spend quotas.
@@ -112,10 +196,6 @@ func (t *clientAPIKeyQuotaTracker) persistedState() persistedClientAPIKeyQuotaSt
 	}
 }
 
-func (state persistedClientAPIKeyQuotaState) isZero() bool {
-	return len(state.Total) == 0 && len(state.Daily) == 0 && len(state.Monthly) == 0
-}
-
 func (t *clientAPIKeyQuotaTracker) restorePersistedState(state persistedClientAPIKeyQuotaState, now time.Time) {
 	if t == nil {
 		return
@@ -133,13 +213,13 @@ func (t *clientAPIKeyQuotaTracker) restorePersistedState(state persistedClientAP
 	t.pruneLocked(now)
 }
 
-func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) {
+func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) float64 {
 	if t == nil {
-		return
+		return 0
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
 	if apiKey == "" {
-		return
+		return 0
 	}
 
 	timestamp := record.RequestedAt.UTC()
@@ -152,13 +232,14 @@ func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) {
 
 	cost := t.costForRecordLocked(record)
 	if cost <= 0 {
-		return
+		return 0
 	}
 
 	t.addCountersLocked(t.total, apiKey, "", cost)
 	t.addCountersLocked(t.daily, apiKey, timestamp.Format("2006-01-02"), cost)
 	t.addCountersLocked(t.monthly, apiKey, timestamp.Format("2006-01"), cost)
 	t.pruneLocked(timestamp)
+	return cost
 }
 
 func (t *clientAPIKeyQuotaTracker) check(apiKey string, quota config.ClientAPIKeyQuota, now time.Time) *ClientAPIKeyQuotaExceeded {
@@ -176,6 +257,18 @@ func (t *clientAPIKeyQuotaTracker) check(apiKey string, quota config.ClientAPIKe
 	}
 
 	usage := t.usage(apiKey, now)
+	return evaluateClientAPIKeyQuota(quota, usage, now)
+}
+
+func evaluateClientAPIKeyQuota(quota config.ClientAPIKeyQuota, usage ClientAPIKeyQuotaUsage, now time.Time) *ClientAPIKeyQuotaExceeded {
+	quota = config.NormalizeClientAPIKeyQuota(quota)
+	if !quota.HasLimits() {
+		return nil
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	if quota.TotalCost > 0 && usage.TotalCost >= quota.TotalCost {
 		return &ClientAPIKeyQuotaExceeded{Scope: "total", Resource: "cost", Limit: quota.TotalCost, Used: usage.TotalCost}
 	}
@@ -186,6 +279,31 @@ func (t *clientAPIKeyQuotaTracker) check(apiKey string, quota config.ClientAPIKe
 		return &ClientAPIKeyQuotaExceeded{Scope: "daily", Resource: "cost", Limit: quota.DailyCost, Used: usage.DailyCost, ResetAt: nextDailyResetUTC(now)}
 	}
 	return nil
+}
+
+func clientAPIKeyQuotaStoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
+	return context.WithTimeout(ctx, clientAPIKeyQuotaStoreTimeout)
+}
+
+func seedCurrentClientAPIKeyQuotaStore() {
+	store := clientAPIKeyQuotaStoreSnapshot()
+	if store == nil {
+		return
+	}
+	state := defaultClientAPIKeyQuotaTracker.persistedState()
+	if state.isZero() {
+		return
+	}
+	ctx, cancel := clientAPIKeyQuotaStoreContext(context.Background())
+	defer cancel()
+	if err := store.SeedClientAPIKeyQuotaState(ctx, state); err != nil {
+		log.WithError(err).Debug("client api key quota redis seed failed")
+	}
 }
 
 func (t *clientAPIKeyQuotaTracker) usage(apiKey string, now time.Time) ClientAPIKeyQuotaUsage {

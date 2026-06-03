@@ -63,6 +63,67 @@ func TestNewAuthFromAuthFileMetadataAppliesCommonProjection(t *testing.T) {
 	}
 }
 
+func TestNewAuthFromAuthFileMetadataAppliesCodexClientProfileFields(t *testing.T) {
+	auth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":                   "codex",
+		"originator":             " codex_vscode ",
+		"beta_features":          " feature-a,feature-b ",
+		"installation_id":        " install-1 ",
+		"include_timing_metrics": "true",
+	}, AuthFileProjectionOptions{ID: "codex.json"})
+
+	want := map[string]string{
+		"originator":                                   "codex_vscode",
+		"header:Originator":                            "codex_vscode",
+		"header:X-Codex-Beta-Features":                 "feature-a,feature-b",
+		"header:X-Codex-Installation-Id":               "install-1",
+		"header:x-responsesapi-include-timing-metrics": "true",
+	}
+	for key, expected := range want {
+		if got := auth.Attributes[key]; got != expected {
+			t.Fatalf("Attributes[%q] = %q, want %q; attrs=%#v", key, got, expected, auth.Attributes)
+		}
+	}
+}
+
+func TestNewAuthFromAuthFileMetadataClearsCodexClientProfileHeaderAliases(t *testing.T) {
+	auth := &Auth{
+		Attributes: map[string]string{
+			"originator":                                   "old",
+			"header:Originator":                            "old",
+			"beta_features":                                "old",
+			"header:X-Codex-Beta-Features":                 "old",
+			"installation_id":                              "old",
+			"header:X-Codex-Installation-Id":               "old",
+			"include_timing_metrics":                       "old",
+			"header:x-responsesapi-include-timing-metrics": "old",
+		},
+		Metadata: map[string]any{
+			"originator":             "",
+			"beta-features":          "",
+			"installationId":         "",
+			"include_timing_metrics": false,
+		},
+	}
+
+	ApplyAuthFileOptionsFromMetadata(auth)
+
+	for _, key := range []string{
+		"originator",
+		"header:Originator",
+		"beta_features",
+		"header:X-Codex-Beta-Features",
+		"installation_id",
+		"header:X-Codex-Installation-Id",
+		"include_timing_metrics",
+		"header:x-responsesapi-include-timing-metrics",
+	} {
+		if _, ok := auth.Attributes[key]; ok {
+			t.Fatalf("Attributes[%q] should be removed when auth-file field is empty/false: %#v", key, auth.Attributes)
+		}
+	}
+}
+
 func TestNewAuthFromAuthFileMetadataAppliesProxyAliasesAndLegacyWebsocket(t *testing.T) {
 	auth := NewAuthFromAuthFileMetadata(map[string]any{
 		"type":      "codex",

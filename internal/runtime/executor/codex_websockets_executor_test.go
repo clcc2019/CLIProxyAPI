@@ -2497,6 +2497,88 @@ func TestCodexWebsocketsExecuteStreamTranslatesAndNormalizesOpenAIResponsesReque
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamDoesNotForwardIncompleteQuotaWarning(t *testing.T) {
+	var upgrader = websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("Upgrade() error = %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, err = conn.ReadMessage(); err != nil {
+			t.Errorf("ReadMessage() error = %v", err)
+			return
+		}
+		if err = conn.WriteJSON(map[string]any{
+			"type": "response.incomplete",
+			"response": map[string]any{
+				"id":     "resp_quota_warning",
+				"object": "response",
+				"status": "incomplete",
+				"incomplete_details": map[string]any{
+					"reason": "max_output_tokens",
+				},
+				"output": []any{map[string]any{
+					"type": "message",
+					"role": "assistant",
+					"content": []any{map[string]any{
+						"type": "output_text",
+						"text": "quota warning: upgrade your plan",
+					}},
+				}},
+			},
+		}); err != nil {
+			t.Errorf("WriteJSON(response.incomplete) error = %v", err)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello","stream":true}`),
+	}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{
+		Stream:          true,
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		OriginalRequest: req.Payload,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var streamErr error
+	var forwarded bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			continue
+		}
+		forwarded.Write(chunk.Payload)
+	}
+	if streamErr == nil {
+		t.Fatal("expected stream error for response.incomplete")
+	}
+	if strings.Contains(forwarded.String(), "quota warning") {
+		t.Fatalf("response.incomplete quota warning leaked to downstream payload: %q", forwarded.String())
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamRetriesConnectionLimitError(t *testing.T) {
 	var (
 		upgrader = websocket.Upgrader{}

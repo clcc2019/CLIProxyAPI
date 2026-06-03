@@ -11,6 +11,22 @@ const (
 	// AuthFileServiceTierPassthroughKey is the canonical auth-file field that
 	// lets Codex executors preserve a client-provided service_tier.
 	AuthFileServiceTierPassthroughKey = "service_tier_passthrough"
+
+	// AuthFileCodexBetaFeaturesKey is the canonical auth-file field for the
+	// X-Codex-Beta-Features client profile header.
+	AuthFileCodexBetaFeaturesKey = "beta_features"
+	// AuthFileCodexInstallationIDKey is the canonical auth-file field for the
+	// X-Codex-Installation-Id client profile header.
+	AuthFileCodexInstallationIDKey = "installation_id"
+	// AuthFileCodexIncludeTimingMetricsKey is the canonical auth-file field for
+	// x-responsesapi-include-timing-metrics.
+	AuthFileCodexIncludeTimingMetricsKey = "include_timing_metrics"
+	AuthFileCodexOriginatorKey           = "originator"
+
+	AuthFileCodexBetaFeaturesHeader         = "X-Codex-Beta-Features"
+	AuthFileCodexInstallationIDHeader       = "X-Codex-Installation-Id"
+	AuthFileCodexIncludeTimingMetricsHeader = "x-responsesapi-include-timing-metrics"
+	AuthFileCodexOriginatorHeader           = "Originator"
 )
 
 var authFileServiceTierPassthroughKeys = []string{
@@ -18,6 +34,29 @@ var authFileServiceTierPassthroughKeys = []string{
 	"service-tier-passthrough",
 	"serviceTierPassthrough",
 	"fast",
+}
+
+var authFileCodexBetaFeaturesKeys = []string{
+	AuthFileCodexBetaFeaturesKey,
+	"beta-features",
+	"betaFeatures",
+}
+
+var authFileCodexInstallationIDKeys = []string{
+	AuthFileCodexInstallationIDKey,
+	"installation-id",
+	"installationId",
+}
+
+var authFileCodexIncludeTimingMetricsKeys = []string{
+	AuthFileCodexIncludeTimingMetricsKey,
+	"include-timing-metrics",
+	"includeTimingMetrics",
+}
+
+var authFileCodexOriginatorKeys = []string{
+	AuthFileCodexOriginatorKey,
+	AuthFileCodexOriginatorHeader,
 }
 
 // ApplyAuthFileOptionsFromMetadata maps editable auth-file fields from Metadata
@@ -63,6 +102,22 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 			auth.Attributes["header:User-Agent"] = userAgent
 		}
 	}
+	if originator, ok := authFileMetadataFirstString(auth.Metadata, authFileCodexOriginatorKeys...); ok {
+		authFileSetOriginatorAttribute(auth, originator)
+	}
+	if betaFeatures, ok := authFileMetadataFirstString(auth.Metadata, authFileCodexBetaFeaturesKeys...); ok {
+		authFileSetHeaderAttribute(auth, AuthFileCodexBetaFeaturesHeader, betaFeatures, authFileCodexBetaFeaturesKeys...)
+	}
+	if installationID, ok := authFileMetadataFirstString(auth.Metadata, authFileCodexInstallationIDKeys...); ok {
+		authFileSetHeaderAttribute(auth, AuthFileCodexInstallationIDHeader, installationID, authFileCodexInstallationIDKeys...)
+	}
+	if includeTimingMetrics, ok := authFileMetadataFirstBool(auth.Metadata, authFileCodexIncludeTimingMetricsKeys...); ok {
+		if includeTimingMetrics {
+			authFileSetHeaderAttribute(auth, AuthFileCodexIncludeTimingMetricsHeader, "true", authFileCodexIncludeTimingMetricsKeys...)
+		} else {
+			authFileSetHeaderAttribute(auth, AuthFileCodexIncludeTimingMetricsHeader, "", authFileCodexIncludeTimingMetricsKeys...)
+		}
+	}
 	if websockets, ok := authFileMetadataFirstBool(auth.Metadata, "websockets", "websocket"); ok {
 		if auth.Attributes == nil {
 			auth.Attributes = make(map[string]string)
@@ -75,6 +130,47 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 		}
 		auth.Attributes[AuthFileServiceTierPassthroughKey] = strconv.FormatBool(serviceTierPassthrough)
 	}
+}
+
+func authFileSetOriginatorAttribute(auth *Auth, originator string) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	originator = strings.TrimSpace(originator)
+	delete(auth.Attributes, AuthFileCodexOriginatorKey)
+	delete(auth.Attributes, AuthFileCodexOriginatorHeader)
+	delete(auth.Attributes, "header:"+AuthFileCodexOriginatorHeader)
+	if originator == "" {
+		return
+	}
+	auth.Attributes[AuthFileCodexOriginatorKey] = originator
+	auth.Attributes["header:"+AuthFileCodexOriginatorHeader] = originator
+}
+
+func authFileSetHeaderAttribute(auth *Auth, headerName string, value string, aliasKeys ...string) {
+	if auth == nil {
+		return
+	}
+	headerName = strings.TrimSpace(headerName)
+	if headerName == "" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	for _, key := range aliasKeys {
+		delete(auth.Attributes, key)
+	}
+	attrKey := "header:" + headerName
+	value = strings.TrimSpace(value)
+	if value == "" {
+		delete(auth.Attributes, attrKey)
+		return
+	}
+	auth.Attributes[attrKey] = value
 }
 
 func authFileMetadataString(metadata map[string]any, key string) (string, bool) {

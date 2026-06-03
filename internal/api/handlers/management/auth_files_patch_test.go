@@ -365,6 +365,79 @@ func TestBuildAuthFileEntryExposesCodexClientProfile(t *testing.T) {
 	}
 }
 
+func TestBuildAuthFileEntryExposesCodexClientProfileFromHeaders(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-auth.json",
+		FileName: "codex-auth.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email": "codex@example.com",
+			"headers": map[string]any{
+				"User-Agent":                            "codex-cli-test/1.0",
+				"Originator":                            "codex_vscode",
+				"X-Codex-Beta-Features":                 "feature-1",
+				"X-Codex-Installation-Id":               "install-1",
+				"X-ResponsesAPI-Include-Timing-Metrics": "true",
+			},
+		},
+		Attributes: map[string]string{
+			"path": "/tmp/codex-auth.json",
+		},
+	}
+
+	entry := h.buildAuthFileEntry(auth)
+	if got, _ := entry["user_agent"].(string); got != "codex-cli-test/1.0" {
+		t.Fatalf("entry[user_agent] = %q, want %q", got, "codex-cli-test/1.0")
+	}
+	profile, ok := entry["client_profile"].(gin.H)
+	if !ok {
+		t.Fatalf("entry[client_profile] = %T, want gin.H", entry["client_profile"])
+	}
+	for key, want := range map[string]string{
+		"user_agent":      "codex-cli-test/1.0",
+		"originator":      "codex_vscode",
+		"beta_features":   "feature-1",
+		"installation_id": "install-1",
+	} {
+		if got, _ := profile[key].(string); got != want {
+			t.Fatalf("client_profile[%s] = %q, want %q", key, got, want)
+		}
+	}
+	if got, _ := profile["include_timing_metrics"].(bool); !got {
+		t.Fatalf("client_profile[include_timing_metrics] = %#v, want true", profile["include_timing_metrics"])
+	}
+}
+
+func TestBuildCodexAuthFilePreviewExposesClientProfileFromHeaders(t *testing.T) {
+	preview := buildCodexAuthFilePreview(map[string]any{
+		"type": "codex",
+		"headers": map[string]any{
+			"User-Agent":                            "codex-cli-test/1.0",
+			"Originator":                            "codex_vscode",
+			"X-Codex-Beta-Features":                 "feature-1",
+			"X-Codex-Installation-Id":               "install-1",
+			"X-ResponsesAPI-Include-Timing-Metrics": "true",
+		},
+	})
+
+	if preview.UserAgent != "codex-cli-test/1.0" {
+		t.Fatalf("preview.UserAgent = %q, want %q", preview.UserAgent, "codex-cli-test/1.0")
+	}
+	if preview.Originator != "codex_vscode" {
+		t.Fatalf("preview.Originator = %q, want codex_vscode", preview.Originator)
+	}
+	if preview.BetaFeatures != "feature-1" {
+		t.Fatalf("preview.BetaFeatures = %q, want feature-1", preview.BetaFeatures)
+	}
+	if preview.InstallationID != "install-1" {
+		t.Fatalf("preview.InstallationID = %q, want install-1", preview.InstallationID)
+	}
+	if preview.IncludeTimingMetrics == nil || !*preview.IncludeTimingMetrics {
+		t.Fatalf("preview.IncludeTimingMetrics = %#v, want true", preview.IncludeTimingMetrics)
+	}
+}
+
 func TestBuildAuthFileEntrySeparatesProxyPoolRuntimeProxy(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	auth := &coreauth.Auth{

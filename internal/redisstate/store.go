@@ -7,13 +7,17 @@ package redisstate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -113,6 +117,23 @@ if failures >= threshold then
   return {failures, recover_at}
 end
 return {failures, 0}
+`)
+
+var seedClientAPIKeyQuotaScript = redis.NewScript(`
+local current = tonumber(redis.call("GET", KEYS[1]) or "0") or 0
+local value = tonumber(ARGV[1]) or 0
+local expire_at = tonumber(ARGV[2]) or 0
+if value > current then
+  redis.call("SET", KEYS[1], ARGV[1])
+  if expire_at > 0 then
+    redis.call("EXPIREAT", KEYS[1], expire_at)
+  end
+  return 1
+end
+if expire_at > 0 and redis.call("TTL", KEYS[1]) < 0 then
+  redis.call("EXPIREAT", KEYS[1], expire_at)
+end
+return 0
 `)
 
 type Store struct {
@@ -279,6 +300,124 @@ func (s *Store) DeleteCache(ctx context.Context, namespace, cacheKey string) err
 		return nil
 	}
 	return s.client.Del(ctx, key).Err()
+}
+
+func (s *Store) LoadClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, now time.Time) (internalusage.ClientAPIKeyQuotaUsage, bool, error) {
+	if s == nil || s.client == nil {
+		return internalusage.ClientAPIKeyQuotaUsage{}, false, nil
+	}
+	apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+	if apiKeyHash == "" {
+		return internalusage.ClientAPIKeyQuotaUsage{}, false, nil
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	keys := []string{
+		s.clientAPIKeyQuotaKey(apiKeyHash, "total", ""),
+		s.clientAPIKeyQuotaKey(apiKeyHash, "daily", now.Format("2006-01-02")),
+		s.clientAPIKeyQuotaKey(apiKeyHash, "monthly", now.Format("2006-01")),
+	}
+	values, err := s.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return internalusage.ClientAPIKeyQuotaUsage{}, false, err
+	}
+	var usage internalusage.ClientAPIKeyQuotaUsage
+	found := false
+	if cost, ok := redisFloat(values[0]); ok {
+		usage.TotalCost = cost
+		found = true
+	}
+	if cost, ok := redisFloat(values[1]); ok {
+		usage.DailyCost = cost
+		found = true
+	}
+	if cost, ok := redisFloat(values[2]); ok {
+		usage.MonthlyCost = cost
+		found = true
+	}
+	return usage, found, nil
+}
+
+func (s *Store) AddClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, timestamp time.Time, cost float64) error {
+	if s == nil || s.client == nil || cost <= 0 {
+		return nil
+	}
+	apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+	if apiKeyHash == "" {
+		return nil
+	}
+	timestamp = timestamp.UTC()
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	day := timestamp.Format("2006-01-02")
+	month := timestamp.Format("2006-01")
+	dailyExpireAt := clientAPIKeyQuotaDailyExpireAt(timestamp)
+	monthlyExpireAt := clientAPIKeyQuotaMonthlyExpireAt(timestamp)
+
+	pipe := s.client.Pipeline()
+	pipe.IncrByFloat(ctx, s.clientAPIKeyQuotaKey(apiKeyHash, "total", ""), cost)
+	daily := s.clientAPIKeyQuotaKey(apiKeyHash, "daily", day)
+	monthly := s.clientAPIKeyQuotaKey(apiKeyHash, "monthly", month)
+	pipe.IncrByFloat(ctx, daily, cost)
+	pipe.ExpireAt(ctx, daily, dailyExpireAt)
+	pipe.IncrByFloat(ctx, monthly, cost)
+	pipe.ExpireAt(ctx, monthly, monthlyExpireAt)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func (s *Store) SeedClientAPIKeyQuotaState(ctx context.Context, state internalusage.ClientAPIKeyQuotaState) error {
+	if s == nil || s.client == nil || state.IsZero() {
+		return nil
+	}
+	ops := 0
+	seed := func(key string, cost float64, expireAt time.Time) error {
+		if key == "" || cost <= 0 {
+			return nil
+		}
+		expireUnix := int64(0)
+		if !expireAt.IsZero() {
+			expireUnix = expireAt.UTC().Unix()
+		}
+		if err := seedClientAPIKeyQuotaScript.Run(ctx, s.client, []string{key}, strconv.FormatFloat(cost, 'f', -1, 64), expireUnix).Err(); err != nil {
+			return err
+		}
+		ops++
+		return nil
+	}
+	for apiKey, cost := range state.Total {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		if err := seed(s.clientAPIKeyQuotaKey(apiKeyHash, "total", ""), cost, time.Time{}); err != nil {
+			return err
+		}
+	}
+	for apiKey, buckets := range state.Daily {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		for bucket, cost := range buckets {
+			if expireAt, ok := clientAPIKeyQuotaDailyBucketExpireAt(bucket); ok {
+				if err := seed(s.clientAPIKeyQuotaKey(apiKeyHash, "daily", bucket), cost, expireAt); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for apiKey, buckets := range state.Monthly {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		for bucket, cost := range buckets {
+			if expireAt, ok := clientAPIKeyQuotaMonthlyBucketExpireAt(bucket); ok {
+				if err := seed(s.clientAPIKeyQuotaKey(apiKeyHash, "monthly", bucket), cost, expireAt); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if ops == 0 {
+		return nil
+	}
+	return nil
 }
 
 func (s *Store) Load(ctx context.Context) (map[string]coreauth.AuthRuntimeState, error) {
@@ -529,6 +668,19 @@ func (s *Store) cacheKey(namespace, cacheKey string) string {
 	return s.key("cache", namespace, cacheKey)
 }
 
+func (s *Store) clientAPIKeyQuotaKey(apiKeyHash, scope, bucket string) string {
+	apiKeyHash = strings.TrimSpace(apiKeyHash)
+	scope = strings.TrimSpace(scope)
+	bucket = strings.TrimSpace(bucket)
+	if apiKeyHash == "" || scope == "" {
+		return ""
+	}
+	if bucket == "" {
+		return s.key("quota", "client-api-key", apiKeyHash, scope)
+	}
+	return s.key("quota", "client-api-key", apiKeyHash, scope, bucket)
+}
+
 func (s *Store) key(parts ...string) string {
 	clean := make([]string, 0, len(parts)+1)
 	prefix := strings.Trim(strings.TrimSpace(s.keyPrefix), ":")
@@ -565,4 +717,64 @@ func redisInt64(value any) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func redisFloat(value any) (float64, bool) {
+	switch v := value.(type) {
+	case nil:
+		return 0, false
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case string:
+		out, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		return out, err == nil
+	case []byte:
+		out, err := strconv.ParseFloat(strings.TrimSpace(string(v)), 64)
+		return out, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func clientAPIKeyQuotaHash(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(apiKey))
+	return hex.EncodeToString(sum[:])
+}
+
+func clientAPIKeyQuotaDailyExpireAt(timestamp time.Time) time.Time {
+	timestamp = timestamp.UTC()
+	dayStart := time.Date(timestamp.Year(), timestamp.Month(), timestamp.Day(), 0, 0, 0, 0, time.UTC)
+	return dayStart.AddDate(0, 0, 3)
+}
+
+func clientAPIKeyQuotaMonthlyExpireAt(timestamp time.Time) time.Time {
+	timestamp = timestamp.UTC()
+	monthStart := time.Date(timestamp.Year(), timestamp.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return monthStart.AddDate(0, 3, 0)
+}
+
+func clientAPIKeyQuotaDailyBucketExpireAt(bucket string) (time.Time, bool) {
+	ts, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(bucket), time.UTC)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts.AddDate(0, 0, 3), true
+}
+
+func clientAPIKeyQuotaMonthlyBucketExpireAt(bucket string) (time.Time, bool) {
+	ts, err := time.ParseInLocation("2006-01", strings.TrimSpace(bucket), time.UTC)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts.AddDate(0, 3, 0), true
 }

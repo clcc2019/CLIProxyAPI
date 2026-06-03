@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -42,6 +43,15 @@ func (s *Store) SaveCache(_ context.Context, _, _ string, _ []byte, _ time.Durat
 	return nil
 }
 func (s *Store) DeleteCache(_ context.Context, _, _ string) error { return nil }
+func (s *Store) LoadClientAPIKeyQuotaUsage(_ context.Context, _ string, _ time.Time) (internalusage.ClientAPIKeyQuotaUsage, bool, error) {
+	return internalusage.ClientAPIKeyQuotaUsage{}, false, nil
+}
+func (s *Store) AddClientAPIKeyQuotaUsage(_ context.Context, _ string, _ time.Time, _ float64) error {
+	return nil
+}
+func (s *Store) SeedClientAPIKeyQuotaState(_ context.Context, _ internalusage.ClientAPIKeyQuotaState) error {
+	return nil
+}
 func (s *Store) Load(_ context.Context) (map[string]coreauth.AuthRuntimeState, error) {
 	return nil, nil
 }

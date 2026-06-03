@@ -690,6 +690,11 @@ func (h *Handler) GetCodexUsage(c *gin.Context) {
 			auth = updated
 		}
 	}
+	if h.authManager != nil {
+		if latest, ok := h.authManager.GetByID(auth.ID); ok && latest != nil {
+			auth = latest
+		}
+	}
 	mergeCodexUsageLocalFields(payload, auth)
 	if entry := h.buildAuthFileEntry(auth); entry != nil {
 		payload["auth_file"] = entry
@@ -817,6 +822,18 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 							fileData["user_agent"] = trimmed
 						}
 					}
+				}
+				if originator := firstTrimmedGJSONString(data, coreauth.AuthFileCodexOriginatorKey, coreauth.AuthFileCodexOriginatorHeader); originator != "" {
+					fileData[coreauth.AuthFileCodexOriginatorKey] = originator
+				}
+				if betaFeatures := firstTrimmedGJSONString(data, coreauth.AuthFileCodexBetaFeaturesKey, "beta-features", "betaFeatures"); betaFeatures != "" {
+					fileData[coreauth.AuthFileCodexBetaFeaturesKey] = betaFeatures
+				}
+				if installationID := firstTrimmedGJSONString(data, coreauth.AuthFileCodexInstallationIDKey, "installation-id", "installationId"); installationID != "" {
+					fileData[coreauth.AuthFileCodexInstallationIDKey] = installationID
+				}
+				if includeTimingMetrics, ok := boolFromGJSON(data, coreauth.AuthFileCodexIncludeTimingMetricsKey, "include-timing-metrics", "includeTimingMetrics"); ok {
+					fileData[coreauth.AuthFileCodexIncludeTimingMetricsKey] = includeTimingMetrics
 				}
 			}
 
@@ -1177,6 +1194,124 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 		if errSleep := codexUsageSleepBeforeRetry(requestCtx, attempt+1); errSleep != nil {
 			return nil, 0, errSleep
 		}
+	}
+}
+
+func (h *Handler) syncCodexUsageQuotaCooldown(ctx context.Context, auth *coreauth.Auth, payload gin.H) {
+	if h == nil || h.authManager == nil || auth == nil || strings.TrimSpace(auth.ID) == "" || len(payload) == 0 {
+		return
+	}
+	recoverAt, exhausted := codexUsageQuotaRecoverAt(payload, time.Now())
+	if !exhausted {
+		return
+	}
+	h.authManager.MarkAuthQuotaCooldown(ctx, auth.ID, recoverAt)
+}
+
+func codexUsageQuotaRecoverAt(payload gin.H, now time.Time) (time.Time, bool) {
+	if len(payload) == 0 {
+		return time.Time{}, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var latestReset time.Time
+	exhaustedWithoutReset := false
+	scanRateLimit := func(value any) {
+		rateLimit, ok := value.(map[string]any)
+		if !ok {
+			if typed, ok := value.(gin.H); ok {
+				rateLimit = map[string]any(typed)
+			}
+		}
+		if len(rateLimit) == 0 {
+			return
+		}
+		for _, key := range []string{"primary_window", "secondary_window"} {
+			window, ok := codexUsageWindowMap(rateLimit[key])
+			if !ok {
+				continue
+			}
+			usedPercent, ok := numberFromAny(window["used_percent"])
+			if !ok || usedPercent < 100 {
+				continue
+			}
+			resetAt, hasReset := codexUsageWindowResetAt(window)
+			if !hasReset {
+				exhaustedWithoutReset = true
+				continue
+			}
+			if resetAt.After(now) && resetAt.After(latestReset) {
+				latestReset = resetAt
+			}
+		}
+	}
+
+	scanRateLimit(payload["rate_limit"])
+	if additional, ok := payload["additional_rate_limits"].([]any); ok {
+		for _, item := range additional {
+			limit, ok := codexUsageWindowMap(item)
+			if !ok {
+				continue
+			}
+			scanRateLimit(limit["rate_limit"])
+		}
+	}
+	if !latestReset.IsZero() {
+		return latestReset, true
+	}
+	if exhaustedWithoutReset {
+		return time.Time{}, true
+	}
+	return time.Time{}, false
+}
+
+func codexUsageWindowMap(value any) (map[string]any, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed, len(typed) > 0
+	case gin.H:
+		return map[string]any(typed), len(typed) > 0
+	default:
+		return nil, false
+	}
+}
+
+func codexUsageWindowResetAt(window map[string]any) (time.Time, bool) {
+	if len(window) == 0 {
+		return time.Time{}, false
+	}
+	raw, ok := window["reset_at"]
+	if !ok {
+		raw = window["resets_at"]
+	}
+	seconds, ok := numberFromAny(raw)
+	if !ok || seconds <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(seconds), 0), true
+}
+
+func numberFromAny(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		return parsed, err == nil
+	default:
+		return 0, false
 	}
 }
 
@@ -2278,6 +2413,19 @@ func boolFromGJSON(data []byte, keys ...string) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func firstTrimmedGJSONString(data []byte, keys ...string) string {
+	for _, key := range keys {
+		value := gjson.GetBytes(data, key)
+		if !value.Exists() || value.Type != gjson.String {
+			continue
+		}
+		if trimmed := strings.TrimSpace(value.String()); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func authFileHasRefreshToken(auth *coreauth.Auth) bool {
@@ -3560,6 +3708,9 @@ func authFileUserAgent(auth *coreauth.Auth) string {
 			return ua
 		}
 	}
+	if ua := authFileHeaderValue(authFileMetadataHeaders(auth.Metadata), "User-Agent"); ua != "" {
+		return ua
+	}
 	return ""
 }
 
@@ -3618,10 +3769,104 @@ func authFileClientProfile(auth *coreauth.Auth) gin.H {
 			profile["headers"] = headers
 		}
 	}
+	if originator := authFileClientProfileString(auth, coreauth.AuthFileCodexOriginatorKey, coreauth.AuthFileCodexOriginatorHeader, "header:"+coreauth.AuthFileCodexOriginatorHeader); originator != "" {
+		profile["originator"] = originator
+	}
+	if betaFeatures := authFileClientProfileString(auth, coreauth.AuthFileCodexBetaFeaturesKey, "beta-features", "betaFeatures", "header:"+coreauth.AuthFileCodexBetaFeaturesHeader); betaFeatures != "" {
+		profile["beta_features"] = betaFeatures
+	}
+	if installationID := authFileClientProfileString(auth, coreauth.AuthFileCodexInstallationIDKey, "installation-id", "installationId", "header:"+coreauth.AuthFileCodexInstallationIDHeader); installationID != "" {
+		profile["installation_id"] = installationID
+	}
+	if includeTimingMetrics, ok := authFileClientProfileBool(auth, coreauth.AuthFileCodexIncludeTimingMetricsKey, "include-timing-metrics", "includeTimingMetrics", "header:"+coreauth.AuthFileCodexIncludeTimingMetricsHeader); ok {
+		profile["include_timing_metrics"] = includeTimingMetrics
+	}
 	if userAgent := authFileUserAgent(auth); userAgent != "" {
 		profile["user_agent"] = userAgent
 	}
 	return profile
+}
+
+func authFileClientProfileString(auth *coreauth.Auth, keys ...string) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		for _, key := range keys {
+			if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
+				return value
+			}
+		}
+	}
+	if auth.Metadata != nil {
+		for _, key := range keys {
+			if value, ok := auth.Metadata[key].(string); ok {
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+		if headers := authFileMetadataHeaders(auth.Metadata); len(headers) > 0 {
+			for _, key := range keys {
+				headerName, ok := strings.CutPrefix(key, "header:")
+				if !ok {
+					continue
+				}
+				if value := authFileHeaderValue(headers, headerName); value != "" {
+					return value
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func authFileClientProfileBool(auth *coreauth.Auth, keys ...string) (bool, bool) {
+	if auth == nil {
+		return false, false
+	}
+	if auth.Attributes != nil {
+		for _, key := range keys {
+			value, exists := auth.Attributes[key]
+			if !exists {
+				continue
+			}
+			parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+			if err == nil {
+				return parsed, true
+			}
+		}
+	}
+	if auth.Metadata != nil {
+		for _, key := range keys {
+			value, exists := auth.Metadata[key]
+			if !exists {
+				continue
+			}
+			switch typed := value.(type) {
+			case bool:
+				return typed, true
+			case string:
+				parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+				if err == nil {
+					return parsed, true
+				}
+			}
+		}
+		if headers := authFileMetadataHeaders(auth.Metadata); len(headers) > 0 {
+			for _, key := range keys {
+				headerName, ok := strings.CutPrefix(key, "header:")
+				if !ok {
+					continue
+				}
+				parsed, err := strconv.ParseBool(authFileHeaderValue(headers, headerName))
+				if err == nil {
+					return parsed, true
+				}
+			}
+		}
+	}
+	return false, false
 }
 
 func authFileMetadataHeaders(metadata map[string]any) map[string]string {
@@ -3661,6 +3906,22 @@ func authFileMetadataHeaders(metadata map[string]any) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func authFileHeaderValue(headers map[string]string, headerName string) string {
+	headerName = strings.TrimSpace(headerName)
+	if len(headers) == 0 || headerName == "" {
+		return ""
+	}
+	if value := strings.TrimSpace(headers[headerName]); value != "" {
+		return value
+	}
+	for key, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), headerName) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -4005,6 +4266,10 @@ type codexAuthFilePreview struct {
 	Priority                       any      `json:"priority,omitempty"`
 	Note                           string   `json:"note,omitempty"`
 	UserAgent                      string   `json:"user_agent,omitempty"`
+	Originator                     string   `json:"originator,omitempty"`
+	BetaFeatures                   string   `json:"beta_features,omitempty"`
+	InstallationID                 string   `json:"installation_id,omitempty"`
+	IncludeTimingMetrics           *bool    `json:"include_timing_metrics,omitempty"`
 	ExcludedModels                 []string `json:"excluded_models,omitempty"`
 	DisableCooling                 *bool    `json:"disable_cooling,omitempty"`
 	Websockets                     *bool    `json:"websockets,omitempty"`
@@ -4075,7 +4340,11 @@ func buildCodexAuthFilePreview(doc map[string]any) codexAuthFilePreview {
 		ChatGPTSubscriptionActiveUntil: authFilePreviewFirstValue(doc, "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil"),
 		Priority:                       authFilePreviewFirstValue(doc, "priority"),
 		Note:                           authFilePreviewMetadataString(doc, "note"),
-		UserAgent:                      authFilePreviewMetadataString(doc, "user_agent", "user-agent", "userAgent"),
+		UserAgent:                      authFilePreviewClientProfileString(doc, "user_agent", "user-agent", "userAgent", "header:User-Agent"),
+		Originator:                     authFilePreviewClientProfileString(doc, coreauth.AuthFileCodexOriginatorKey, coreauth.AuthFileCodexOriginatorHeader, "header:"+coreauth.AuthFileCodexOriginatorHeader),
+		BetaFeatures:                   authFilePreviewClientProfileString(doc, coreauth.AuthFileCodexBetaFeaturesKey, "beta-features", "betaFeatures", "header:"+coreauth.AuthFileCodexBetaFeaturesHeader),
+		InstallationID:                 authFilePreviewClientProfileString(doc, coreauth.AuthFileCodexInstallationIDKey, "installation-id", "installationId", "header:"+coreauth.AuthFileCodexInstallationIDHeader),
+		IncludeTimingMetrics:           authFilePreviewClientProfileBool(doc, coreauth.AuthFileCodexIncludeTimingMetricsKey, "include-timing-metrics", "includeTimingMetrics", "header:"+coreauth.AuthFileCodexIncludeTimingMetricsHeader),
 		ExcludedModels:                 extractExcludedModelsFromMetadata(doc),
 		DisableCooling:                 authFilePreviewOptionalBool(doc, "disable_cooling", "disable-cooling", "disableCooling"),
 		Websockets:                     authFilePreviewOptionalBool(doc, "websockets", "websocket"),
@@ -4089,6 +4358,41 @@ func buildCodexAuthFilePreview(doc map[string]any) codexAuthFilePreview {
 
 func authFilePreviewMetadataString(metadata map[string]any, keys ...string) string {
 	return codexAuthMetadataString(metadata, keys...)
+}
+
+func authFilePreviewClientProfileString(metadata map[string]any, keys ...string) string {
+	if value := authFilePreviewMetadataString(metadata, keys...); value != "" {
+		return value
+	}
+	headers := authFileMetadataHeaders(metadata)
+	for _, key := range keys {
+		headerName, ok := strings.CutPrefix(key, "header:")
+		if !ok {
+			continue
+		}
+		if value := authFileHeaderValue(headers, headerName); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func authFilePreviewClientProfileBool(metadata map[string]any, keys ...string) *bool {
+	if parsed := authFilePreviewOptionalBool(metadata, keys...); parsed != nil {
+		return parsed
+	}
+	headers := authFileMetadataHeaders(metadata)
+	for _, key := range keys {
+		headerName, ok := strings.CutPrefix(key, "header:")
+		if !ok {
+			continue
+		}
+		value := authFileHeaderValue(headers, headerName)
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			return &parsed
+		}
+	}
+	return nil
 }
 
 func authFilePreviewNestedString(metadata map[string]any, outerKey, innerKey string) string {

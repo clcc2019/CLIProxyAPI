@@ -124,11 +124,16 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 	now := time.Now()
 	if cacheKey != "" && !opts.force {
 		if payload, _, ok := h.loadCodexUsageCache(ctx, cache, cacheKey, now, false); ok {
+			h.syncCodexUsageQuotaCooldown(ctx, auth, payload)
 			return payload, http.StatusOK, nil
 		}
 	}
 	if cacheKey == "" || cache == nil {
-		return h.fetchCodexUsage(ctx, auth)
+		payload, status, err := h.fetchCodexUsage(ctx, auth)
+		if err == nil {
+			h.syncCodexUsageQuotaCooldown(ctx, auth, payload)
+		}
+		return payload, status, err
 	}
 
 	flightKey := cacheKey
@@ -164,6 +169,9 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 	res, ok := value.(result)
 	if !ok {
 		return nil, 0, fmt.Errorf("codex usage: invalid singleflight result")
+	}
+	if res.err == nil {
+		h.syncCodexUsageQuotaCooldown(ctx, auth, res.payload)
 	}
 	return res.payload, res.status, res.err
 }
@@ -259,6 +267,7 @@ func (h *Handler) codexUsageCacheKey(auth *coreauth.Auth) string {
 	add("fedramp", strconv.FormatBool(codexUsageFedramp(auth)))
 	if h != nil {
 		add("proxy", h.codexSubscriptionProxyURL(auth))
+		add("user_agent", codexUsageRequestUserAgent(h, auth))
 	}
 	if len(parts) == 0 {
 		return ""

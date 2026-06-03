@@ -640,8 +640,18 @@ func TestGetCodexUsageUsesOfficialHeadersAndLocalSubscription(t *testing.T) {
 		if got := r.Header.Get("ChatGPT-Account-ID"); got != "acct_123" {
 			t.Fatalf("ChatGPT-Account-ID = %q, want acct_123", got)
 		}
-		if got := r.Header.Get("User-Agent"); got != codexUsageUserAgent {
-			t.Fatalf("User-Agent = %q, want %q", got, codexUsageUserAgent)
+		if got := r.Header.Get("User-Agent"); got != "codex-profile/1.0" {
+			t.Fatalf("User-Agent = %q, want %q", got, "codex-profile/1.0")
+		}
+		for _, header := range []string{
+			"Originator",
+			"X-Codex-Beta-Features",
+			"X-Codex-Installation-Id",
+			"x-responsesapi-include-timing-metrics",
+		} {
+			if got := r.Header.Get(header); got != "" {
+				t.Fatalf("%s = %q, want empty for official usage request", header, got)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -668,6 +678,11 @@ func TestGetCodexUsageUsesOfficialHeadersAndLocalSubscription(t *testing.T) {
 			"access_token":            "usage-access-token",
 			"account_id":              "acct_123",
 			"subscription_expires_at": "2026-06-01T00:00:00Z",
+			"user_agent":              "codex-profile/1.0",
+			"originator":              "codex_vscode",
+			"beta_features":           "feature-a,feature-b",
+			"installation_id":         "install-1",
+			"include_timing_metrics":  true,
 		},
 		Attributes: map[string]string{"path": "/tmp/codex.json"},
 	}
@@ -758,6 +773,88 @@ func TestGetCodexUsageDerivesAccountIDFromAccessTokenClaims(t *testing.T) {
 	}
 	if got := payload["plan_type"]; got != "plus" {
 		t.Fatalf("plan_type = %#v, want plus", got)
+	}
+}
+
+func TestGetCodexUsageMarksAuthScopedQuotaCooldown(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	resetAt := time.Now().Add(2 * time.Hour).Unix()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"rate_limit": map[string]any{
+				"primary_window": map[string]any{
+					"used_percent":         100,
+					"limit_window_seconds": 18000,
+					"reset_at":             resetAt,
+				},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	originalURL := codexUsageURL
+	codexUsageURL = server.URL
+	t.Cleanup(func() { codexUsageURL = originalURL })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=codex.json", nil)
+
+	h.GetCodexUsage(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	authFile, ok := payload["auth_file"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth_file missing from payload: %#v", payload)
+	}
+	if got := authFile["unavailable"]; got != true {
+		t.Fatalf("auth_file.unavailable = %#v, want true", got)
+	}
+	quota, ok := authFile["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth_file.quota missing: %#v", authFile)
+	}
+	if got := quota["exceeded"]; got != true {
+		t.Fatalf("auth_file.quota.exceeded = %#v, want true", got)
+	}
+	updated, ok := manager.GetByID("codex.json")
+	if !ok || updated == nil {
+		t.Fatal("updated auth not found")
+	}
+	if !updated.Quota.Exceeded || !updated.Quota.AuthScope {
+		t.Fatalf("quota state = %#v, want auth-scoped exceeded quota", updated.Quota)
+	}
+	if !updated.Unavailable || !updated.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("availability = unavailable:%v next:%v, want future cooldown", updated.Unavailable, updated.NextRetryAfter)
+	}
+	if got := updated.NextRetryAfter.Unix(); got != resetAt {
+		t.Fatalf("next retry unix = %d, want reset_at %d", got, resetAt)
+	}
+	if coreauth.AuthAvailableForModel(updated, "gpt-5-codex", time.Now()) {
+		t.Fatal("auth should be unavailable for Codex model while usage quota is exhausted")
 	}
 }
 

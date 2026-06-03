@@ -89,3 +89,48 @@ func TestCodexUsageCacheKeyUsesOpaqueTokenFingerprintWhenAccountMissing(t *testi
 		t.Fatalf("opaque tokens without account ids produced the same cache key: %s", first)
 	}
 }
+
+func TestCodexUsageCacheKeyIncludesUsageUserAgentOnly(t *testing.T) {
+	h := &Handler{}
+	base := &coreauth.Auth{
+		ID:       "same-auth",
+		FileName: "codex.json",
+		Metadata: map[string]any{
+			"access_token":            "opaque-token",
+			"account_id":              "acct_123",
+			"user_agent":              "codex-profile/1.0",
+			"originator":              "codex_cli",
+			"beta_features":           "feature-a",
+			"installation_id":         "install-1",
+			"include_timing_metrics":  true,
+			"header:Originator":       "codex_vscode",
+			"X-Codex-Installation-Id": "install-2",
+			"X-Codex-Beta-Features":   "feature-b",
+			"include-timing-metrics":  "false",
+		},
+	}
+	changedProfile := base.Clone()
+	changedProfile.Metadata["originator"] = "codex_vscode"
+	changedProfile.Metadata["beta_features"] = "feature-b"
+	changedProfile.Metadata["installation_id"] = "install-2"
+	changedProfile.Metadata["include_timing_metrics"] = false
+
+	first := h.codexUsageCacheKey(base)
+	second := h.codexUsageCacheKey(changedProfile)
+	if first == "" || second == "" {
+		t.Fatalf("cache keys must be non-empty: first=%q second=%q", first, second)
+	}
+	if first != second {
+		t.Fatalf("non-official usage profile fields changed cache key: first=%s second=%s", first, second)
+	}
+
+	changedUserAgent := base.Clone()
+	changedUserAgent.Metadata["user_agent"] = "codex-profile/2.0"
+	third := h.codexUsageCacheKey(changedUserAgent)
+	if third == "" {
+		t.Fatal("cache key must be non-empty")
+	}
+	if third == first {
+		t.Fatalf("usage User-Agent did not change cache key: %s", first)
+	}
+}

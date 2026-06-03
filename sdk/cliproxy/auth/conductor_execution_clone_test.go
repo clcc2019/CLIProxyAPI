@@ -207,11 +207,16 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 		Success:       11,
 		Failed:        2,
 		Attributes: map[string]string{
-			"path":              "/tmp/codex.json",
-			"api_key":           "sk-test",
-			"base_url":          "https://chatgpt.com/backend-api/codex",
-			"header:X-Test":     "drop-me",
-			"header:User-Agent": "codex_vscode/1.0.0",
+			"path":                           "/tmp/codex.json",
+			"api_key":                        "sk-test",
+			"base_url":                       "https://chatgpt.com/backend-api/codex",
+			"header:X-Test":                  "drop-me",
+			"header:User-Agent":              "codex_vscode/1.0.0",
+			"originator":                     "codex_vscode",
+			"header:Originator":              "codex_vscode",
+			"header:X-Codex-Beta-Features":   "feature-a",
+			"header:X-Codex-Installation-Id": "install-1",
+			"header:x-responsesapi-include-timing-metrics": "true",
 		},
 		Metadata: map[string]any{
 			"email":                             "x@example.com",
@@ -224,6 +229,10 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 			"chatgpt_subscription_active_start": "2026-05-19T11:44:26Z",
 			"subscription_active_days":          3,
 			"websockets":                        true,
+			"originator":                        "codex_vscode",
+			"beta_features":                     "feature-a",
+			"installation_id":                   "install-1",
+			"include_timing_metrics":            true,
 			"token":                             map[string]any{"refresh_token": "nested-refresh", "access_token": "nested-access"},
 			"subscription":                      map[string]any{"current_period_end": "2026-06-19T11:44:26Z", "large_blob": "drop-me"},
 			runtimeStateMetadataKey:             map[string]any{"updated_at": "2026-05-20T00:00:00Z"},
@@ -251,6 +260,17 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 	if cloned.Attributes["path"] != "/tmp/codex.json" || cloned.Attributes["api_key"] != "sk-test" || cloned.Attributes["header:User-Agent"] == "" {
 		t.Fatalf("management summary attributes = %#v", cloned.Attributes)
 	}
+	for _, key := range []string{
+		"originator",
+		"header:Originator",
+		"header:X-Codex-Beta-Features",
+		"header:X-Codex-Installation-Id",
+		"header:x-responsesapi-include-timing-metrics",
+	} {
+		if cloned.Attributes[key] == "" {
+			t.Fatalf("management summary dropped %s attribute: %#v", key, cloned.Attributes)
+		}
+	}
 	if _, ok := cloned.Attributes["base_url"]; ok {
 		t.Fatalf("management summary kept base_url: %#v", cloned.Attributes)
 	}
@@ -264,6 +284,11 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 	}
 	if cloned.Metadata["refresh_token"] != "refresh-token" || cloned.Metadata["plan_type"] != "plus" {
 		t.Fatalf("management summary metadata = %#v", cloned.Metadata)
+	}
+	for _, key := range []string{"originator", "beta_features", "installation_id", "include_timing_metrics"} {
+		if _, ok := cloned.Metadata[key]; !ok {
+			t.Fatalf("management summary dropped %s metadata: %#v", key, cloned.Metadata)
+		}
 	}
 	if nested, ok := cloned.Metadata["token"].(map[string]any); !ok || nested["refresh_token"] != "nested-refresh" || nested["access_token"] != nil {
 		t.Fatalf("management summary nested token = %#v", cloned.Metadata["token"])

@@ -1085,9 +1085,18 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			payload = normalizeCodexWebsocketCompletion(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
-			var terminalAfterForward error
 			if eventType == "response.incomplete" {
-				terminalAfterForward = codexResponseIncompleteEventErr(payload)
+				terminalErr := codexResponseIncompleteEventErr(payload)
+				if sess != nil {
+					sess.clearIncrementalState()
+					e.invalidateUpstreamConn(sess, conn, "upstream_incomplete", terminalErr)
+				}
+				terminateReason = "upstream_incomplete"
+				terminateErr = terminalErr
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_incomplete", terminalErr)
+				reporter.PublishFailureWithError(ctx, terminalErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
+				return
 			} else if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
 				if sess != nil {
 					sess.clearIncrementalState()
@@ -1121,18 +1130,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if len(chunks[i]) > 0 {
 					emittedPayload = true
 				}
-			}
-			if terminalAfterForward != nil {
-				if sess != nil {
-					sess.clearIncrementalState()
-					e.invalidateUpstreamConn(sess, conn, "upstream_incomplete", terminalAfterForward)
-				}
-				terminateReason = "upstream_incomplete"
-				terminateErr = terminalAfterForward
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_incomplete", terminalAfterForward)
-				reporter.PublishFailureWithError(ctx, terminalAfterForward)
-				_ = send(cliproxyexecutor.StreamChunk{Err: terminalAfterForward})
-				return
 			}
 			if eventType == codexEventCompleted || eventType == "response.done" {
 				if sess != nil {
