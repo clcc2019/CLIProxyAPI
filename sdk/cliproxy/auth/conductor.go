@@ -3556,7 +3556,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		} else {
 			authWideFailure := result.AuthScoped || isAuthWideResultError(result.Error)
 			if result.Model != "" && !authWideFailure {
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				if !isRequestScopedNotFoundResultError(result.Error) && !isSessionContextResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -4139,7 +4139,9 @@ func isAuthWideResultError(err *Error) bool {
 	case http.StatusUnauthorized:
 		return true
 	case http.StatusBadRequest:
-		return !isModelSupportResultError(err) && !isRequestInvalidResultError(err)
+		return !isModelSupportResultError(err) &&
+			!isRequestInvalidResultError(err) &&
+			!isSessionContextResultError(err)
 	default:
 		return false
 	}
@@ -4229,6 +4231,32 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+func isSessionContextErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "previous_response_not_found") {
+		return true
+	}
+	if strings.Contains(lower, "not found") &&
+		(strings.Contains(lower, "previous_response_id") || strings.Contains(lower, "previous response")) {
+		return true
+	}
+	return strings.Contains(lower, "no tool call found") &&
+		strings.Contains(lower, "function call output")
+}
+
+func isSessionContextResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusBadRequest {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(err.Code), "previous_response_not_found") {
+		return true
+	}
+	return isSessionContextErrorMessage(err.Message)
+}
+
 func isRequestInvalidResultError(err *Error) bool {
 	if err == nil {
 		return false
@@ -4312,7 +4340,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
-	if isRequestScopedNotFoundResultError(resultErr) {
+	if isRequestScopedNotFoundResultError(resultErr) || isSessionContextResultError(resultErr) {
 		return
 	}
 	disableCooling := quotaCooldownDisabledForAuth(auth)

@@ -74,7 +74,26 @@ func codexWebsocketPreviousResponseNotFound(payload []byte) bool {
 			return true
 		}
 	}
-	return strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "error.param").String()), "previous_response_id")
+	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "error.param").String()), "previous_response_id") {
+		return true
+	}
+	for _, path := range []string{"error.message", "message", "error"} {
+		if codexPreviousResponseNotFoundText(gjson.GetBytes(payload, path).String()) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexPreviousResponseNotFoundText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || !strings.Contains(lower, "not found") {
+		return false
+	}
+	if strings.Contains(lower, "previous_response_id") {
+		return true
+	}
+	return strings.Contains(lower, "previous response")
 }
 
 func codexWebsocketNoToolCallFoundForFunctionOutput(payload []byte) bool {

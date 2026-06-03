@@ -2581,6 +2581,11 @@ func TestResponsesWebsocketPayloadShouldRetryFullTranscript(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "previous response not found message only",
+			payload: []byte(`{"type":"error","status":400,"error":{"message":"Previous response with id 'resp_0806d41b86f2084b016a1908c1edac819181dc011e6fffd7ce' not found.","type":"invalid_request_error"}}`),
+			want:    true,
+		},
+		{
 			name:    "missing tool call",
 			payload: []byte(`{"type":"error","status":400,"error":{"message":"No tool call found for function call output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn.","param":"input","type":"invalid_request_error"}}`),
 			want:    true,
@@ -2603,6 +2608,16 @@ func TestResponsesWebsocketPayloadShouldRetryFullTranscript(t *testing.T) {
 				t.Fatalf("responsesWebsocketPayloadShouldRetryFullTranscript() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResponsesWebsocketShouldRetryFullTranscriptPlainPreviousResponseError(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New("HTTP 400: Previous response with id 'resp_038d5107ec6cc78c016a1fb143ac088191b14e6ca3097c696e' not found."),
+	}
+	if !responsesWebsocketShouldRetryFullTranscript(errMsg) {
+		t.Fatal("plain previous response not found error should retry full transcript")
 	}
 }
 

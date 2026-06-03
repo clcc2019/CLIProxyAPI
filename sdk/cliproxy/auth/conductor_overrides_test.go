@@ -1579,6 +1579,57 @@ func TestIsRequestInvalidError_BadRequestDoesNotBlockCredentialFailover(t *testi
 	}
 }
 
+func TestManagerMarkResult_SessionContextBadRequestDoesNotSuspendAuth(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "previous response missing",
+			message: "HTTP 400: Previous response with id 'resp_038d5107ec6cc78c016a1fb143ac088191b14e6ca3097c696e' not found.",
+		},
+		{
+			name:    "tool call missing",
+			message: `{"error":{"message":"No tool call found for function call output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn.","param":"input","type":"invalid_request_error"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			auth := &Auth{ID: "auth-ws-context", Provider: "codex", Status: StatusActive}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			m.MarkResult(context.Background(), Result{
+				AuthID:   auth.ID,
+				Provider: auth.Provider,
+				Model:    "gpt-5-codex",
+				Success:  false,
+				Error: &Error{
+					HTTPStatus: http.StatusBadRequest,
+					Message:    tt.message,
+				},
+			})
+
+			updated, ok := m.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatalf("auth not found")
+			}
+			if updated.Unavailable {
+				t.Fatal("session-context 400 should not suspend the auth file")
+			}
+			if updated.LastError != nil {
+				t.Fatalf("session-context 400 should not persist LastError, got %#v", updated.LastError)
+			}
+			if !AuthAvailableForModel(updated, "gpt-5-codex", time.Now()) {
+				t.Fatal("session-context 400 should not make the model unavailable")
+			}
+		})
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

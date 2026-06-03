@@ -1440,10 +1440,10 @@ func responsesWebsocketShouldRetryFullTranscript(errMsg *interfaces.ErrorMessage
 		}
 		errText = strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
 	}
-	lower := strings.ToLower(errText)
-	if strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "not found") {
+	if responsesWebsocketPreviousResponseNotFoundText(errText) {
 		return true
 	}
+	lower := strings.ToLower(errText)
 	return strings.Contains(lower, "no tool call found") &&
 		strings.Contains(lower, "function call output")
 }
@@ -1476,12 +1476,23 @@ func responsesWebsocketPayloadShouldRetryFullTranscript(payload []byte) bool {
 	if errText == "" {
 		errText = strings.TrimSpace(gjson.GetBytes(payload, "message").String())
 	}
-	lower := strings.ToLower(errText)
-	if strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "not found") {
+	if responsesWebsocketPreviousResponseNotFoundText(errText) {
 		return true
 	}
+	lower := strings.ToLower(errText)
 	return strings.Contains(lower, "no tool call found") &&
 		strings.Contains(lower, "function call output")
+}
+
+func responsesWebsocketPreviousResponseNotFoundText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || !strings.Contains(lower, "not found") {
+		return false
+	}
+	if strings.Contains(lower, "previous_response_id") {
+		return true
+	}
+	return strings.Contains(lower, "previous response")
 }
 
 func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
