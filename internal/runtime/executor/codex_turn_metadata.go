@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +25,30 @@ const (
 	codexDefaultCompactionImplementation = "responses_compact"
 	codexDefaultCompactionStrategy       = "memento"
 )
+
+var codexResponsesAPIClientMetadataReservedKeys = map[string]struct{}{
+	"session_id":                 {},
+	"thread_id":                  {},
+	"turn_id":                    {},
+	"turn_started_at_unix_ms":    {},
+	"forked_from_thread_id":      {},
+	"parent_thread_id":           {},
+	"subagent_kind":              {},
+	codexRequestKindMetadataPath: {},
+	codexCompactionMetadataPath:  {},
+	codexWindowIDMetadataPath:    {},
+}
+
+var codexResponsesAPIClientMetadataTransportKeys = map[string]struct{}{
+	codexClientMetadataInstallationID:         {},
+	codexClientMetadataWindowID:               {},
+	codexClientMetadataParentThreadID:         {},
+	codexClientMetadataSubagent:               {},
+	codexClientMetadataTurnMetadata:           {},
+	codexWSClientMetadataTraceparent:          {},
+	codexWSClientMetadataTracestate:           {},
+	codexClientMetadataWSStreamRequestStartMS: {},
+}
 
 type codexTurnMetadata struct {
 	RequestKind        string `json:"request_kind,omitempty"`
@@ -266,6 +291,69 @@ func codexAugmentTurnMetadataHeader(raw string, defaults codexTurnMetadataDefaul
 	setStringIfMissing(codexWindowIDMetadataPath, defaults.windowID)
 	setInt64IfMissing("turn_started_at_unix_ms", defaults.turnStartedAtUnixMilli)
 	return updated
+}
+
+func codexResponsesAPIClientMetadataFromBody(body []byte) map[string]string {
+	metadata := gjson.GetBytes(body, "client_metadata")
+	if !metadata.IsObject() {
+		return nil
+	}
+	entries := make(map[string]string)
+	metadata.ForEach(func(key, value gjson.Result) bool {
+		keyString := strings.TrimSpace(key.String())
+		if keyString == "" || value.Type != gjson.String {
+			return true
+		}
+		entries[keyString] = value.String()
+		return true
+	})
+	if len(entries) == 0 {
+		return nil
+	}
+	return entries
+}
+
+func codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(headers http.Header, responsesAPIClientMetadata map[string]string) {
+	if headers == nil || len(responsesAPIClientMetadata) == 0 {
+		return
+	}
+	raw := strings.TrimSpace(headers.Get(codexHeaderTurnMetadata))
+	if raw == "" || !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
+		return
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		return
+	}
+	changed := false
+	for key, value := range responsesAPIClientMetadata {
+		key = strings.TrimSpace(key)
+		if key == "" || codexShouldSkipResponsesAPIClientMetadataForTurnMetadata(key) {
+			continue
+		}
+		if _, exists := metadata[key]; exists {
+			continue
+		}
+		metadata[key] = value
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if updated, err := json.Marshal(metadata); err == nil && len(updated) > 0 {
+		headers.Set(codexHeaderTurnMetadata, string(updated))
+	}
+}
+
+func codexShouldSkipResponsesAPIClientMetadataForTurnMetadata(key string) bool {
+	if _, ok := codexResponsesAPIClientMetadataReservedKeys[key]; ok {
+		return true
+	}
+	lowerKey := strings.ToLower(key)
+	if _, ok := codexResponsesAPIClientMetadataTransportKeys[lowerKey]; ok {
+		return true
+	}
+	return false
 }
 
 func codexSetTurnMetadataString(raw string, path string, value string, overwrite bool) string {

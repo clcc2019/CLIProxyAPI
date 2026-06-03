@@ -117,6 +117,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	ctx = contextWithCachedCodexGinHeaders(ctx)
 	requestKind := finalOpts.requestKind
 	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, finalOpts)
+	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	// Resolve gin headers once and reuse across subsequent helpers to avoid
 	// repeated context value lookups in the per-request hot path.
 	ginHeaders := codexGinHeadersFromContext(ctx)
@@ -131,6 +132,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 		return codexPreparedHTTPCall{}, err
 	}
 	applyCodexHeaders(prepared.httpReq, auth, token, stream, e.cfg)
+	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)
 	if requestKind != codexFinalUpstreamCompact {
 		e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
 	}

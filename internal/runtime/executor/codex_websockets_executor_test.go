@@ -775,6 +775,39 @@ func TestPrepareCodexWebsocketRequestMarksGenerateFalseAsPrewarm(t *testing.T) {
 	}
 }
 
+func TestPrepareCodexWebsocketRequestMergesResponsesAPIClientMetadataIntoTurnMetadata(t *testing.T) {
+	executor := NewCodexWebsocketsExecutor(nil)
+	executor.store = &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
+	req := cliproxyexecutor.Request{Model: "gpt-5-codex"}
+
+	prepared, err := executor.prepareCodexWebsocketRequest(
+		context.Background(),
+		auth,
+		req,
+		cliproxyexecutor.Options{SourceFormat: "openai-response"},
+		[]byte(`{"model":"gpt-5-codex","prompt_cache_key":"thread-1","input":[],"client_metadata":{"fiber_run_id":"fiber-123","session_id":"client-session","x-codex-installation-id":"client-install"}}`),
+		"oauth-token",
+		"https://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketRequest() error = %v", err)
+	}
+	defer prepared.unlockSession()
+
+	turnMetadata := gjson.GetBytes(prepared.wsReqBody, "client_metadata."+codexClientMetadataTurnMetadata).String()
+	assertCodexTurnMetadataString(t, turnMetadata, "fiber_run_id", "fiber-123")
+	if got := gjson.Get(turnMetadata, "session_id").String(); got == "" || got == "client-session" {
+		t.Fatalf("session_id = %q, want generated upstream session isolated from client metadata in %s", got, turnMetadata)
+	}
+	if got := gjson.Get(turnMetadata, codexClientMetadataInstallationID); got.Exists() {
+		t.Fatalf("%s should not be copied into websocket turn metadata: %s", codexClientMetadataInstallationID, turnMetadata)
+	}
+}
+
 func TestCodexWebsocketTurnMetadataRequestKindOnlyPrewarmsExplicitGenerateFalse(t *testing.T) {
 	if got := codexWebsocketTurnMetadataRequestKind([]byte(`{"generate":false}`)); got != codexPrewarmRequestKind {
 		t.Fatalf("generate=false request kind = %q, want %q", got, codexPrewarmRequestKind)

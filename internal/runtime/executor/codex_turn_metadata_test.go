@@ -150,6 +150,98 @@ func TestCodexEnsureTurnMetadataHeaderMarksMemgenRequestAsMemory(t *testing.T) {
 	assertCodexTurnMetadataString(t, headers.Get(codexHeaderTurnMetadata), "request_kind", codexMemoryRequestKind)
 }
 
+func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(codexHeaderTurnMetadata, codexBuildTurnMetadataHeader(
+		codexTurnRequestKind,
+		"session-1",
+		"thread-1",
+		"fork-1",
+		"parent-1",
+		"review",
+		"user",
+		"turn-1",
+		codexDefaultSandboxTag,
+		"window-1",
+		1700000000123,
+	))
+
+	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(headers, map[string]string{
+		"fiber_run_id":                            "fiber-123",
+		"origin":                                  "cli",
+		"workspace_kind":                          "project",
+		"session_id":                              "client-session",
+		"thread_id":                               "client-thread",
+		"turn_id":                                 "client-turn",
+		"turn_started_at_unix_ms":                 "client-start",
+		"forked_from_thread_id":                   "client-fork",
+		"parent_thread_id":                        "client-parent",
+		"subagent_kind":                           "client-subagent",
+		codexRequestKindMetadataPath:              "client-kind",
+		codexCompactionMetadataPath:               "client-compaction",
+		codexWindowIDMetadataPath:                 "client-window",
+		codexClientMetadataInstallationID:         "install-1",
+		codexWSClientMetadataTraceparent:          "trace-1",
+		codexClientMetadataWSStreamRequestStartMS: "1234",
+	})
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(headers.Get(codexHeaderTurnMetadata)), &parsed); err != nil {
+		t.Fatalf("turn metadata should be valid JSON: %v", err)
+	}
+	for key, want := range map[string]string{
+		"fiber_run_id":               "fiber-123",
+		"origin":                     "cli",
+		"workspace_kind":             "project",
+		"session_id":                 "session-1",
+		"thread_id":                  "thread-1",
+		"turn_id":                    "turn-1",
+		"forked_from_thread_id":      "fork-1",
+		"parent_thread_id":           "parent-1",
+		"subagent_kind":              "review",
+		codexRequestKindMetadataPath: codexTurnRequestKind,
+		codexWindowIDMetadataPath:    "window-1",
+	} {
+		if got, _ := parsed[key].(string); got != want {
+			t.Fatalf("%s = %q, want %q in %s", key, got, want, headers.Get(codexHeaderTurnMetadata))
+		}
+	}
+	if got, _ := parsed["turn_started_at_unix_ms"].(float64); int64(got) != 1700000000123 {
+		t.Fatalf("turn_started_at_unix_ms = %.0f, want %d", got, int64(1700000000123))
+	}
+	for _, key := range []string{
+		codexCompactionMetadataPath,
+		codexClientMetadataInstallationID,
+		codexWSClientMetadataTraceparent,
+		codexClientMetadataWSStreamRequestStartMS,
+	} {
+		if _, ok := parsed[key]; ok {
+			t.Fatalf("%s should not be copied into turn metadata: %s", key, headers.Get(codexHeaderTurnMetadata))
+		}
+	}
+}
+
+func TestCodexMergeResponsesAPIClientMetadataDoesNotReplaceExistingCustomFields(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(codexHeaderTurnMetadata, `{"session_id":"session-1","origin":"server"}`)
+
+	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(headers, map[string]string{
+		"origin":       "client",
+		"fiber_run_id": "fiber-123",
+	})
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(headers.Get(codexHeaderTurnMetadata)), &parsed); err != nil {
+		t.Fatalf("turn metadata should be valid JSON: %v", err)
+	}
+	if got, _ := parsed["origin"].(string); got != "server" {
+		t.Fatalf("origin = %q, want server in %s", got, headers.Get(codexHeaderTurnMetadata))
+	}
+	if got, _ := parsed["fiber_run_id"].(string); got != "fiber-123" {
+		t.Fatalf("fiber_run_id = %q, want fiber-123 in %s", got, headers.Get(codexHeaderTurnMetadata))
+	}
+}
+
 func TestCodexEnsureCompactTurnMetadataHeaderAddsCompactionMetadata(t *testing.T) {
 	headers := http.Header{}
 	source := http.Header{}

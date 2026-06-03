@@ -1184,6 +1184,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	body = codexSanitizeForcedUpstreamSessionBody(ctx, body)
 	body, wsHeaders := e.applyCodexPromptCacheHeaders(ctx, opts.SourceFormat, executionSessionID, req, body)
 	codexApplyForcedUpstreamSessionHeaders(ctx, wsHeaders)
+	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	explicitTurnMetadata := ""
 	if codexForcedUpstreamSessionID(ctx) == "" {
 		explicitTurnMetadata = codexExplicitWebsocketTurnMetadata(ctx, body)
@@ -1193,6 +1194,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	}
 	codexEnsureExecutionSessionHeader(wsHeaders, codexGinHeadersFromContext(ctx), executionSessionID)
 	wsHeaders = applyCodexWebsocketHeadersForRequestKind(ctx, wsHeaders, auth, apiKey, e.cfg, codexWebsocketTurnMetadataRequestKind(body))
+	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(wsHeaders, responsesAPIClientMetadata)
 	turnStateScope := strings.TrimSpace(wsHeaders.Get(codexHeaderTurnMetadata))
 	if explicitTurnMetadata != "" {
 		turnStateScope = explicitTurnMetadata
