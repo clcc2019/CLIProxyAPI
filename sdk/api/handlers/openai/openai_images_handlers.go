@@ -221,11 +221,42 @@ func (a *sseFrameAccumulator) ForEachChunkFrame(chunk []byte, fn func([]byte) bo
 	if len(chunk) == 0 {
 		return true
 	}
+	if fn != nil && len(a.pending) == 0 {
+		return a.forEachDirectChunkFrame(chunk, fn)
+	}
 	if responsesSSENeedsLineBreak(a.pending, chunk) {
 		a.pending = append(a.pending, '\n')
 	}
 	a.pending = append(a.pending, chunk...)
 	return a.drainFrames(fn, false)
+}
+
+func (a *sseFrameAccumulator) forEachDirectChunkFrame(chunk []byte, fn func([]byte) bool) bool {
+	consumed := 0
+	for consumed < len(chunk) {
+		frameLen := responsesSSEFrameLen(chunk[consumed:])
+		if frameLen == 0 {
+			break
+		}
+		next := consumed + frameLen
+		if !fn(chunk[consumed:next]) {
+			a.pending = append(a.pending, chunk[next:]...)
+			return false
+		}
+		consumed = next
+	}
+	if consumed >= len(chunk) {
+		return true
+	}
+	rest := chunk[consumed:]
+	if len(bytes.TrimSpace(rest)) == 0 {
+		return true
+	}
+	if responsesSSECanEmitWithoutDelimiter(rest, false) {
+		return fn(rest)
+	}
+	a.pending = append(a.pending, rest...)
+	return true
 }
 
 func (a *sseFrameAccumulator) FlushFrames(fn func([]byte) bool) bool {

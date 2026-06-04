@@ -429,6 +429,35 @@ func TestSSEFrameAccumulatorAddChunkPreservesMultipleFrames(t *testing.T) {
 	}
 }
 
+func TestSSEFrameAccumulatorDirectPathPreservesPendingAfterStop(t *testing.T) {
+	var acc sseFrameAccumulator
+	chunk := []byte("data: {\"type\":\"first\"}\n\ndata: {\"type\":\"second\"}\n\n")
+	count := 0
+	if acc.ForEachChunkFrame(chunk, func(frame []byte) bool {
+		count++
+		return false
+	}) {
+		t.Fatalf("ForEachChunkFrame returned true after callback stopped")
+	}
+	if count != 1 {
+		t.Fatalf("callback count = %d, want 1", count)
+	}
+
+	var flushed [][]byte
+	if !acc.FlushFrames(func(frame []byte) bool {
+		flushed = append(flushed, append([]byte(nil), frame...))
+		return true
+	}) {
+		t.Fatalf("FlushFrames returned false")
+	}
+	if len(flushed) != 1 {
+		t.Fatalf("flushed frame count = %d, want 1", len(flushed))
+	}
+	if got, want := string(flushed[0]), "data: {\"type\":\"second\"}\n\n"; got != want {
+		t.Fatalf("flushed frame = %q, want %q", got, want)
+	}
+}
+
 func BenchmarkResponsesSSEFrameLen(b *testing.B) {
 	chunk := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
 	b.ReportAllocs()

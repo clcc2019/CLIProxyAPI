@@ -44,6 +44,8 @@ const (
 	maxResponsesWebsocketErrorTimelineBytes = 4 << 10
 	maxResponsesWebsocketInboundBytes       = 64 << 20
 	responsesWebsocketWriteTimeout          = 30 * time.Second
+
+	wsCompactResponseTypeKindOffset = len(`{"type":"response.`)
 )
 
 const responsesWebsocketTimelineTruncatedMarker = "\n...[websocket timeline truncated]...\n"
@@ -67,6 +69,11 @@ var (
 	wsEventTypeContentPartDone    = []byte("response.content_part.done")
 	wsEventTypeResponseCreated    = []byte("response.created")
 	wsEventTypeResponseInProgress = []byte("response.in_progress")
+
+	wsCompactEventTypeOutputTextDelta = []byte(`{"type":"response.output_text.delta"`)
+	wsCompactEventTypeOutputTextDone  = []byte(`{"type":"response.output_text.done"`)
+	wsCompactEventTypeOutputItemAdded = []byte(`{"type":"response.output_item.added"`)
+	wsCompactEventTypeOutputItemDone  = []byte(`{"type":"response.output_item.done"`)
 )
 
 type websocketTimelineBuilder struct {
@@ -581,10 +588,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 		subscribeUpstreamDisconnect(currentExecutionSessionID)
 
-		completedOutput, completedResponseID, completedForward, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey, toolCallCache)
+		retryCredentialFailoverWithFullTranscript := requestSelectedIncrementalAuth &&
+			strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String()) != ""
+		completedOutput, completedResponseID, completedForward, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey, retryCredentialFailoverWithFullTranscript, toolCallCache)
 		if errors.Is(errForward, errResponsesWebsocketRetryFullTranscript) &&
 			allowIncrementalInputWithPreviousResponseID &&
-			strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" {
+			strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String()) != "" {
 			if h != nil && h.AuthManager != nil {
 				suppressNextUpstreamDisconnect(currentExecutionSessionID)
 				setActiveDisconnectSessionID("")
@@ -622,7 +631,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			dataChan, _, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, retryJSON, "")
 			subscribeUpstreamDisconnect(currentExecutionSessionID)
-			completedOutput, completedResponseID, completedForward, errForward = h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey, toolCallCache)
+			completedOutput, completedResponseID, completedForward, errForward = h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey, false, toolCallCache)
 		}
 		if errForward != nil {
 			wsTerminateErr = errForward
@@ -840,6 +849,9 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 func websocketIncrementalToolOutputsKnown(input gjson.Result, lastResponseOutput gjson.Result) bool {
 	if !input.IsArray() {
 		return false
+	}
+	if !strings.Contains(input.Raw, `_output"`) {
+		return true
 	}
 
 	knownCalls := make(map[string]string)
@@ -1312,6 +1324,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	wsTimelineLog *websocketTimelineBuilder,
 	sessionID string,
 	downstreamSessionKey string,
+	retryCredentialFailoverWithFullTranscript bool,
 	toolCallCaches ...*websocketToolOutputCache,
 ) ([]byte, string, bool, error) {
 	var toolCallCache *websocketToolOutputCache
@@ -1352,7 +1365,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
-				if !emittedPayload && responsesWebsocketShouldRetryFullTranscript(errMsg) {
+				if !emittedPayload &&
+					(responsesWebsocketShouldRetryFullTranscript(errMsg) ||
+						(retryCredentialFailoverWithFullTranscript && responsesWebsocketIsCredentialFailoverFailure(errMsg.Error))) {
 					if errMsg.Error != nil {
 						cancel(errMsg.Error)
 					} else {
@@ -1530,6 +1545,17 @@ func responsesWebsocketShouldRetryFullTranscript(errMsg *interfaces.ErrorMessage
 	lower := strings.ToLower(errText)
 	return strings.Contains(lower, "no tool call found") &&
 		strings.Contains(lower, "function call output")
+}
+
+func responsesWebsocketIsCredentialFailoverFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var failure coreauth.CredentialFailoverFailure
+	if errors.As(err, &failure) && failure != nil {
+		return failure.IsCredentialFailoverFailure()
+	}
+	return false
 }
 
 func responsesWebsocketPayloadIsError(payload []byte) bool {
@@ -1779,6 +1805,9 @@ func websocketPayloadTopLevelType(payload []byte) (string, bool) {
 	if len(payload) == 0 || payload[0] != '{' {
 		return "", false
 	}
+	if eventType, ok := websocketCompactKnownPayloadEventType(payload); ok {
+		return eventType, true
+	}
 
 	depth := 0
 	for i := 0; i < len(payload); {
@@ -1822,6 +1851,36 @@ func websocketPayloadTopLevelType(payload []byte) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func websocketCompactKnownPayloadEventType(payload []byte) (string, bool) {
+	if len(payload) <= wsCompactResponseTypeKindOffset || payload[wsCompactResponseTypeKindOffset] != 'o' {
+		return "", false
+	}
+	switch {
+	case websocketHasCompactJSONFieldPrefix(payload, wsCompactEventTypeOutputTextDelta):
+		return "response.output_text.delta", true
+	case websocketHasCompactJSONFieldPrefix(payload, wsCompactEventTypeOutputTextDone):
+		return "response.output_text.done", true
+	case websocketHasCompactJSONFieldPrefix(payload, wsCompactEventTypeOutputItemAdded):
+		return "response.output_item.added", true
+	case websocketHasCompactJSONFieldPrefix(payload, wsCompactEventTypeOutputItemDone):
+		return "response.output_item.done", true
+	default:
+		return "", false
+	}
+}
+
+func websocketHasCompactJSONFieldPrefix(payload []byte, prefix []byte) bool {
+	if !bytes.HasPrefix(payload, prefix) || len(payload) == len(prefix) {
+		return false
+	}
+	switch payload[len(prefix)] {
+	case ',', '}', ' ', '\n', '\r', '\t':
+		return true
+	default:
+		return false
+	}
 }
 
 func websocketKnownPayloadEventType(value []byte) (string, bool) {

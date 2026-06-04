@@ -13,6 +13,14 @@ import (
 )
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
+	requestKind := codexFinalUpstreamResponses
+	if r != nil && r.URL != nil {
+		requestKind = codexFinalUpstreamRequestKindForURL(r.URL.String())
+	}
+	applyCodexHeadersForRequestKind(r, auth, token, stream, cfg, requestKind)
+}
+
+func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, requestKind codexFinalUpstreamRequestKind) {
 	headers := r.Header
 	headers.Set("Content-Type", "application/json")
 	if token = strings.TrimSpace(token); token != "" {
@@ -21,10 +29,6 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		headers.Del("Authorization")
 	}
 	apiKeyAuth := codexIsAPIKeyAuth(auth)
-	requestKind := codexFinalUpstreamResponses
-	if r.URL != nil {
-		requestKind = codexFinalUpstreamRequestKindForURL(r.URL.String())
-	}
 
 	ginHeaders := codexGinHeadersFromContext(r.Context())
 	codexPinClientProfileFromFirstRequest(r.Context(), auth, headers, ginHeaders, cfg)
@@ -33,8 +37,8 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, profileHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
 	codexEnsureVersionHeader(headers, profileHeaders)
-	misc.EnsureHeader(headers, profileHeaders, "X-OpenAI-Subagent", "")
-	misc.EnsureHeader(headers, profileHeaders, codexHeaderOAIAttestation, "")
+	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderOpenAISubagent, "")
+	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderOAIAttestation, "")
 	misc.EnsureHeader(headers, profileHeaders, "Traceparent", "")
 	misc.EnsureHeader(headers, profileHeaders, "Tracestate", "")
 	identity := codexResolvedIdentity(headers, profileHeaders, auth, cfg)
@@ -92,10 +96,11 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(r, attrs)
-	codexEnsureVersionHeader(headers, nil)
-	if cfgUserAgent != "" {
-		headers.Set("User-Agent", cfgUserAgent)
+	if util.ApplyCustomHeadersFromAttrs(r, attrs) {
+		codexEnsureVersionHeader(headers, nil)
+		if cfgUserAgent != "" {
+			headers.Set("User-Agent", cfgUserAgent)
+		}
 	}
 }
 
@@ -131,14 +136,14 @@ func codexEnsureFedrampHeader(target http.Header, source http.Header, auth *clip
 	if target == nil || codexIsAPIKeyAuth(auth) {
 		return
 	}
-	if value := firstNonEmptyHeaderValue(target, source, codexHeaderOpenAIFedramp); value != "" {
+	if value := firstNonEmptyHeaderValue(target, source, codexWireHeaderOpenAIFedramp); value != "" {
 		if parsed, ok := codexParseBoolLike(value); ok && parsed {
-			target.Set(codexHeaderOpenAIFedramp, "true")
+			target.Set(codexWireHeaderOpenAIFedramp, "true")
 		}
 		return
 	}
-	if codexAuthBoolValue(auth, []string{"fedramp", "openai_fedramp", "x_openai_fedramp", codexHeaderOpenAIFedramp}) {
-		target.Set(codexHeaderOpenAIFedramp, "true")
+	if codexAuthBoolValue(auth, []string{"fedramp", "openai_fedramp", "x_openai_fedramp", codexHeaderOpenAIFedramp, codexWireHeaderOpenAIFedramp}) {
+		target.Set(codexWireHeaderOpenAIFedramp, "true")
 	}
 }
 
@@ -195,10 +200,10 @@ func codexEnsureVersionHeader(target http.Header, source http.Header) {
 		version = trimHeaderValue(target, "Version")
 	}
 	if codexVersionAtLeast(version, codexDefaultVersionHeader()) {
-		target.Set("Version", version)
+		codexSetSingleHeaderValue(target, "Version", version)
 		return
 	}
-	target.Set("Version", codexDefaultVersionHeader())
+	codexSetSingleHeaderValue(target, "Version", codexDefaultVersionHeader())
 }
 
 type codexParsedVersion struct {
@@ -209,6 +214,14 @@ type codexParsedVersion struct {
 }
 
 func codexVersionAtLeast(version, minimum string) bool {
+	version = strings.TrimSpace(version)
+	minimum = strings.TrimSpace(minimum)
+	if version == "" || minimum == "" {
+		return false
+	}
+	if version == minimum {
+		return true
+	}
 	cmp, ok := codexCompareVersions(version, minimum)
 	return ok && cmp >= 0
 }
@@ -287,6 +300,9 @@ func codexParseVersionPart(part string) (int, bool) {
 }
 
 func codexComparePrerelease(left, right string) int {
+	if left == right {
+		return 0
+	}
 	for {
 		leftPart, leftRest, leftHasRest := strings.Cut(left, ".")
 		rightPart, rightRest, rightHasRest := strings.Cut(right, ".")

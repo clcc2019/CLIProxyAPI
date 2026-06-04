@@ -200,16 +200,17 @@ func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {
 }
 
 // normalizeCodexWebsocketCompletion rewrites the legacy response.done event
-// type to the canonical response.completed so downstream translators have a
-// single shape to match on. Leaves other event types untouched.
-func normalizeCodexWebsocketCompletion(payload []byte) []byte {
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.done" {
+// type to the canonical response.completed and returns the parsed event type.
+// Returning the type avoids parsing every websocket frame again in the caller.
+func normalizeCodexWebsocketCompletion(payload []byte) ([]byte, string) {
+	eventType := codexEventType(payload)
+	if eventType == "response.done" {
 		updated, err := sjson.SetBytes(payload, "type", "response.completed")
 		if err == nil && len(updated) > 0 {
-			return updated
+			return updated, codexEventCompleted
 		}
 	}
-	return payload
+	return payload, eventType
 }
 
 // encodeCodexWebsocketAsSSE produces the SSE "data: <payload>" line fragment

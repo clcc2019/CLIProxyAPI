@@ -31,7 +31,7 @@ var codexDedupeIgnoredHeaders = map[string]struct{}{
 // influence the upstream response and therefore must separate dedupe buckets.
 var codexDedupeRelevantHeaders = []string{
 	codexHeaderChatGPTAccountID,
-	"OpenAI-Beta",
+	codexWireHeaderOpenAIBeta,
 	"Session_id",
 	codexHeaderThreadID,
 	codexHeaderTurnState,
@@ -173,36 +173,50 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 	key := e.codexResponseDedupeKey(auth, url, prepared)
 	captureBody := e.cfg != nil && e.cfg.RequestLog
 	result, executed, shared, err := e.responseDedupe.Do(ctx, key, func() (codexNonStreamHTTPResult, error) {
-		httpResp, errDo := e.doCodexHTTPRequest(ctx, auth, prepared)
-		if errDo != nil {
-			return codexNonStreamHTTPResult{}, errDo
-		}
-		defer func() {
+		turnStateRetryUsed := false
+		for {
+			httpResp, errDo := e.doCodexHTTPRequest(ctx, auth, prepared)
+			if errDo != nil {
+				return codexNonStreamHTTPResult{}, errDo
+			}
+			e.rememberCodexHTTPTurnState(auth, prepared, httpResp.Header)
+
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				data, errRead := helps.ReadErrorResponseBody(httpResp.Body)
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("codex executor: close response body error: %v", errClose)
+				}
+				if errRead != nil {
+					return codexNonStreamHTTPResult{}, errRead
+				}
+				if !turnStateRetryUsed && codexShouldRetryHTTPWithoutTurnState(prepared, data) {
+					turnStateRetryUsed = true
+					e.dropCodexHTTPTurnStateForRetry(ctx, auth, prepared, "aggregate HTTP status", httpResp.StatusCode)
+					continue
+				}
+				return codexNonStreamHTTPResult{
+					statusCode: httpResp.StatusCode,
+					headers:    httpResp.Header,
+					body:       data,
+				}, nil
+			}
+
+			aggregate, errRead := collectCodexResponseAggregateWithIdleTimeout(httpResp.Body, captureBody, codexResponsesAggregateIdleTimeout)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
-		}()
-		e.rememberCodexHTTPTurnState(auth, prepared, httpResp.Header)
-
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			data, errRead := helps.ReadErrorResponseBody(httpResp.Body)
 			if errRead != nil {
 				return codexNonStreamHTTPResult{}, errRead
 			}
-			return codexNonStreamHTTPResult{
-				statusCode: httpResp.StatusCode,
-				headers:    httpResp.Header,
-				body:       data,
-			}, nil
+			aggregate.statusCode = httpResp.StatusCode
+			aggregate.headers = httpResp.Header
+			if !turnStateRetryUsed && len(aggregate.errorBody) > 0 && codexShouldRetryHTTPWithoutTurnState(prepared, aggregate.errorBody) {
+				turnStateRetryUsed = true
+				e.dropCodexHTTPTurnStateForRetry(ctx, auth, prepared, "aggregate stream error", aggregate.errorStatus)
+				continue
+			}
+			return aggregate, nil
 		}
-
-		aggregate, errRead := collectCodexResponseAggregateWithIdleTimeout(httpResp.Body, captureBody, codexResponsesAggregateIdleTimeout)
-		if errRead != nil {
-			return codexNonStreamHTTPResult{}, errRead
-		}
-		aggregate.statusCode = httpResp.StatusCode
-		aggregate.headers = httpResp.Header
-		return aggregate, nil
 	})
 	if err != nil {
 		codexRecordAPIResponseError(ctx, e.cfg, err)

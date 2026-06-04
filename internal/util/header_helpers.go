@@ -7,13 +7,14 @@ import (
 
 // ApplyCustomHeadersFromAttrs applies user-defined headers stored in the provided attributes map.
 // Custom headers override built-in defaults when conflicts occur.
-func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) {
+func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) bool {
 	if r == nil || len(attrs) == 0 {
-		return
+		return false
 	}
 	if r.Header == nil {
 		r.Header = make(http.Header)
 	}
+	applied := false
 	for rawKey, rawValue := range attrs {
 		if !strings.HasPrefix(rawKey, "header:") {
 			continue
@@ -35,5 +36,7 @@ func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) {
 			r.Host = val
 		}
 		r.Header.Set(name, val)
+		applied = true
 	}
+	return applied
 }

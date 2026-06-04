@@ -13,7 +13,7 @@ import (
 )
 
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
-	if !bytes.Contains(body, []byte("encrypted_content")) {
+	if !bytes.Contains(body, []byte(`"encrypted_content"`)) {
 		return body
 	}
 	input := gjson.GetBytes(body, "input")

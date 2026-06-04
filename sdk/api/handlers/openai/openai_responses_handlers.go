@@ -114,6 +114,9 @@ type responsesCompletedOutputRepairState struct {
 }
 
 func (s *responsesCompletedOutputRepairState) PatchFrame(frame []byte) []byte {
+	if !responsesSSEFrameMayNeedOutputRepair(frame) {
+		return frame
+	}
 	payload, ok := responsesSSEDataPayload(frame)
 	if !ok || !json.Valid(payload) {
 		return frame
@@ -132,6 +135,11 @@ func (s *responsesCompletedOutputRepairState) PatchFrame(frame []byte) []byte {
 	default:
 		return frame
 	}
+}
+
+func responsesSSEFrameMayNeedOutputRepair(frame []byte) bool {
+	return bytes.Contains(frame, []byte("response.output_item.done")) ||
+		bytes.Contains(frame, []byte("response.completed"))
 }
 
 func (s *responsesCompletedOutputRepairState) recordOutputItem(payload []byte) {

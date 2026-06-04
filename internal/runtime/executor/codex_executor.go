@@ -414,6 +414,7 @@ codexStreamResponseOK:
 				return false
 			}
 		}
+		turnStateRetryUsed := false
 		for streamAttempt := 0; ; streamAttempt++ {
 			if streamAttempt > 0 {
 				retryResp, retryErr := e.doCodexHTTPRequest(upstreamCtx, auth, call.prepared)
@@ -478,6 +479,9 @@ codexStreamResponseOK:
 				stopAfterForward := false
 				if eventData, ok := codexEventData(line); ok {
 					eventType := codexEventType(eventData)
+					if codexShouldSuppressUsageWarningEvent(eventType, eventData) {
+						return nil
+					}
 					if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
 						log.Warnf("codex stream terminated with %s: %s", eventType, terminalErr.Error())
 						if eventType == "response.failed" {
@@ -559,6 +563,12 @@ codexStreamResponseOK:
 			idleReader.StopTimer()
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
+			}
+			if !turnStateRetryUsed && !emittedPayload && !completedStreamObserved && pendingTerminalErr == nil && codexShouldRetryHTTPWithoutTurnState(call.prepared, codexErrorBodyForTurnStateRetry(errRead)) {
+				turnStateRetryUsed = true
+				statusCode := statusCodeFromCodexError(errRead)
+				e.dropCodexHTTPTurnStateForRetry(upstreamCtx, auth, call.prepared, "stream terminal error", statusCode)
+				continue
 			}
 			if codexShouldRetryStreamRead(ctx, errRead, emittedPayload, completedStreamObserved, pendingTerminalErr, terminalFailure, streamAttempt) {
 				helps.LogWithRequestID(ctx).Debugf("codex executor: retrying stream after transport read error (attempt=%d/%d): %v", streamAttempt+1, codexHTTPMaxStreamReadRetries, errRead)

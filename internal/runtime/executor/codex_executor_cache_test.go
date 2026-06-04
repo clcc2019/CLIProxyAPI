@@ -846,6 +846,32 @@ func BenchmarkCodexResponseDedupeKey(b *testing.B) {
 	}
 }
 
+func BenchmarkPrepareCodexHTTPCall(b *testing.B) {
+	b.Setenv(codexCompressionEnv, "0")
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
+	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"prompt_cache_key":"cache-1"}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: body}
+	from := sdktranslator.FromString("openai-response")
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := executor.prepareCodexHTTPCall(
+			context.Background(),
+			auth,
+			from,
+			"",
+			"https://chatgpt.com/backend-api/codex/responses",
+			req,
+			body,
+			"oauth-token",
+			true,
+		); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestPrepareCodexHTTPCallAppliesHeadersAndPreservesLogBody(t *testing.T) {
 	t.Setenv(codexCompressionEnv, "1")
 

@@ -201,3 +201,54 @@ func TestCodexApplyWebsocketClientMetadataOverwritesReservedFields(t *testing.T)
 	assertMetadata("ws_request_header_tracestate", "state-current")
 	assertMetadata("keep", "value")
 }
+
+func TestCodexApplyWebsocketClientMetadataReplacesNonObjectMetadata(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[],"client_metadata":"invalid"}`)
+	headers := http.Header{}
+	headers.Set(codexHeaderInstallationID, "current-install")
+	headers.Set(codexHeaderWindowID, "current-window")
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+
+	got := codexApplyWebsocketClientMetadata(context.Background(), body, headers, auth, nil)
+
+	if !gjson.GetBytes(got, "client_metadata").IsObject() {
+		t.Fatalf("client_metadata should be replaced with object; body=%s", got)
+	}
+	if id := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); id != "current-install" {
+		t.Fatalf("client_metadata.x-codex-installation-id = %q, want current-install; body=%s", id, got)
+	}
+}
+
+func BenchmarkCodexApplyWebsocketClientMetadataNoExistingMetadata(b *testing.B) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"role":"user","content":"hello"}],"tools":[],"stream":true}`)
+	headers := http.Header{}
+	headers.Set(codexHeaderInstallationID, "install-1")
+	headers.Set(codexHeaderWindowID, "window-1")
+	headers.Set(codexHeaderTurnMetadata, `{"turn_id":"turn-1"}`)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		got := codexApplyWebsocketClientMetadata(context.Background(), body, headers, auth, nil)
+		if len(got) == 0 {
+			b.Fatal("empty body")
+		}
+	}
+}
+
+func BenchmarkCodexApplyWebsocketClientMetadataExistingMetadata(b *testing.B) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"role":"user","content":"hello"}],"client_metadata":{"x-codex-installation-id":"stale-install","x-codex-window-id":"stale-window","x-codex-turn-metadata":"stale-turn","keep":"value"},"tools":[],"stream":true}`)
+	headers := http.Header{}
+	headers.Set(codexHeaderInstallationID, "install-1")
+	headers.Set(codexHeaderWindowID, "window-1")
+	headers.Set(codexHeaderTurnMetadata, `{"turn_id":"turn-1"}`)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		got := codexApplyWebsocketClientMetadata(context.Background(), body, headers, auth, nil)
+		if len(got) == 0 {
+			b.Fatal("empty body")
+		}
+	}
+}

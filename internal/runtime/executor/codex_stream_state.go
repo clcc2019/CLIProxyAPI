@@ -17,17 +17,54 @@ var (
 	codexJSONTypeFirstFieldPrefix = []byte(`"type":"`)
 
 	codexJSONKeyType        = []byte("type")
+	codexJSONKeyInput       = []byte("input")
+	codexJSONKeyGenerate    = []byte("generate")
+	codexJSONKeyMetadata    = []byte("client_metadata")
 	codexJSONKeyItemID      = []byte("item_id")
 	codexJSONKeyCallID      = []byte("call_id")
 	codexJSONKeyDelta       = []byte("delta")
 	codexJSONKeyOutputIndex = []byte("output_index")
+	codexJSONKeyPreviousID  = []byte("previous_response_id")
+
+	codexJSONKeyMetadataTurn      = []byte(codexClientMetadataTurnMetadata)
+	codexJSONKeyMetadataTrace     = []byte(codexWSClientMetadataTraceparent)
+	codexJSONKeyMetadataTraceStat = []byte(codexWSClientMetadataTracestate)
+	codexJSONKeyMetadataStartMS   = []byte(codexClientMetadataWSStreamRequestStartMS)
+
+	codexJSONFieldItemID      = []byte(`"item_id":`)
+	codexJSONFieldCallID      = []byte(`"call_id":`)
+	codexJSONFieldDelta       = []byte(`"delta":`)
+	codexJSONFieldOutputIndex = []byte(`"output_index":`)
+	codexJSONFieldSequence    = []byte(`"sequence_number":`)
 
 	codexEventOutputItemDoneValue             = []byte("response.output_item.done")
 	codexEventOutputItemAddedValue            = []byte("response.output_item.added")
 	codexEventFunctionCallArgumentsDeltaValue = []byte("response.function_call_arguments.delta")
 	codexEventFunctionCallArgumentsDoneValue  = []byte("response.function_call_arguments.done")
 	codexEventCustomToolCallInputDeltaValue   = []byte("response.custom_tool_call_input.delta")
+	codexEventOutputTextDeltaValue            = []byte("response.output_text.delta")
+	codexEventOutputTextDoneValue             = []byte("response.output_text.done")
+	codexEventReasoningSummaryTextDeltaValue  = []byte("response.reasoning_summary_text.delta")
+	codexEventReasoningSummaryTextDoneValue   = []byte("response.reasoning_summary_text.done")
+	codexEventReasoningTextDeltaValue         = []byte("response.reasoning_text.delta")
 	codexEventCompletedValue                  = []byte("response.completed")
+
+	codexJSONFieldFunctionCallArgumentsDeltaType = []byte(`"type":"response.function_call_arguments.delta"`)
+	codexJSONFieldCustomToolCallInputDeltaType   = []byte(`"type":"response.custom_tool_call_input.delta"`)
+
+	codexJSONCompactFunctionCallDeltaType         = []byte(`{"type":"response.function_call_arguments.delta"`)
+	codexJSONCompactCustomToolCallInputDeltaType  = []byte(`{"type":"response.custom_tool_call_input.delta"`)
+	codexJSONCompactOutputTextDeltaType           = []byte(`{"type":"response.output_text.delta"`)
+	codexJSONCompactReasoningSummaryTextDeltaType = []byte(`{"type":"response.reasoning_summary_text.delta"`)
+	codexJSONCompactReasoningTextDeltaType        = []byte(`{"type":"response.reasoning_text.delta"`)
+	codexJSONCompactOutputItemAddedType           = []byte(`{"type":"response.output_item.added"`)
+	codexJSONCompactOutputItemDoneType            = []byte(`{"type":"response.output_item.done"`)
+	codexJSONCompactFunctionCallDeltaItemIDPrefix = []byte(`{"type":"response.function_call_arguments.delta","item_id":`)
+	codexJSONCompactFunctionCallDeltaSequencePref = []byte(`{"type":"response.function_call_arguments.delta","sequence_number":`)
+	codexJSONCompactItemIDField                   = []byte(`,"item_id":`)
+	codexJSONCompactOutputIndexField              = []byte(`,"output_index":`)
+	codexJSONCompactDeltaField                    = []byte(`,"delta":`)
+	codexJSONCompactSequenceField                 = []byte(`,"sequence_number":`)
 )
 
 const (
@@ -36,7 +73,26 @@ const (
 	codexEventFunctionCallArgumentsDelta = "response.function_call_arguments.delta"
 	codexEventFunctionCallArgumentsDone  = "response.function_call_arguments.done"
 	codexEventCustomToolCallInputDelta   = "response.custom_tool_call_input.delta"
+	codexEventOutputTextDelta            = "response.output_text.delta"
+	codexEventOutputTextDone             = "response.output_text.done"
+	codexEventReasoningSummaryTextDelta  = "response.reasoning_summary_text.delta"
+	codexEventReasoningSummaryTextDone   = "response.reasoning_summary_text.done"
+	codexEventReasoningTextDelta         = "response.reasoning_text.delta"
 	codexEventCompleted                  = "response.completed"
+
+	codexStreamArgumentBuilderInitialCapacity = 128
+
+	codexCompactResponseTypeKindOffset = len(`{"type":"response.`)
+)
+
+const (
+	codexStreamArgumentFieldUnknown uint8 = iota
+	codexStreamArgumentFieldAlreadyParsed
+	codexStreamArgumentFieldOutputIndex
+	codexStreamArgumentFieldItemID
+	codexStreamArgumentFieldCallID
+	codexStreamArgumentFieldDelta
+	codexStreamArgumentFieldSequence
 )
 
 type codexStreamFunctionCallState struct {
@@ -86,17 +142,14 @@ type codexStreamArgumentDeltaFields struct {
 }
 
 func newCodexStreamCompletionState() *codexStreamCompletionState {
-	return &codexStreamCompletionState{
-		outputItemsByIndex:   make(map[int64][]byte),
-		functionCallsByItem:  make(map[string]*codexStreamFunctionCallState),
-		functionCallsByIndex: make(map[int64]*codexStreamFunctionCallState),
-	}
+	return &codexStreamCompletionState{}
 }
 
 func (s *codexStreamFunctionCallState) appendArgumentsDelta(delta string) {
 	if s == nil || delta == "" {
 		return
 	}
+	s.ensureArgumentsBuilderCapacity(len(delta))
 	if s.Arguments != "" && s.argumentsBuilder.Len() == 0 {
 		s.argumentsBuilder.WriteString(s.Arguments)
 		s.Arguments = ""
@@ -108,11 +161,23 @@ func (s *codexStreamFunctionCallState) appendArgumentsDeltaBytes(delta []byte) {
 	if s == nil || len(delta) == 0 {
 		return
 	}
+	s.ensureArgumentsBuilderCapacity(len(delta))
 	if s.Arguments != "" && s.argumentsBuilder.Len() == 0 {
 		s.argumentsBuilder.WriteString(s.Arguments)
 		s.Arguments = ""
 	}
 	_, _ = s.argumentsBuilder.Write(delta)
+}
+
+func (s *codexStreamFunctionCallState) ensureArgumentsBuilderCapacity(additional int) {
+	if s == nil || s.argumentsBuilder.Len() > 0 {
+		return
+	}
+	capacity := len(s.Arguments) + additional
+	if capacity < codexStreamArgumentBuilderInitialCapacity {
+		capacity = codexStreamArgumentBuilderInitialCapacity
+	}
+	s.argumentsBuilder.Grow(capacity)
 }
 
 func (s *codexStreamFunctionCallState) appendArgumentsDeltaRaw(delta []byte, escaped bool) bool {
@@ -214,6 +279,9 @@ func codexEventType(eventData []byte) string {
 	if len(eventData) == 0 {
 		return ""
 	}
+	if eventType, ok := codexCompactKnownEventType(eventData); ok {
+		return eventType
+	}
 	if raw, ok := codexFirstFieldEventTypeRaw(eventData); ok {
 		if eventType, ok := codexKnownEventTypeRaw(raw); ok {
 			return eventType
@@ -232,6 +300,51 @@ func codexEventType(eventData []byte) string {
 		}
 	}
 	return gjson.GetBytes(eventData, "type").String()
+}
+
+func codexCompactKnownEventType(data []byte) (string, bool) {
+	if len(data) <= codexCompactResponseTypeKindOffset || data[0] != '{' {
+		return "", false
+	}
+	switch data[codexCompactResponseTypeKindOffset] {
+	case 'c':
+		if codexHasCompactJSONFieldPrefix(data, codexJSONCompactCustomToolCallInputDeltaType) {
+			return codexEventCustomToolCallInputDelta, true
+		}
+	case 'f':
+		if codexHasCompactJSONFieldPrefix(data, codexJSONCompactFunctionCallDeltaType) {
+			return codexEventFunctionCallArgumentsDelta, true
+		}
+	case 'o':
+		switch {
+		case codexHasCompactJSONFieldPrefix(data, codexJSONCompactOutputTextDeltaType):
+			return codexEventOutputTextDelta, true
+		case codexHasCompactJSONFieldPrefix(data, codexJSONCompactOutputItemAddedType):
+			return codexEventOutputItemAdded, true
+		case codexHasCompactJSONFieldPrefix(data, codexJSONCompactOutputItemDoneType):
+			return codexEventOutputItemDone, true
+		}
+	case 'r':
+		switch {
+		case codexHasCompactJSONFieldPrefix(data, codexJSONCompactReasoningSummaryTextDeltaType):
+			return codexEventReasoningSummaryTextDelta, true
+		case codexHasCompactJSONFieldPrefix(data, codexJSONCompactReasoningTextDeltaType):
+			return codexEventReasoningTextDelta, true
+		}
+	}
+	return "", false
+}
+
+func codexHasCompactJSONFieldPrefix(data []byte, prefix []byte) bool {
+	if !bytes.HasPrefix(data, prefix) || len(data) == len(prefix) {
+		return false
+	}
+	switch data[len(prefix)] {
+	case ',', '}', ' ', '\n', '\r', '\t':
+		return true
+	default:
+		return false
+	}
 }
 
 func codexFirstFieldEventTypeRaw(data []byte) ([]byte, bool) {
@@ -267,6 +380,9 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 	if s == nil || len(eventData) == 0 {
 		return
 	}
+	if codexShouldSuppressUsageWarningEvent(eventType, eventData) {
+		return
+	}
 
 	switch eventType {
 	case codexEventOutputItemDone:
@@ -277,6 +393,9 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 		itemBytes := []byte(itemResult.Raw)
 		outputIndexResult := gjson.GetBytes(eventData, "output_index")
 		if outputIndexResult.Exists() {
+			if s.outputItemsByIndex == nil {
+				s.outputItemsByIndex = make(map[int64][]byte)
+			}
 			s.outputItemsByIndex[outputIndexResult.Int()] = itemBytes
 			return
 		}
@@ -305,6 +424,9 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 					return
 				}
 				stateKey = fmt.Sprintf("idx:%d", outputIndex)
+			}
+			if s.functionCallsByItem == nil {
+				s.functionCallsByItem = make(map[string]*codexStreamFunctionCallState)
 			}
 			s.functionCallsByItem[stateKey] = state
 			if outputIndex >= 0 {
@@ -369,6 +491,10 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 }
 
 func (s *codexStreamCompletionState) recordArgumentsDeltaFast(eventType string, eventData []byte) bool {
+	if s.recordFunctionCallArgumentsDeltaByIndexFast(eventType, eventData) {
+		return true
+	}
+
 	fields, ok := parseCodexStreamArgumentDeltaFields(eventData)
 	if !ok {
 		return false
@@ -415,6 +541,81 @@ func (s *codexStreamCompletionState) recordArgumentsDeltaFast(eventType string, 
 	return state.appendArgumentsDeltaRaw(fields.delta, fields.deltaEscaped)
 }
 
+func (s *codexStreamCompletionState) recordFunctionCallArgumentsDeltaByIndexFast(eventType string, eventData []byte) bool {
+	if s == nil || eventType != codexEventFunctionCallArgumentsDelta || s.functionCallsByIndex == nil {
+		return false
+	}
+
+	i := 0
+	switch {
+	case bytes.HasPrefix(eventData, codexJSONCompactFunctionCallDeltaItemIDPrefix):
+		i = len(codexJSONCompactFunctionCallDeltaItemIDPrefix)
+	case bytes.HasPrefix(eventData, codexJSONCompactFunctionCallDeltaSequencePref):
+		i = len(codexJSONCompactFunctionCallDeltaSequencePref)
+		_, next, ok := codexParseJSONInt(eventData, i)
+		if !ok {
+			return false
+		}
+		i = next
+		if !bytes.HasPrefix(eventData[i:], codexJSONCompactItemIDField) {
+			return false
+		}
+		i += len(codexJSONCompactItemIDField)
+	default:
+		return false
+	}
+
+	_, _, _, next, ok := codexParseJSONStringRaw(eventData, i)
+	if !ok {
+		return false
+	}
+	i = next
+	if !bytes.HasPrefix(eventData[i:], codexJSONCompactOutputIndexField) {
+		return false
+	}
+	i += len(codexJSONCompactOutputIndexField)
+	outputIndex, next, ok := codexParseJSONInt(eventData, i)
+	if !ok {
+		return false
+	}
+	state := s.functionCallsByIndex[outputIndex]
+	if state == nil {
+		return false
+	}
+
+	i = next
+	if !bytes.HasPrefix(eventData[i:], codexJSONCompactDeltaField) {
+		return false
+	}
+	i += len(codexJSONCompactDeltaField)
+	delta, escaped, next, isNull, ok := codexParseOptionalJSONStringRaw(eventData, i)
+	if !ok {
+		return false
+	}
+
+	i = next
+	if bytes.HasPrefix(eventData[i:], codexJSONCompactSequenceField) {
+		i += len(codexJSONCompactSequenceField)
+		_, next, ok = codexParseJSONInt(eventData, i)
+		if !ok {
+			return false
+		}
+		i = next
+	}
+	i = codexSkipJSONSpaces(eventData, i)
+	if i >= len(eventData) || eventData[i] != '}' {
+		return false
+	}
+	i = codexSkipJSONSpaces(eventData, i+1)
+	if i != len(eventData) {
+		return false
+	}
+	if isNull {
+		return true
+	}
+	return state.appendArgumentsDeltaRaw(delta, escaped)
+}
+
 func codexStreamToolCallStateKey(itemID, callID string) string {
 	itemID = strings.TrimSpace(itemID)
 	if itemID != "" {
@@ -440,22 +641,85 @@ func parseCodexStreamArgumentDeltaFields(data []byte) (codexStreamArgumentDeltaF
 			return fields, fields.hasLookupCandidate || fields.hasDelta
 		}
 
-		keyStart, keyEnd, keyEscaped, next, ok := codexParseJSONStringRaw(data, i)
-		if !ok || keyEscaped {
-			return fields, false
+		field := codexStreamArgumentFieldUnknown
+		matched := false
+		if i+1 < len(data) && data[i] == '"' {
+			switch data[i+1] {
+			case 'c':
+				if bytes.HasPrefix(data[i:], codexJSONFieldCallID) {
+					field = codexStreamArgumentFieldCallID
+					i += len(codexJSONFieldCallID)
+					matched = true
+				}
+			case 'd':
+				if bytes.HasPrefix(data[i:], codexJSONFieldDelta) {
+					field = codexStreamArgumentFieldDelta
+					i += len(codexJSONFieldDelta)
+					matched = true
+				}
+			case 'i':
+				if bytes.HasPrefix(data[i:], codexJSONFieldItemID) {
+					field = codexStreamArgumentFieldItemID
+					i += len(codexJSONFieldItemID)
+					matched = true
+				}
+			case 'o':
+				if bytes.HasPrefix(data[i:], codexJSONFieldOutputIndex) {
+					field = codexStreamArgumentFieldOutputIndex
+					i += len(codexJSONFieldOutputIndex)
+					matched = true
+				}
+			case 's':
+				if bytes.HasPrefix(data[i:], codexJSONFieldSequence) {
+					field = codexStreamArgumentFieldSequence
+					i += len(codexJSONFieldSequence)
+					matched = true
+				}
+			case 't':
+				switch {
+				case bytes.HasPrefix(data[i:], codexJSONFieldFunctionCallArgumentsDeltaType):
+					field = codexStreamArgumentFieldAlreadyParsed
+					i += len(codexJSONFieldFunctionCallArgumentsDeltaType)
+					matched = true
+				case bytes.HasPrefix(data[i:], codexJSONFieldCustomToolCallInputDeltaType):
+					field = codexStreamArgumentFieldAlreadyParsed
+					i += len(codexJSONFieldCustomToolCallInputDeltaType)
+					matched = true
+				}
+			}
 		}
-		i = codexSkipJSONSpaces(data, next)
-		if i >= len(data) || data[i] != ':' {
-			return fields, false
-		}
-		i = codexSkipJSONSpaces(data, i+1)
-		if i >= len(data) {
-			return fields, false
+		if !matched {
+			keyStart, keyEnd, keyEscaped, next, ok := codexParseJSONStringRaw(data, i)
+			if !ok || keyEscaped {
+				return fields, false
+			}
+			i = codexSkipJSONSpaces(data, next)
+			if i >= len(data) || data[i] != ':' {
+				return fields, false
+			}
+			i++
+			switch key := data[keyStart:keyEnd]; {
+			case bytes.Equal(key, codexJSONKeyOutputIndex):
+				field = codexStreamArgumentFieldOutputIndex
+			case bytes.Equal(key, codexJSONKeyItemID):
+				field = codexStreamArgumentFieldItemID
+			case bytes.Equal(key, codexJSONKeyCallID):
+				field = codexStreamArgumentFieldCallID
+			case bytes.Equal(key, codexJSONKeyDelta):
+				field = codexStreamArgumentFieldDelta
+			}
 		}
 
-		key := data[keyStart:keyEnd]
-		switch {
-		case bytes.Equal(key, codexJSONKeyOutputIndex):
+		if field != codexStreamArgumentFieldAlreadyParsed {
+			i = codexSkipJSONSpaces(data, i)
+			if i >= len(data) {
+				return fields, false
+			}
+		}
+
+		switch field {
+		case codexStreamArgumentFieldAlreadyParsed:
+		case codexStreamArgumentFieldOutputIndex:
 			value, valueNext, ok := codexParseJSONInt(data, i)
 			if !ok {
 				return fields, false
@@ -464,7 +728,7 @@ func parseCodexStreamArgumentDeltaFields(data []byte) (codexStreamArgumentDeltaF
 			fields.hasOutputIndex = true
 			fields.hasLookupCandidate = true
 			i = valueNext
-		case bytes.Equal(key, codexJSONKeyItemID):
+		case codexStreamArgumentFieldItemID:
 			raw, escaped, valueNext, isNull, ok := codexParseOptionalJSONStringRaw(data, i)
 			if !ok {
 				return fields, false
@@ -475,7 +739,7 @@ func parseCodexStreamArgumentDeltaFields(data []byte) (codexStreamArgumentDeltaF
 				fields.hasLookupCandidate = true
 			}
 			i = valueNext
-		case bytes.Equal(key, codexJSONKeyCallID):
+		case codexStreamArgumentFieldCallID:
 			raw, escaped, valueNext, isNull, ok := codexParseOptionalJSONStringRaw(data, i)
 			if !ok {
 				return fields, false
@@ -486,7 +750,7 @@ func parseCodexStreamArgumentDeltaFields(data []byte) (codexStreamArgumentDeltaF
 				fields.hasLookupCandidate = true
 			}
 			i = valueNext
-		case bytes.Equal(key, codexJSONKeyDelta):
+		case codexStreamArgumentFieldDelta:
 			raw, escaped, valueNext, isNull, ok := codexParseOptionalJSONStringRaw(data, i)
 			if !ok {
 				return fields, false
@@ -495,6 +759,12 @@ func parseCodexStreamArgumentDeltaFields(data []byte) (codexStreamArgumentDeltaF
 				fields.delta = raw
 				fields.deltaEscaped = escaped
 				fields.hasDelta = true
+			}
+			i = valueNext
+		case codexStreamArgumentFieldSequence:
+			_, valueNext, ok := codexParseJSONInt(data, i)
+			if !ok {
+				return fields, false
 			}
 			i = valueNext
 		default:
@@ -579,6 +849,16 @@ func codexKnownEventTypeRaw(raw []byte) (string, bool) {
 		return codexEventFunctionCallArgumentsDelta, true
 	case bytes.Equal(raw, codexEventCustomToolCallInputDeltaValue):
 		return codexEventCustomToolCallInputDelta, true
+	case bytes.Equal(raw, codexEventOutputTextDeltaValue):
+		return codexEventOutputTextDelta, true
+	case bytes.Equal(raw, codexEventOutputTextDoneValue):
+		return codexEventOutputTextDone, true
+	case bytes.Equal(raw, codexEventReasoningSummaryTextDeltaValue):
+		return codexEventReasoningSummaryTextDelta, true
+	case bytes.Equal(raw, codexEventReasoningSummaryTextDoneValue):
+		return codexEventReasoningSummaryTextDone, true
+	case bytes.Equal(raw, codexEventReasoningTextDeltaValue):
+		return codexEventReasoningTextDelta, true
 	case bytes.Equal(raw, codexEventCompletedValue):
 		return codexEventCompleted, true
 	case bytes.Equal(raw, codexEventOutputItemDoneValue):
@@ -810,6 +1090,11 @@ func (s *codexStreamCompletionState) processEventDataWithType(eventType string, 
 		return codexCompletedStreamEvent{}, false
 	}
 
+	if eventType == codexEventCompleted {
+		if scrubbed, removed := scrubCodexCompletedUsageWarnings(eventData); removed > 0 {
+			eventData = scrubbed
+		}
+	}
 	s.recordEventWithType(eventType, eventData)
 	if eventType != codexEventCompleted {
 		return codexCompletedStreamEvent{}, false

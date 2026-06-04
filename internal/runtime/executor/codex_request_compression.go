@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"os"
@@ -26,7 +25,15 @@ func maybeEnableCodexRequestCompressionWithBody(req *http.Request, auth *cliprox
 }
 
 func maybeEnableCodexRequestCompressionWithConfig(req *http.Request, auth *cliproxyauth.Auth, cfg *config.Config, body []byte) error {
-	if req == nil || auth == nil || codexIsAPIKeyAuth(auth) || codexRequestCompressionSkipsTarget(req, auth) || !codexRequestCompressionEnabled(cfg) {
+	rawURL := ""
+	if req != nil && req.URL != nil {
+		rawURL = req.URL.String()
+	}
+	return maybeEnableCodexRequestCompressionWithConfigForURL(req, auth, cfg, body, rawURL)
+}
+
+func maybeEnableCodexRequestCompressionWithConfigForURL(req *http.Request, auth *cliproxyauth.Auth, cfg *config.Config, body []byte, rawURL string) error {
+	if req == nil || auth == nil || codexIsAPIKeyAuth(auth) || codexRequestCompressionSkipsTargetURL(rawURL, auth) || !codexRequestCompressionEnabled(cfg) {
 		return nil
 	}
 	if encoding := strings.TrimSpace(req.Header.Get("Content-Encoding")); encoding != "" {
@@ -67,37 +74,37 @@ func maybeEnableCodexRequestCompressionWithConfig(req *http.Request, auth *clipr
 }
 
 func codexRequestCompressionSkipsTarget(req *http.Request, auth *cliproxyauth.Auth) bool {
+	rawURL := ""
+	if req != nil && req.URL != nil {
+		rawURL = req.URL.String()
+	}
+	return codexRequestCompressionSkipsTargetURL(rawURL, auth)
+}
+
+func codexRequestCompressionSkipsTargetURL(rawURL string, auth *cliproxyauth.Auth) bool {
 	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "azure") {
 		return true
 	}
-	return req != nil && req.URL != nil && codexMatchesAzureResponsesBaseURL(req.URL.String())
+	return codexMatchesAzureResponsesBaseURL(rawURL)
 }
 
 func compressCodexRequestBody(body []byte) ([]byte, error) {
-	var compressed bytes.Buffer
-	encoder, err := borrowCodexZstdEncoder(&compressed)
+	encoder, err := borrowCodexZstdEncoder()
 	if err != nil {
 		return nil, err
 	}
-	if _, errWrite := encoder.Write(body); errWrite != nil {
-		_ = encoder.Close()
-		return nil, errWrite
-	}
-	if errClose := encoder.Close(); errClose != nil {
-		return nil, errClose
-	}
+	compressed := encoder.EncodeAll(body, make([]byte, 0, 256))
 	codexZstdEncoderPool.Put(encoder)
-	return compressed.Bytes(), nil
+	return compressed, nil
 }
 
-func borrowCodexZstdEncoder(w io.Writer) (*zstd.Encoder, error) {
+func borrowCodexZstdEncoder() (*zstd.Encoder, error) {
 	if cached := codexZstdEncoderPool.Get(); cached != nil {
 		if encoder, ok := cached.(*zstd.Encoder); ok && encoder != nil {
-			encoder.Reset(w)
 			return encoder, nil
 		}
 	}
-	return zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(3)))
+	return zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(3)))
 }
 
 func codexRequestCompressionEnabled(cfg *config.Config) bool {

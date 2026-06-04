@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"sync"
+	"unicode/utf8"
 )
 
 // claudeSSEBufPool reuses scratch buffers for Claude-format SSE event builders.
@@ -32,12 +33,44 @@ func releaseClaudeSSEBuf(bp *[]byte) {
 	claudeSSEBufPool.Put(bp)
 }
 
-// appendClaudeJSONString writes s to dst as a JSON-quoted string. Uses
-// encoding/json for correctness on edge cases (control chars, non-UTF-8) —
-// strconv.AppendQuote uses Go syntax which is not valid JSON.
+// appendClaudeJSONString writes s to dst as a JSON-quoted string. The common
+// valid UTF-8 path avoids json.Marshal's per-token allocation; invalid UTF-8
+// falls back to encoding/json so replacement semantics stay correct.
 func appendClaudeJSONString(dst []byte, s string) []byte {
-	encoded, _ := json.Marshal(s)
-	return append(dst, encoded...)
+	if !utf8.ValidString(s) {
+		encoded, _ := json.Marshal(s)
+		return append(dst, encoded...)
+	}
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x20 && c != '"' && c != '\\' {
+			continue
+		}
+		dst = append(dst, s[start:i]...)
+		switch c {
+		case '"', '\\':
+			dst = append(dst, '\\', c)
+		case '\b':
+			dst = append(dst, '\\', 'b')
+		case '\f':
+			dst = append(dst, '\\', 'f')
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		case '\r':
+			dst = append(dst, '\\', 'r')
+		case '\t':
+			dst = append(dst, '\\', 't')
+		default:
+			const hex = "0123456789abcdef"
+			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0x0f])
+		}
+		start = i + 1
+	}
+	dst = append(dst, s[start:]...)
+	dst = append(dst, '"')
+	return dst
 }
 
 // ClaudeTextDeltaJSON returns the JSON payload for a Claude text_delta

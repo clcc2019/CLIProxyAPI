@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -247,8 +248,9 @@ func (s *codexWebsocketSession) rememberLogicalRequest(body []byte) {
 	s.lastResponseID = ""
 	s.lastResponseOutput = nil
 	s.lastResponseItems = nil
-	s.lastRequestCmp, _ = codexComparableRequestWithoutInput(request)
-	if inputItems, ok := codexRawArrayItems(gjson.GetBytes(request, "input")); ok {
+	inputResult := codexGJSONGetImmutableBytes(request, "input")
+	s.lastRequestCmp, _ = codexComparableRequestWithoutInputWithInputResult(request, inputResult)
+	if inputItems, ok := codexRawArrayItemViews(request, inputResult, 0, 16); ok {
 		s.lastRequestInput = inputItems
 	} else {
 		s.lastRequestInput = nil
@@ -259,13 +261,18 @@ func (s *codexWebsocketSession) rememberCompletedResponse(eventData []byte) {
 	if s == nil || len(bytes.TrimSpace(eventData)) == 0 {
 		return
 	}
-	s.lastResponseID = strings.TrimSpace(gjson.GetBytes(eventData, "response.id").String())
-	s.lastResponseOutput = codexCompletedResponseOutput(eventData)
-	if outputItems, ok := codexRawArrayItems(gjson.ParseBytes(s.lastResponseOutput)); ok {
-		s.lastResponseItems = outputItems
-	} else {
-		s.lastResponseItems = nil
+	response := codexGJSONGetImmutableBytes(eventData, "response")
+	s.lastResponseID = strings.Clone(strings.TrimSpace(response.Get("id").String()))
+	output := response.Get("output")
+	if output.Exists() && output.IsArray() {
+		s.lastResponseOutput = []byte(output.Raw)
+		if outputItems, ok := codexRawArrayItemViews(s.lastResponseOutput, output, output.Index, 4); ok {
+			s.lastResponseItems = outputItems
+			return
+		}
 	}
+	s.lastResponseOutput = []byte("[]")
+	s.lastResponseItems = make([][]byte, 0)
 }
 
 func (s *codexWebsocketSession) clearIncrementalState() {
@@ -738,8 +745,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return resp, wsErr
 		}
 
-		payload = normalizeCodexWebsocketCompletion(payload)
-		eventType := gjson.GetBytes(payload, "type").String()
+		payload, eventType := normalizeCodexWebsocketCompletion(payload)
+		if codexShouldSuppressUsageWarningEvent(eventType, payload) {
+			continue
+		}
 		if eventType == "response.incomplete" {
 			terminalErr := codexResponseIncompleteEventErr(payload)
 			if sess != nil {
@@ -952,6 +961,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 		var param any
 		streamState := newCodexStreamCompletionState()
+		usageWarningFilter := newCodexUsageWarningStreamFilter()
 		emittedPayload := false
 		previousResponseRetryUsed := false
 		readRetryUsed := false
@@ -1037,7 +1047,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
 					return
 				}
-				if !previousResponseRetryUsed && !emittedPayload && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, payload) {
+				if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, payload) {
 					previousResponseRetryUsed = true
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: retrying without previous_response_id after upstream rejected incremental context")
 					wsReqBodyRetry := buildCodexWebsocketRetryWithoutPreviousResponse(body, wsHeaders.Get(codexHeaderTurnMetadata), time.Now())
@@ -1083,63 +1093,71 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return
 			}
 
-			payload = normalizeCodexWebsocketCompletion(payload)
-			eventType := gjson.GetBytes(payload, "type").String()
-			if eventType == "response.incomplete" {
-				terminalErr := codexResponseIncompleteEventErr(payload)
-				if sess != nil {
-					sess.clearIncrementalState()
-					e.invalidateUpstreamConn(sess, conn, "upstream_incomplete", terminalErr)
-				}
-				terminateReason = "upstream_incomplete"
-				terminateErr = terminalErr
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_incomplete", terminalErr)
-				reporter.PublishFailureWithError(ctx, terminalErr)
-				_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
-				return
-			} else if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
-				if sess != nil {
-					sess.clearIncrementalState()
-					e.invalidateUpstreamConn(sess, conn, "upstream_terminal", terminalErr)
-				}
-				terminateReason = "upstream_terminal"
-				terminateErr = terminalErr
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_terminal", terminalErr)
-				reporter.PublishFailureWithError(ctx, terminalErr)
-				_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
-				return
-			}
-			if completed, ok := streamState.processEventDataWithType(eventType, payload, true); ok {
-				payload = completed.data
-				eventType = codexEventCompleted
-			}
-			if eventType == codexEventCompleted || eventType == "response.done" {
-				if detail, ok := helps.ParseCodexUsage(payload); ok {
-					reporter.Publish(ctx, detail)
-				}
+			payload, eventType := normalizeCodexWebsocketCompletion(payload)
+			events := usageWarningFilter.Filter(eventType, payload)
+			if len(events) == 0 {
+				continue
 			}
 
-			line := encodeCodexWebsocketAsSSE(payload)
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
-			for i := range chunks {
-				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-					terminateReason = "context_done"
-					terminateErr = ctx.Err()
+			for _, event := range events {
+				payload := event.payload
+				eventType := event.eventType
+				if eventType == "response.incomplete" {
+					terminalErr := codexResponseIncompleteEventErr(payload)
+					if sess != nil {
+						sess.clearIncrementalState()
+						e.invalidateUpstreamConn(sess, conn, "upstream_incomplete", terminalErr)
+					}
+					terminateReason = "upstream_incomplete"
+					terminateErr = terminalErr
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_incomplete", terminalErr)
+					reporter.PublishFailureWithError(ctx, terminalErr)
+					_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
+					return
+				} else if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
+					if sess != nil {
+						sess.clearIncrementalState()
+						e.invalidateUpstreamConn(sess, conn, "upstream_terminal", terminalErr)
+					}
+					terminateReason = "upstream_terminal"
+					terminateErr = terminalErr
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_terminal", terminalErr)
+					reporter.PublishFailureWithError(ctx, terminalErr)
+					_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
 					return
 				}
-				if len(chunks[i]) > 0 {
-					emittedPayload = true
+				if completed, ok := streamState.processEventDataWithType(eventType, payload, true); ok {
+					payload = completed.data
+					eventType = codexEventCompleted
 				}
-			}
-			if eventType == codexEventCompleted || eventType == "response.done" {
-				if sess != nil {
-					sess.rememberLogicalRequest(body)
-					sess.rememberCompletedResponse(payload)
+				if eventType == codexEventCompleted || eventType == "response.done" {
+					if detail, ok := helps.ParseCodexUsage(payload); ok {
+						reporter.Publish(ctx, detail)
+					}
 				}
-				if codexWebsocketShouldSendResponseProcessed(wsHeaders, wsReqBody) {
-					e.sendCodexWebsocketResponseProcessed(ctx, sess, conn, gjson.GetBytes(payload, "response.id").String())
+
+				line := encodeCodexWebsocketAsSSE(payload)
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
+				for i := range chunks {
+					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+						terminateReason = "context_done"
+						terminateErr = ctx.Err()
+						return
+					}
+					if len(chunks[i]) > 0 {
+						emittedPayload = true
+					}
 				}
-				return
+				if eventType == codexEventCompleted || eventType == "response.done" {
+					if sess != nil {
+						sess.rememberLogicalRequest(body)
+						sess.rememberCompletedResponse(payload)
+					}
+					if codexWebsocketShouldSendResponseProcessed(wsHeaders, wsReqBody) {
+						e.sendCodexWebsocketResponseProcessed(ctx, sess, conn, gjson.GetBytes(payload, "response.id").String())
+					}
+					return
+				}
 			}
 		}
 	}()
@@ -1196,7 +1214,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	if explicitTurnMetadata != "" {
 		turnStateScope = explicitTurnMetadata
 	}
-	body = codexApplyWebsocketClientMetadata(ctx, body, wsHeaders, auth, e.cfg)
+	body = codexApplyWebsocketClientMetadataWithStreamStartMS(ctx, body, wsHeaders, auth, e.cfg, strconv.FormatInt(time.Now().UnixMilli(), 10))
 	wsHeaders.Del("Traceparent")
 	wsHeaders.Del("Tracestate")
 
@@ -1235,13 +1253,12 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		}
 	}
 
-	prepared.wsReqBody = buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
+	prepared.wsReqBody = buildCodexWebsocketRequestBodyWithCurrentTurnMetadata(body)
 	if !prepared.httpFallback && prepared.sess != nil {
 		if incrementalBody, ok := buildCodexIncrementalWebsocketRequestBody(prepared.sess, body, wsHeaders.Get("X-Codex-Turn-Metadata")); ok {
 			prepared.wsReqBody = incrementalBody
 		}
 	}
-	prepared.wsReqBody = stampCodexWebsocketStreamRequestStartMS(prepared.wsReqBody, time.Now())
 	prepared.wsReqLog = helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -1488,6 +1505,27 @@ func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []by
 	return body
 }
 
+func buildCodexWebsocketRequestBodyWithCurrentTurnMetadata(body []byte) []byte {
+	if len(body) == 0 {
+		body = []byte(`{}`)
+	}
+	body = codexEnsureResponsesContextField(body, codexFinalUpstreamResponses)
+
+	typeResult := gjson.GetBytes(body, "type")
+	if strings.TrimSpace(typeResult.String()) == "response.create" {
+		return body
+	}
+	if !typeResult.Exists() {
+		if updated, ok := codexAppendTopLevelStringField(body, "type", "response.create"); ok {
+			return updated
+		}
+	}
+	if updated, err := sjson.SetBytes(body, "type", "response.create"); err == nil && len(updated) > 0 {
+		return updated
+	}
+	return body
+}
+
 func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body []byte, turnMetadataHeader string) ([]byte, bool) {
 	if sess == nil || len(sess.lastRequestCmp) == 0 {
 		return nil, false
@@ -1497,8 +1535,9 @@ func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body
 		return nil, false
 	}
 
-	currentComparable, ok := codexComparableRequestWithoutInput(body)
-	if !ok || !bytes.Equal(sess.lastRequestCmp, currentComparable) {
+	inputResult := codexGJSONGetImmutableBytes(body, "input")
+	currentComparable, ok := codexComparableRequestWithoutInputWithInputResult(body, inputResult)
+	if !ok || !codexJSONRawEqual(sess.lastRequestCmp, currentComparable) {
 		return nil, false
 	}
 
@@ -1506,33 +1545,22 @@ func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body
 	if previousInput == nil {
 		return nil, false
 	}
-	currentInput, ok := codexRawArrayItems(gjson.GetBytes(body, "input"))
-	if !ok {
-		return nil, false
-	}
 	responseOutput := sess.lastResponseItems
 	if responseOutput == nil {
 		return nil, false
 	}
 
-	baseline := make([][]byte, 0, len(previousInput)+len(responseOutput))
-	baseline = append(baseline, previousInput...)
-	baseline = append(baseline, responseOutput...)
-	if len(currentInput) < len(baseline) {
+	delta, ok := codexIncrementalInputDeltaViews(body, inputResult, previousInput, responseOutput)
+	if !ok {
 		return nil, false
 	}
-	for i := range baseline {
-		if !codexJSONRawEqual(currentInput[i], baseline[i]) {
-			return nil, false
-		}
-	}
-
-	delta := currentInput[len(baseline):]
-	if !codexWebsocketDeltaToolOutputsAnchorable(baseline, delta) {
+	if !codexWebsocketDeltaToolOutputsAnchorable(previousInput, responseOutput, delta) {
 		return nil, false
 	}
-	wsReqBody := buildCodexWebsocketRequestBody(body, turnMetadataHeader)
-	updated, err := sjson.SetRawBytes(wsReqBody, "input", codexRawJSONArray(delta))
+	if updated, ok := buildCodexIncrementalWebsocketRequestBodyFast(body, inputResult, delta, previousResponseID, turnMetadataHeader); ok {
+		return updated, true
+	}
+	updated, err := sjson.SetRawBytes(body, "input", codexRawJSONArray(delta))
 	if err != nil {
 		return nil, false
 	}
@@ -1540,20 +1568,170 @@ func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body
 	if err != nil || len(updated) == 0 {
 		return nil, false
 	}
+	return buildCodexWebsocketRequestBody(updated, turnMetadataHeader), true
+}
+
+func codexIncrementalInputDeltaViews(source []byte, inputResult gjson.Result, previousInput [][]byte, responseOutput [][]byte) ([][]byte, bool) {
+	if !inputResult.Exists() || !inputResult.IsArray() {
+		return nil, false
+	}
+	baselineLen := len(previousInput) + len(responseOutput)
+	delta := make([][]byte, 0, 1)
+	index := 0
+	valid := true
+	inputResult.ForEach(func(_, item gjson.Result) bool {
+		start := item.Index
+		end := start + len(item.Raw)
+		if start < 0 || end < start || end > len(source) {
+			valid = false
+			return false
+		}
+		itemView := source[start:end]
+		switch {
+		case index < len(previousInput):
+			valid = codexJSONRawEqual(itemView, previousInput[index])
+		case index < baselineLen:
+			valid = codexJSONRawEqual(itemView, responseOutput[index-len(previousInput)])
+		default:
+			delta = append(delta, itemView)
+		}
+		index++
+		return valid
+	})
+	if !valid || index < baselineLen {
+		return nil, false
+	}
+	return delta, true
+}
+
+func buildCodexIncrementalWebsocketRequestBodyFast(body []byte, inputResult gjson.Result, delta [][]byte, previousResponseID string, turnMetadataHeader string) ([]byte, bool) {
+	previousResponseID = strings.TrimSpace(previousResponseID)
+	if previousResponseID == "" || !inputResult.Exists() || !inputResult.IsArray() {
+		return nil, false
+	}
+	if codexTopLevelHasTypeOrPreviousResponseID(body, inputResult) {
+		return nil, false
+	}
+	turnMetadataHeader = strings.TrimSpace(turnMetadataHeader)
+	if turnMetadataHeader != "" && gjson.GetBytes(body, "client_metadata."+codexClientMetadataTurnMetadata).String() != turnMetadataHeader {
+		return nil, false
+	}
+
+	trimmed, suffix, hasFields, ok := codexPrepareTopLevelObjectAppend(body)
+	if !ok || !hasFields {
+		return nil, false
+	}
+	start, end, ok := codexJSONResultRawRange(body, inputResult)
+	if !ok || end > len(trimmed)-1 {
+		return nil, false
+	}
+
+	deltaRaw := codexRawJSONArray(delta)
+	updated := make([]byte, 0, len(body)-len(inputResult.Raw)+len(deltaRaw)+len(previousResponseID)+len(`,"previous_response_id":"","type":"response.create"`))
+	updated = append(updated, body[:start]...)
+	updated = append(updated, deltaRaw...)
+	updated = append(updated, body[end:len(trimmed)-1]...)
+	updated = append(updated, ',')
+	updated = strconv.AppendQuote(updated, "previous_response_id")
+	updated = append(updated, ':')
+	updated = strconv.AppendQuote(updated, previousResponseID)
+	updated = append(updated, ',')
+	updated = strconv.AppendQuote(updated, "type")
+	updated = append(updated, ':')
+	updated = strconv.AppendQuote(updated, "response.create")
+	updated = append(updated, '}')
+	updated = append(updated, suffix...)
 	return updated, true
 }
 
-func codexWebsocketDeltaToolOutputsAnchorable(baseline [][]byte, delta [][]byte) bool {
-	knownCalls := make(map[string]string)
-	for _, item := range baseline {
-		itemType := codexWebsocketRawItemType(item)
-		if !codexWebsocketIsToolCallType(itemType) {
-			continue
+func codexTopLevelHasTypeOrPreviousResponseID(data []byte, inputResult gjson.Result) bool {
+	i := codexSkipJSONSpaces(data, 0)
+	if i >= len(data) || data[i] != '{' {
+		return true
+	}
+	i++
+	inputStart, inputEnd, hasInputRange := codexJSONResultRawRange(data, inputResult)
+	for {
+		i = codexSkipJSONSpaces(data, i)
+		if i >= len(data) {
+			return true
 		}
-		if callID := codexWebsocketRawItemCallID(item); callID != "" {
-			knownCalls[callID] = itemType
+		if data[i] == '}' {
+			return false
+		}
+		keyStart, keyEnd, keyEscaped, next, ok := codexParseJSONStringRaw(data, i)
+		if !ok {
+			return true
+		}
+		if !keyEscaped {
+			key := data[keyStart:keyEnd]
+			if bytes.Equal(key, codexJSONKeyType) || bytes.Equal(key, codexJSONKeyPreviousID) {
+				return true
+			}
+		}
+		i = codexSkipJSONSpaces(data, next)
+		if i >= len(data) || data[i] != ':' {
+			return true
+		}
+		valueStart := codexSkipJSONSpaces(data, i+1)
+		if valueStart >= len(data) {
+			return true
+		}
+		valueNext := 0
+		if !keyEscaped && bytes.Equal(data[keyStart:keyEnd], codexJSONKeyInput) && hasInputRange && inputStart == valueStart {
+			valueNext = inputEnd
+		} else {
+			valueNext, ok = codexSkipJSONValue(data, valueStart)
+			if !ok {
+				return true
+			}
+		}
+		i = codexSkipJSONSpaces(data, valueNext)
+		if i >= len(data) {
+			return true
+		}
+		switch data[i] {
+		case ',':
+			i++
+		case '}':
+			return false
+		default:
+			return true
 		}
 	}
+}
+
+func codexWebsocketDeltaToolOutputsAnchorable(previousInput [][]byte, responseOutput [][]byte, delta [][]byte) bool {
+	needsAnchor := false
+	for _, item := range delta {
+		itemType := codexWebsocketRawItemType(item)
+		if !codexWebsocketIsToolCallOutputType(itemType) {
+			continue
+		}
+		if itemType == "tool_search_output" && codexWebsocketToolSearchOutputCanStandAlone(item) {
+			continue
+		}
+		needsAnchor = true
+		break
+	}
+	if !needsAnchor {
+		return true
+	}
+
+	knownCalls := make(map[string]string)
+	rememberCalls := func(items [][]byte) {
+		for _, item := range items {
+			itemType := codexWebsocketRawItemType(item)
+			if !codexWebsocketIsToolCallType(itemType) {
+				continue
+			}
+			if callID := codexWebsocketRawItemCallID(item); callID != "" {
+				knownCalls[callID] = itemType
+			}
+		}
+	}
+	rememberCalls(previousInput)
+	rememberCalls(responseOutput)
 	for _, item := range delta {
 		itemType := codexWebsocketRawItemType(item)
 		callID := codexWebsocketRawItemCallID(item)
@@ -1702,8 +1880,15 @@ func stampCodexWebsocketStreamRequestStartMS(body []byte, now time.Time) []byte 
 }
 
 func codexComparableRequestWithoutInput(body []byte) ([]byte, bool) {
+	return codexComparableRequestWithoutInputWithInputResult(body, gjson.Result{})
+}
+
+func codexComparableRequestWithoutInputWithInputResult(body []byte, inputResult gjson.Result) ([]byte, bool) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, false
+	}
+	if comparable, ok := codexComparableRequestWithoutInputFast(body, inputResult); ok {
+		return comparable, true
 	}
 	comparable, err := sjson.DeleteBytes(body, "input")
 	if err != nil {
@@ -1728,39 +1913,257 @@ func codexComparableRequestWithoutInput(body []byte) ([]byte, bool) {
 			return nil, false
 		}
 	}
-	canonical, ok := codexCanonicalJSONBytes(comparable)
-	if !ok {
+	comparable = bytes.TrimSpace(comparable)
+	if len(comparable) == 0 || !gjson.ValidBytes(comparable) {
 		return nil, false
 	}
-	return canonical, true
+	return bytes.Clone(comparable), true
+}
+
+func codexComparableRequestWithoutInputFast(data []byte, inputResult gjson.Result) ([]byte, bool) {
+	i := codexSkipJSONSpaces(data, 0)
+	if i >= len(data) || data[i] != '{' {
+		return nil, false
+	}
+	i++
+	inputStart, inputEnd, hasInputRange := codexJSONResultRawRange(data, inputResult)
+
+	capacity := len(data)
+	if capacity > 1024 {
+		capacity = 1024
+	}
+	out := make([]byte, 0, capacity)
+	out = append(out, '{')
+	wrote := false
+	appendField := func(keyRaw []byte, valueRaw []byte) {
+		if wrote {
+			out = append(out, ',')
+		}
+		out = append(out, keyRaw...)
+		out = append(out, ':')
+		out = append(out, bytes.TrimSpace(valueRaw)...)
+		wrote = true
+	}
+
+	for {
+		i = codexSkipJSONSpaces(data, i)
+		if i >= len(data) {
+			return nil, false
+		}
+		if data[i] == '}' {
+			out = append(out, '}')
+			i = codexSkipJSONSpaces(data, i+1)
+			if i != len(data) {
+				return nil, false
+			}
+			return out, true
+		}
+
+		keyRawStart := i
+		keyStart, keyEnd, keyEscaped, next, ok := codexParseJSONStringRaw(data, i)
+		if !ok || keyEscaped {
+			return nil, false
+		}
+		keyRaw := data[keyRawStart:next]
+		key := data[keyStart:keyEnd]
+		i = codexSkipJSONSpaces(data, next)
+		if i >= len(data) || data[i] != ':' {
+			return nil, false
+		}
+		valueStart := codexSkipJSONSpaces(data, i+1)
+		if valueStart >= len(data) {
+			return nil, false
+		}
+		inputKey := bytes.Equal(key, codexJSONKeyInput)
+		valueNext := 0
+		if inputKey && hasInputRange && inputStart == valueStart {
+			valueNext = inputEnd
+		} else {
+			valueNext, ok = codexSkipJSONValue(data, valueStart)
+			if !ok {
+				return nil, false
+			}
+		}
+		valueRaw := data[valueStart:valueNext]
+
+		switch {
+		case inputKey, bytes.Equal(key, codexJSONKeyGenerate):
+		case bytes.Equal(key, codexJSONKeyMetadata):
+			metadataRaw, keep, ok := codexComparableClientMetadataRaw(valueRaw)
+			if !ok {
+				return nil, false
+			}
+			if keep {
+				appendField(keyRaw, metadataRaw)
+			}
+		default:
+			appendField(keyRaw, valueRaw)
+		}
+
+		i = codexSkipJSONSpaces(data, valueNext)
+		if i >= len(data) {
+			return nil, false
+		}
+		switch data[i] {
+		case ',':
+			i++
+		case '}':
+			out = append(out, '}')
+			i = codexSkipJSONSpaces(data, i+1)
+			if i != len(data) {
+				return nil, false
+			}
+			return out, true
+		default:
+			return nil, false
+		}
+	}
+}
+
+func codexComparableClientMetadataRaw(raw []byte) ([]byte, bool, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, false, false
+	}
+	if raw[0] != '{' {
+		return raw, true, true
+	}
+	i := codexSkipJSONSpaces(raw, 0)
+	if i >= len(raw) || raw[i] != '{' {
+		return nil, false, false
+	}
+	i++
+
+	capacity := len(raw)
+	if capacity > 256 {
+		capacity = 256
+	}
+	out := make([]byte, 0, capacity)
+	out = append(out, '{')
+	wrote := false
+	appendField := func(keyRaw []byte, valueRaw []byte) {
+		if wrote {
+			out = append(out, ',')
+		}
+		out = append(out, keyRaw...)
+		out = append(out, ':')
+		out = append(out, bytes.TrimSpace(valueRaw)...)
+		wrote = true
+	}
+
+	for {
+		i = codexSkipJSONSpaces(raw, i)
+		if i >= len(raw) {
+			return nil, false, false
+		}
+		if raw[i] == '}' {
+			i = codexSkipJSONSpaces(raw, i+1)
+			if i != len(raw) {
+				return nil, false, false
+			}
+			if !wrote {
+				return nil, false, true
+			}
+			out = append(out, '}')
+			return out, true, true
+		}
+
+		keyRawStart := i
+		keyStart, keyEnd, keyEscaped, next, ok := codexParseJSONStringRaw(raw, i)
+		if !ok || keyEscaped {
+			return nil, false, false
+		}
+		keyRaw := raw[keyRawStart:next]
+		key := raw[keyStart:keyEnd]
+		i = codexSkipJSONSpaces(raw, next)
+		if i >= len(raw) || raw[i] != ':' {
+			return nil, false, false
+		}
+		valueStart := codexSkipJSONSpaces(raw, i+1)
+		if valueStart >= len(raw) {
+			return nil, false, false
+		}
+		valueNext, ok := codexSkipJSONValue(raw, valueStart)
+		if !ok {
+			return nil, false, false
+		}
+		if !codexComparableSkipClientMetadataKey(key) {
+			appendField(keyRaw, raw[valueStart:valueNext])
+		}
+		i = codexSkipJSONSpaces(raw, valueNext)
+		if i >= len(raw) {
+			return nil, false, false
+		}
+		switch raw[i] {
+		case ',':
+			i++
+		case '}':
+			i = codexSkipJSONSpaces(raw, i+1)
+			if i != len(raw) {
+				return nil, false, false
+			}
+			if !wrote {
+				return nil, false, true
+			}
+			out = append(out, '}')
+			return out, true, true
+		default:
+			return nil, false, false
+		}
+	}
+}
+
+func codexComparableSkipClientMetadataKey(key []byte) bool {
+	return bytes.Equal(key, codexJSONKeyMetadataTurn) ||
+		bytes.Equal(key, codexJSONKeyMetadataTrace) ||
+		bytes.Equal(key, codexJSONKeyMetadataTraceStat) ||
+		bytes.Equal(key, codexJSONKeyMetadataStartMS)
 }
 
 func codexRawArrayItems(result gjson.Result) ([][]byte, bool) {
 	if !result.Exists() || !result.IsArray() {
 		return nil, false
 	}
-	items := make([][]byte, 0, len(result.Array()))
-	result.ForEach(func(_, item gjson.Result) bool {
-		items = append(items, []byte(item.Raw))
-		return true
-	})
+	results := result.Array()
+	items := make([][]byte, len(results))
+	for i := range results {
+		items[i] = []byte(results[i].Raw)
+	}
 	return items, true
 }
 
-func codexCanonicalJSONBytes(raw []byte) ([]byte, bool) {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
+func codexRawArrayItemViews(source []byte, result gjson.Result, sourceOffset int, capacityHint int) ([][]byte, bool) {
+	if !result.Exists() || !result.IsArray() {
 		return nil, false
 	}
-	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if capacityHint < 0 {
+		capacityHint = 0
+	}
+	items := make([][]byte, 0, capacityHint)
+	valid := true
+	result.ForEach(func(_, item gjson.Result) bool {
+		start := item.Index - sourceOffset
+		end := start + len(item.Raw)
+		if start < 0 || end < start || end > len(source) {
+			valid = false
+			return false
+		}
+		items = append(items, source[start:end])
+		return true
+	})
+	if !valid {
 		return nil, false
 	}
-	canonical, err := json.Marshal(value)
-	if err != nil {
-		return nil, false
+	return items, true
+}
+
+// codexGJSONGetImmutableBytes avoids gjson.GetBytes' defensive copy. Callers
+// must keep source alive and immutable while using the returned result.
+func codexGJSONGetImmutableBytes(source []byte, path string) gjson.Result {
+	if len(source) == 0 {
+		return gjson.Result{}
 	}
-	return canonical, true
+	return gjson.Get(unsafe.String(unsafe.SliceData(source), len(source)), path)
 }
 
 func codexJSONRawEqual(left []byte, right []byte) bool {
@@ -1778,14 +2181,6 @@ func codexJSONRawEqual(left []byte, right []byte) bool {
 		return false
 	}
 	return reflect.DeepEqual(leftValue, rightValue)
-}
-
-func codexCompletedResponseOutput(eventData []byte) []byte {
-	output := gjson.GetBytes(eventData, "response.output")
-	if output.Exists() && output.IsArray() {
-		return []byte(output.Raw)
-	}
-	return []byte("[]")
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
@@ -1937,7 +2332,7 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 }
 
 func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Context, from sdktranslator.Format, executionSessionID string, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
-	headers := http.Header{}
+	headers := make(http.Header, codexRequestHeaderInitialCapacity)
 	if len(rawJSON) == 0 {
 		return rawJSON, headers
 	}
@@ -1998,7 +2393,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 
 func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config, requestKind string) http.Header {
 	if headers == nil {
-		headers = http.Header{}
+		headers = make(http.Header, codexRequestHeaderInitialCapacity)
 	}
 	if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
@@ -2010,15 +2405,15 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, profileHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
-	misc.EnsureHeader(headers, profileHeaders, "x-responsesapi-include-timing-metrics", "")
+	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderResponsesAPIIncludeTimingMetrics, "")
 	if codexIncludeTimingMetrics(cfg) {
-		headers.Set("x-responsesapi-include-timing-metrics", "true")
+		headers.Set(codexWireHeaderResponsesAPIIncludeTimingMetrics, "true")
 	}
 	codexEnsureVersionHeader(headers, profileHeaders)
-	misc.EnsureHeader(headers, profileHeaders, "x-openai-subagent", "")
-	misc.EnsureHeader(headers, profileHeaders, codexHeaderOAIAttestation, "")
+	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderOpenAISubagent, "")
+	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderOAIAttestation, "")
 
-	headers.Set("OpenAI-Beta", codexResponsesWebsocketBetaHeaderValue)
+	headers.Set(codexWireHeaderOpenAIBeta, codexResponsesWebsocketBetaHeaderValue)
 	identity := codexResolvedIdentity(headers, profileHeaders, auth, cfg)
 	headers.Set("User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
@@ -2033,7 +2428,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 		sandbox:     codexDefaultSandboxTag,
 		windowID:    strings.TrimSpace(headers.Get(codexHeaderWindowID)),
 	})
-	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
+	misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	headers.Set("Originator", identity.originator)
 	if !codexIsAPIKeyAuth(auth) {
 		if auth != nil && auth.Metadata != nil {
@@ -2050,10 +2445,11 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
-	codexEnsureVersionHeader(headers, nil)
-	if cfgUserAgent != "" {
-		headers.Set("User-Agent", cfgUserAgent)
+	if util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs) {
+		codexEnsureVersionHeader(headers, nil)
+		if cfgUserAgent != "" {
+			headers.Set("User-Agent", cfgUserAgent)
+		}
 	}
 
 	return headers

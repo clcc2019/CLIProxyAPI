@@ -333,6 +333,48 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 	}
 }
 
+func TestCodexExecutorExecuteStreamSuppressesUsageWarningBeforeForwarding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_text.delta","item_id":"msg-warning","delta":"` + codexUsageLimitHeadsUpText + `"}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1775555723,"status":"completed","model":"gpt-5.4-mini-2026-03-17","output":[],"usage":{"input_tokens":8,"output_tokens":28,"total_tokens":36}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var received bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		_, _ = received.Write(chunk.Payload)
+	}
+
+	if strings.Contains(received.String(), "5h limit left") {
+		t.Fatalf("usage warning leaked to downstream stream: %s", received.String())
+	}
+	if !strings.Contains(received.String(), "ok") {
+		t.Fatalf("normal assistant output missing from downstream stream: %s", received.String())
+	}
+}
+
 func TestCodexExecutorExecuteStream_IgnoresUnexpectedEOFAfterCompleted(t *testing.T) {
 	executor := NewCodexExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
@@ -380,6 +422,78 @@ func TestCodexExecutorExecuteStream_IgnoresUnexpectedEOFAfterCompleted(t *testin
 	gotContent := gjson.GetBytes(completed, "response.output.0.content.0.text").String()
 	if gotContent != "ok" {
 		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
+	}
+}
+
+func TestCodexExecutorExecuteStreamRetriesWithoutStaleTurnState(t *testing.T) {
+	var attempts int
+	seenTurnState := make([]string, 0, 2)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		turnState := r.Header.Get(codexHeaderTurnState)
+		seenTurnState = append(seenTurnState, turnState)
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch attempts {
+		case 1:
+			if turnState != "turn-state-1" {
+				t.Fatalf("first %s = %q, want turn-state-1", codexHeaderTurnState, turnState)
+			}
+			_, _ = w.Write([]byte("data: {\"type\":\"error\",\"status\":400,\"error\":{\"code\":\"previous_response_not_found\",\"message\":\"Previous response with id 'resp_1' not found.\",\"param\":\"previous_response_id\",\"type\":\"invalid_request_error\"}}\n\n"))
+		case 2:
+			if turnState != "" {
+				t.Fatalf("retry %s = %q, want empty", codexHeaderTurnState, turnState)
+			}
+			_, _ = w.Write([]byte(codexCompletedAfterOutputItemDoneSSE))
+		default:
+			t.Fatalf("unexpected attempt %d", attempts)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+	ctx := contextWithGinHeaders(map[string]string{
+		codexHeaderTurnState: "turn-state-1",
+	})
+
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var completed []byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		payload := bytes.TrimSpace(chunk.Payload)
+		if !bytes.HasPrefix(payload, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(payload[5:])
+		if gjson.GetBytes(data, "type").String() == "response.completed" {
+			completed = append([]byte(nil), data...)
+		}
+	}
+
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if len(seenTurnState) != 2 || seenTurnState[0] != "turn-state-1" || seenTurnState[1] != "" {
+		t.Fatalf("unexpected turn states: %v", seenTurnState)
+	}
+	if len(completed) == 0 {
+		t.Fatal("missing response.completed chunk after retry")
 	}
 }
 
@@ -594,6 +708,11 @@ func TestCodexEventTypeUsesTopLevelType(t *testing.T) {
 	if got := codexEventType([]byte(`{"nested":{"type":"response.completed"}}`)); got != "" {
 		t.Fatalf("codexEventType() for nested-only type = %q, want empty", got)
 	}
+
+	unknownType := "response.function_call_arguments.delta.invalid"
+	if got := codexEventType([]byte(`{"type":"response.function_call_arguments.delta.invalid","delta":"chunk"}`)); got != unknownType {
+		t.Fatalf("codexEventType() = %q, want %q", got, unknownType)
+	}
 }
 
 func TestCodexStreamArgumentDeltaRecordsEscapedWhitespacePayload(t *testing.T) {
@@ -606,12 +725,60 @@ func TestCodexStreamArgumentDeltaRecordsEscapedWhitespacePayload(t *testing.T) {
 	}
 }
 
+func TestCodexStreamArgumentDeltaRecordsCompactSequenceNumberPayload(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","sequence_number":42,"item_id":"fc_item_1","output_index":0,"delta":"{\"q\":\"hello world\"}"}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"\n","sequence_number":43}`))
+
+	if got := streamState.functionCallsByItem["fc_item_1"].arguments(); got != "{\"q\":\"hello world\"}\n" {
+		t.Fatalf("arguments = %q, want escaped JSON payload", got)
+	}
+}
+
+func TestCodexStreamArgumentDeltaFallsBackToItemIDForUnknownOutputIndex(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":99,"delta":"chunk"}`))
+
+	if got := streamState.functionCallsByItem["fc_item_1"].arguments(); got != "chunk" {
+		t.Fatalf("arguments = %q, want fallback item_id lookup", got)
+	}
+}
+
 func BenchmarkCodexEventTypeFirstField(b *testing.B) {
 	eventData := []byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"chunk"}`)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		if got := codexEventType(eventData); got != codexEventFunctionCallArgumentsDelta {
 			b.Fatalf("codexEventType() = %q", got)
+		}
+	}
+}
+
+func BenchmarkCodexEventTypeOutputTextFirstField(b *testing.B) {
+	eventData := []byte(`{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"chunk"}`)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if got := codexEventType(eventData); got != "response.output_text.delta" {
+			b.Fatalf("codexEventType() = %q", got)
+		}
+	}
+}
+
+func BenchmarkCodexStreamTextOnlyCompletion(b *testing.B) {
+	deltaEvent := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
+	completedEvent := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}}`)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		streamState := newCodexStreamCompletionState()
+		for j := 0; j < 64; j++ {
+			streamState.recordEventWithType("response.output_text.delta", deltaEvent)
+		}
+		completed, ok := streamState.processEventDataWithType(codexEventCompleted, completedEvent, true)
+		if !ok || len(completed.data) == 0 {
+			b.Fatal("missing completed event")
 		}
 	}
 }
@@ -725,12 +892,47 @@ func TestPatchCodexCompletedOutputRecoversServerToolSearchCallWithoutCallID(t *t
 }
 
 func BenchmarkCodexStreamFunctionCallArgumentDeltas(b *testing.B) {
+	addedEvent := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`)
+	deltaEvent := []byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"chunk"}`)
+	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		streamState := newCodexStreamCompletionState()
-		streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
+		streamState.recordEvent(addedEvent)
 		for j := 0; j < 512; j++ {
-			streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"chunk"}`))
+			streamState.recordEvent(deltaEvent)
 		}
+		if got := streamState.functionCallsByItem["fc_item_1"].arguments(); len(got) == 0 {
+			b.Fatal("arguments are empty")
+		}
+	}
+}
+
+func BenchmarkCodexStreamFunctionCallArgumentDeltasWithSequenceNumber(b *testing.B) {
+	addedEvent := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`)
+	deltaEvent := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":42,"item_id":"fc_item_1","output_index":0,"delta":"chunk"}`)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		streamState := newCodexStreamCompletionState()
+		streamState.recordEvent(addedEvent)
+		for j := 0; j < 512; j++ {
+			streamState.recordEvent(deltaEvent)
+		}
+		if got := streamState.functionCallsByItem["fc_item_1"].arguments(); len(got) == 0 {
+			b.Fatal("arguments are empty")
+		}
+	}
+}
+
+func BenchmarkCodexStreamFunctionCallSingleArgumentDelta(b *testing.B) {
+	addedEvent := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`)
+	deltaEvent := []byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"chunk"}`)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		streamState := newCodexStreamCompletionState()
+		streamState.recordEvent(addedEvent)
+		streamState.recordEvent(deltaEvent)
 		if got := streamState.functionCallsByItem["fc_item_1"].arguments(); len(got) == 0 {
 			b.Fatal("arguments are empty")
 		}

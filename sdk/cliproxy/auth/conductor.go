@@ -3945,7 +3945,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	schedulerDirty := false
 	persistAuthID := ""
 	var schedulerSnapshot *Auth
+	var errorEventAuthSnapshot *Auth
 	invalidateAuthAffinity := false
+	publishErrorEvent := m.shouldPublishErrorEvent(result)
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -4100,6 +4102,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if schedulerDirty {
 			schedulerSnapshot = auth.CloneForScheduler()
 		}
+		if publishErrorEvent {
+			errorEventAuthSnapshot = auth.Clone()
+		}
 	}
 	m.mu.Unlock()
 	if persistAuthID != "" {
@@ -4129,6 +4134,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		m.releaseProxyLease(ctx, result.AuthID)
 	}
 	m.hook.OnResult(ctx, result)
+	m.publishErrorEvent(result, errorEventAuthSnapshot)
 }
 
 // MarkAuthQuotaCooldown marks a credential as auth-scoped quota exhausted using
@@ -7245,6 +7251,53 @@ func (e *credentialRetryLimitError) StatusCode() int {
 	return statusCodeFromError(e.cause)
 }
 
+type credentialFailoverRetryLimitError struct {
+	authErr *Error
+	cause   error
+}
+
+func (e *credentialFailoverRetryLimitError) Error() string {
+	if e == nil || e.authErr == nil {
+		return ""
+	}
+	return e.authErr.Error()
+}
+
+func (e *credentialFailoverRetryLimitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *credentialFailoverRetryLimitError) StatusCode() int {
+	if e == nil || e.authErr == nil {
+		return 0
+	}
+	return e.authErr.StatusCode()
+}
+
+func (e *credentialFailoverRetryLimitError) IsAuthScopedFailure() bool {
+	return e != nil && isAuthScopedFailure(e.cause)
+}
+
+func (e *credentialFailoverRetryLimitError) IsCredentialFailoverFailure() bool {
+	return e != nil && isCredentialFailoverFailure(e.cause)
+}
+
+func (e *credentialFailoverRetryLimitError) As(target any) bool {
+	if e == nil || e.authErr == nil {
+		return false
+	}
+	switch out := target.(type) {
+	case **Error:
+		*out = e.authErr
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Manager) credentialRetryLimitReachedError(ctx context.Context, mode string, providers []string, model string, opts cliproxyexecutor.Options, maxRetryCredentials int, attempted map[string]struct{}, lastErr error) error {
 	attemptedCount := len(attempted)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
@@ -7270,10 +7323,13 @@ func (m *Manager) credentialRetryLimitReachedError(ctx context.Context, mode str
 	if lastErr != nil {
 		entry.Warnf("auth failover stopped by max-retry-credentials: %v", lastErr)
 		if isCredentialFailoverFailure(lastErr) {
-			return &Error{
-				Code:       "auth_unavailable",
-				Message:    fmt.Sprintf("credential failover stopped during %s after %d credential(s) (max-retry-credentials=%d)", mode, attemptedCount, maxRetryCredentials),
-				HTTPStatus: http.StatusServiceUnavailable,
+			return &credentialFailoverRetryLimitError{
+				authErr: &Error{
+					Code:       "auth_unavailable",
+					Message:    fmt.Sprintf("credential failover stopped during %s after %d credential(s) (max-retry-credentials=%d)", mode, attemptedCount, maxRetryCredentials),
+					HTTPStatus: http.StatusServiceUnavailable,
+				},
+				cause: lastErr,
 			}
 		}
 		return &credentialRetryLimitError{

@@ -241,6 +241,26 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 	}
 }
 
+func TestCodexResponsesAPIClientMetadataFromBodyFiltersNonMergeableKeys(t *testing.T) {
+	metadata := codexResponsesAPIClientMetadataFromBody([]byte(`{
+		"client_metadata":{
+			"origin":"cli",
+			"session_id":"client-session",
+			"x-codex-installation-id":"install-1",
+			"ws_request_header_traceparent":"trace-1"
+		}
+	}`))
+
+	if len(metadata) != 1 || metadata["origin"] != "cli" {
+		t.Fatalf("metadata = %#v, want only mergeable origin", metadata)
+	}
+
+	transportOnly := codexResponsesAPIClientMetadataFromBody([]byte(`{"client_metadata":{"x-codex-installation-id":"install-1"}}`))
+	if transportOnly != nil {
+		t.Fatalf("transport-only metadata = %#v, want nil", transportOnly)
+	}
+}
+
 func TestCodexMergeResponsesAPIClientMetadataDoesNotReplaceExistingCustomFields(t *testing.T) {
 	headers := http.Header{}
 	headers.Set(codexHeaderTurnMetadata, `{"session_id":"session-1","origin":"server"}`)

@@ -122,6 +122,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	ginHeaders := codexGinHeadersFromContext(ctx)
 	codexPinClientProfileFromFirstRequest(ctx, auth, nil, ginHeaders, e.cfg)
 	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
+	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	if requestKind != codexFinalUpstreamCompact {
 		body = codexApplyHTTPClientMetadataWithSource(body, nil, profileHeaders, auth, e.cfg)
 	}
@@ -130,8 +131,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	if err != nil {
 		return codexPreparedHTTPCall{}, err
 	}
-	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(prepared.body)
-	applyCodexHeaders(prepared.httpReq, auth, token, stream, e.cfg)
+	applyCodexHeadersForRequestKind(prepared.httpReq, auth, token, stream, e.cfg, requestKind)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)
 	if requestKind != codexFinalUpstreamCompact {
 		e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
@@ -142,7 +142,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 		}
 	}
 	if requestKind != codexFinalUpstreamCompact {
-		if err := maybeEnableCodexRequestCompressionWithConfig(prepared.httpReq, auth, e.cfg, prepared.body); err != nil {
+		if err := maybeEnableCodexRequestCompressionWithConfigForURL(prepared.httpReq, auth, e.cfg, prepared.body, url); err != nil {
 			return codexPreparedHTTPCall{}, fmt.Errorf("codex executor: request compression failed: %w", err)
 		}
 	}

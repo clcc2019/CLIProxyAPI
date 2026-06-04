@@ -143,7 +143,7 @@ func codexFillTurnMetadataLineageDefaults(target http.Header, source http.Header
 		defaults.parentThreadID = firstNonEmptyHeaderValue(target, source, codexHeaderParentThreadID)
 	}
 	if defaults.subagentKind == "" {
-		defaults.subagentKind = firstNonEmptyHeaderValue(target, source, "X-OpenAI-Subagent")
+		defaults.subagentKind = firstNonEmptyHeaderValue(target, source, codexWireHeaderOpenAISubagent)
 	}
 }
 
@@ -151,7 +151,7 @@ func codexFillTurnMetadataRequestKindDefault(target http.Header, source http.Hea
 	if defaults == nil || strings.TrimSpace(defaults.requestKind) != codexTurnRequestKind {
 		return
 	}
-	if codexHeaderBoolValue(target, source, codexHeaderMemgenRequest) {
+	if codexHeaderBoolValue(target, source, codexWireHeaderMemgenRequest) {
 		defaults.requestKind = codexMemoryRequestKind
 	}
 }
@@ -349,18 +349,18 @@ func codexResponsesAPIClientMetadataFromBody(body []byte) map[string]string {
 	if !metadata.IsObject() {
 		return nil
 	}
-	entries := make(map[string]string)
+	var entries map[string]string
 	metadata.ForEach(func(key, value gjson.Result) bool {
 		keyString := strings.TrimSpace(key.String())
-		if keyString == "" || value.Type != gjson.String {
+		if keyString == "" || value.Type != gjson.String || codexShouldSkipResponsesAPIClientMetadataForTurnMetadata(keyString) {
 			return true
+		}
+		if entries == nil {
+			entries = make(map[string]string)
 		}
 		entries[keyString] = value.String()
 		return true
 	})
-	if len(entries) == 0 {
-		return nil
-	}
 	return entries
 }
 

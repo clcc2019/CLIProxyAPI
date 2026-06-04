@@ -189,14 +189,14 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 			sessionID = uuid.NewString()
 		}
 	}
-	target.Set("Session_id", sessionID)
-	target.Set(codexHeaderOfficialSessionID, sessionID)
+	codexSetSingleHeaderValue(target, "Session_id", sessionID)
+	codexSetSingleHeaderValue(target, codexHeaderOfficialSessionID, sessionID)
 	if threadID == "" {
 		threadID = sessionID
 	}
 	if threadID != "" {
-		target.Set(codexHeaderThreadID, threadID)
-		target.Set(codexHeaderOfficialThreadID, threadID)
+		codexSetSingleHeaderValue(target, codexHeaderThreadID, threadID)
+		codexSetSingleHeaderValue(target, codexHeaderOfficialThreadID, threadID)
 	}
 
 	requestID := firstNonEmptyHeaderValue(target, source, "X-Client-Request-Id")
@@ -210,7 +210,7 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 		requestID = sessionID
 	}
 	if requestID != "" {
-		target.Set("X-Client-Request-Id", requestID)
+		codexSetSingleHeaderValue(target, "X-Client-Request-Id", requestID)
 	} else {
 		target.Del("X-Client-Request-Id")
 	}

@@ -19,11 +19,11 @@ var codexPinnedClientProfileHeaders = []string{
 	"Version",
 	codexHeaderInstallationID,
 	"X-OpenAI-Subagent",
-	codexHeaderOAIAttestation,
+	"X-OAI-Attestation",
 	"Traceparent",
 	"Tracestate",
 	misc.CodexResidencyHeader,
-	codexHeaderOpenAIFedramp,
+	"X-OpenAI-Fedramp",
 	"x-responsesapi-include-timing-metrics",
 }
 
@@ -98,15 +98,27 @@ func codexPreparePinnedClientProfileHeaders(headers http.Header, auth *cliproxya
 	if headers == nil || !codexClientProfilePinned(auth) {
 		return
 	}
-	if codexAuthUserAgent(auth) == "" && !codexAuthHeaderFixed(auth, "User-Agent") {
-		headers.Del("User-Agent")
-	}
-	if codexAuthOriginator(auth) == "" && !codexAuthHeaderFixed(auth, "Originator") {
-		headers.Del("Originator")
-	}
-	for _, headerName := range codexPinnedClientProfileHeaders {
-		if !codexAuthHeaderFixed(auth, headerName) {
-			headers.Del(headerName)
+
+	for existingKey := range headers {
+		switch {
+		case strings.EqualFold(existingKey, "User-Agent"):
+			if codexAuthUserAgent(auth) == "" && !codexAuthHeaderFixed(auth, "User-Agent") {
+				delete(headers, existingKey)
+			}
+		case strings.EqualFold(existingKey, "Originator"):
+			if codexAuthOriginator(auth) == "" && !codexAuthHeaderFixed(auth, "Originator") {
+				delete(headers, existingKey)
+			}
+		default:
+			for _, headerName := range codexPinnedClientProfileHeaders {
+				if !strings.EqualFold(existingKey, headerName) {
+					continue
+				}
+				if !codexAuthHeaderFixed(auth, headerName) {
+					delete(headers, existingKey)
+				}
+				break
+			}
 		}
 	}
 }

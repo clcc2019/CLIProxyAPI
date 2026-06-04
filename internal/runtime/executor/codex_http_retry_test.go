@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -220,6 +221,134 @@ func TestDoCodexHTTPRequestDoesNotRetryZstdApplicationBadRequest(t *testing.T) {
 	}
 }
 
+func TestCodexShouldRetryHTTPStatusWithoutCompressionSniffsBoundedPrefixAndPreservesBody(t *testing.T) {
+	body := append([]byte(`{"error":{"message":"ordinary application bad request"}}`), bytes.Repeat([]byte("x"), helps.MaxErrorResponseBodyBytes+64)...)
+	source := &codexCountingReadCloser{reader: bytes.NewReader(body)}
+	resp := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Body:       source,
+	}
+
+	if codexShouldRetryHTTPStatusWithoutCompression(resp) {
+		t.Fatal("ordinary application error should not be treated as zstd rejection")
+	}
+	if source.bytesRead > helps.MaxErrorResponseBodyBytes {
+		t.Fatalf("sniff read %d bytes, want at most %d", source.bytesRead, helps.MaxErrorResponseBodyBytes)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(restored response body) error = %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("restored response body length = %d, want %d", len(got), len(body))
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatalf("Close(restored response body) error = %v", errClose)
+	}
+	if !source.closed {
+		t.Fatal("restored response body Close() did not close original body")
+	}
+}
+
+func TestCodexShouldRetryHTTPResponseWithoutTurnStateSniffsBoundedPrefixAndPreservesBody(t *testing.T) {
+	body := append([]byte(`{"error":{"code":"unrelated","message":"ordinary application bad request"}}`), bytes.Repeat([]byte("x"), helps.MaxErrorResponseBodyBytes+64)...)
+	source := &codexCountingReadCloser{reader: bytes.NewReader(body)}
+	resp := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Body:       source,
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set(codexHeaderTurnState, "turn-state-1")
+	prepared := codexPreparedRequest{
+		httpReq: req,
+		body:    []byte(`{"model":"gpt-5-codex","input":"hello"}`),
+	}
+
+	if codexShouldRetryHTTPResponseWithoutTurnState(resp, prepared) {
+		t.Fatal("unrelated application error should not retry without turn state")
+	}
+	if source.bytesRead > helps.MaxErrorResponseBodyBytes {
+		t.Fatalf("sniff read %d bytes, want at most %d", source.bytesRead, helps.MaxErrorResponseBodyBytes)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(restored response body) error = %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("restored response body length = %d, want %d", len(got), len(body))
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatalf("Close(restored response body) error = %v", errClose)
+	}
+	if !source.closed {
+		t.Fatal("restored response body Close() did not close original body")
+	}
+}
+
+func TestDoCodexHTTPRequestRetriesPreviousResponseNotFoundWithoutTurnState(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	errBody := `{"error":{"code":"previous_response_not_found","message":"Previous response with id 'resp_1' not found.","param":"previous_response_id","type":"invalid_request_error"}}`
+
+	var attempts int
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(codexRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		gotBody, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatalf("ReadAll(request body) error = %v", errRead)
+		}
+		if !bytes.Equal(gotBody, body) {
+			t.Fatalf("attempt %d body = %s, want %s", attempts, gotBody, body)
+		}
+		switch attempts {
+		case 1:
+			if got := req.Header.Get(codexHeaderTurnState); got != "turn-state-1" {
+				t.Fatalf("first %s = %q, want turn-state-1", codexHeaderTurnState, got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(errBody)),
+			}, nil
+		case 2:
+			if got := req.Header.Get(codexHeaderTurnState); got != "" {
+				t.Fatalf("retry %s = %q, want empty", codexHeaderTurnState, got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		default:
+			t.Fatalf("unexpected attempt %d", attempts)
+			return nil, nil
+		}
+	})))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(codexHeaderTurnState, "turn-state-1")
+
+	resp, err := (&CodexExecutor{}).doCodexHTTPRequest(ctx, nil, codexPreparedRequest{httpReq: req, body: body})
+	if err != nil {
+		t.Fatalf("doCodexHTTPRequest() error = %v", err)
+	}
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("response = %#v, want 200", resp)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if got := req.Header.Get(codexHeaderTurnState); got != "" {
+		t.Fatalf("prepared request %s = %q, want empty after retry", codexHeaderTurnState, got)
+	}
+}
+
 func TestDoCodexHTTPRequestRebuildsBodyAcrossSeparateCalls(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{
@@ -380,4 +509,21 @@ func TestCodexShouldRetryStreamReadBeforePayloadOnHTTP2InternalError(t *testing.
 	if codexHTTPMaxStreamReadRetries != 5 {
 		t.Fatalf("stream retry budget = %d, want official default 5", codexHTTPMaxStreamReadRetries)
 	}
+}
+
+type codexCountingReadCloser struct {
+	reader    *bytes.Reader
+	bytesRead int
+	closed    bool
+}
+
+func (r *codexCountingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytesRead += n
+	return n, err
+}
+
+func (r *codexCountingReadCloser) Close() error {
+	r.closed = true
+	return nil
 }

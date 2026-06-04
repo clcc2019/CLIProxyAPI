@@ -1136,17 +1136,20 @@ func codexRawJSONArray(items [][]byte) []byte {
 	if len(items) == 0 {
 		return []byte("[]")
 	}
-	var buf bytes.Buffer
-	buf.Grow(len(items) * 32)
-	buf.WriteByte('[')
+	totalLen := 2 + len(items) - 1
+	for _, item := range items {
+		totalLen += len(bytes.TrimSpace(item))
+	}
+	buf := make([]byte, 0, totalLen)
+	buf = append(buf, '[')
 	for i, item := range items {
 		if i > 0 {
-			buf.WriteByte(',')
+			buf = append(buf, ',')
 		}
-		buf.Write(bytes.TrimSpace(item))
+		buf = append(buf, bytes.TrimSpace(item)...)
 	}
-	buf.WriteByte(']')
-	return buf.Bytes()
+	buf = append(buf, ']')
+	return buf
 }
 
 func codexRawJSONEqual(left, right []byte) bool {

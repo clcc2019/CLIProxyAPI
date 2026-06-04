@@ -39,8 +39,11 @@ func (e *CodexExecutor) applyCodexHTTPTurnState(auth *cliproxyauth.Auth, executi
 		return
 	}
 	key := e.codexHTTPTurnStateKey(auth, executionSessionID)
+	if key == "" {
+		return
+	}
 	scope := codexHTTPTurnStateScope(headers.Get(codexHeaderTurnMetadata))
-	if key == "" || scope == "" {
+	if scope == "" {
 		return
 	}
 	if state := e.httpTurnState.get(key, scope, time.Now()); state != "" {
@@ -60,14 +63,39 @@ func (e *CodexExecutor) rememberCodexHTTPTurnState(auth *cliproxyauth.Auth, prep
 		return
 	}
 	key := e.codexHTTPTurnStateKey(auth, prepared.executionSessionID)
+	if key == "" {
+		return
+	}
 	scope := codexHTTPTurnStateScope(prepared.httpReq.Header.Get(codexHeaderTurnMetadata))
-	if key == "" || scope == "" {
+	if scope == "" {
 		return
 	}
 	e.httpTurnState.put(key, scope, state, time.Now())
 	if strings.TrimSpace(prepared.httpReq.Header.Get(codexHeaderTurnState)) == "" {
 		prepared.httpReq.Header.Set(codexHeaderTurnState, state)
 	}
+}
+
+func (e *CodexExecutor) forgetCodexHTTPTurnState(auth *cliproxyauth.Auth, prepared codexPreparedRequest) {
+	if e == nil || e.httpTurnState == nil || prepared.httpReq == nil {
+		return
+	}
+	if prepared.httpReq.URL == nil || codexFinalUpstreamRequestKindForURL(prepared.httpReq.URL.String()) != codexFinalUpstreamResponses {
+		return
+	}
+	state := strings.TrimSpace(prepared.httpReq.Header.Get(codexHeaderTurnState))
+	if state == "" {
+		return
+	}
+	key := e.codexHTTPTurnStateKey(auth, prepared.executionSessionID)
+	if key == "" {
+		return
+	}
+	scope := codexHTTPTurnStateScope(prepared.httpReq.Header.Get(codexHeaderTurnMetadata))
+	if scope == "" {
+		return
+	}
+	e.httpTurnState.delete(key, scope, state)
 }
 
 func (e *CodexExecutor) CloseExecutionSession(sessionID string) {
@@ -187,6 +215,22 @@ func (s *codexHTTPTurnStateStore) put(key string, scope string, state string, no
 		scope:    scope,
 		lastSeen: now,
 	}
+}
+
+func (s *codexHTTPTurnStateStore) delete(key string, scope string, state string) {
+	key = strings.TrimSpace(key)
+	scope = strings.TrimSpace(scope)
+	state = strings.TrimSpace(state)
+	if s == nil || key == "" || scope == "" || state == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.entries[key]
+	if !ok || entry.scope != scope || entry.state != state {
+		return
+	}
+	delete(s.entries, key)
 }
 
 func (s *codexHTTPTurnStateStore) deleteExecutionSession(sessionID string) {
