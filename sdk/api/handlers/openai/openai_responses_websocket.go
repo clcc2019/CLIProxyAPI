@@ -1347,6 +1347,37 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		}
 		return errResponsesWebsocketNilStreamChannels
 	}
+	shouldRetryWithFullTranscript := func(errMsg *interfaces.ErrorMessage) bool {
+		return errMsg != nil &&
+			!emittedPayload &&
+			(responsesWebsocketShouldRetryFullTranscript(errMsg) ||
+				(retryCredentialFailoverWithFullTranscript && responsesWebsocketIsCredentialFailoverFailure(errMsg.Error)))
+	}
+	forwardTerminalError := func(errMsg *interfaces.ErrorMessage) error {
+		if errMsg != nil {
+			recordResponsesWebsocketAPIResponseError(h, c, errMsg)
+			errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
+			log.Infof(
+				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				sessionID,
+				websocket.TextMessage,
+				websocketPayloadEventType(errorPayload),
+				websocketPayloadPreview(errorPayload),
+			)
+			if errWrite != nil {
+				if errMsg.Error != nil {
+					cancel(errMsg.Error)
+				} else {
+					cancel(errWrite)
+				}
+				return errWrite
+			}
+			cancel(errMsg.Error)
+			return nil
+		}
+		cancel(nil)
+		return nil
+	}
 	if data == nil && errs == nil {
 		return completedOutput, completedResponseID, completed, failNilStreamChannels()
 	}
@@ -1364,46 +1395,32 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				continue
 			}
-			if errMsg != nil {
-				if !emittedPayload &&
-					(responsesWebsocketShouldRetryFullTranscript(errMsg) ||
-						(retryCredentialFailoverWithFullTranscript && responsesWebsocketIsCredentialFailoverFailure(errMsg.Error))) {
-					if errMsg.Error != nil {
-						cancel(errMsg.Error)
-					} else {
-						cancel(errResponsesWebsocketRetryFullTranscript)
-					}
-					return completedOutput, completedResponseID, completed, errResponsesWebsocketRetryFullTranscript
-				}
-				recordResponsesWebsocketAPIResponseError(h, c, errMsg)
-				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
-				log.Infof(
-					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
-					sessionID,
-					websocket.TextMessage,
-					websocketPayloadEventType(errorPayload),
-					websocketPayloadPreview(errorPayload),
-				)
-				if errWrite != nil {
-					// log.Warnf(
-					// 	"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-					// 	sessionID,
-					// 	websocketPayloadEventType(errorPayload),
-					// 	errWrite,
-					// )
+			if errMsg == nil {
+				continue
+			}
+			if shouldRetryWithFullTranscript(errMsg) {
+				if errMsg.Error != nil {
 					cancel(errMsg.Error)
-					return completedOutput, completedResponseID, completed, errWrite
+				} else {
+					cancel(errResponsesWebsocketRetryFullTranscript)
 				}
+				return completedOutput, completedResponseID, completed, errResponsesWebsocketRetryFullTranscript
 			}
-			if errMsg != nil {
-				cancel(errMsg.Error)
-			} else {
-				cancel(nil)
-			}
-			return completedOutput, completedResponseID, completed, nil
+			return completedOutput, completedResponseID, completed, forwardTerminalError(errMsg)
 		case chunk, ok := <-data:
 			if !ok {
 				if !completed {
+					if errMsg, okPendingErr := handlers.PendingStreamError(errs); okPendingErr {
+						if shouldRetryWithFullTranscript(errMsg) {
+							if errMsg.Error != nil {
+								cancel(errMsg.Error)
+							} else {
+								cancel(errResponsesWebsocketRetryFullTranscript)
+							}
+							return completedOutput, completedResponseID, completed, errResponsesWebsocketRetryFullTranscript
+						}
+						return completedOutput, completedResponseID, completed, forwardTerminalError(errMsg)
+					}
 					errMsg := &interfaces.ErrorMessage{
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),

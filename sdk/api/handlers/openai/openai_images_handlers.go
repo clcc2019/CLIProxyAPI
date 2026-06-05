@@ -1734,19 +1734,27 @@ func (h *OpenAIAPIHandler) streamImagesFromNative(c *gin.Context, rawPayload []b
 				}
 				continue
 			}
+			if errMsg == nil {
+				continue
+			}
 			if sseStarted {
 				emitImagesStreamError(writeEvent, errMsg)
 			} else {
 				h.WriteErrorResponse(c, errMsg)
 			}
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
+			cliCancel(errMsg.Error)
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					if sseStarted {
+						emitImagesStreamError(writeEvent, errMsg)
+					} else {
+						h.WriteErrorResponse(c, errMsg)
+					}
+					cliCancel(errMsg.Error)
+					return
+				}
 				ensureSSEStarted()
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
@@ -1793,20 +1801,29 @@ func (h *OpenAIAPIHandler) forwardNativeImagesStream(c *gin.Context, cancel func
 			cancel(requestCtx.Err())
 			return
 		case errMsg, ok := <-errs:
-			if ok && errMsg != nil {
-				emitImagesStreamError(writeEvent, errMsg)
-				cancel(errMsg.Error)
-				return
+			if !ok {
+				errs = nil
+				if data == nil {
+					errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+					emitImagesStreamError(writeEvent, errMsg)
+					cancel(errImageStreamNilChannels)
+					return
+				}
+				continue
 			}
-			errs = nil
-			if data == nil {
-				errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
-				emitImagesStreamError(writeEvent, errMsg)
-				cancel(errImageStreamNilChannels)
-				return
+			if errMsg == nil {
+				continue
 			}
+			emitImagesStreamError(writeEvent, errMsg)
+			cancel(errMsg.Error)
+			return
 		case chunk, ok := <-data:
 			if !ok {
+				if errMsg, okPendingErr := handlers.PendingStreamError(errs); okPendingErr {
+					emitImagesStreamError(writeEvent, errMsg)
+					cancel(errMsg.Error)
+					return
+				}
 				cancel(nil)
 				return
 			}
@@ -1903,15 +1920,22 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 		case <-ctx.Done():
 			return nil, &interfaces.ErrorMessage{StatusCode: http.StatusRequestTimeout, Error: ctx.Err()}
 		case errMsg, ok := <-errs:
-			if ok && errMsg != nil {
-				return nil, errMsg
+			if !ok {
+				errs = nil
+				if data == nil {
+					return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+				}
+				continue
 			}
-			errs = nil
-			if data == nil {
-				return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+			if errMsg == nil {
+				continue
 			}
+			return nil, errMsg
 		case chunk, ok := <-data:
 			if !ok {
+				if errMsg, okPendingErr := handlers.PendingStreamError(errs); okPendingErr {
+					return nil, errMsg
+				}
 				var result []byte
 				var done bool
 				var errMsg *interfaces.ErrorMessage
@@ -2195,19 +2219,27 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 				}
 				continue
 			}
+			if errMsg == nil {
+				continue
+			}
 			if sseStarted {
 				emitImagesStreamError(writeEvent, errMsg)
 			} else {
 				h.WriteErrorResponse(c, errMsg)
 			}
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
+			cliCancel(errMsg.Error)
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
+					if sseStarted {
+						emitImagesStreamError(writeEvent, errMsg)
+					} else {
+						h.WriteErrorResponse(c, errMsg)
+					}
+					cliCancel(errMsg.Error)
+					return
+				}
 				ensureSSEStarted()
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
@@ -2301,20 +2333,29 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			opts.cancel(requestCtx.Err())
 			return
 		case errMsg, ok := <-opts.errs:
-			if ok && errMsg != nil {
-				emitImagesStreamError(opts.writeEvent, errMsg)
-				opts.cancel(errMsg.Error)
-				return
+			if !ok {
+				opts.errs = nil
+				if opts.data == nil {
+					errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
+					emitImagesStreamError(opts.writeEvent, errMsg)
+					opts.cancel(errImageStreamNilChannels)
+					return
+				}
+				continue
 			}
-			opts.errs = nil
-			if opts.data == nil {
-				errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errImageStreamNilChannels}
-				emitImagesStreamError(opts.writeEvent, errMsg)
-				opts.cancel(errImageStreamNilChannels)
-				return
+			if errMsg == nil {
+				continue
 			}
+			emitImagesStreamError(opts.writeEvent, errMsg)
+			opts.cancel(errMsg.Error)
+			return
 		case chunk, ok := <-opts.data:
 			if !ok {
+				if errMsg, okPendingErr := handlers.PendingStreamError(opts.errs); okPendingErr {
+					emitImagesStreamError(opts.writeEvent, errMsg)
+					opts.cancel(errMsg.Error)
+					return
+				}
 				done := false
 				acc.FlushFrames(func(frame []byte) bool {
 					if processFrame(frame) {

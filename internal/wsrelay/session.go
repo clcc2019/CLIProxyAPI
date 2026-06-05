@@ -11,17 +11,27 @@ import (
 )
 
 const (
-	readTimeout          = 60 * time.Second
-	writeTimeout         = 10 * time.Second
-	maxInboundMessageLen = 64 << 20 // 64 MiB
-	heartbeatInterval    = 30 * time.Second
+	readTimeout           = 60 * time.Second
+	writeTimeout          = 10 * time.Second
+	maxInboundMessageLen  = 64 << 20 // 64 MiB
+	heartbeatInterval     = 30 * time.Second
+	pendingResponseBuffer = 32
 )
 
 var errClosed = errors.New("websocket session closed")
 
+func contextOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
 type pendingRequest struct {
 	ch        chan Message
 	closeOnce sync.Once
+	mu        sync.Mutex
+	closed    bool
 }
 
 func (pr *pendingRequest) close() {
@@ -29,8 +39,54 @@ func (pr *pendingRequest) close() {
 		return
 	}
 	pr.closeOnce.Do(func() {
+		pr.mu.Lock()
+		defer pr.mu.Unlock()
+		pr.closed = true
 		close(pr.ch)
 	})
+}
+
+func (pr *pendingRequest) send(msg Message) bool {
+	if pr == nil {
+		return false
+	}
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.closed {
+		return false
+	}
+	select {
+	case pr.ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (pr *pendingRequest) sendTerminal(msg Message) bool {
+	if pr.send(msg) {
+		return true
+	}
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.closed {
+		return false
+	}
+	select {
+	case pr.ch <- msg:
+		return true
+	default:
+	}
+	select {
+	case <-pr.ch:
+	default:
+	}
+	select {
+	case pr.ch <- msg:
+		return true
+	default:
+		return false
+	}
 }
 
 type session struct {
@@ -86,7 +142,7 @@ func (s *session) startHeartbeat() {
 	}()
 }
 
-func (s *session) run(ctx context.Context) {
+func (s *session) run() {
 	defer s.cleanup(errClosed)
 	for {
 		var msg Message
@@ -105,30 +161,43 @@ func (s *session) dispatch(msg Message) {
 	}
 	if value, ok := s.pending.Load(msg.ID); ok {
 		req := value.(*pendingRequest)
-		select {
-		case req.ch <- msg:
-		default:
-		}
-		if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
+		if terminalMessage(msg) {
+			req.sendTerminal(msg)
 			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
 				actual.(*pendingRequest).close()
 			}
+		} else {
+			req.send(msg)
 		}
 		return
 	}
-	if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
+	if terminalMessage(msg) && s.manager != nil {
 		s.manager.logDebugf("wsrelay: received terminal message for unknown id %s (provider=%s)", msg.ID, s.provider)
 	}
 }
 
+func terminalMessage(msg Message) bool {
+	return msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd
+}
+
 func (s *session) send(ctx context.Context, msg Message) error {
+	ctx = contextOrBackground(ctx)
 	select {
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-s.closed:
 		return errClosed
 	default:
 	}
 	s.writeMutex.Lock()
 	defer s.writeMutex.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.closed:
+		return errClosed
+	default:
+	}
 	if err := s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
@@ -139,10 +208,11 @@ func (s *session) send(ctx context.Context, msg Message) error {
 }
 
 func (s *session) request(ctx context.Context, msg Message) (<-chan Message, error) {
+	ctx = contextOrBackground(ctx)
 	if msg.ID == "" {
 		return nil, fmt.Errorf("wsrelay: message id is required")
 	}
-	if _, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan Message, 8)}); loaded {
+	if _, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan Message, pendingResponseBuffer)}); loaded {
 		return nil, fmt.Errorf("wsrelay: duplicate message id %s", msg.ID)
 	}
 	value, _ := s.pending.Load(msg.ID)
@@ -172,10 +242,7 @@ func (s *session) cleanup(cause error) {
 		s.pending.Range(func(key, value any) bool {
 			req := value.(*pendingRequest)
 			msg := Message{ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": cause.Error()}}
-			select {
-			case req.ch <- msg:
-			default:
-			}
+			req.sendTerminal(msg)
 			req.close()
 			return true
 		})

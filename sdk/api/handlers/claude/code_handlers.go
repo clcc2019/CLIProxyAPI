@@ -244,23 +244,18 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, modelName
 				errChan = nil
 				continue
 			}
+			if errMsg == nil {
+				continue
+			}
 			// Upstream failed immediately. Return proper error status and JSON.
 			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
+			cliCancel(errMsg.Error)
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
 				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
 					h.WriteErrorResponse(c, errMsg)
-					if errMsg != nil {
-						cliCancel(errMsg.Error)
-					} else {
-						cliCancel(nil)
-					}
+					cliCancel(errMsg.Error)
 					return
 				}
 				streamErr := fmt.Errorf("auth manager stream closed before sending payload")

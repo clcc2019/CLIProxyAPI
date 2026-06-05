@@ -1483,7 +1483,7 @@ func TestSessionAffinitySelector_ProviderScopeIsolation(t *testing.T) {
 	}
 	optsB := cliproxyexecutor.Options{
 		OriginalRequest: []byte(`{"metadata":{"session_id":"same-session"}}`),
-		Metadata:        map[string]any{cliproxyexecutor.ProviderScopeMetadataKey: "providers:claude,codex"},
+		Metadata:        map[string]any{cliproxyexecutor.ProviderScopeMetadataKey: "providers:claude,openai-compatibility"},
 	}
 
 	authA := &Auth{ID: "auth-a"}

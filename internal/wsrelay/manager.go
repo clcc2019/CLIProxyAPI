@@ -159,12 +159,13 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		m.onConnected(s.provider)
 	}
 
-	go s.run(context.Background())
+	go s.run()
 }
 
 // Send forwards the message to the specific provider connection and returns a channel
 // yielding response messages.
 func (m *Manager) Send(ctx context.Context, provider string, msg Message) (<-chan Message, error) {
+	ctx = contextOrBackground(ctx)
 	s := m.session(provider)
 	if s == nil {
 		return nil, fmt.Errorf("wsrelay: provider %s not connected", provider)

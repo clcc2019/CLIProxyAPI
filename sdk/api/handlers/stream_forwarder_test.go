@@ -79,6 +79,67 @@ func TestForwardStreamFlushesTerminalErrorImmediately(t *testing.T) {
 	}
 }
 
+func TestForwardStreamSkipsNilErrorMessages(t *testing.T) {
+	ctx, cancelRequest := newStreamForwardTestContext(t)
+	defer cancelRequest()
+
+	data := make(chan []byte)
+	wantErr := &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New("upstream quota")}
+	errs := make(chan *interfaces.ErrorMessage, 2)
+	errs <- nil
+	errs <- wantErr
+	close(errs)
+
+	flusher := &countingFlusher{}
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	var canceledErr error
+	var gotErr *interfaces.ErrorMessage
+	handler.ForwardStream(ctx, flusher, func(err error) { canceledErr = err }, data, errs, StreamForwardOptions{
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) { gotErr = errMsg },
+	})
+
+	if gotErr != wantErr {
+		t.Fatalf("terminal error = %p, want %p", gotErr, wantErr)
+	}
+	if canceledErr != wantErr.Error {
+		t.Fatalf("cancel error = %v, want %v", canceledErr, wantErr.Error)
+	}
+	if flusher.count != 1 {
+		t.Fatalf("flush count = %d, want 1", flusher.count)
+	}
+}
+
+func TestForwardStreamDataCloseSkipsNilPendingErrorMessages(t *testing.T) {
+	ctx, cancelRequest := newStreamForwardTestContext(t)
+	defer cancelRequest()
+
+	data := make(chan []byte)
+	close(data)
+	wantErr := &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New("upstream quota")}
+	errs := make(chan *interfaces.ErrorMessage, 2)
+	errs <- nil
+	errs <- wantErr
+	close(errs)
+
+	flusher := &countingFlusher{}
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	var canceledErr error
+	var gotErr *interfaces.ErrorMessage
+	handler.ForwardStream(ctx, flusher, func(err error) { canceledErr = err }, data, errs, StreamForwardOptions{
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) { gotErr = errMsg },
+	})
+
+	if gotErr != wantErr {
+		t.Fatalf("terminal error = %p, want %p", gotErr, wantErr)
+	}
+	if canceledErr != wantErr.Error {
+		t.Fatalf("cancel error = %v, want %v", canceledErr, wantErr.Error)
+	}
+	if flusher.count != 1 {
+		t.Fatalf("flush count = %d, want 1", flusher.count)
+	}
+}
+
 func TestForwardStreamRejectsDataWithoutChunkWriter(t *testing.T) {
 	ctx, cancelRequest := newStreamForwardTestContext(t)
 	defer cancelRequest()

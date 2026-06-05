@@ -37,6 +37,7 @@ type StreamEvent struct {
 
 // NonStream executes a non-streaming HTTP request using the websocket provider.
 func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPRequest) (*HTTPResponse, error) {
+	ctx = contextOrBackground(ctx)
 	if req == nil {
 		return nil, fmt.Errorf("wsrelay: request is nil")
 	}
@@ -113,6 +114,7 @@ func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPReque
 
 // Stream executes a streaming HTTP request and returns channel with stream events.
 func (m *Manager) Stream(ctx context.Context, provider string, req *HTTPRequest) (<-chan StreamEvent, error) {
+	ctx = contextOrBackground(ctx)
 	if req == nil {
 		return nil, fmt.Errorf("wsrelay: request is nil")
 	}
@@ -125,10 +127,6 @@ func (m *Manager) Stream(ctx context.Context, provider string, req *HTTPRequest)
 	go func() {
 		defer close(out)
 		send := func(ev StreamEvent) bool {
-			if ctx == nil {
-				out <- ev
-				return true
-			}
 			select {
 			case <-ctx.Done():
 				return false

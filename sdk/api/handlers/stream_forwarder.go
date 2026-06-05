@@ -40,14 +40,19 @@ func PendingStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.Error
 	if errs == nil {
 		return nil, false
 	}
-	select {
-	case errMsg, ok := <-errs:
-		if !ok {
+	for {
+		select {
+		case errMsg, ok := <-errs:
+			if !ok {
+				return nil, false
+			}
+			if errMsg == nil {
+				continue
+			}
+			return errMsg, true
+		default:
 			return nil, false
 		}
-		return errMsg, true
-	default:
-		return nil, false
 	}
 }
 
@@ -101,13 +106,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			if !ok {
 				// Prefer surfacing a terminal error if one is pending.
 				if terminalErr == nil {
-					select {
-					case errMsg, ok := <-errs:
-						if ok && errMsg != nil {
-							terminalErr = errMsg
-						}
-					default:
-					}
+					terminalErr, _ = PendingStreamError(errs)
 				}
 				if terminalErr != nil {
 					if opts.WriteTerminalError != nil {
@@ -145,18 +144,15 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				}
 				continue
 			}
-			if errMsg != nil {
-				terminalErr = errMsg
-				if opts.WriteTerminalError != nil {
-					opts.WriteTerminalError(errMsg)
-					flushNow()
-				}
+			if errMsg == nil {
+				continue
 			}
-			var execErr error
-			if errMsg != nil {
-				execErr = errMsg.Error
+			terminalErr = errMsg
+			if opts.WriteTerminalError != nil {
+				opts.WriteTerminalError(errMsg)
+				flushNow()
 			}
-			cancel(execErr)
+			cancel(errMsg.Error)
 			return
 		case <-keepAliveC:
 			writeKeepAlive()

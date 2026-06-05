@@ -117,3 +117,22 @@ func TestPendingStreamErrorUsesBufferedError(t *testing.T) {
 		t.Fatalf("pending error = %p, want %p", gotErr, wantErr)
 	}
 }
+
+func TestPendingStreamErrorSkipsNilMessages(t *testing.T) {
+	wantErr := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New("rate limited"),
+	}
+	errs := make(chan *interfaces.ErrorMessage, 2)
+	errs <- nil
+	errs <- wantErr
+	close(errs)
+
+	gotErr, ok := handlers.PendingStreamError(errs)
+	if !ok {
+		t.Fatal("expected pending stream error after nil message")
+	}
+	if gotErr != wantErr {
+		t.Fatalf("pending error = %p, want %p", gotErr, wantErr)
+	}
+}

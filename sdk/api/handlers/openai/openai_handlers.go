@@ -431,23 +431,18 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, modelName str
 				errChan = nil
 				continue
 			}
+			if errMsg == nil {
+				continue
+			}
 			// Upstream failed immediately. Return proper error status and JSON.
 			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
+			cliCancel(errMsg.Error)
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
 				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
 					h.WriteErrorResponse(c, errMsg)
-					if errMsg != nil {
-						cliCancel(errMsg.Error)
-					} else {
-						cliCancel(nil)
-					}
+					cliCancel(errMsg.Error)
 					return
 				}
 				streamErr := fmt.Errorf("auth manager stream closed before sending payload")
@@ -545,22 +540,17 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, mo
 				errChan = nil
 				continue
 			}
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
+			if errMsg == nil {
+				continue
 			}
+			h.WriteErrorResponse(c, errMsg)
+			cliCancel(errMsg.Error)
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
 				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
 					h.WriteErrorResponse(c, errMsg)
-					if errMsg != nil {
-						cliCancel(errMsg.Error)
-					} else {
-						cliCancel(nil)
-					}
+					cliCancel(errMsg.Error)
 					return
 				}
 				streamErr := fmt.Errorf("auth manager stream closed before sending payload")

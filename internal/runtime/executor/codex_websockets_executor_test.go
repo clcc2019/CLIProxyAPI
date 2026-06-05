@@ -4302,6 +4302,23 @@ func TestCodexWebsocketsExecuteRetriesFullRequestWhenPreviousResponseMissing(t *
 	}
 }
 
+func TestReadCodexWebsocketMessageAcceptsNilContext(t *testing.T) {
+	conn := &websocket.Conn{}
+	readCh := make(chan codexWebsocketRead, 1)
+	readCh <- codexWebsocketRead{conn: conn, msgType: websocket.TextMessage, payload: []byte("ok")}
+
+	msgType, payload, err := readCodexWebsocketMessage(nil, &codexWebsocketSession{}, conn, readCh)
+	if err != nil {
+		t.Fatalf("readCodexWebsocketMessage() error = %v", err)
+	}
+	if msgType != websocket.TextMessage {
+		t.Fatalf("message type = %d, want %d", msgType, websocket.TextMessage)
+	}
+	if string(payload) != "ok" {
+		t.Fatalf("payload = %q, want ok", payload)
+	}
+}
+
 func TestCodexWebsocketsRetryRebindsActiveReadChannel(t *testing.T) {
 	var (
 		upgrader    = websocket.Upgrader{}
@@ -4430,6 +4447,100 @@ func TestCodexWebsocketsRetryRebindsActiveReadChannel(t *testing.T) {
 	}
 	if got := gjson.GetBytes(responsePayload, "type").String(); got != "response.completed" {
 		t.Fatalf("response type = %q, want response.completed; payload=%s", got, responsePayload)
+	}
+}
+
+func TestCodexWebsocketsRetryHandshakeErrorKeepsStatusAndHeaders(t *testing.T) {
+	var (
+		upgrader  = websocket.Upgrader{}
+		accepted  = make(chan *websocket.Conn, 1)
+		serverErr = make(chan error, 2)
+		attempts  int32
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				serverErr <- fmt.Errorf("Upgrade() error: %w", err)
+				return
+			}
+			accepted <- conn
+			return
+		}
+		w.Header().Set("X-Retry-Test", "kept")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"The usage limit has been reached","resets_in_seconds":30}}`))
+	}))
+	defer server.Close()
+
+	waitConn := func() *websocket.Conn {
+		t.Helper()
+		select {
+		case conn := <-accepted:
+			return conn
+		case err := <-serverErr:
+			t.Fatalf("websocket server error: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for websocket connection")
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	executor := NewCodexWebsocketsExecutor(nil)
+	executor.store = &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+	t.Cleanup(func() { executor.closeAllExecutionSessions("test_cleanup") })
+
+	sess := executor.getOrCreateSession("exec-retry-status", "")
+	conn, _, err := executor.ensureUpstreamConn(ctx, nil, sess, "auth-1", wsURL, http.Header{})
+	if err != nil {
+		t.Fatalf("ensureUpstreamConn() error = %v", err)
+	}
+	serverConn := waitConn()
+	defer serverConn.Close()
+
+	readCh := make(chan codexWebsocketRead, codexResponsesWebsocketReadBuffer)
+	sess.setActive(readCh, conn)
+
+	_, _, err = executor.retrySessionWebsocketRequest(
+		ctx,
+		nil,
+		sess,
+		conn,
+		&readCh,
+		"auth-1",
+		wsURL,
+		http.Header{},
+		helps.UpstreamRequestLog{URL: wsURL, Method: "WEBSOCKET"},
+		[]byte(`{"type":"response.create","input":[]}`),
+		errors.New("forced retry"),
+	)
+	if err == nil {
+		t.Fatal("retrySessionWebsocketRequest() error = nil, want 429")
+	}
+	statusProvider, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("retry error %T does not expose StatusCode()", err)
+	}
+	if got := statusProvider.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("retry status = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	headerProvider, ok := err.(interface{ Headers() http.Header })
+	if !ok {
+		t.Fatalf("retry error %T does not expose Headers()", err)
+	}
+	if got := headerProvider.Headers().Get("X-Retry-Test"); got != "kept" {
+		t.Fatalf("retry header X-Retry-Test = %q, want kept", got)
+	}
+	retryAfterProvider, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryAfterProvider.RetryAfter() == nil || *retryAfterProvider.RetryAfter() != 30*time.Second {
+		t.Fatalf("retryAfter = %#v, want 30s", retryAfterProvider)
 	}
 }
 

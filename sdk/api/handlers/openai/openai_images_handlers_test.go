@@ -624,6 +624,26 @@ func TestCollectImagesFromResponsesStreamRejectsNilDataAfterErrorChannelCloses(t
 	}
 }
 
+func TestCollectImagesFromResponsesStreamPrefersPendingErrorWhenDataCloses(t *testing.T) {
+	data := make(chan []byte)
+	close(data)
+	wantErr := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New("upstream quota"),
+	}
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- wantErr
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+	if out != nil {
+		t.Fatalf("output = %s, want nil", out)
+	}
+	if errMsg != wantErr {
+		t.Fatalf("error = %p, want %p", errMsg, wantErr)
+	}
+}
+
 func TestForwardNativeImagesStreamWritesKeepAlive(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -737,6 +757,39 @@ func TestForwardNativeImagesStreamRejectsNilDataAfterErrorChannelCloses(t *testi
 	}
 }
 
+func TestForwardNativeImagesStreamPrefersPendingErrorWhenDataCloses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/images/generations", nil)
+
+	data := make(chan []byte)
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New("upstream quota")}
+	close(errs)
+
+	var eventName string
+	var canceledErr error
+	handler := &OpenAIAPIHandler{}
+	handler.forwardNativeImagesStream(
+		ginCtx,
+		func(err error) { canceledErr = err },
+		data,
+		errs,
+		func(name string, _ []byte) { eventName = name },
+		nil,
+		nil,
+	)
+
+	if canceledErr == nil || !strings.Contains(canceledErr.Error(), "upstream quota") {
+		t.Fatalf("cancel err = %v, want upstream quota", canceledErr)
+	}
+	if eventName != "error" {
+		t.Fatalf("event = %q, want error", eventName)
+	}
+}
+
 func TestForwardImagesStreamRejectsNilDataAndErrorChannels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -753,6 +806,36 @@ func TestForwardImagesStreamRejectsNilDataAndErrorChannels(t *testing.T) {
 
 	if !errors.Is(canceledErr, errImageStreamNilChannels) {
 		t.Fatalf("cancel err = %v, want nil image stream channels", canceledErr)
+	}
+	if eventName != "error" {
+		t.Fatalf("event = %q, want error", eventName)
+	}
+}
+
+func TestForwardImagesStreamPrefersPendingErrorWhenDataCloses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/images/generations", nil)
+
+	data := make(chan []byte)
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New("upstream quota")}
+	close(errs)
+
+	var eventName string
+	var canceledErr error
+	handler := &OpenAIAPIHandler{}
+	handler.forwardImagesStream(context.Background(), ginCtx, imageStreamForwardOptions{
+		cancel:     func(err error) { canceledErr = err },
+		data:       data,
+		errs:       errs,
+		writeEvent: func(name string, _ []byte) { eventName = name },
+	})
+
+	if canceledErr == nil || !strings.Contains(canceledErr.Error(), "upstream quota") {
+		t.Fatalf("cancel err = %v, want upstream quota", canceledErr)
 	}
 	if eventName != "error" {
 		t.Fatalf("event = %q, want error", eventName)

@@ -2619,6 +2619,157 @@ func TestForwardResponsesWebsocketForwardsErrorWithNilHandler(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesWebsocketSkipsNilErrorMessages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamErr := errors.New("upstream quota")
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		errCh := make(chan *interfaces.ErrorMessage, 2)
+		errCh <- nil
+		errCh <- &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: upstreamErr}
+		close(errCh)
+
+		var cancelErr error
+		handler := &OpenAIResponsesAPIHandler{BaseAPIHandler: &handlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}}
+		_, _, _, err = handler.forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(params ...interface{}) {
+				if len(params) > 0 {
+					if errParam, ok := params[0].(error); ok {
+						cancelErr = errParam
+					}
+				}
+			},
+			nil,
+			errCh,
+			nil,
+			"session-1",
+			"session-1",
+			false,
+		)
+		if err != nil {
+			serverErrCh <- fmt.Errorf("forward error = %v, want nil", err)
+			return
+		}
+		if !errors.Is(cancelErr, upstreamErr) {
+			serverErrCh <- fmt.Errorf("cancel error = %v, want upstream error", cancelErr)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "status").Int(); got != http.StatusTooManyRequests {
+		t.Fatalf("payload status = %d, want %d; payload=%s", got, http.StatusTooManyRequests, payload)
+	}
+	if !strings.Contains(gjson.GetBytes(payload, "error.message").String(), "upstream quota") {
+		t.Fatalf("payload did not include upstream error: %s", payload)
+	}
+
+	select {
+	case errServer := <-serverErrCh:
+		if errServer != nil {
+			t.Fatalf("server error: %v", errServer)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forwardResponsesWebsocket hung forwarding upstream error")
+	}
+}
+
+func TestForwardResponsesWebsocketPrefersPendingErrorWhenDataCloses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for attempt := 0; attempt < 20; attempt++ {
+		serverErrCh := make(chan error, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+			if err != nil {
+				serverErrCh <- err
+				return
+			}
+			defer func() { _ = conn.Close() }()
+
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = r
+
+			data := make(chan []byte)
+			close(data)
+			errCh := make(chan *interfaces.ErrorMessage, 1)
+			errCh <- &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New("upstream quota")}
+			close(errCh)
+
+			handler := &OpenAIResponsesAPIHandler{BaseAPIHandler: &handlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}}
+			_, _, _, err = handler.forwardResponsesWebsocket(
+				ctx,
+				conn,
+				func(...interface{}) {},
+				data,
+				errCh,
+				nil,
+				"session-1",
+				"session-1",
+				false,
+			)
+			if err != nil {
+				serverErrCh <- err
+				return
+			}
+			serverErrCh <- nil
+		}))
+
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			server.Close()
+			t.Fatalf("attempt %d dial websocket: %v", attempt, err)
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		_ = conn.Close()
+		server.Close()
+		if errReadMessage != nil {
+			t.Fatalf("attempt %d read websocket message: %v", attempt, errReadMessage)
+		}
+		if got := gjson.GetBytes(payload, "status").Int(); got != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d payload status = %d, want %d; payload=%s", attempt, got, http.StatusTooManyRequests, payload)
+		}
+		if !strings.Contains(gjson.GetBytes(payload, "error.message").String(), "upstream quota") {
+			t.Fatalf("attempt %d payload did not include upstream error: %s", attempt, payload)
+		}
+
+		select {
+		case errServer := <-serverErrCh:
+			if errServer != nil {
+				t.Fatalf("attempt %d server error: %v", attempt, errServer)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("attempt %d forwardResponsesWebsocket hung forwarding pending upstream error", attempt)
+		}
+	}
+}
+
 func TestForwardResponsesWebsocketDoesNotRetryAfterEmittingPayload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

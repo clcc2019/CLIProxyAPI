@@ -1358,9 +1358,22 @@ func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequestWithReason(
 	// closing the socket between sequential requests within the same execution session.
 	connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 	if errDialRetry != nil || connRetry == nil {
-		closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
-		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
-		return nil, nil, errDialRetry
+		retryErr := errDialRetry
+		if respHSRetry != nil && respHSRetry.StatusCode > 0 {
+			bodyErr := websocketHandshakeBody(respHSRetry)
+			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHSRetry.StatusCode, respHSRetry.Header, bodyErr)
+			retryErr = statusErrWithHeaders{
+				statusErr: newCodexStatusErr(respHSRetry.StatusCode, bodyErr),
+				headers:   respHSRetry.Header.Clone(),
+			}
+		} else {
+			closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+			if retryErr == nil {
+				retryErr = fmt.Errorf("codex websockets executor: retry websocket conn is nil")
+			}
+		}
+		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", retryErr)
+		return nil, nil, retryErr
 	}
 
 	wsReqBodyRetry := bytes.Clone(wsReqBody)
@@ -2184,6 +2197,9 @@ func codexJSONRawEqual(left []byte, right []byte) bool {
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if sess == nil {
 		if conn == nil {
 			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
