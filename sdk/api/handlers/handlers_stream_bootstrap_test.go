@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,6 +19,60 @@ import (
 type failOnceStreamExecutor struct {
 	mu    sync.Mutex
 	calls int
+}
+
+type wrappedStatusHeaderError struct {
+	status  int
+	headers http.Header
+}
+
+func (e wrappedStatusHeaderError) Error() string {
+	return "wrapped upstream error"
+}
+
+func (e wrappedStatusHeaderError) StatusCode() int {
+	return e.status
+}
+
+func (e wrappedStatusHeaderError) Headers() http.Header {
+	return e.headers
+}
+
+func TestStatusAndHeadersFromErrorUnwraps(t *testing.T) {
+	base := wrappedStatusHeaderError{
+		status: http.StatusTooManyRequests,
+		headers: http.Header{
+			"Retry-After":       {"30"},
+			"X-Request-Id":      {"req-1"},
+			"Set-Cookie":        {"session=secret"},
+			"X-Accel-Buffering": {"no"},
+		},
+	}
+	err := fmt.Errorf("outer wrapper: %w", base)
+
+	if got := statusFromError(err); got != http.StatusTooManyRequests {
+		t.Fatalf("statusFromError = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	headers := filteredErrorHeaders(err)
+	if got := headers.Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After = %q, want 30", got)
+	}
+	if got := headers.Get("X-Request-Id"); got != "req-1" {
+		t.Fatalf("X-Request-Id = %q, want req-1", got)
+	}
+	if got := headers.Get("Set-Cookie"); got != "" {
+		t.Fatalf("filtered header leaked: %q", got)
+	}
+	errMsg := errorMessageFromError(err, http.StatusInternalServerError)
+	if errMsg == nil || errMsg.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("errorMessageFromError status = %#v, want %d", errMsg, http.StatusTooManyRequests)
+	}
+	if got := errMsg.Addon.Get("Retry-After"); got != "30" {
+		t.Fatalf("errorMessageFromError Retry-After = %q, want 30", got)
+	}
+	if got := errMsg.Addon.Get("Set-Cookie"); got != "" {
+		t.Fatalf("errorMessageFromError filtered header leaked: %q", got)
+	}
 }
 
 func (e *failOnceStreamExecutor) Identifier() string { return "codex" }

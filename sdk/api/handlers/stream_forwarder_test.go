@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +141,30 @@ func TestForwardStreamDataCloseSkipsNilPendingErrorMessages(t *testing.T) {
 	}
 }
 
+func TestForwardStreamTerminalErrorWithoutCauseCancelsWithFallback(t *testing.T) {
+	ctx, cancelRequest := newStreamForwardTestContext(t)
+	defer cancelRequest()
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests}
+	close(errs)
+
+	flusher := &countingFlusher{}
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	var canceledErr error
+	handler.ForwardStream(ctx, flusher, func(err error) { canceledErr = err }, data, errs, StreamForwardOptions{
+		WriteTerminalError: func(*interfaces.ErrorMessage) {},
+	})
+
+	if canceledErr == nil {
+		t.Fatal("cancel error = nil, want fallback status error")
+	}
+	if !strings.Contains(canceledErr.Error(), http.StatusText(http.StatusTooManyRequests)) {
+		t.Fatalf("cancel error = %v, want status text fallback", canceledErr)
+	}
+}
+
 func TestForwardStreamRejectsDataWithoutChunkWriter(t *testing.T) {
 	ctx, cancelRequest := newStreamForwardTestContext(t)
 	defer cancelRequest()
@@ -245,6 +270,81 @@ func TestForwardStreamRejectsNilDataAfterErrorChannelCloses(t *testing.T) {
 	}
 	if flusher.count != 1 {
 		t.Fatalf("flush count = %d, want 1", flusher.count)
+	}
+}
+
+func TestAwaitStreamFirstChunkRejectsNilDataAndErrorChannels(t *testing.T) {
+	_, errMsg, err := AwaitStreamFirstChunk(context.Background(), nil, nil)
+
+	if err != nil {
+		t.Fatalf("AwaitStreamFirstChunk error = %v, want nil", err)
+	}
+	if errMsg == nil || errMsg.StatusCode != http.StatusBadGateway || !errors.Is(errMsg.Error, ErrStreamClosedBeforePayload) {
+		t.Fatalf("error message = %#v, want stream closed before payload 502", errMsg)
+	}
+}
+
+func TestErrorMessageCauseFallsBackToStatusText(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{name: "error status", status: http.StatusTooManyRequests, want: http.StatusText(http.StatusTooManyRequests)},
+		{name: "missing status", status: 0, want: http.StatusText(http.StatusInternalServerError)},
+		{name: "non error status", status: http.StatusOK, want: http.StatusText(http.StatusInternalServerError)},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cause := ErrorMessageCause(&interfaces.ErrorMessage{StatusCode: tc.status})
+
+			if cause == nil {
+				t.Fatal("cause = nil, want fallback status error")
+			}
+			if !strings.Contains(cause.Error(), tc.want) {
+				t.Fatalf("cause = %v, want %q", cause, tc.want)
+			}
+		})
+	}
+}
+
+func TestAwaitStreamFirstChunkSkipsNilErrorMessages(t *testing.T) {
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- nil
+	go func() {
+		data <- []byte("payload")
+	}()
+
+	first, errMsg, err := AwaitStreamFirstChunk(context.Background(), data, errs)
+
+	if err != nil {
+		t.Fatalf("AwaitStreamFirstChunk error = %v, want nil", err)
+	}
+	if errMsg != nil {
+		t.Fatalf("error message = %#v, want nil", errMsg)
+	}
+	if string(first.Chunk) != "payload" {
+		t.Fatalf("first chunk = %q, want payload", first.Chunk)
+	}
+}
+
+func TestAwaitStreamFirstChunkDataCloseUsesPendingError(t *testing.T) {
+	data := make(chan []byte)
+	close(data)
+	wantErr := &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New("quota")}
+	errs := make(chan *interfaces.ErrorMessage, 2)
+	errs <- nil
+	errs <- wantErr
+	close(errs)
+
+	_, errMsg, err := AwaitStreamFirstChunk(context.Background(), data, errs)
+
+	if err != nil {
+		t.Fatalf("AwaitStreamFirstChunk error = %v, want nil", err)
+	}
+	if errMsg != wantErr {
+		t.Fatalf("error message = %p, want %p", errMsg, wantErr)
 	}
 }
 

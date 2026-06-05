@@ -1355,17 +1355,14 @@ func (e *streamBootstrapError) Headers() http.Header {
 	if e == nil {
 		return nil
 	}
-	return cloneHTTPHeader(e.headers)
+	return mergeHTTPHeaders(e.headers, headersFromError(e.cause))
 }
 
 func (e *streamBootstrapError) StatusCode() int {
 	if e == nil || e.cause == nil {
 		return 0
 	}
-	if se, ok := e.cause.(interface{ StatusCode() int }); ok && se != nil {
-		return se.StatusCode()
-	}
-	return 0
+	return statusCodeFromError(e.cause)
 }
 
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
@@ -1376,6 +1373,23 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 		Headers: cloneHTTPHeader(headers),
 		Chunks:  ch,
 	}
+}
+
+func mergeHTTPHeaders(primary, fallback http.Header) http.Header {
+	merged := cloneHTTPHeader(primary)
+	if len(fallback) == 0 {
+		return merged
+	}
+	if merged == nil {
+		return cloneHTTPHeader(fallback)
+	}
+	for key, values := range fallback {
+		if _, exists := merged[key]; exists {
+			continue
+		}
+		merged[key] = append([]string(nil), values...)
+	}
+	return merged
 }
 
 func invalidStreamResultError(message string) *Error {
@@ -1392,14 +1406,10 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			chunk cliproxyexecutor.StreamChunk
 			ok    bool
 		)
-		if ctx != nil {
-			select {
-			case <-ctx.Done():
-				return nil, false, ctx.Err()
-			case chunk, ok = <-ch:
-			}
-		} else {
-			chunk, ok = <-ch
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case chunk, ok = <-ch:
 		}
 		if !ok {
 			return buffered, true, nil
@@ -1429,10 +1439,6 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 			if !forward {
 				return false
-			}
-			if ctx == nil {
-				out <- chunk
-				return true
 			}
 			select {
 			case <-ctx.Done():
@@ -2656,6 +2662,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -2745,8 +2754,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: &Error{Message: errPrepare.Error()}}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPrepare); ok && se != nil {
-				result.Error.HTTPStatus = se.StatusCode()
+			if status := statusCodeFromError(errPrepare); status > 0 {
+				result.Error.HTTPStatus = status
 			}
 			m.MarkResult(execCtx, result)
 			forceNewUpstreamSessionForNextCredential(&opts)
@@ -2848,8 +2857,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: &Error{Message: errPrepare.Error()}}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPrepare); ok && se != nil {
-				result.Error.HTTPStatus = se.StatusCode()
+			if status := statusCodeFromError(errPrepare); status > 0 {
+				result.Error.HTTPStatus = status
 			}
 			m.MarkResult(execCtx, result)
 			forceNewUpstreamSessionForNextCredential(&opts)
@@ -2949,8 +2958,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: &Error{Message: errPrepare.Error()}}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPrepare); ok && se != nil {
-				result.Error.HTTPStatus = se.StatusCode()
+			if status := statusCodeFromError(errPrepare); status > 0 {
+				result.Error.HTTPStatus = status
 			}
 			m.MarkResult(execCtx, result)
 			forceNewUpstreamSessionForNextCredential(&opts)
@@ -4317,8 +4326,8 @@ func resultErrorFromError(err error) *Error {
 		return cloneError(authErr)
 	}
 	resultErr := &Error{Message: err.Error()}
-	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
-		resultErr.HTTPStatus = se.StatusCode()
+	if status := statusCodeFromError(err); status > 0 {
+		resultErr.HTTPStatus = status
 	}
 	return resultErr
 }
@@ -4358,6 +4367,17 @@ func statusCodeFromError(err error) int {
 		return sc.StatusCode()
 	}
 	return 0
+}
+
+func headersFromError(err error) http.Header {
+	if err == nil {
+		return nil
+	}
+	var he interface{ Headers() http.Header }
+	if errors.As(err, &he) && he != nil {
+		return cloneHTTPHeader(he.Headers())
+	}
+	return nil
 }
 
 func isUnauthorizedError(err error) bool {
@@ -6891,6 +6911,13 @@ func (e *credentialRetryLimitError) StatusCode() int {
 		return 0
 	}
 	return statusCodeFromError(e.cause)
+}
+
+func (e *credentialRetryLimitError) Headers() http.Header {
+	if e == nil || e.cause == nil {
+		return nil
+	}
+	return headersFromError(e.cause)
 }
 
 type credentialFailoverRetryLimitError struct {

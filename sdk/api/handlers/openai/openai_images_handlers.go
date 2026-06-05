@@ -1309,11 +1309,7 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		if errMsg.Error != nil {
-			cliCancel(errMsg.Error)
-		} else {
-			cliCancel(nil)
-		}
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -1450,11 +1446,7 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		if errMsg.Error != nil {
-			cliCancel(errMsg.Error)
-		} else {
-			cliCancel(nil)
-		}
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
 
@@ -1539,11 +1531,7 @@ func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte
 		} else {
 			h.WriteErrorResponse(c, errMsg)
 		}
-		if errMsg != nil && errMsg.Error != nil {
-			cliCancel(errMsg.Error)
-		} else {
-			cliCancel(nil)
-		}
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 	}
 
 	for {
@@ -1640,11 +1628,7 @@ func (h *OpenAIAPIHandler) collectImagesFromNative(c *gin.Context, rawPayload []
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		if errMsg.Error != nil {
-			cliCancel(errMsg.Error)
-		} else {
-			cliCancel(nil)
-		}
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -1742,7 +1726,7 @@ func (h *OpenAIAPIHandler) streamImagesFromNative(c *gin.Context, rawPayload []b
 			} else {
 				h.WriteErrorResponse(c, errMsg)
 			}
-			cliCancel(errMsg.Error)
+			cliCancel(handlers.ErrorMessageCause(errMsg))
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
@@ -1752,7 +1736,7 @@ func (h *OpenAIAPIHandler) streamImagesFromNative(c *gin.Context, rawPayload []b
 					} else {
 						h.WriteErrorResponse(c, errMsg)
 					}
-					cliCancel(errMsg.Error)
+					cliCancel(handlers.ErrorMessageCause(errMsg))
 					return
 				}
 				ensureSSEStarted()
@@ -1775,7 +1759,7 @@ func (h *OpenAIAPIHandler) streamImagesFromNative(c *gin.Context, rawPayload []b
 			}
 			errMsg := imageStreamIdleTimeoutError(timing.dataIntervalTimeout)
 			emitImagesStreamError(writeEvent, errMsg)
-			cliCancel(errMsg.Error)
+			cliCancel(handlers.ErrorMessageCause(errMsg))
 			return
 		}
 	}
@@ -1815,13 +1799,13 @@ func (h *OpenAIAPIHandler) forwardNativeImagesStream(c *gin.Context, cancel func
 				continue
 			}
 			emitImagesStreamError(writeEvent, errMsg)
-			cancel(errMsg.Error)
+			cancel(handlers.ErrorMessageCause(errMsg))
 			return
 		case chunk, ok := <-data:
 			if !ok {
 				if errMsg, okPendingErr := handlers.PendingStreamError(errs); okPendingErr {
 					emitImagesStreamError(writeEvent, errMsg)
-					cancel(errMsg.Error)
+					cancel(handlers.ErrorMessageCause(errMsg))
 					return
 				}
 				cancel(nil)
@@ -1839,7 +1823,7 @@ func (h *OpenAIAPIHandler) forwardNativeImagesStream(c *gin.Context, cancel func
 			}
 			errMsg := imageStreamIdleTimeoutError(timing.dataIntervalTimeout)
 			emitImagesStreamError(writeEvent, errMsg)
-			cancel(errMsg.Error)
+			cancel(handlers.ErrorMessageCause(errMsg))
 			return
 		}
 	}
@@ -2227,7 +2211,7 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 			} else {
 				h.WriteErrorResponse(c, errMsg)
 			}
-			cliCancel(errMsg.Error)
+			cliCancel(handlers.ErrorMessageCause(errMsg))
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
@@ -2237,7 +2221,7 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 					} else {
 						h.WriteErrorResponse(c, errMsg)
 					}
-					cliCancel(errMsg.Error)
+					cliCancel(handlers.ErrorMessageCause(errMsg))
 					return
 				}
 				ensureSSEStarted()
@@ -2270,7 +2254,7 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 			}
 			errMsg := imageStreamIdleTimeoutError(timing.dataIntervalTimeout)
 			emitImagesStreamError(writeEvent, errMsg)
-			cliCancel(errMsg.Error)
+			cliCancel(handlers.ErrorMessageCause(errMsg))
 			return
 		}
 	}
@@ -2347,13 +2331,13 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 				continue
 			}
 			emitImagesStreamError(opts.writeEvent, errMsg)
-			opts.cancel(errMsg.Error)
+			opts.cancel(handlers.ErrorMessageCause(errMsg))
 			return
 		case chunk, ok := <-opts.data:
 			if !ok {
 				if errMsg, okPendingErr := handlers.PendingStreamError(opts.errs); okPendingErr {
 					emitImagesStreamError(opts.writeEvent, errMsg)
-					opts.cancel(errMsg.Error)
+					opts.cancel(handlers.ErrorMessageCause(errMsg))
 					return
 				}
 				done := false
@@ -2397,7 +2381,7 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			}
 			errMsg := imageStreamIdleTimeoutError(timing.dataIntervalTimeout)
 			emitImagesStreamError(opts.writeEvent, errMsg)
-			opts.cancel(errMsg.Error)
+			opts.cancel(handlers.ErrorMessageCause(errMsg))
 			return
 		}
 	}

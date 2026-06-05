@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -353,6 +354,7 @@ type retryAfterStatusError struct {
 	status     int
 	message    string
 	retryAfter time.Duration
+	headers    http.Header
 }
 
 func (e *retryAfterStatusError) Error() string {
@@ -377,9 +379,107 @@ func (e *retryAfterStatusError) RetryAfter() *time.Duration {
 	return &d
 }
 
+func (e *retryAfterStatusError) Headers() http.Header {
+	if e == nil {
+		return nil
+	}
+	return cloneHTTPHeader(e.headers)
+}
+
 type credentialFailoverStatusError struct {
 	status  int
 	message string
+}
+
+func TestStreamBootstrapErrorStatusCodeUnwrapsCause(t *testing.T) {
+	cause := fmt.Errorf("outer: %w", &retryAfterStatusError{
+		status:  http.StatusTooManyRequests,
+		message: "quota",
+	})
+	err := newStreamBootstrapError(cause, nil)
+
+	statusProvider, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("bootstrap error %T does not expose StatusCode()", err)
+	}
+	if got := statusProvider.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
+func TestStreamBootstrapErrorHeadersMergesCauseHeaders(t *testing.T) {
+	cause := fmt.Errorf("outer: %w", &retryAfterStatusError{
+		status:  http.StatusTooManyRequests,
+		message: "quota",
+		headers: http.Header{
+			"Retry-After": {"30"},
+			"X-Cause":     {"kept"},
+			"X-Shared":    {"cause"},
+		},
+	})
+	err := newStreamBootstrapError(cause, http.Header{
+		"X-Stream": {"kept"},
+		"X-Shared": {"stream"},
+	})
+
+	headerProvider, ok := err.(interface{ Headers() http.Header })
+	if !ok {
+		t.Fatalf("bootstrap error %T does not expose Headers()", err)
+	}
+	headers := headerProvider.Headers()
+	if got := headers.Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After = %q, want 30", got)
+	}
+	if got := headers.Get("X-Cause"); got != "kept" {
+		t.Fatalf("X-Cause = %q, want kept", got)
+	}
+	if got := headers.Get("X-Stream"); got != "kept" {
+		t.Fatalf("X-Stream = %q, want kept", got)
+	}
+	if got := headers.Get("X-Shared"); got != "stream" {
+		t.Fatalf("X-Shared = %q, want stream", got)
+	}
+}
+
+func TestCredentialRetryLimitErrorHeadersUnwrapCause(t *testing.T) {
+	err := &credentialRetryLimitError{
+		cause: fmt.Errorf("outer: %w", &retryAfterStatusError{
+			status:  http.StatusTooManyRequests,
+			message: "quota",
+			headers: http.Header{
+				"Retry-After": {"30"},
+				"X-Upstream":  {"kept"},
+			},
+		}),
+	}
+
+	headerProvider, ok := error(err).(interface{ Headers() http.Header })
+	if !ok {
+		t.Fatalf("retry limit error %T does not expose Headers()", err)
+	}
+	headers := headerProvider.Headers()
+	if got := headers.Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After = %q, want 30", got)
+	}
+	if got := headers.Get("X-Upstream"); got != "kept" {
+		t.Fatalf("X-Upstream = %q, want kept", got)
+	}
+}
+
+func TestResultErrorFromErrorUnwrapsStatus(t *testing.T) {
+	err := fmt.Errorf("outer: %w", &retryAfterStatusError{
+		status:  http.StatusTooManyRequests,
+		message: "quota",
+	})
+
+	resultErr := resultErrorFromError(err)
+
+	if resultErr == nil {
+		t.Fatal("resultErrorFromError returned nil")
+	}
+	if got := resultErr.HTTPStatus; got != http.StatusTooManyRequests {
+		t.Fatalf("HTTPStatus = %d, want %d", got, http.StatusTooManyRequests)
+	}
 }
 
 func (e *credentialFailoverStatusError) Error() string {

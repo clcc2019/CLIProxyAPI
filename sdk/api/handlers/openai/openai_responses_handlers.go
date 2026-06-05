@@ -486,7 +486,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		cliCancel(errMsg.Error)
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
 	resp = newResponsesNoticeFilter().FilterResponseObject(resp)
@@ -519,7 +519,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, m
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		cliCancel(errMsg.Error)
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
 	resp = newResponsesNoticeFilter().FilterResponseObject(resp)
@@ -564,52 +564,30 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, mode
 	}
 	framer := &responsesSSEFramer{noticeFilter: newResponsesNoticeFilter(), trustedData: true}
 
-	// Peek at the first chunk
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				// Err channel closed cleanly; wait for data channel.
-				errChan = nil
-				continue
-			}
-			if errMsg == nil {
-				continue
-			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
-			cliCancel(errMsg.Error)
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				if errMsg, okPendingErr := handlers.PendingStreamError(errChan); okPendingErr {
-					h.WriteErrorResponse(c, errMsg)
-					cliCancel(errMsg.Error)
-					return
-				}
-				streamErr := fmt.Errorf("auth manager stream closed before sending payload")
-				h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: streamErr})
-				cliCancel(streamErr)
-				return
-			}
-
-			// Success! Set headers.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
-			// Write first chunk logic (matching forwardResponsesStream)
-			if framer.WriteChunk(c.Writer, chunk) {
-				flusher.Flush()
-			}
-
-			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
-			return
-		}
+	first, errMsg, err := handlers.AwaitStreamFirstChunk(c.Request.Context(), dataChan, errChan)
+	if err != nil {
+		cliCancel(err)
+		return
 	}
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(handlers.ErrorMessageCause(errMsg))
+		return
+	}
+	dataChan = first.Data
+	errChan = first.Errs
+
+	// Success! Set headers.
+	setSSEHeaders()
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+
+	// Write first chunk logic (matching forwardResponsesStream)
+	if framer.WriteChunk(c.Writer, first.Chunk) {
+		flusher.Flush()
+	}
+
+	// Continue
+	h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {

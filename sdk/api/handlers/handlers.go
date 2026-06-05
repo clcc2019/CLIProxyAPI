@@ -761,14 +761,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		addon := filteredErrorHeaders(err)
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return nil, nil, errorMessageFromError(err, http.StatusInternalServerError)
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
 		return resp.Payload, nil, nil
@@ -818,14 +811,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		addon := filteredErrorHeaders(err)
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return nil, nil, errorMessageFromError(err, http.StatusInternalServerError)
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
 		return resp.Payload, nil, nil
@@ -892,14 +878,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		addon := filteredErrorHeaders(err)
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		errChan <- errorMessageFromError(err, http.StatusInternalServerError)
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -1003,14 +982,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 						}
 					}
 
-					status := http.StatusInternalServerError
-					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
-						if code := se.StatusCode(); code > 0 {
-							status = code
-						}
-					}
-					addon := filteredErrorHeaders(streamErr)
-					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
+					_ = sendErr(errorMessageFromError(streamErr, http.StatusInternalServerError))
 					return
 				}
 				if len(chunk.Payload) > 0 {
@@ -1073,7 +1045,8 @@ func statusFromError(err error) int {
 	if err == nil {
 		return 0
 	}
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+	var se interface{ StatusCode() int }
+	if errors.As(err, &se) && se != nil {
 		if code := se.StatusCode(); code > 0 {
 			return code
 		}
@@ -1081,12 +1054,27 @@ func statusFromError(err error) int {
 	return 0
 }
 
+func errorMessageFromError(err error, fallbackStatus int) *interfaces.ErrorMessage {
+	if fallbackStatus <= 0 {
+		fallbackStatus = http.StatusInternalServerError
+	}
+	status := fallbackStatus
+	if code := statusFromError(err); code > 0 {
+		status = code
+	}
+	return &interfaces.ErrorMessage{
+		StatusCode: status,
+		Error:      err,
+		Addon:      filteredErrorHeaders(err),
+	}
+}
+
 func filteredErrorHeaders(err error) http.Header {
 	if err == nil {
 		return nil
 	}
-	he, ok := err.(interface{ Headers() http.Header })
-	if !ok || he == nil {
+	var he interface{ Headers() http.Header }
+	if !errors.As(err, &he) || he == nil {
 		return nil
 	}
 	return FilterUpstreamHeaders(he.Headers())

@@ -145,3 +145,31 @@ func TestPendingRequestSendAfterCloseDoesNotPanic(t *testing.T) {
 		t.Fatal("terminal send after close returned true")
 	}
 }
+
+func TestSessionCleanupAcceptsNilCause(t *testing.T) {
+	s, _, cleanup := newTestSession(t)
+	defer cleanup()
+
+	respCh, err := s.request(nil, Message{ID: "req-1", Type: MessageTypeHTTPReq})
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("cleanup(nil) panicked: %v", r)
+		}
+	}()
+	s.cleanup(nil)
+
+	msg, ok := <-respCh
+	if !ok {
+		t.Fatal("response channel closed without cleanup error")
+	}
+	if msg.Type != MessageTypeError {
+		t.Fatalf("message type = %q, want error", msg.Type)
+	}
+	if got, _ := msg.Payload["error"].(string); got != errClosed.Error() {
+		t.Fatalf("cleanup error = %q, want %q", got, errClosed.Error())
+	}
+}

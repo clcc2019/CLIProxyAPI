@@ -529,11 +529,7 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		if errMsg.Error != nil {
-			cliCancel(errMsg.Error)
-		} else {
-			cliCancel(nil)
-		}
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
 
@@ -559,11 +555,7 @@ func (h *OpenAIAPIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		if errMsg.Error != nil {
-			cliCancel(errMsg.Error)
-		} else {
-			cliCancel(nil)
-		}
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
 
@@ -581,11 +573,7 @@ func (h *OpenAIAPIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte,
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		if errMsg.Error != nil {
-			cliCancel(errMsg.Error)
-		} else {
-			cliCancel(nil)
-		}
+		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
 

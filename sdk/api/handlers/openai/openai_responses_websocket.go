@@ -1365,14 +1365,20 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				websocketPayloadPreview(errorPayload),
 			)
 			if errWrite != nil {
+				log.Warnf(
+					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					sessionID,
+					websocketPayloadEventType(errorPayload),
+					errWrite,
+				)
 				if errMsg.Error != nil {
-					cancel(errMsg.Error)
+					cancel(handlers.ErrorMessageCause(errMsg))
 				} else {
 					cancel(errWrite)
 				}
 				return errWrite
 			}
-			cancel(errMsg.Error)
+			cancel(handlers.ErrorMessageCause(errMsg))
 			return nil
 		}
 		cancel(nil)
@@ -1400,7 +1406,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 			if shouldRetryWithFullTranscript(errMsg) {
 				if errMsg.Error != nil {
-					cancel(errMsg.Error)
+					cancel(handlers.ErrorMessageCause(errMsg))
 				} else {
 					cancel(errResponsesWebsocketRetryFullTranscript)
 				}
@@ -1413,7 +1419,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					if errMsg, okPendingErr := handlers.PendingStreamError(errs); okPendingErr {
 						if shouldRetryWithFullTranscript(errMsg) {
 							if errMsg.Error != nil {
-								cancel(errMsg.Error)
+								cancel(handlers.ErrorMessageCause(errMsg))
 							} else {
 								cancel(errResponsesWebsocketRetryFullTranscript)
 							}
@@ -1425,27 +1431,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
-					recordResponsesWebsocketAPIResponseError(h, c, errMsg)
-					errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
-					log.Infof(
-						"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
-						sessionID,
-						websocket.TextMessage,
-						websocketPayloadEventType(errorPayload),
-						websocketPayloadPreview(errorPayload),
-					)
-					if errWrite != nil {
-						log.Warnf(
-							"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-							sessionID,
-							websocketPayloadEventType(errorPayload),
-							errWrite,
-						)
-						cancel(errMsg.Error)
-						return completedOutput, completedResponseID, completed, errWrite
-					}
-					cancel(errMsg.Error)
-					return completedOutput, completedResponseID, completed, nil
+					return completedOutput, completedResponseID, completed, forwardTerminalError(errMsg)
 				}
 				cancel(nil)
 				return completedOutput, completedResponseID, completed, nil

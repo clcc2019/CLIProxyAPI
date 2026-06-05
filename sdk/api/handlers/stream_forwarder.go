@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,8 +13,16 @@ import (
 
 var defaultSSEKeepAlive = []byte(": keep-alive\n\n")
 
+var ErrStreamClosedBeforePayload = errors.New("auth manager stream closed before sending payload")
+
 var errNilStreamChannels = errors.New("stream forwarder received nil data and error channels")
 var errNilStreamChunkWriter = errors.New("stream forwarder received data without a chunk writer")
+
+type FirstStreamChunk struct {
+	Chunk []byte
+	Data  <-chan []byte
+	Errs  <-chan *interfaces.ErrorMessage
+}
 
 type StreamForwardOptions struct {
 	// KeepAliveInterval overrides the configured streaming keep-alive interval.
@@ -52,6 +62,62 @@ func PendingStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.Error
 			return errMsg, true
 		default:
 			return nil, false
+		}
+	}
+}
+
+func ErrorMessageCause(errMsg *interfaces.ErrorMessage) error {
+	if errMsg == nil {
+		return nil
+	}
+	if errMsg.Error != nil {
+		return errMsg.Error
+	}
+	status := errMsg.StatusCode
+	if status < http.StatusBadRequest {
+		status = http.StatusInternalServerError
+	}
+	text := strings.TrimSpace(http.StatusText(status))
+	if text == "" {
+		text = "stream error"
+	}
+	return errors.New(text)
+}
+
+func AwaitStreamFirstChunk(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage) (FirstStreamChunk, *interfaces.ErrorMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	closedBeforePayload := func() *interfaces.ErrorMessage {
+		return &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: ErrStreamClosedBeforePayload}
+	}
+	if data == nil && errs == nil {
+		return FirstStreamChunk{}, closedBeforePayload(), nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return FirstStreamChunk{}, nil, ctx.Err()
+		case errMsg, ok := <-errs:
+			if !ok {
+				errs = nil
+				if data == nil {
+					return FirstStreamChunk{}, closedBeforePayload(), nil
+				}
+				continue
+			}
+			if errMsg == nil {
+				continue
+			}
+			return FirstStreamChunk{}, errMsg, nil
+		case chunk, ok := <-data:
+			if !ok {
+				if errMsg, okPendingErr := PendingStreamError(errs); okPendingErr {
+					return FirstStreamChunk{}, errMsg, nil
+				}
+				return FirstStreamChunk{}, closedBeforePayload(), nil
+			}
+			return FirstStreamChunk{Chunk: chunk, Data: data, Errs: errs}, nil, nil
 		}
 	}
 }
@@ -113,7 +179,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 						opts.WriteTerminalError(terminalErr)
 					}
 					flushNow()
-					cancel(terminalErr.Error)
+					cancel(ErrorMessageCause(terminalErr))
 					return
 				}
 				if opts.WriteDone != nil {
@@ -152,7 +218,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				opts.WriteTerminalError(errMsg)
 				flushNow()
 			}
-			cancel(errMsg.Error)
+			cancel(ErrorMessageCause(errMsg))
 			return
 		case <-keepAliveC:
 			writeKeepAlive()

@@ -180,6 +180,13 @@ func terminalMessage(msg Message) bool {
 	return msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd
 }
 
+func cleanupErrorMessage(cause error) string {
+	if cause == nil {
+		return errClosed.Error()
+	}
+	return cause.Error()
+}
+
 func (s *session) send(ctx context.Context, msg Message) error {
 	ctx = contextOrBackground(ctx)
 	select {
@@ -239,9 +246,10 @@ func (s *session) request(ctx context.Context, msg Message) (<-chan Message, err
 func (s *session) cleanup(cause error) {
 	s.closeOnce.Do(func() {
 		close(s.closed)
+		causeMessage := cleanupErrorMessage(cause)
 		s.pending.Range(func(key, value any) bool {
 			req := value.(*pendingRequest)
-			msg := Message{ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": cause.Error()}}
+			msg := Message{ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": causeMessage}}
 			req.sendTerminal(msg)
 			req.close()
 			return true
