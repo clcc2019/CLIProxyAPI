@@ -16,12 +16,9 @@ import (
 )
 
 // GetProviderName determines all AI service providers capable of serving a registered model.
-// It first queries the global model registry to retrieve the providers backing the supplied model name.
-// When the model has not been registered yet, it falls back to legacy string heuristics to infer
-// potential providers.
+// It queries the global model registry to retrieve the providers backing the supplied model name.
 //
 // Supported providers include (but are not limited to):
-//   - "gemini" for Google's Gemini family
 //   - "codex" for OpenAI GPT-compatible providers
 //   - "claude" for Anthropic models
 //   - "openai-compatibility" for external OpenAI-compatible providers

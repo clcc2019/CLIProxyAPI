@@ -31,7 +31,7 @@ var aiAPIPrefixes = []string{
 
 const (
 	skipGinLogKey  = "__gin_skip_request_logging__"
-	creditsUsedKey = "__antigravity_credits_used__"
+	creditsUsedKey = "__upstream_credits_used__"
 )
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses

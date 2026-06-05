@@ -13,7 +13,7 @@ type ProjectSelectionError struct {
 }
 
 func (e *ProjectSelectionError) Error() string {
-	if e == nil {
+	if e == nil || e.Email == "" {
 		return "cliproxy auth: project selection required"
 	}
 	return fmt.Sprintf("cliproxy auth: project selection required for %s", e.Email)

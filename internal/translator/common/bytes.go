@@ -4,30 +4,10 @@ import (
 	"bytes"
 	"context"
 	"strconv"
-
-	"github.com/tidwall/sjson"
 )
 
 var sseDataPrefix = []byte("data:")
 var sseDonePayload = []byte("[DONE]")
-
-func WrapGeminiCLIResponse(response []byte) []byte {
-	out, err := sjson.SetRawBytes([]byte(`{"response":{}}`), "response", response)
-	if err != nil {
-		return response
-	}
-	return out
-}
-
-func GeminiTokenCountJSON(count int64) []byte {
-	out := make([]byte, 0, 96)
-	out = append(out, `{"totalTokens":`...)
-	out = strconv.AppendInt(out, count, 10)
-	out = append(out, `,"promptTokensDetails":[{"modality":"TEXT","tokenCount":`...)
-	out = strconv.AppendInt(out, count, 10)
-	out = append(out, `}]}`...)
-	return out
-}
 
 func ClaudeInputTokensJSON(count int64) []byte {
 	out := make([]byte, 0, 32)

@@ -61,11 +61,6 @@ type Handler struct {
 	// Lazily allocated under h.mu by codexUsageHandlerCache.
 	codexUsageCache *codexUsageCache
 
-	// kiroUsageCache memoises kiro getUsageLimits responses with a short TTL
-	// and collapses concurrent dashboard polls into a single upstream call.
-	// Lazily allocated under h.mu by kiroUsageHandlerCache.
-	kiroUsageCache *kiroUsageCache
-
 	// cleanupStop terminates the background attempt-cleanup goroutine on
 	// Close(). Without this, the goroutine and its ticker leak for the
 	// lifetime of the process even after the handler is replaced (e.g. in

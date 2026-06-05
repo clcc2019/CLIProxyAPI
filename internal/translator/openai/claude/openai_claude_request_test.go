@@ -266,12 +266,6 @@ func TestConvertClaudeRequestToOpenAI_SignedThinkingCompatibility(t *testing.T) 
 			wantHasReasoningContent: false,
 		},
 		{
-			name:                    "Gemini signature drops reasoning_content",
-			signature:               "gemini#EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA",
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
-		},
-		{
 			name:                    "Unknown signature drops reasoning_content",
 			signature:               "not-a-provider-signature",
 			wantReasoningContent:    "",

@@ -75,7 +75,7 @@ func appendClaudeJSONString(dst []byte, s string) []byte {
 
 // ClaudeTextDeltaJSON returns the JSON payload for a Claude text_delta
 // content_block_delta event. Hot path — called once per text token across
-// gemini-claude, gemini-cli-claude, and antigravity-claude translators.
+// Claude response translators.
 //
 // The returned slice is freshly allocated (one alloc); the scratch buffer
 // is pooled.

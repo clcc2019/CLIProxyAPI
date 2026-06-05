@@ -180,7 +180,7 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 // If an alias exists, returns the original (upstream) model name that corresponds
 // to the requested alias.
 //
-// If the requested model contains a thinking suffix (e.g., "gemini-2.5-pro(8192)"),
+// If the requested model contains a thinking suffix (e.g., "gpt-5(high)"),
 // the suffix is preserved in the returned model name. However, if the alias's
 // original name already contains a suffix, the config suffix takes priority.
 func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {
@@ -266,20 +266,11 @@ func modelAliasChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model alias (e.g., API key authentication).
 //
-// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, kiro.
+// Supported channels: claude, codex, kimi, xai.
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	authKind = strings.ToLower(strings.TrimSpace(authKind))
 	switch provider {
-	case "gemini":
-		// gemini provider uses gemini-api-key config, not oauth-model-alias.
-		// OAuth-based gemini auth is converted to "gemini-cli" by the synthesizer.
-		return ""
-	case "vertex":
-		if authKind == "apikey" {
-			return ""
-		}
-		return "vertex"
 	case "claude":
 		if authKind == "apikey" {
 			return ""
@@ -290,7 +281,7 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 			return ""
 		}
 		return "codex"
-	case "gemini-cli", "aistudio", "antigravity", "kimi", "kiro":
+	case "kimi", "xai":
 		return provider
 	default:
 		return ""

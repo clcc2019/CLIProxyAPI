@@ -31,8 +31,8 @@ func NormalizeModelPatternList(models []string) []string {
 	return out
 }
 
-// CanonicalModelPatternKey strips thinking suffixes and Gemini's "models/"
-// prefix so model restrictions can be written against the client-visible model id.
+// CanonicalModelPatternKey strips thinking suffixes and provider path prefixes
+// so model restrictions can be written against the client-visible model id.
 func CanonicalModelPatternKey(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {

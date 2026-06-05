@@ -15,7 +15,7 @@ import (
 )
 
 // ApplyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
-// paths as relative to the provided root path (for example, "request" for Gemini CLI)
+// paths as relative to the provided root path.
 // and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
@@ -650,8 +650,6 @@ func normalizePayloadFromProtocol(protocol string) string {
 	switch protocol {
 	case "openai-response", "openai-responses", "response":
 		return "responses"
-	case "gemini-cli":
-		return "gemini"
 	default:
 		return protocol
 	}
@@ -1050,7 +1048,7 @@ func PayloadRequestPath(opts cliproxyexecutor.Options) string {
 //
 //	"*-5" matches "gpt-5"
 //	"gpt-*" matches "gpt-5" and "gpt-4"
-//	"gemini-*-pro" matches "gemini-2.5-pro" and "gemini-3-pro".
+//	"claude-*-sonnet" matches "claude-3-7-sonnet" and "claude-4-sonnet".
 func matchModelPattern(pattern, model string) bool {
 	pattern = strings.TrimSpace(pattern)
 	model = strings.TrimSpace(model)

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -104,75 +103,5 @@ func TestListAuthFilesSummaryLoadsCodexSubscriptionFromCacheStore(t *testing.T) 
 	}
 	if got := file["plan_type"]; got != "plus" {
 		t.Fatalf("plan_type = %#v, want plus", got)
-	}
-}
-
-func TestGetKiroUsageLoadsFromCacheStore(t *testing.T) {
-	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
-
-	client := &fakeKiroUsageClient{}
-	previousFactory := newKiroUsageClient
-	newKiroUsageClient = func(*config.Config) kiroUsageClient { return client }
-	t.Cleanup(func() { newKiroUsageClient = previousFactory })
-
-	manager := coreauth.NewManager(nil, nil, nil)
-	auth := &coreauth.Auth{
-		ID:       "kiro-auth.json",
-		FileName: "kiro-auth.json",
-		Provider: "kiro",
-		Metadata: map[string]any{
-			"type":          "kiro",
-			"access_token":  "access-token",
-			"refresh_token": "refresh-token",
-			"profile_arn":   "arn:aws:codewhisperer:us-east-1:123:profile/test",
-			"client_id":     "client-id",
-		},
-	}
-	if _, err := manager.Register(context.Background(), auth); err != nil {
-		t.Fatalf("register auth: %v", err)
-	}
-
-	remaining := 42.0
-	store := newMemoryManagementCacheStore()
-	data, err := json.Marshal(kiroUsageCacheWire{
-		Usage: &kiroauth.KiroUsageInfo{
-			SubscriptionInfo: &kiroauth.KiroSubscriptionInfo{SubscriptionTitle: "Kiro Cached"},
-			UsageBreakdownList: []kiroauth.KiroUsageBreakdown{
-				{ResourceType: "AGENTIC_REQUEST", RemainingWithPrecision: &remaining},
-			},
-		},
-		ExpiresAt: time.Now().Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("marshal cache entry: %v", err)
-	}
-	if err := store.SaveCache(context.Background(), kiroUsageCacheNamespace, kiroUsageCacheKey(auth.ID), data, time.Hour); err != nil {
-		t.Fatalf("save cache: %v", err)
-	}
-
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
-	h.SetCacheStore(store)
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/kiro-usage?name=kiro-auth.json", nil)
-
-	h.GetKiroUsage(ctx)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if client.calls != 0 {
-		t.Fatalf("upstream calls = %d, want 0", client.calls)
-	}
-	var payload kiroauth.KiroUsageInfo
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if payload.SubscriptionInfo == nil || payload.SubscriptionInfo.SubscriptionTitle != "Kiro Cached" {
-		t.Fatalf("subscription = %+v", payload.SubscriptionInfo)
-	}
-	if len(payload.UsageBreakdownList) != 1 || payload.UsageBreakdownList[0].RemainingWithPrecision == nil || *payload.UsageBreakdownList[0].RemainingWithPrecision != remaining {
-		t.Fatalf("usage breakdown = %+v", payload.UsageBreakdownList)
 	}
 }

@@ -21,8 +21,8 @@ func TestIsClaudeThinkingModel(t *testing.T) {
 		{"claude-3-5-sonnet", "claude-3-5-sonnet-20240620", false},
 
 		// Non-Claude models - should return false
-		{"gemini-3-pro-preview", "gemini-3-pro-preview", false},
-		{"gemini-thinking model", "gemini-3-pro-thinking", false}, // not Claude
+		{"gpt-5", "gpt-5", false},
+		{"non-claude thinking model", "codex-mini-latest-thinking", false}, // not Claude
 		{"gpt-4o", "gpt-4o", false},
 		{"empty string", "", false},
 

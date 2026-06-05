@@ -5,21 +5,17 @@ import "strings"
 type SignatureProvider string
 
 const (
-	SignatureProviderUnknown      SignatureProvider = "unknown"
-	SignatureProviderClaude       SignatureProvider = "claude"
-	SignatureProviderGemini       SignatureProvider = "gemini"
-	SignatureProviderGeminiBypass SignatureProvider = "gemini_bypass"
-	SignatureProviderGPT          SignatureProvider = "gpt"
+	SignatureProviderUnknown SignatureProvider = "unknown"
+	SignatureProviderClaude  SignatureProvider = "claude"
+	SignatureProviderGPT     SignatureProvider = "gpt"
 )
 
 type SignatureBlockKind string
 
 const (
-	SignatureBlockKindUnknown            SignatureBlockKind = "unknown"
-	SignatureBlockKindClaudeThinking     SignatureBlockKind = "claude_thinking"
-	SignatureBlockKindGeminiModelPart    SignatureBlockKind = "gemini_model_part"
-	SignatureBlockKindGeminiFunctionCall SignatureBlockKind = "gemini_function_call"
-	SignatureBlockKindGPTReasoning       SignatureBlockKind = "gpt_reasoning"
+	SignatureBlockKindUnknown        SignatureBlockKind = "unknown"
+	SignatureBlockKindClaudeThinking SignatureBlockKind = "claude_thinking"
+	SignatureBlockKindGPTReasoning   SignatureBlockKind = "gpt_reasoning"
 )
 
 type SignatureCompatibilityAction string
@@ -28,7 +24,6 @@ const (
 	SignatureActionPreserve                SignatureCompatibilityAction = "preserve"
 	SignatureActionDropBlock               SignatureCompatibilityAction = "drop_block"
 	SignatureActionDropSignature           SignatureCompatibilityAction = "drop_signature"
-	SignatureActionReplaceWithGeminiBypass SignatureCompatibilityAction = "replace_with_gemini_bypass"
 	SignatureActionNoCompatibleReplacement SignatureCompatibilityAction = "no_compatible_replacement"
 )
 
@@ -50,8 +45,6 @@ func SignatureProviderFromModelName(modelName string) SignatureProvider {
 	switch {
 	case strings.Contains(lower, "claude"):
 		return SignatureProviderClaude
-	case strings.Contains(lower, "gemini"):
-		return SignatureProviderGemini
 	case strings.Contains(lower, "gpt"),
 		strings.Contains(lower, "openai"),
 		strings.Contains(lower, "codex"),
@@ -65,17 +58,13 @@ func SignatureProviderFromModelName(modelName string) SignatureProvider {
 }
 
 // DetectSignatureProvider classifies the provider family that can replay
-// rawSignature. It intentionally uses Claude strict validation before Gemini
-// detection because Gemini 3 signatures also decode from an E-prefixed base64
-// string and can look Claude-like under shallow prefix checks.
+// rawSignature.
 func DetectSignatureProvider(rawSignature string) SignatureProvider {
 	return DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindUnknown)
 }
 
 // DetectSignatureProviderForBlock classifies rawSignature with block-kind
-// context. UUID-shaped payloads are deliberately not classified as replay-safe
-// provider signatures; callers targeting Gemini should replace them with the
-// bypass sentinel.
+// context.
 func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlockKind) SignatureProvider {
 	sig := strings.TrimSpace(rawSignature)
 	if sig == "" {
@@ -84,13 +73,6 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 
 	if prefixedProvider, unprefixed, ok := SplitSignatureProviderPrefix(sig); ok {
 		switch prefixedProvider {
-		case SignatureProviderGemini:
-			if IsGeminiThoughtSignatureBypass(unprefixed) {
-				return SignatureProviderGeminiBypass
-			}
-			if isRecognizedGeminiProviderSignature(unprefixed, blockKind) {
-				return SignatureProviderGemini
-			}
 		case SignatureProviderClaude:
 			if IsValidClaudeThinkingSignature(unprefixed, ClaudeSignatureValidationOptions{Strict: true}) {
 				return SignatureProviderClaude
@@ -106,17 +88,11 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 		return SignatureProviderUnknown
 	}
 
-	if IsGeminiThoughtSignatureBypass(sig) {
-		return SignatureProviderGeminiBypass
-	}
 	if IsValidGPTReasoningSignature(sig) {
 		return SignatureProviderGPT
 	}
 	if IsValidClaudeThinkingSignature(sig, ClaudeSignatureValidationOptions{Strict: true}) {
 		return SignatureProviderClaude
-	}
-	if isRecognizedGeminiProviderSignature(sig, blockKind) {
-		return SignatureProviderGemini
 	}
 	return SignatureProviderUnknown
 }
@@ -151,15 +127,6 @@ func DecideSignatureCompatibility(targetProvider SignatureProvider, rawSignature
 
 	decision.Compatible = false
 	switch targetProvider {
-	case SignatureProviderGemini:
-		if blockKind == SignatureBlockKindGeminiFunctionCall || blockKind == SignatureBlockKindGeminiModelPart || blockKind == SignatureBlockKindUnknown {
-			decision.Action = SignatureActionReplaceWithGeminiBypass
-			decision.ReplacementSignature = GeminiSkipThoughtSignatureValidator
-			decision.Reason = "Gemini can bypass synthetic or incompatible model-part signatures with the documented sentinel"
-			return decision
-		}
-		decision.Action = SignatureActionDropBlock
-		decision.Reason = "signature is not compatible with Gemini and this block is not a bypass-safe Gemini model part"
 	case SignatureProviderClaude:
 		decision.Action = SignatureActionDropBlock
 		decision.Reason = "Claude has no cross-provider bypass sentinel for thinking blocks"
@@ -193,8 +160,6 @@ func SignatureProviderFromCachePrefix(prefix string) SignatureProvider {
 	switch strings.ToLower(strings.TrimSpace(prefix)) {
 	case "claude", "anthropic":
 		return SignatureProviderClaude
-	case "gemini", "google":
-		return SignatureProviderGemini
 	case "openai", "gpt", "codex":
 		return SignatureProviderGPT
 	default:
@@ -229,37 +194,12 @@ func CompatibleSignatureForProviderBlock(targetProvider SignatureProvider, rawSi
 	return decision.NormalizedSignature, true
 }
 
-// CompatibleAntigravityClaudeThinkingSignature returns the double-layer R-form
-// required by Antigravity Claude replay. It only accepts signatures that are
-// strictly identifiable as Claude, so Gemini E-prefixed envelopes cannot slip
-// through the looser Antigravity bypass normalization path.
-func CompatibleAntigravityClaudeThinkingSignature(rawSignature string) (string, bool) {
-	if DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindClaudeThinking) != SignatureProviderClaude {
-		return "", false
-	}
-	normalized, err := NormalizeClaudeThinkingSignature(
-		SignaturePayloadWithoutProviderPrefix(rawSignature),
-		ClaudeSignatureValidationOptions{Strict: true},
-	)
-	if err != nil {
-		return "", false
-	}
-	return normalized, true
-}
-
 func normalizeSignatureTargetProvider(provider SignatureProvider) SignatureProvider {
-	switch provider {
-	case SignatureProviderGeminiBypass:
-		return SignatureProviderGemini
-	default:
-		return provider
-	}
+	return provider
 }
 
 func signatureProviderMatchesTarget(target, detected SignatureProvider) bool {
 	switch target {
-	case SignatureProviderGemini:
-		return detected == SignatureProviderGemini || detected == SignatureProviderGeminiBypass
 	case SignatureProviderClaude:
 		return detected == SignatureProviderClaude
 	case SignatureProviderGPT:
@@ -278,24 +218,10 @@ func normalizeCompatibleSignatureForProvider(targetProvider SignatureProvider, r
 			return ""
 		}
 		return normalized
-	case SignatureProviderGemini:
-		if IsGeminiThoughtSignatureBypass(payload) {
-			return payload
-		}
-		if isRecognizedGeminiProviderSignature(payload, blockKind) {
-			return payload
-		}
 	case SignatureProviderGPT:
 		if IsValidGPTReasoningSignature(payload) {
 			return payload
 		}
 	}
 	return ""
-}
-
-func isRecognizedGeminiProviderSignature(rawSignature string, blockKind SignatureBlockKind) bool {
-	if IsValidGeminiThoughtSignature(rawSignature, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}) {
-		return true
-	}
-	return false
 }

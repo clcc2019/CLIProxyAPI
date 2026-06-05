@@ -22,28 +22,28 @@ func TestSanitizeOAuthModelAlias_PreservesForkFlag(t *testing.T) {
 		t.Fatalf("expected first alias to be gpt-5->g5 fork=true, got name=%q alias=%q fork=%v", aliases[0].Name, aliases[0].Alias, aliases[0].Fork)
 	}
 	if aliases[1].Name != "gpt-6" || aliases[1].Alias != "g6" || aliases[1].Fork {
-		t.Fatalf("expected second alias to be gpt-6->g6 fork=false, got name=%q alias=%q fork=%v", aliases[1].Name, aliases[1].Alias, aliases[1].Fork)
+			t.Fatalf("expected second alias to be gpt-6->g6 fork=false, got name=%q alias=%q fork=%v", aliases[1].Name, aliases[1].Alias, aliases[1].Fork)
 	}
 }
 
 func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) {
 	cfg := &Config{
 		OAuthModelAlias: map[string][]OAuthModelAlias{
-			"antigravity": {
-				{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5-20251101", Fork: true},
-				{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5-20251101-thinking", Fork: true},
-				{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5", Fork: true},
+			"xai": {
+				{Name: "grok-4-fast-thinking", Alias: "grok-4-20251101", Fork: true},
+				{Name: "grok-4-fast-thinking", Alias: "grok-4-20251101-thinking", Fork: true},
+				{Name: "grok-4-fast-thinking", Alias: "grok-4", Fork: true},
 			},
 		},
 	}
 
 	cfg.SanitizeOAuthModelAlias()
 
-	aliases := cfg.OAuthModelAlias["antigravity"]
+	aliases := cfg.OAuthModelAlias["xai"]
 	expected := []OAuthModelAlias{
-		{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5-20251101", Fork: true},
-		{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5-20251101-thinking", Fork: true},
-		{Name: "gemini-claude-opus-4-5-thinking", Alias: "claude-opus-4-5", Fork: true},
+		{Name: "grok-4-fast-thinking", Alias: "grok-4-20251101", Fork: true},
+		{Name: "grok-4-fast-thinking", Alias: "grok-4-20251101-thinking", Fork: true},
+		{Name: "grok-4-fast-thinking", Alias: "grok-4", Fork: true},
 	}
 	if len(aliases) != len(expected) {
 		t.Fatalf("expected %d sanitized aliases, got %d", len(expected), len(aliases))

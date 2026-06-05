@@ -26,11 +26,7 @@ type SDKConfig struct {
 	// default base model ("gpt-5.4-mini") is used.
 	GPTImage2BaseModel string `yaml:"gpt-image-2-base-model,omitempty" json:"gpt-image-2-base-model,omitempty"`
 
-	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
-	// Default is false for safety; when false, /v1internal:* requests are rejected.
-	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`
-
-	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
+	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gpt-5.4")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.
 	ForceModelPrefix bool `yaml:"force-model-prefix" json:"force-model-prefix"`

@@ -22,65 +22,6 @@ func writeTestConfigFile(t *testing.T) string {
 	return path
 }
 
-func TestDeleteGeminiKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
-	t.Parallel()
-	gin.SetMode(gin.TestMode)
-
-	h := &Handler{
-		cfg: &config.Config{
-			GeminiKey: []config.GeminiKey{
-				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
-				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
-			},
-		},
-		configFilePath: writeTestConfigFile(t),
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/gemini-api-key?api-key=shared-key", nil)
-
-	h.DeleteGeminiKey(c)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
-	}
-	if got := len(h.cfg.GeminiKey); got != 2 {
-		t.Fatalf("gemini keys len = %d, want 2", got)
-	}
-}
-
-func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
-	t.Parallel()
-	gin.SetMode(gin.TestMode)
-
-	h := &Handler{
-		cfg: &config.Config{
-			GeminiKey: []config.GeminiKey{
-				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
-				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
-			},
-		},
-		configFilePath: writeTestConfigFile(t),
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/gemini-api-key?api-key=shared-key&base-url=https://a.example.com", nil)
-
-	h.DeleteGeminiKey(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if got := len(h.cfg.GeminiKey); got != 1 {
-		t.Fatalf("gemini keys len = %d, want 1", got)
-	}
-	if got := h.cfg.GeminiKey[0].BaseURL; got != "https://b.example.com" {
-		t.Fatalf("remaining base-url = %q, want %q", got, "https://b.example.com")
-	}
-}
-
 func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
@@ -109,37 +50,6 @@ func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T)
 	}
 	if got := h.cfg.ClaudeKey[0].BaseURL; got != "https://claude.example.com" {
 		t.Fatalf("remaining base-url = %q, want %q", got, "https://claude.example.com")
-	}
-}
-
-func TestDeleteVertexCompatKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
-	t.Parallel()
-	gin.SetMode(gin.TestMode)
-
-	h := &Handler{
-		cfg: &config.Config{
-			VertexCompatAPIKey: []config.VertexCompatKey{
-				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
-				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
-			},
-		},
-		configFilePath: writeTestConfigFile(t),
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/vertex-api-key?api-key=shared-key&base-url=https://b.example.com", nil)
-
-	h.DeleteVertexCompatKey(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if got := len(h.cfg.VertexCompatAPIKey); got != 1 {
-		t.Fatalf("vertex keys len = %d, want 1", got)
-	}
-	if got := h.cfg.VertexCompatAPIKey[0].BaseURL; got != "https://a.example.com" {
-		t.Fatalf("remaining base-url = %q, want %q", got, "https://a.example.com")
 	}
 }
 

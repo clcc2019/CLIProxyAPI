@@ -96,14 +96,14 @@ func TestClientAPIKeyQuotaTrackerUsesUTCWindows(t *testing.T) {
 	}
 }
 
-func TestClientAPIKeyQuotaTrackerUsesDefaultKiroClaudePriceAliases(t *testing.T) {
+func TestClientAPIKeyQuotaTrackerUsesDefaultClaudePriceAliases(t *testing.T) {
 	tracker := newClientAPIKeyQuotaTracker()
 	tracker.setModelPrices(nil)
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
 	tracker.record(coreusage.Record{
 		APIKey:      "client-key",
 		RequestedAt: now,
-		Model:       "kiro-claude-sonnet-4-6-agentic",
+		Model:       "claude-sonnet-4-6-agentic",
 		Detail: coreusage.Detail{
 			InputTokens:  1_000_000,
 			OutputTokens: 1_000_000,
@@ -112,7 +112,7 @@ func TestClientAPIKeyQuotaTrackerUsesDefaultKiroClaudePriceAliases(t *testing.T)
 
 	exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{DailyCost: 18}, now)
 	if exceeded == nil {
-		t.Fatal("expected default Kiro Claude price to count toward quota")
+		t.Fatal("expected default Claude price to count toward quota")
 	}
 	if exceeded.Used != 18 {
 		t.Fatalf("used cost = %v, want 18", exceeded.Used)

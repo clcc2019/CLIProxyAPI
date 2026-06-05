@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
-	DefaultPprofAddr             = "127.0.0.1:8316"
-	DefaultAuthDir               = "~/.cli-proxy-api"
+	DefaultPprofAddr = "127.0.0.1:8316"
+	DefaultAuthDir   = "~/.cli-proxy-api"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -118,16 +117,6 @@ type Config struct {
 	// official client unless a config file explicitly disables it.
 	EnableRequestCompression *bool `yaml:"enable-request-compression,omitempty" json:"enable-request-compression,omitempty"`
 
-	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
-	// When true (default), cached signatures are preferred and validated.
-	// When false, client signatures are used directly after normalization (bypass mode).
-	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
-
-	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
-
-	// GeminiKey defines Gemini API key configurations with optional routing overrides.
-	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
-
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
@@ -148,22 +137,15 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
-	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
-	// Used for services that use Vertex AI-style paths but with simple API key authentication.
-	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
-
-	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
-	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
-
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-	// gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, kiro.
+	// claude, codex, kimi, and xai.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
-	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
+	// codex-api-key, claude-api-key, and openai-compatibility.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
@@ -240,18 +222,6 @@ type RemoteManagement struct {
 	AllowRemote bool `yaml:"allow-remote"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
-	// DisableControlPanel skips serving and syncing the bundled management UI when true.
-	DisableControlPanel bool `yaml:"disable-control-panel"`
-	// DisableAutoUpdatePanel disables automatic periodic background updates of the management panel asset from GitHub.
-	// When false (the default), the background updater remains enabled; when true, the panel is only downloaded on first access if missing.
-	DisableAutoUpdatePanel bool `yaml:"disable-auto-update-panel"`
-	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
-	// When no explicit tag is provided, the latest release tag is used by default.
-	// Accepts either a repository URL, a GitHub releases page URL, or an API releases endpoint.
-	PanelGitHubRepository string `yaml:"panel-github-repository"`
-	// PanelGitHubTag forces the management panel download to use a specific GitHub release tag.
-	// When empty, the updater falls back to the tag embedded in PanelGitHubRepository, or the latest release.
-	PanelGitHubTag string `yaml:"panel-github-tag"`
 }
 
 // RedisConfig controls optional Redis-backed runtime state persistence.
@@ -315,11 +285,6 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
-
-	// AntigravityCredits enables credits-based last-resort fallback for Claude models.
-	// When all free-tier auths are exhausted (429/503), the conductor retries with
-	// an auth that has available Google One AI credits.
-	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -331,7 +296,7 @@ type RoutingConfig struct {
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Session IDs are extracted from multiple sources:
 	// metadata.user_id (Claude Code session format), X-Session-ID, Session_id (Codex),
-	// X-Amp-Thread-Id (Amp CLI thread), X-Client-Request-Id (PI), metadata.user_id,
+	// X-Client-Request-Id (PI), metadata.user_id,
 	// prompt_cache_key, conversation_id, or message hash.
 	// Automatic failover is always enabled when bound auth becomes unavailable.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
@@ -349,63 +314,6 @@ type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
-}
-
-// AmpModelMapping defines a model name mapping for Amp CLI requests.
-// When Amp requests a model that isn't available locally, this mapping
-// allows routing to an alternative model that IS available.
-type AmpModelMapping struct {
-	// From is the model name that Amp CLI requests (e.g., "claude-opus-4.5").
-	From string `yaml:"from" json:"from"`
-
-	// To is the target model name to route to (e.g., "claude-sonnet-4").
-	// The target model must have available providers in the registry.
-	To string `yaml:"to" json:"to"`
-
-	// Regex indicates whether the 'from' field should be interpreted as a regular
-	// expression for matching model names. When true, this mapping is evaluated
-	// after exact matches and in the order provided. Defaults to false (exact match).
-	Regex bool `yaml:"regex,omitempty" json:"regex,omitempty"`
-}
-
-// AmpCode groups Amp CLI integration settings including upstream routing,
-// optional overrides, management route restrictions, and model fallback mappings.
-type AmpCode struct {
-	// UpstreamURL defines the upstream Amp control plane used for non-provider calls.
-	UpstreamURL string `yaml:"upstream-url" json:"upstream-url"`
-
-	// UpstreamAPIKey optionally overrides the Authorization header when proxying Amp upstream calls.
-	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
-
-	// UpstreamAPIKeys maps client API keys (from top-level api-keys) to upstream API keys.
-	// When a request is authenticated with one of the APIKeys, the corresponding UpstreamAPIKey
-	// is used for the upstream Amp request.
-	UpstreamAPIKeys []AmpUpstreamAPIKeyEntry `yaml:"upstream-api-keys,omitempty" json:"upstream-api-keys,omitempty"`
-
-	// RestrictManagementToLocalhost restricts Amp management routes (/api/user, /api/threads, etc.)
-	// to only accept connections from localhost (127.0.0.1, ::1). When true, prevents drive-by
-	// browser attacks and remote access to management endpoints. Default: false (API key auth is sufficient).
-	RestrictManagementToLocalhost bool `yaml:"restrict-management-to-localhost" json:"restrict-management-to-localhost"`
-
-	// ModelMappings defines model name mappings for Amp CLI requests.
-	// When Amp requests a model that isn't available locally, these mappings
-	// allow routing to an alternative model that IS available.
-	ModelMappings []AmpModelMapping `yaml:"model-mappings" json:"model-mappings"`
-
-	// ForceModelMappings when true, model mappings take precedence over local API keys.
-	// When false (default), local API keys are used first if available.
-	ForceModelMappings bool `yaml:"force-model-mappings" json:"force-model-mappings"`
-}
-
-// AmpUpstreamAPIKeyEntry maps a set of client API keys to a specific upstream API key.
-// When a request is authenticated with one of the APIKeys, the corresponding UpstreamAPIKey
-// is used for the upstream Amp request.
-type AmpUpstreamAPIKeyEntry struct {
-	// UpstreamAPIKey is the API key to use when proxying to the Amp upstream.
-	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
-
-	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -441,13 +349,13 @@ type PayloadRule struct {
 
 // PayloadModelRule ties a model name pattern to a specific translator protocol.
 type PayloadModelRule struct {
-	// Name is the model name or wildcard pattern (e.g., "gpt-*", "*-5", "gemini-*-pro").
+	// Name is the model name or wildcard pattern (e.g., "gpt-*", "claude-*", "*-mini").
 	Name string `yaml:"name" json:"name"`
-	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
+	// Protocol restricts the rule to a specific translator format (e.g., "responses", "claude").
 	Protocol string `yaml:"protocol" json:"protocol"`
 	// Headers restricts the rule to requests whose headers match all configured wildcard patterns.
 	Headers map[string]string `yaml:"headers" json:"headers"`
-	// FromProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
+	// FromProtocol restricts the rule to a specific source protocol (e.g., "responses", "claude").
 	FromProtocol string `yaml:"from-protocol" json:"from-protocol"`
 	// Match requires payload JSON paths to equal the configured values.
 	Match []map[string]any `yaml:"match" json:"match"`
@@ -589,53 +497,6 @@ type CodexModel struct {
 func (m CodexModel) GetName() string  { return m.Name }
 func (m CodexModel) GetAlias() string { return m.Alias }
 
-// GeminiKey represents the configuration for a Gemini API key,
-// including optional overrides for upstream base URL, proxy routing, and headers.
-type GeminiKey struct {
-	// APIKey is the authentication key for accessing Gemini API services.
-	APIKey string `yaml:"api-key" json:"api-key"`
-
-	// Priority controls selection preference when multiple credentials match.
-	// Higher values are preferred; defaults to 0.
-	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
-
-	// Prefix optionally namespaces models for this credential (e.g., "teamA/gemini-3-pro-preview").
-	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
-
-	// BaseURL optionally overrides the Gemini API endpoint.
-	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
-
-	// ProxyURL optionally overrides the global proxy for this API key.
-	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
-
-	// Models defines upstream model names and aliases for request routing.
-	Models []GeminiModel `yaml:"models,omitempty" json:"models,omitempty"`
-
-	// Headers optionally adds extra HTTP headers for requests sent with this key.
-	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-
-	// ExcludedModels lists model IDs that should be excluded for this provider.
-	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
-
-	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
-	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
-}
-
-func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
-func (k GeminiKey) GetBaseURL() string { return k.BaseURL }
-
-// GeminiModel describes a mapping between an alias and the actual upstream model name.
-type GeminiModel struct {
-	// Name is the upstream model identifier used when issuing requests.
-	Name string `yaml:"name" json:"name"`
-
-	// Alias is the client-facing model name that maps to Name.
-	Alias string `yaml:"alias" json:"alias"`
-}
-
-func (m GeminiModel) GetName() string  { return m.Name }
-func (m GeminiModel) GetAlias() string { return m.Alias }
-
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
 type OpenAICompatibility struct {
@@ -749,8 +610,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
-	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
-	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -764,13 +623,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Re-enable the block below if automatic startup migration is needed again.
 	// var legacy legacyConfigData
 	// if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
-	// 	if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
-	// 		cfg.legacyMigrationPending = true
-	// 	}
 	// 	if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
-	// 		cfg.legacyMigrationPending = true
-	// 	}
-	// 	if cfg.migrateLegacyAmpConfig(&legacy) {
 	// 		cfg.legacyMigrationPending = true
 	// 	}
 	// }
@@ -788,12 +641,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		// Preserve YAML comments and ordering; update only the nested key.
 		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
 	}
-
-	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
-	if cfg.RemoteManagement.PanelGitHubRepository == "" {
-		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
-	}
-	cfg.RemoteManagement.PanelGitHubTag = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubTag)
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {
@@ -837,12 +684,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.SanitizeClientAPIKeys()
 
 	cfg.ModelPrices = NormalizeModelPrices(cfg.ModelPrices)
-
-	// Sanitize Gemini API key configuration and migrate legacy entries.
-	cfg.SanitizeGeminiKeys()
-
-	// Sanitize Vertex-compatible API keys.
-	cfg.SanitizeVertexCompatKeys()
 
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
@@ -1096,36 +937,6 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
-}
-
-// SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
-// It uses API key + base URL as the uniqueness key.
-func (cfg *Config) SanitizeGeminiKeys() {
-	if cfg == nil {
-		return
-	}
-
-	seen := make(map[string]struct{}, len(cfg.GeminiKey))
-	out := cfg.GeminiKey[:0]
-	for i := range cfg.GeminiKey {
-		entry := cfg.GeminiKey[i]
-		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
-			continue
-		}
-		entry.Prefix = normalizeModelPrefix(entry.Prefix)
-		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-		entry.Headers = NormalizeHeaders(entry.Headers)
-		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		uniqueKey := entry.APIKey + "|" + entry.BaseURL
-		if _, exists := seen[uniqueKey]; exists {
-			continue
-		}
-		seen[uniqueKey] = struct{}{}
-		out = append(out, entry)
-	}
-	cfg.GeminiKey = out
 }
 
 func normalizeModelPrefix(prefix string) string {
@@ -1522,8 +1333,6 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "pprof.addr":
 			return node.Value == DefaultPprofAddr
-		case "remote-management.panel-github-repository":
-			return node.Value == DefaultPanelGitHubRepository
 		case "routing.strategy":
 			return node.Value == "round-robin"
 		}
@@ -1920,46 +1729,13 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 
 // Legacy migration helpers (move deprecated config keys into structured fields).
 type legacyConfigData struct {
-	LegacyGeminiKeys      []string                    `yaml:"generative-language-api-key"`
-	OpenAICompat          []legacyOpenAICompatibility `yaml:"openai-compatibility"`
-	AmpUpstreamURL        string                      `yaml:"amp-upstream-url"`
-	AmpUpstreamAPIKey     string                      `yaml:"amp-upstream-api-key"`
-	AmpRestrictManagement *bool                       `yaml:"amp-restrict-management-to-localhost"`
-	AmpModelMappings      []AmpModelMapping           `yaml:"amp-model-mappings"`
+	OpenAICompat []legacyOpenAICompatibility `yaml:"openai-compatibility"`
 }
 
 type legacyOpenAICompatibility struct {
 	Name    string   `yaml:"name"`
 	BaseURL string   `yaml:"base-url"`
 	APIKeys []string `yaml:"api-keys"`
-}
-
-func (cfg *Config) migrateLegacyGeminiKeys(legacy []string) bool {
-	if cfg == nil || len(legacy) == 0 {
-		return false
-	}
-	changed := false
-	seen := make(map[string]struct{}, len(cfg.GeminiKey))
-	for i := range cfg.GeminiKey {
-		key := strings.TrimSpace(cfg.GeminiKey[i].APIKey)
-		if key == "" {
-			continue
-		}
-		seen[key] = struct{}{}
-	}
-	for _, raw := range legacy {
-		key := strings.TrimSpace(raw)
-		if key == "" {
-			continue
-		}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		cfg.GeminiKey = append(cfg.GeminiKey, GeminiKey{APIKey: key})
-		seen[key] = struct{}{}
-		changed = true
-	}
-	return changed
 }
 
 func (cfg *Config) migrateLegacyOpenAICompatibilityKeys(legacy []legacyOpenAICompatibility) bool {
@@ -2036,34 +1812,6 @@ func findOpenAICompatTarget(entries []OpenAICompatibility, legacyName, legacyBas
 		}
 	}
 	return nil
-}
-
-func (cfg *Config) migrateLegacyAmpConfig(legacy *legacyConfigData) bool {
-	if cfg == nil || legacy == nil {
-		return false
-	}
-	changed := false
-	if cfg.AmpCode.UpstreamURL == "" {
-		if val := strings.TrimSpace(legacy.AmpUpstreamURL); val != "" {
-			cfg.AmpCode.UpstreamURL = val
-			changed = true
-		}
-	}
-	if cfg.AmpCode.UpstreamAPIKey == "" {
-		if val := strings.TrimSpace(legacy.AmpUpstreamAPIKey); val != "" {
-			cfg.AmpCode.UpstreamAPIKey = val
-			changed = true
-		}
-	}
-	if legacy.AmpRestrictManagement != nil {
-		cfg.AmpCode.RestrictManagementToLocalhost = *legacy.AmpRestrictManagement
-		changed = true
-	}
-	if len(cfg.AmpCode.ModelMappings) == 0 && len(legacy.AmpModelMappings) > 0 {
-		cfg.AmpCode.ModelMappings = append([]AmpModelMapping(nil), legacy.AmpModelMappings...)
-		changed = true
-	}
-	return changed
 }
 
 func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {

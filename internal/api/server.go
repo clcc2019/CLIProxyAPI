@@ -1,6 +1,6 @@
 // Package api provides the HTTP API server implementation for the CLI Proxy API.
 // It includes the main server struct, routing setup, middleware for CORS and authentication,
-// and integration with various AI API handlers (OpenAI, Claude, Gemini).
+// and integration with various AI API handlers (OpenAI and Claude).
 // The server supports hot-reloading of clients and configuration.
 package api
 
@@ -26,20 +26,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules"
-	ampmodule "github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules/amp"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -198,9 +193,6 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
-	// ampModule is the Amp routing module for model mapping hot-reload
-	ampModule *ampmodule.AmpModule
-
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -327,9 +319,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
-	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
-	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.managementCacheStore != nil {
@@ -351,22 +341,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Setup routes
 	s.setupRoutes()
-
-	// Register Amp module.
-	ampAuthMiddleware := AuthMiddleware(accessManager)
-	s.ampModule = ampmodule.New(
-		ampmodule.WithAccessManager(accessManager),
-		ampmodule.WithAuthMiddleware(ampAuthMiddleware),
-	)
-	ctx := modules.Context{
-		Engine:         engine,
-		BaseHandler:    s.handlers,
-		Config:         cfg,
-		AuthMiddleware: ampAuthMiddleware,
-	}
-	if err := s.ampModule.Register(ctx); err != nil {
-		log.Errorf("Failed to register Amp module: %v", err)
-	}
 
 	// Apply additional router configurators from options
 	if optionState.routerConfigurator != nil {
@@ -410,7 +384,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		if c != nil && c.Request != nil {
 			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || path == "/management.html" {
+			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" {
 				c.Next()
 				return
 			}
@@ -460,10 +434,7 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/readyz", readyzHandler)
 	s.engine.HEAD("/readyz", readyzHandler)
 
-	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
-	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
-	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 
@@ -493,15 +464,6 @@ func (s *Server) setupRoutes() {
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
-	// Gemini compatible API routes
-	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
-	{
-		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
-		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
-		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
-	}
-
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -513,8 +475,6 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
-	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
-
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
@@ -541,48 +501,6 @@ func (s *Server) setupRoutes() {
 		}
 		if state != "" {
 			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/google/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/kiro/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "kiro", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -715,11 +633,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 
-		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
-		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
-		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)
-		mgmt.DELETE("/gemini-api-key", s.mgmt.DeleteGeminiKey)
-
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
 		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)
@@ -731,30 +644,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
 		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
 		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
-
-		mgmt.GET("/ampcode", s.mgmt.GetAmpCode)
-		mgmt.GET("/ampcode/upstream-url", s.mgmt.GetAmpUpstreamURL)
-		mgmt.PUT("/ampcode/upstream-url", s.mgmt.PutAmpUpstreamURL)
-		mgmt.PATCH("/ampcode/upstream-url", s.mgmt.PutAmpUpstreamURL)
-		mgmt.DELETE("/ampcode/upstream-url", s.mgmt.DeleteAmpUpstreamURL)
-		mgmt.GET("/ampcode/upstream-api-key", s.mgmt.GetAmpUpstreamAPIKey)
-		mgmt.PUT("/ampcode/upstream-api-key", s.mgmt.PutAmpUpstreamAPIKey)
-		mgmt.PATCH("/ampcode/upstream-api-key", s.mgmt.PutAmpUpstreamAPIKey)
-		mgmt.DELETE("/ampcode/upstream-api-key", s.mgmt.DeleteAmpUpstreamAPIKey)
-		mgmt.GET("/ampcode/restrict-management-to-localhost", s.mgmt.GetAmpRestrictManagementToLocalhost)
-		mgmt.PUT("/ampcode/restrict-management-to-localhost", s.mgmt.PutAmpRestrictManagementToLocalhost)
-		mgmt.PATCH("/ampcode/restrict-management-to-localhost", s.mgmt.PutAmpRestrictManagementToLocalhost)
-		mgmt.GET("/ampcode/model-mappings", s.mgmt.GetAmpModelMappings)
-		mgmt.PUT("/ampcode/model-mappings", s.mgmt.PutAmpModelMappings)
-		mgmt.PATCH("/ampcode/model-mappings", s.mgmt.PatchAmpModelMappings)
-		mgmt.DELETE("/ampcode/model-mappings", s.mgmt.DeleteAmpModelMappings)
-		mgmt.GET("/ampcode/force-model-mappings", s.mgmt.GetAmpForceModelMappings)
-		mgmt.PUT("/ampcode/force-model-mappings", s.mgmt.PutAmpForceModelMappings)
-		mgmt.PATCH("/ampcode/force-model-mappings", s.mgmt.PutAmpForceModelMappings)
-		mgmt.GET("/ampcode/upstream-api-keys", s.mgmt.GetAmpUpstreamAPIKeys)
-		mgmt.PUT("/ampcode/upstream-api-keys", s.mgmt.PutAmpUpstreamAPIKeys)
-		mgmt.PATCH("/ampcode/upstream-api-keys", s.mgmt.PatchAmpUpstreamAPIKeys)
-		mgmt.DELETE("/ampcode/upstream-api-keys", s.mgmt.DeleteAmpUpstreamAPIKeys)
 
 		mgmt.GET("/request-retry", s.mgmt.GetRequestRetry)
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)
@@ -786,11 +675,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
 
-		mgmt.GET("/vertex-api-key", s.mgmt.GetVertexCompatKeys)
-		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)
-		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
-		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
-
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
 		mgmt.PATCH("/oauth-excluded-models", s.mgmt.PatchOAuthExcludedModels)
@@ -804,7 +688,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/auth-files/codex-usage", s.mgmt.GetCodexUsage)
-		mgmt.GET("/auth-files/kiro-usage", s.mgmt.GetKiroUsage)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/preview", s.mgmt.PreviewAuthFile)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
@@ -812,13 +695,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
-		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
-
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
-		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
-		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
-		mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
@@ -842,36 +720,6 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
-}
-
-func (s *Server) serveManagementControlPanel(c *gin.Context) {
-	cfg := s.cfg
-	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
-	}
-	filePath := managementasset.FilePath(s.configFilePath)
-	if strings.TrimSpace(filePath) == "" {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
-	}
-
-	if _, err := os.Stat(filePath); err != nil {
-		if os.IsNotExist(err) {
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository, cfg.RemoteManagement.PanelGitHubTag) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
-		} else {
-			log.WithError(err).Error("failed to stat management control panel asset")
-			c.AbortWithStatus(http.StatusInternalServerError)
-			return
-		}
-	}
-
-	c.File(filePath)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -1014,28 +862,6 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 	c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
 }
 
-func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
-			s.handleHomeGeminiModels(c)
-			return
-		}
-
-		geminiHandler.GeminiModels(c)
-	}
-}
-
-func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
-			s.handleHomeGeminiModel(c)
-			return
-		}
-
-		geminiHandler.GeminiGetHandler(c)
-	}
-}
-
 type homeModelEntry struct {
 	id          string
 	created     int64
@@ -1107,40 +933,6 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	})
 }
 
-func (s *Server) handleHomeGeminiModels(c *gin.Context) {
-	entries, ok := s.loadHomeModelEntries(c)
-	if !ok {
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"models": formatHomeGeminiModels(entries),
-	})
-}
-
-func (s *Server) handleHomeGeminiModel(c *gin.Context) {
-	entries, ok := s.loadHomeModelEntries(c)
-	if !ok {
-		return
-	}
-
-	action := strings.TrimPrefix(c.Param("action"), "/")
-	action = strings.TrimSpace(action)
-	for _, entry := range entries {
-		if homeGeminiModelMatches(entry, action) {
-			c.JSON(http.StatusOK, formatHomeGeminiModel(entry))
-			return
-		}
-	}
-
-	c.JSON(http.StatusNotFound, handlers.ErrorResponse{
-		Error: handlers.ErrorDetail{
-			Message: "Not Found",
-			Type:    "not_found",
-		},
-	})
-}
-
 func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
 	if s == nil || c == nil || c.Request == nil {
 		return nil, false
@@ -1179,41 +971,6 @@ func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
 	}
 
 	return entries, true
-}
-
-func formatHomeGeminiModels(entries []homeModelEntry) []map[string]any {
-	out := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, formatHomeGeminiModel(entry))
-	}
-	return out
-}
-
-func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
-	name := entry.id
-	if !strings.HasPrefix(name, "models/") {
-		name = "models/" + name
-	}
-	displayName := entry.displayName
-	if displayName == "" {
-		displayName = entry.id
-	}
-	return map[string]any{
-		"name":                       name,
-		"displayName":                displayName,
-		"description":                displayName,
-		"supportedGenerationMethods": []string{"generateContent"},
-	}
-}
-
-func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
-	id := strings.TrimSpace(entry.id)
-	if id == "" || action == "" {
-		return false
-	}
-	normalizedAction := strings.TrimPrefix(action, "models/")
-	normalizedID := strings.TrimPrefix(id, "models/")
-	return action == id || action == "models/"+id || normalizedAction == normalizedID
 }
 
 func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
@@ -1454,7 +1211,7 @@ func corsMiddleware() gin.HandlerFunc {
 
 func managementCORSPath(path string) bool {
 	path = strings.TrimSpace(path)
-	return path == "/management.html" || strings.HasPrefix(path, "/v0/management")
+	return strings.HasPrefix(path, "/v0/management")
 }
 
 func disableManagementCORS(c *gin.Context) {
@@ -1541,8 +1298,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	}
 
-	applySignatureCacheConfig(oldCfg, cfg)
-
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
@@ -1596,7 +1351,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}
-	managementasset.SetCurrentConfig(cfg)
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 
@@ -1605,19 +1359,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
-	}
-
-	// Notify Amp module only when Amp config has changed.
-	ampConfigChanged := oldCfg == nil || !reflect.DeepEqual(oldCfg.AmpCode, cfg.AmpCode)
-	if ampConfigChanged {
-		if s.ampModule != nil {
-			log.Debugf("triggering amp module config update")
-			if err := s.ampModule.OnConfigUpdated(cfg); err != nil {
-				log.Errorf("failed to update Amp module config: %v", err)
-			}
-		} else {
-			log.Warnf("amp module is nil, skipping config update")
-		}
 	}
 
 	// Count client sources from configuration and auth store.
@@ -1629,24 +1370,20 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 		authEntries = util.CountAuthFiles(context.Background(), tokenStore)
 	}
-	geminiAPIKeyCount := len(cfg.GeminiKey)
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
-	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
 		entry := cfg.OpenAICompatibility[i]
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	total := authEntries + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Claude API keys + %d Codex keys + %d OpenAI-compat)\n",
 		total,
 		authEntries,
-		geminiAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
-		vertexAICompatCount,
 		openAICompatCount,
 	)
 }
@@ -1740,38 +1477,4 @@ func retryAfterHeaderSeconds(duration time.Duration) int64 {
 		return 1
 	}
 	return int64(seconds)
-}
-
-func configuredSignatureCacheEnabled(cfg *config.Config) bool {
-	if cfg != nil && cfg.AntigravitySignatureCacheEnabled != nil {
-		return *cfg.AntigravitySignatureCacheEnabled
-	}
-	return true
-}
-
-func applySignatureCacheConfig(oldCfg, cfg *config.Config) {
-	newVal := configuredSignatureCacheEnabled(cfg)
-	newStrict := configuredSignatureBypassStrict(cfg)
-	if oldCfg == nil {
-		cache.SetSignatureCacheEnabled(newVal)
-		cache.SetSignatureBypassStrictMode(newStrict)
-		return
-	}
-
-	oldVal := configuredSignatureCacheEnabled(oldCfg)
-	if oldVal != newVal {
-		cache.SetSignatureCacheEnabled(newVal)
-	}
-
-	oldStrict := configuredSignatureBypassStrict(oldCfg)
-	if oldStrict != newStrict {
-		cache.SetSignatureBypassStrictMode(newStrict)
-	}
-}
-
-func configuredSignatureBypassStrict(cfg *config.Config) bool {
-	if cfg != nil && cfg.AntigravitySignatureBypassStrict != nil {
-		return *cfg.AntigravitySignatureBypassStrict
-	}
-	return false
 }

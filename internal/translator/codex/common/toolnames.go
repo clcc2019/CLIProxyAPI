@@ -1,6 +1,6 @@
 // Package common holds helpers shared across the codex translator variants
-// (claude, gemini, gemini-cli, openai). Keeping the tool-name shortening logic
-// in one place avoids the risk of the four copies drifting apart.
+// (claude, codex, openai). Keeping the tool-name shortening logic in one place
+// avoids the risk of the copies drifting apart.
 package common
 
 import (

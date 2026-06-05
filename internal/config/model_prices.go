@@ -111,7 +111,7 @@ func modelPriceAliasCandidates(name string) []string {
 	if slash := strings.LastIndex(name, "/"); slash >= 0 && slash+1 < len(name) {
 		add(name[slash+1:])
 	}
-	for _, prefix := range []string{"kiro-", "amazonq-"} {
+	for _, prefix := range []string{"amazonq-"} {
 		if strings.HasPrefix(name, prefix) {
 			add(strings.TrimPrefix(name, prefix))
 		}

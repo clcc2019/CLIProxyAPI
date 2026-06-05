@@ -43,15 +43,15 @@ func TestCacheSignature_DifferentModelGroups(t *testing.T) {
 	sig1 := "signature1_1234567890123456789012345678901234567890123456"
 	sig2 := "signature2_1234567890123456789012345678901234567890123456"
 
-	geminiModel := "gemini-3-pro-preview"
+	gptModel := "gpt-5"
 	CacheSignature(testModelName, text, sig1)
-	CacheSignature(geminiModel, text, sig2)
+	CacheSignature(gptModel, text, sig2)
 
 	if GetCachedSignature(testModelName, text) != sig1 {
 		t.Error("Claude signature mismatch")
 	}
-	if GetCachedSignature(geminiModel, text) != sig2 {
-		t.Error("Gemini signature mismatch")
+	if GetCachedSignature(gptModel, text) != sig2 {
+		t.Error("GPT signature mismatch")
 	}
 }
 
@@ -139,7 +139,6 @@ func TestHasValidSignature(t *testing.T) {
 		{"49 chars - invalid", testModelName, "1234567890123456789012345678901234567890123456789", false},
 		{"empty string", testModelName, "", false},
 		{"short signature", testModelName, "abc", false},
-		{"gemini sentinel", "gemini-3-pro-preview", "skip_thought_signature_validator", true},
 	}
 
 	for _, tt := range tests {
@@ -410,7 +409,7 @@ func TestSignatureModeSetters_LogAtInfoLevel(t *testing.T) {
 	SetSignatureBypassStrictMode(false)
 
 	output := buffer.String()
-	if !strings.Contains(output, "antigravity signature cache DISABLED") {
+	if !strings.Contains(output, "signature cache DISABLED") {
 		t.Fatalf("expected info output for disabling signature cache, got: %q", output)
 	}
 	if strings.Contains(output, "strict mode (protobuf tree)") {

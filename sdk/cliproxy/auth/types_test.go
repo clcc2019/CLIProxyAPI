@@ -43,11 +43,11 @@ func TestToolPrefixDisabled(t *testing.T) {
 func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	t.Parallel()
 
-	geminiAuth := &Auth{
-		Provider: "gemini",
+	claudeAuth := &Auth{
+		Provider: "claude",
 		Attributes: map[string]string{
 			"api_key": "shared-key",
-			"source":  "config:gemini[abc123]",
+			"source":  "config:claude[abc123]",
 		},
 	}
 	compatAuth := &Auth{
@@ -59,29 +59,29 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 			"source":       "config:bohe[def456]",
 		},
 	}
-	geminiAltBase := &Auth{
-		Provider: "gemini",
+	claudeAltBase := &Auth{
+		Provider: "claude",
 		Attributes: map[string]string{
 			"api_key":  "shared-key",
 			"base_url": "https://alt.example.com",
-			"source":   "config:gemini[ghi789]",
+			"source":   "config:claude[ghi789]",
 		},
 	}
-	geminiDuplicate := &Auth{
-		Provider: "gemini",
+	claudeDuplicate := &Auth{
+		Provider: "claude",
 		Attributes: map[string]string{
 			"api_key": "shared-key",
-			"source":  "config:gemini[abc123-1]",
+			"source":  "config:claude[abc123-1]",
 		},
 	}
 
-	geminiIndex := geminiAuth.EnsureIndex()
+	claudeIndex := claudeAuth.EnsureIndex()
 	compatIndex := compatAuth.EnsureIndex()
-	altBaseIndex := geminiAltBase.EnsureIndex()
-	duplicateIndex := geminiDuplicate.EnsureIndex()
+	altBaseIndex := claudeAltBase.EnsureIndex()
+	duplicateIndex := claudeDuplicate.EnsureIndex()
 
-	if geminiIndex == "" {
-		t.Fatal("gemini index should not be empty")
+	if claudeIndex == "" {
+		t.Fatal("claude index should not be empty")
 	}
 	if compatIndex == "" {
 		t.Fatal("compat index should not be empty")
@@ -92,14 +92,14 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	if duplicateIndex == "" {
 		t.Fatal("duplicate index should not be empty")
 	}
-	if geminiIndex == compatIndex {
-		t.Fatalf("shared api key produced duplicate auth_index %q", geminiIndex)
+	if claudeIndex == compatIndex {
+		t.Fatalf("shared api key produced duplicate auth_index %q", claudeIndex)
 	}
-	if geminiIndex == altBaseIndex {
-		t.Fatalf("same provider/key with different base_url produced duplicate auth_index %q", geminiIndex)
+	if claudeIndex == altBaseIndex {
+		t.Fatalf("same provider/key with different base_url produced duplicate auth_index %q", claudeIndex)
 	}
-	if geminiIndex != duplicateIndex {
-		t.Fatalf("same provider/key with different source should share auth_index, got %q vs %q", geminiIndex, duplicateIndex)
+	if claudeIndex != duplicateIndex {
+		t.Fatalf("same provider/key with different source should share auth_index, got %q vs %q", claudeIndex, duplicateIndex)
 	}
 }
 
@@ -113,16 +113,16 @@ func TestEnsureIndexUsesOAuthTypeAndAbsolutePath(t *testing.T) {
 
 	relPath := "test-oauth.json"
 	absPath := filepath.Join(wd, relPath)
-	expectedSeed := "gemini:" + filepath.Clean(absPath)
+	expectedSeed := "claude:" + filepath.Clean(absPath)
 	expectedIndex := stableAuthIndex(expectedSeed)
 
 	a := &Auth{
-		Provider: "gemini-cli",
+		Provider: "claude",
 		Attributes: map[string]string{
 			"path": relPath,
 		},
 		Metadata: map[string]any{
-			"type": "gemini",
+			"type": "claude",
 		},
 	}
 

@@ -63,10 +63,6 @@ func TestApplyAuthExcludedModelsMeta_OAuthProvider(t *testing.T) {
 
 func TestBuildAPIKeyClientsCounts(t *testing.T) {
 	cfg := &config.Config{
-		GeminiKey: []config.GeminiKey{{APIKey: "g1"}, {APIKey: "g2"}},
-		VertexCompatAPIKey: []config.VertexCompatKey{
-			{APIKey: "v1"},
-		},
 		ClaudeKey: []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:  []config.CodexKey{{APIKey: "x1"}, {APIKey: "x2"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -74,9 +70,9 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 		},
 	}
 
-	gemini, vertex, claude, codex, compat := BuildAPIKeyClients(cfg)
-	if gemini != 2 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 {
-		t.Fatalf("unexpected counts: %d %d %d %d %d", gemini, vertex, claude, codex, compat)
+	claude, codex, compat := BuildAPIKeyClients(cfg)
+	if claude != 1 || codex != 2 || compat != 2 {
+		t.Fatalf("unexpected counts: %d %d %d", claude, codex, compat)
 	}
 }
 
@@ -117,12 +113,11 @@ func TestMatchProvider(t *testing.T) {
 func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 	authDir := t.TempDir()
 	metadata := map[string]any{
-		"type":       "gemini",
-		"email":      "user@example.com",
-		"project_id": "proj-a, proj-b",
-		"proxy_url":  "https://proxy",
+		"type":         "codex",
+		"email":        "user@example.com",
+		"access_token": "token",
 	}
-	authFile := filepath.Join(authDir, "gemini.json")
+	authFile := filepath.Join(authDir, "codex.json")
 	data, err := json.Marshal(metadata)
 	if err != nil {
 		t.Fatalf("failed to marshal metadata: %v", err)
@@ -133,16 +128,16 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 
 	cfg := &config.Config{
 		AuthDir: authDir,
-		GeminiKey: []config.GeminiKey{
+		ClaudeKey: []config.ClaudeKey{
 			{
-				APIKey:         "g-key",
-				BaseURL:        "https://gemini",
+				APIKey:         "c-key",
+				BaseURL:        "https://claude",
 				ExcludedModels: []string{"Model-A", "model-b"},
 				Headers:        map[string]string{"X-Req": "1"},
 			},
 		},
 		OAuthExcludedModels: map[string][]string{
-			"gemini-cli": {"Foo", "bar"},
+			"codex": {"Foo", "bar"},
 		},
 	}
 
@@ -150,61 +145,40 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 	w.SetConfig(cfg)
 
 	auths := w.SnapshotCoreAuths()
-	if len(auths) != 4 {
-		t.Fatalf("expected 4 auth entries (1 config + 1 primary + 2 virtual), got %d", len(auths))
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auth entries (1 config + 1 file), got %d", len(auths))
 	}
 
-	var geminiAPIKeyAuth *coreauth.Auth
-	var geminiPrimary *coreauth.Auth
-	virtuals := make([]*coreauth.Auth, 0)
+	var claudeAPIKeyAuth *coreauth.Auth
+	var codexFileAuth *coreauth.Auth
 	for _, a := range auths {
 		switch {
-		case a.Provider == "gemini" && a.Attributes["api_key"] == "g-key":
-			geminiAPIKeyAuth = a
-		case a.Attributes["gemini_virtual_primary"] == "true":
-			geminiPrimary = a
-		case strings.TrimSpace(a.Attributes["gemini_virtual_parent"]) != "":
-			virtuals = append(virtuals, a)
+		case a.Provider == "claude" && a.Attributes["api_key"] == "c-key":
+			claudeAPIKeyAuth = a
+		case a.Provider == "codex":
+			codexFileAuth = a
 		}
 	}
-	if geminiAPIKeyAuth == nil {
-		t.Fatal("expected synthesized Gemini API key auth")
+	if claudeAPIKeyAuth == nil {
+		t.Fatal("expected synthesized Claude API key auth")
 	}
 	expectedAPIKeyHash := diff.ComputeExcludedModelsHash([]string{"Model-A", "model-b"})
-	if geminiAPIKeyAuth.Attributes["excluded_models_hash"] != expectedAPIKeyHash {
-		t.Fatalf("expected API key excluded hash %s, got %s", expectedAPIKeyHash, geminiAPIKeyAuth.Attributes["excluded_models_hash"])
+	if claudeAPIKeyAuth.Attributes["excluded_models_hash"] != expectedAPIKeyHash {
+		t.Fatalf("expected API key excluded hash %s, got %s", expectedAPIKeyHash, claudeAPIKeyAuth.Attributes["excluded_models_hash"])
 	}
-	if geminiAPIKeyAuth.Attributes["auth_kind"] != "apikey" {
-		t.Fatalf("expected auth_kind=apikey, got %s", geminiAPIKeyAuth.Attributes["auth_kind"])
+	if claudeAPIKeyAuth.Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", claudeAPIKeyAuth.Attributes["auth_kind"])
 	}
 
-	if geminiPrimary == nil {
-		t.Fatal("expected primary gemini-cli auth from file")
-	}
-	if !geminiPrimary.Disabled || geminiPrimary.Status != coreauth.StatusDisabled {
-		t.Fatal("expected primary gemini-cli auth to be disabled when virtual auths are synthesized")
+	if codexFileAuth == nil {
+		t.Fatal("expected Codex auth from file")
 	}
 	expectedOAuthHash := diff.ComputeExcludedModelsHash([]string{"Foo", "bar"})
-	if geminiPrimary.Attributes["excluded_models_hash"] != expectedOAuthHash {
-		t.Fatalf("expected OAuth excluded hash %s, got %s", expectedOAuthHash, geminiPrimary.Attributes["excluded_models_hash"])
+	if codexFileAuth.Attributes["excluded_models_hash"] != expectedOAuthHash {
+		t.Fatalf("expected OAuth excluded hash %s, got %s", expectedOAuthHash, codexFileAuth.Attributes["excluded_models_hash"])
 	}
-	if geminiPrimary.Attributes["auth_kind"] != "oauth" {
-		t.Fatalf("expected auth_kind=oauth, got %s", geminiPrimary.Attributes["auth_kind"])
-	}
-
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtual auths, got %d", len(virtuals))
-	}
-	for _, v := range virtuals {
-		if v.Attributes["gemini_virtual_parent"] != geminiPrimary.ID {
-			t.Fatalf("virtual auth missing parent link to %s", geminiPrimary.ID)
-		}
-		if v.Attributes["excluded_models_hash"] != expectedOAuthHash {
-			t.Fatalf("expected virtual excluded hash %s, got %s", expectedOAuthHash, v.Attributes["excluded_models_hash"])
-		}
-		if v.Status != coreauth.StatusActive {
-			t.Fatalf("expected virtual auth to be active, got %s", v.Status)
-		}
+	if codexFileAuth.Attributes["auth_kind"] != "oauth" {
+		t.Fatalf("expected auth_kind=oauth, got %s", codexFileAuth.Attributes["auth_kind"])
 	}
 }
 
@@ -1388,20 +1362,20 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	// Ensure SnapshotCoreAuths yields a provider that is NOT affected, so we can assert it survives.
-	if err := os.WriteFile(filepath.Join(authDir, "provider-b.json"), []byte(`{"type":"provider-b","email":"b@example.com"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(authDir, "codex.json"), []byte(`{"type":"codex","email":"b@example.com"}`), 0o644); err != nil {
 		t.Fatalf("failed to write auth file: %v", err)
 	}
 
 	oldCfg := &config.Config{
 		AuthDir: authDir,
 		OAuthExcludedModels: map[string][]string{
-			"provider-a": {"m1"},
+			"claude": {"m1"},
 		},
 	}
 	newCfg := &config.Config{
 		AuthDir: authDir,
 		OAuthExcludedModels: map[string][]string{
-			"provider-a": {"m2"},
+			"claude": {"m2"},
 		},
 	}
 	data, err := yaml.Marshal(newCfg)
@@ -1417,7 +1391,7 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 		authDir:        authDir,
 		lastAuthHashes: make(map[string]string),
 		currentAuths: map[string]*coreauth.Auth{
-			"a": {ID: "a", Provider: "provider-a"},
+			"a": {ID: "a", Provider: "claude"},
 		},
 	}
 	w.SetConfig(oldCfg)
@@ -1429,13 +1403,13 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	w.clientsMutex.RLock()
 	defer w.clientsMutex.RUnlock()
 	for _, auth := range w.currentAuths {
-		if auth != nil && auth.Provider == "provider-a" {
+		if auth != nil && auth.Provider == "claude" {
 			t.Fatal("expected affected provider auth to be filtered")
 		}
 	}
 	foundB := false
 	for _, auth := range w.currentAuths {
-		if auth != nil && auth.Provider == "provider-b" {
+		if auth != nil && auth.Provider == "codex" {
 			foundB = true
 			break
 		}

@@ -43,7 +43,7 @@ func TestRefreshAuthViaHomeAcceptsAuthEnvelope(t *testing.T) {
 	}{
 		Auth: cliproxyauth.Auth{
 			ID:       "home-auth-1",
-			Provider: "antigravity",
+			Provider: "home-test",
 			Metadata: map[string]any{
 				"access_token": "new-access-token",
 			},
@@ -66,7 +66,7 @@ func TestRefreshAuthViaHomeAcceptsAuthEnvelope(t *testing.T) {
 	cfg := &config.Config{Home: config.HomeConfig{Enabled: true}}
 	auth := &cliproxyauth.Auth{
 		ID:       "home-auth-1",
-		Provider: "antigravity",
+		Provider: "home-test",
 		Index:    "home-index-1",
 		Metadata: map[string]any{
 			"refresh_token": "refresh-token",

@@ -6,11 +6,11 @@ import "errors"
 // entire auth (i.e., the credential itself is no longer usable for any model),
 // rather than only the model that triggered the error.
 //
-// Kiro is the canonical example: its AGENTIC_REQUEST quota is a single shared
-// bucket across all models, so a 429 on one model means every model on that
-// auth will fail next. Without this marker, the conductor treats the 429 as
-// per-model, a session-affinity binding stays on the depleted auth for
-// unrelated models, and requests appear to "scatter" across credentials.
+// Some upstreams expose a single shared quota bucket across all models, so a
+// 429 on one model means every model on that auth will fail next. Without this
+// marker, the conductor treats the 429 as per-model, a session-affinity binding
+// stays on the depleted auth for unrelated models, and requests appear to
+// "scatter" across credentials.
 //
 // Executors signal auth-scoped failures by returning an error that implements
 // this interface. The conductor then suspends the auth as a whole instead of

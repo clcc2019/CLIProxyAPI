@@ -53,8 +53,8 @@ func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string)
 // SanitizeClaudeMessagesSignaturesForTarget applies provider-aware signature
 // compatibility rules to Claude /v1/messages history. Compatible thinking
 // signatures are preserved. Incompatible thinking blocks are removed so a user
-// can continue a conversation after switching between Claude, GPT/Codex,
-// and Gemini models.
+// can continue a conversation after switching between Claude and GPT/Codex
+// models.
 func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessagesSignatureSanitizeOptions) ([]byte, SignatureSanitizeReport) {
 	targetProvider := normalizeSignatureTargetProvider(opts.TargetProvider)
 	if targetProvider == SignatureProviderUnknown && opts.TargetModel != "" {
@@ -103,8 +103,6 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 					switch decision.Action {
 					case SignatureActionPreserve:
 						report.Preserved++
-					case SignatureActionReplaceWithGeminiBypass:
-						report.ReplacedSignatures++
 					default:
 						report.DroppedSignatures++
 					}
@@ -138,11 +136,6 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 					continue
 				}
 				keptParts = append(keptParts, part.Raw)
-			case SignatureActionReplaceWithGeminiBypass:
-				report.ReplacedSignatures++
-				updated, _ := sjson.Set(part.Raw, "signature", decision.ReplacementSignature)
-				keptParts = append(keptParts, updated)
-				messageModified = true
 			case SignatureActionDropSignature:
 				report.DroppedSignatures++
 				updated, _ := sjson.Delete(part.Raw, "signature")
@@ -206,7 +199,7 @@ func sanitizeClaudeToolUseSignature(part gjson.Result, targetProvider SignatureP
 			continue
 		}
 
-		blockKind := SignatureBlockKindGeminiFunctionCall
+		blockKind := SignatureBlockKindUnknown
 		if targetProvider == SignatureProviderClaude {
 			blockKind = SignatureBlockKindClaudeThinking
 		} else if targetProvider == SignatureProviderGPT {
@@ -222,9 +215,6 @@ func sanitizeClaudeToolUseSignature(part gjson.Result, targetProvider SignatureP
 				updated, _ = sjson.Set(updated, sigPath, decision.NormalizedSignature)
 				changed = true
 			}
-		case SignatureActionReplaceWithGeminiBypass:
-			updated, _ = sjson.Set(updated, sigPath, decision.ReplacementSignature)
-			changed = true
 		default:
 			updated, _ = sjson.Delete(updated, sigPath)
 			changed = true

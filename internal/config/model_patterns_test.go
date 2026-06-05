@@ -33,8 +33,8 @@ func TestIsModelAllowed(t *testing.T) {
 		},
 		{
 			name:     "gemini models prefix is canonicalized",
-			model:    "models/gemini-2.5-pro",
-			allowed:  []string{"gemini-2.5-*"},
+			model:    "models/gpt-5",
+			allowed:  []string{"gpt-*"},
 			excluded: nil,
 			want:     true,
 		},

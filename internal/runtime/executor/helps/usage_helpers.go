@@ -571,26 +571,6 @@ func resolveUsageAPIKey(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 	if auth != nil {
-		provider := strings.TrimSpace(auth.Provider)
-		if strings.EqualFold(provider, "gemini-cli") {
-			if id := strings.TrimSpace(auth.ID); id != "" {
-				return id
-			}
-		}
-		if strings.EqualFold(provider, "vertex") {
-			if auth.Metadata != nil {
-				if projectID, ok := auth.Metadata["project_id"].(string); ok {
-					if trimmed := strings.TrimSpace(projectID); trimmed != "" {
-						return trimmed
-					}
-				}
-				if project, ok := auth.Metadata["project"].(string); ok {
-					if trimmed := strings.TrimSpace(project); trimmed != "" {
-						return trimmed
-					}
-				}
-			}
-		}
 		if _, value := auth.AccountInfo(); value != "" {
 			return strings.TrimSpace(value)
 		}
@@ -792,108 +772,6 @@ func usageDetailIsZero(detail usage.Detail) bool {
 		detail.TotalTokens == 0
 }
 
-func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
-	detail := usage.Detail{
-		InputTokens:     node.Get("promptTokenCount").Int(),
-		OutputTokens:    node.Get("candidatesTokenCount").Int(),
-		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
-		TotalTokens:     node.Get("totalTokenCount").Int(),
-		CachedTokens:    node.Get("cachedContentTokenCount").Int(),
-	}
-	detail.CacheReadTokens = detail.CachedTokens
-	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
-	}
-	return detail
-}
-
-func ParseGeminiCLIUsage(data []byte) usage.Detail {
-	usageNode := gjson.ParseBytes(data)
-	node := usageNode.Get("response.usageMetadata")
-	if !node.Exists() {
-		node = usageNode.Get("response.usage_metadata")
-	}
-	if !node.Exists() {
-		return usage.Detail{}
-	}
-	return parseGeminiFamilyUsageDetail(node)
-}
-
-func ParseGeminiUsage(data []byte) usage.Detail {
-	usageNode := gjson.ParseBytes(data)
-	node := usageNode.Get("usageMetadata")
-	if !node.Exists() {
-		node = usageNode.Get("usage_metadata")
-	}
-	if !node.Exists() {
-		return usage.Detail{}
-	}
-	return parseGeminiFamilyUsageDetail(node)
-}
-
-func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
-	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
-	}
-	node := gjson.GetBytes(payload, "usageMetadata")
-	if !node.Exists() {
-		node = gjson.GetBytes(payload, "usage_metadata")
-	}
-	if !node.Exists() {
-		return usage.Detail{}, false
-	}
-	return parseGeminiFamilyUsageDetail(node), true
-}
-
-func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
-	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
-	}
-	node := gjson.GetBytes(payload, "response.usageMetadata")
-	if !node.Exists() {
-		node = gjson.GetBytes(payload, "usage_metadata")
-	}
-	if !node.Exists() {
-		return usage.Detail{}, false
-	}
-	return parseGeminiFamilyUsageDetail(node), true
-}
-
-func ParseAntigravityUsage(data []byte) usage.Detail {
-	usageNode := gjson.ParseBytes(data)
-	node := usageNode.Get("response.usageMetadata")
-	if !node.Exists() {
-		node = usageNode.Get("usageMetadata")
-	}
-	if !node.Exists() {
-		node = usageNode.Get("usage_metadata")
-	}
-	if !node.Exists() {
-		return usage.Detail{}
-	}
-	return parseGeminiFamilyUsageDetail(node)
-}
-
-func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
-	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
-	}
-	node := gjson.GetBytes(payload, "response.usageMetadata")
-	if !node.Exists() {
-		node = gjson.GetBytes(payload, "usageMetadata")
-	}
-	if !node.Exists() {
-		node = gjson.GetBytes(payload, "usage_metadata")
-	}
-	if !node.Exists() {
-		return usage.Detail{}, false
-	}
-	return parseGeminiFamilyUsageDetail(node), true
-}
-
 var stopChunkWithoutUsage sync.Map
 
 func rememberStopWithoutUsage(traceID string) {
@@ -902,8 +780,7 @@ func rememberStopWithoutUsage(traceID string) {
 }
 
 // FilterSSEUsageMetadata removes usageMetadata from SSE events that are not
-// terminal (finishReason != "stop"). Stop chunks are left untouched. This
-// function is shared between aistudio and antigravity executors.
+// terminal (finishReason != "stop"). Stop chunks are left untouched.
 func FilterSSEUsageMetadata(payload []byte) []byte {
 	if len(payload) == 0 {
 		return payload
@@ -965,16 +842,14 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 }
 
 // StripUsageMetadataFromJSON drops usageMetadata unless finishReason is present (terminal).
-// It handles both formats:
-// - Aistudio: candidates.0.finishReason
-// - Antigravity: response.candidates.0.finishReason
+// It handles both top-level and response-wrapped candidate formats.
 func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
 	jsonBytes := bytes.TrimSpace(rawJSON)
 	if len(jsonBytes) == 0 || !gjson.ValidBytes(jsonBytes) {
 		return rawJSON, false
 	}
 
-	// Check for finishReason in both aistudio and antigravity formats
+	// Check for finishReason in both top-level and response-wrapped formats.
 	finishReason := gjson.GetBytes(jsonBytes, "candidates.0.finishReason")
 	if !finishReason.Exists() {
 		finishReason = gjson.GetBytes(jsonBytes, "response.candidates.0.finishReason")

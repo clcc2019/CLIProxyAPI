@@ -14,12 +14,6 @@ import (
 )
 
 const (
-	// GeminiCLIVersion is the version string reported in the User-Agent for upstream requests.
-	GeminiCLIVersion = "0.34.0"
-
-	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
-	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
-
 	// CodexCLIVersion is the upstream-compatible Codex CLI version embedded in
 	// the User-Agent and Version header. Keep this at or above the highest
 	// minimal_client_version in the Codex model catalog bundled with the proxy.
@@ -160,37 +154,6 @@ func sanitizeTerminalToken(in string) string {
 		b = append(b, c)
 	}
 	return string(b)
-}
-
-// geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.
-func geminiCLIOS() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "win32"
-	default:
-		return runtime.GOOS
-	}
-}
-
-// geminiCLIArch maps Go runtime architecture names to the Node.js-style arch strings used by Gemini CLI.
-func geminiCLIArch() string {
-	switch runtime.GOARCH {
-	case "amd64":
-		return "x64"
-	case "386":
-		return "x86"
-	default:
-		return runtime.GOARCH
-	}
-}
-
-// GeminiCLIUserAgent returns a User-Agent string that matches the Gemini CLI format.
-// The model parameter is included in the UA; pass "" or "unknown" when the model is not applicable.
-func GeminiCLIUserAgent(model string) string {
-	if model == "" {
-		model = "unknown"
-	}
-	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s; terminal)", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch())
 }
 
 // DefaultCodexCLIUserAgent returns the fallback Codex CLI-style User-Agent used by
@@ -423,7 +386,7 @@ func ScrubProxyAndFingerprintHeaders(req *http.Request) {
 
 	// --- Browser / Chromium fingerprint headers ---
 	// These are sent by Electron-based clients (e.g. CherryStudio) using the
-	// Fetch API, but NOT by Node.js https module (which Antigravity uses).
+	// Fetch API, but not by Node.js https module clients.
 	req.Header.Del("Sec-Ch-Ua")
 	req.Header.Del("Sec-Ch-Ua-Mobile")
 	req.Header.Del("Sec-Ch-Ua-Platform")
@@ -433,7 +396,7 @@ func ScrubProxyAndFingerprintHeaders(req *http.Request) {
 	req.Header.Del("Priority")
 
 	// --- Encoding negotiation ---
-	// Antigravity (Node.js) sends "gzip, deflate, br" by default;
+	// Node.js clients may send "gzip, deflate, br" by default;
 	// Electron-based clients may add "zstd" which is a fingerprint mismatch.
 	req.Header.Del("Accept-Encoding")
 }

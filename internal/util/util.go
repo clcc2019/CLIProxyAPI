@@ -17,7 +17,7 @@ import (
 
 var functionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
 
-// SanitizeFunctionName ensures a function name matches the requirements for Gemini/Vertex AI.
+// SanitizeFunctionName ensures a function name matches upstream tool-name requirements.
 // It replaces invalid characters with underscores, ensures it starts with a letter or underscore,
 // and truncates it to 64 characters if necessary.
 // Regex Rule: [^a-zA-Z0-9_.:-] replaced with _.
@@ -30,7 +30,7 @@ func SanitizeFunctionName(name string) string {
 	sanitized := functionNameSanitizer.ReplaceAllString(name, "_")
 
 	// Ensure it starts with a letter or underscore
-	// Re-reading requirements: Must start with a letter or an underscore.
+	// Tool names must start with a letter or an underscore.
 	if len(sanitized) > 0 {
 		first := sanitized[0]
 		if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {

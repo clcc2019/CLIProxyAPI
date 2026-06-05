@@ -39,7 +39,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 		totalTokens    int64
 	}{
 		{
-			// A provider may send finish_reason first and only attach usage in a later chunk (e.g. Vertex AI),
+			// A provider may send finish_reason first and only attach usage in a later chunk,
 			// so response.completed must wait for [DONE] to include that usage.
 			name: "late usage after finish reason",
 			in: []string{

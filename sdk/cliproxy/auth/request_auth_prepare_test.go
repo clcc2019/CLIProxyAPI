@@ -41,7 +41,7 @@ type requestPrepareExecutor struct {
 	executeCalls atomic.Int32
 }
 
-func (e *requestPrepareExecutor) Identifier() string { return "antigravity" }
+func (e *requestPrepareExecutor) Identifier() string { return "request-prepare" }
 
 func (e *requestPrepareExecutor) ShouldPrepareRequestAuth(auth *Auth) bool {
 	return auth == nil || auth.Metadata == nil || testStringValue(auth.Metadata["project_id"]) == ""
@@ -82,7 +82,7 @@ func (e *requestPrepareExecutor) HttpRequest(context.Context, *Auth, *http.Reque
 }
 
 func TestManagerExecute_PreparesAndPersistsMissingRequestAuthMetadata(t *testing.T) {
-	const model = "gemini-3.1-pro"
+	const model = "gpt-5"
 	store := &requestPrepareStore{}
 	executor := &requestPrepareExecutor{}
 	manager := NewManager(store, nil, nil)
@@ -90,16 +90,16 @@ func TestManagerExecute_PreparesAndPersistsMissingRequestAuthMetadata(t *testing
 
 	auth := &Auth{
 		ID:       "auth-request-prepare",
-		Provider: "antigravity",
+		Provider: "request-prepare",
 		Metadata: map[string]any{"access_token": "token"},
 	}
 	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: model}})
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "request-prepare", []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 
-	resp, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	resp, errExecute := manager.Execute(context.Background(), []string{"request-prepare"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if errExecute != nil {
 		t.Fatalf("Execute error: %v", errExecute)
 	}
@@ -123,7 +123,7 @@ func TestManagerExecute_PreparesAndPersistsMissingRequestAuthMetadata(t *testing
 		t.Fatalf("manager project_id = %q, want prepared-project", got)
 	}
 
-	if _, errExecute = manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute != nil {
+	if _, errExecute = manager.Execute(context.Background(), []string{"request-prepare"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute != nil {
 		t.Fatalf("second Execute error: %v", errExecute)
 	}
 	if got := executor.prepareCalls.Load(); got != 1 {

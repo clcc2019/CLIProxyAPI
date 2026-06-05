@@ -38,43 +38,18 @@ var (
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
-	Claude      []*ModelInfo `json:"claude"`
-	Gemini      []*ModelInfo `json:"gemini"`
-	Vertex      []*ModelInfo `json:"vertex"`
-	GeminiCLI   []*ModelInfo `json:"gemini-cli"`
-	AIStudio    []*ModelInfo `json:"aistudio"`
-	CodexFree   []*ModelInfo `json:"codex-free"`
-	CodexTeam   []*ModelInfo `json:"codex-team"`
-	CodexPlus   []*ModelInfo `json:"codex-plus"`
-	CodexPro    []*ModelInfo `json:"codex-pro"`
-	Kimi        []*ModelInfo `json:"kimi"`
-	Antigravity []*ModelInfo `json:"antigravity"`
-	XAI         []*ModelInfo `json:"xai"`
+	Claude    []*ModelInfo `json:"claude"`
+	CodexFree []*ModelInfo `json:"codex-free"`
+	CodexTeam []*ModelInfo `json:"codex-team"`
+	CodexPlus []*ModelInfo `json:"codex-plus"`
+	CodexPro  []*ModelInfo `json:"codex-pro"`
+	Kimi      []*ModelInfo `json:"kimi"`
+	XAI       []*ModelInfo `json:"xai"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
 func GetClaudeModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Claude)
-}
-
-// GetGeminiModels returns the standard Gemini model definitions.
-func GetGeminiModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Gemini)
-}
-
-// GetGeminiVertexModels returns Gemini model definitions for Vertex AI.
-func GetGeminiVertexModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Vertex)
-}
-
-// GetGeminiCLIModels returns Gemini model definitions for the Gemini CLI.
-func GetGeminiCLIModels() []*ModelInfo {
-	return cloneModelInfos(getModels().GeminiCLI)
-}
-
-// GetAIStudioModels returns model definitions for AI Studio.
-func GetAIStudioModels() []*ModelInfo {
-	return cloneModelInfos(getModels().AIStudio)
 }
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
@@ -100,24 +75,6 @@ func GetCodexProModels() []*ModelInfo {
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
-}
-
-// GetKiroModels was a hard-coded Kiro/Amazon Q model list used as a fallback
-// for the dynamic model catalog pulled via listAvailableModels. The dynamic
-// catalog is now the only source of truth: if no token is available or the
-// upstream call fails the auth simply registers no models, which is the same
-// behaviour as any other provider with missing credentials.
-//
-// The function is kept as a no-op stub so external callers (and the
-// management UI that iterates over channels) still link; it returns an empty
-// slice rather than nil so "unknown channel" checks continue to behave.
-func GetKiroModels() []*ModelInfo {
-	return []*ModelInfo{}
-}
-
-// GetAntigravityModels returns the standard Antigravity model definitions.
-func GetAntigravityModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Antigravity)
 }
 
 // GetXAIModels returns the standard xAI Grok model definitions.
@@ -269,36 +226,18 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //
 // Supported channels:
 //   - claude
-//   - gemini
-//   - vertex
-//   - gemini-cli
-//   - aistudio
 //   - codex
 //   - kimi
-//   - antigravity
-//   - kiro
 //   - xai
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
 	case "claude":
 		return GetClaudeModels()
-	case "gemini":
-		return GetGeminiModels()
-	case "vertex":
-		return GetGeminiVertexModels()
-	case "gemini-cli":
-		return GetGeminiCLIModels()
-	case "aistudio":
-		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
 	case "kimi":
 		return GetKimiModels()
-	case "antigravity":
-		return GetAntigravityModels()
-	case "kiro", "amazonq":
-		return GetKiroModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
 	default:
@@ -352,14 +291,8 @@ func buildStaticModelLookup(data *staticModelsJSON) map[string]*ModelInfo {
 	}
 	allModels := [][]*ModelInfo{
 		data.Claude,
-		data.Gemini,
-		data.Vertex,
-		data.GeminiCLI,
-		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,
-		data.Antigravity,
-		GetKiroModels(),
 	}
 	total := 0
 	for _, models := range allModels {

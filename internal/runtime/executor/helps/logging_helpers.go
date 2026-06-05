@@ -26,7 +26,7 @@ const (
 	apiWebsocketTimelineKey  = "API_WEBSOCKET_TIMELINE"
 	apiResponseTruncatedKey  = "API_RESPONSE_TRUNCATED"
 	apiWebsocketTruncatedKey = "API_WEBSOCKET_TIMELINE_TRUNCATED"
-	creditsUsedKey           = "__antigravity_credits_used__"
+	creditsUsedKey           = "__upstream_credits_used__"
 
 	maxLoggedAPIRequestBytes           = 1 << 20
 	maxLoggedAPIResponseBytes          = 4 << 20

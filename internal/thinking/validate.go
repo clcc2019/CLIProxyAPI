@@ -54,7 +54,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	}
 
 	// allowClampUnsupported determines whether to clamp unsupported levels instead of returning an error.
-	// This applies when crossing provider families (e.g., openai→gemini, claude→gemini) and the target
+	// This applies when crossing provider families (e.g., openai->claude) and the target
 	// model supports discrete levels. Same-family conversions require strict validation.
 	toCapability := detectModelCapability(modelInfo)
 	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
@@ -339,16 +339,7 @@ func normalizeLevels(levels []string) []string {
 // These providers may also support level-based thinking (hybrid models).
 func isBudgetCapableProvider(provider string) bool {
 	switch provider {
-	case "gemini", "gemini-cli", "antigravity", "claude":
-		return true
-	default:
-		return false
-	}
-}
-
-func isGeminiFamily(provider string) bool {
-	switch provider {
-	case "gemini", "gemini-cli", "antigravity":
+	case "claude":
 		return true
 	default:
 		return false
@@ -368,8 +359,7 @@ func isSameProviderFamily(from, to string) bool {
 	if from == to {
 		return true
 	}
-	return (isGeminiFamily(from) && isGeminiFamily(to)) ||
-		(isOpenAIFamily(from) && isOpenAIFamily(to))
+	return isOpenAIFamily(from) && isOpenAIFamily(to)
 }
 
 func abs(x int) int {

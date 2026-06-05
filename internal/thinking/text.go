@@ -8,10 +8,10 @@ import (
 // Handles various formats:
 // - Simple string: { "thinking": "text" } or { "text": "text" }
 // - Wrapped object: { "thinking": { "text": "text", "cache_control": {...} } }
-// - Gemini-style: { "thought": true, "text": "text" }
+// - Thought marker: { "thought": true, "text": "text" }
 // Returns the extracted text string.
 func GetThinkingText(part gjson.Result) string {
-	// Try direct text field first (Gemini-style)
+	// Try direct text field first.
 	if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
 		return text.String()
 	}

@@ -2,12 +2,12 @@ package config
 
 import "testing"
 
-func TestEffectiveModelPricesIncludesKiroClaudeDefaults(t *testing.T) {
+func TestEffectiveModelPricesIncludesClaudeDefaults(t *testing.T) {
 	prices := EffectiveModelPrices(nil)
 
-	price, ok := LookupModelPrice(prices, "kiro-claude-opus-4-7-agentic")
+	price, ok := LookupModelPrice(prices, "claude-opus-4-7-agentic")
 	if !ok {
-		t.Fatal("expected kiro opus 4.7 alias to resolve")
+		t.Fatal("expected opus 4.7 agentic alias to resolve")
 	}
 	if price.Prompt != 5 || price.Completion != 25 || price.Cache != 0.5 {
 		t.Fatalf("unexpected opus price: %+v", price)

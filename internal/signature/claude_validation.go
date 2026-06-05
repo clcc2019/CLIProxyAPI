@@ -13,8 +13,8 @@
 //   - R prefix: double-layer, inner[0] == E (0x45), first 6 bits = 010001,
 //     base64 index 17 = R.
 //
-// Valid signatures can be normalized to R-form (double-layer base64) before
-// sending to the Antigravity backend.
+// Valid signatures can be normalized to R-form (double-layer base64) for cache
+// storage and compatibility paths that expect the wrapped encoding.
 //
 // # Protobuf structure (Spec sections 4.1 and 4.2) in strict mode only
 //
@@ -40,12 +40,12 @@
 //	routing_class:        routing_class_11 | routing_class_12 | unknown
 //	infrastructure_class: infra_default (absent) | infra_aws (1) | infra_google (2) | infra_unknown
 //	schema_features:      compact_schema (len 70-72, no f6/f7) | extended_model_tagged_schema (f6 exists) | unknown
-//	legacy_route_hint:    only for ch=11, legacy_default_group | legacy_aws_group | legacy_vertex_direct/proxy
+//	legacy_route_hint:    only for ch=11, legacy_default_group | legacy_aws_group | legacy_google_direct/proxy
 //
 // # Compatibility
 //
 // Verified against all confirmed spec samples (Anthropic Max 20x, Azure,
-// Vertex, Bedrock) and legacy ch=11 signatures. Both single-layer (E) and
+// Google-hosted, Bedrock) and legacy ch=11 signatures. Both single-layer (E) and
 // double-layer (R) encodings are supported. Historical cache-mode modelGroup#
 // prefixes are stripped.
 package signature
@@ -197,8 +197,7 @@ func ValidateClaudeThinkingSignatures(inputRawJSON []byte, opts ...ClaudeSignatu
 }
 
 // NormalizeClaudeThinkingSignature strips any cache prefix, validates the
-// signature, and returns the double-layer R-form expected by Antigravity bypass
-// mode.
+// signature, and returns the double-layer R-form.
 func NormalizeClaudeThinkingSignature(rawSignature string, opts ...ClaudeSignatureValidationOptions) (string, error) {
 	opt := claudeSignatureValidationOptions(opts)
 	sig := stripClaudeSignaturePrefix(rawSignature)
@@ -447,9 +446,9 @@ func inspectClaudeChannelBlock(channelBlock []byte, encodingLayers int) (*Claude
 		case *tree.Field2 == 1:
 			tree.LegacyRouteHint = "legacy_aws_group"
 		case *tree.Field2 == 2 && tree.EncodingLayers == 2:
-			tree.LegacyRouteHint = "legacy_vertex_direct"
+			tree.LegacyRouteHint = "legacy_google_direct"
 		case *tree.Field2 == 2 && tree.EncodingLayers == 1:
-			tree.LegacyRouteHint = "legacy_vertex_proxy"
+			tree.LegacyRouteHint = "legacy_google_proxy"
 		}
 	}
 

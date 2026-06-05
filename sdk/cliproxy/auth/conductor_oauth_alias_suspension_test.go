@@ -65,7 +65,7 @@ func (e *aliasRoutingExecutor) ExecuteAliases() []string {
 
 func TestManagerExecute_OAuthAliasBypassesBlockedRouteModel(t *testing.T) {
 	const (
-		provider    = "antigravity"
+		provider    = "claude"
 		routeModel  = "claude-opus-4-6"
 		targetModel = "claude-opus-4-6-thinking"
 	)

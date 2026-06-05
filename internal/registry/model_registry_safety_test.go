@@ -11,16 +11,12 @@ func staticModelWithThinkingLevels(t *testing.T) string {
 	data := getModels()
 	allModels := [][]*ModelInfo{
 		data.Claude,
-		data.Gemini,
-		data.Vertex,
-		data.GeminiCLI,
-		data.AIStudio,
 		data.CodexFree,
 		data.CodexTeam,
 		data.CodexPlus,
 		data.CodexPro,
 		data.Kimi,
-		data.Antigravity,
+		data.XAI,
 	}
 	for _, models := range allModels {
 		for _, model := range models {

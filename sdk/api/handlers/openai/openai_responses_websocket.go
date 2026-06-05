@@ -917,7 +917,7 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 	replace := false
 	nextInput.ForEach(func(_, item gjson.Result) bool {
 		switch strings.TrimSpace(item.Get("type").String()) {
-		case "function_call", "custom_tool_call", "local_shell_call", "tool_search_call":
+		case "function_call", "custom_tool_call", "local_shell_call", "tool_search_call", "compaction", "context_compaction":
 			replace = true
 			return false
 		case "message":
@@ -1544,7 +1544,7 @@ func responsesWebsocketShouldRetryFullTranscript(errMsg *interfaces.ErrorMessage
 	}
 	lower := strings.ToLower(errText)
 	return strings.Contains(lower, "no tool call found") &&
-		strings.Contains(lower, "function call output")
+		strings.Contains(lower, "call output")
 }
 
 func responsesWebsocketIsCredentialFailoverFailure(err error) bool {
@@ -1591,7 +1591,7 @@ func responsesWebsocketPayloadShouldRetryFullTranscript(payload []byte) bool {
 	}
 	lower := strings.ToLower(errText)
 	return strings.Contains(lower, "no tool call found") &&
-		strings.Contains(lower, "function call output")
+		strings.Contains(lower, "call output")
 }
 
 func responsesWebsocketPreviousResponseNotFoundText(text string) bool {

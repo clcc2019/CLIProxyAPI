@@ -2840,6 +2840,11 @@ func TestResponsesWebsocketPayloadShouldRetryFullTranscript(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "missing custom tool call",
+			payload: []byte(`{"type":"error","status":400,"error":{"message":"No tool call found for custom tool call output with call_id call_jzaeS5GDDushxTKTsXR9CTWL.","param":"input","type":"invalid_request_error"}}`),
+			want:    true,
+		},
+		{
 			name:    "server error",
 			payload: []byte(`{"type":"error","status":500,"error":{"code":"previous_response_not_found","param":"previous_response_id"}}`),
 			want:    false,
@@ -4105,6 +4110,34 @@ func TestNormalizeResponsesWebsocketRequestTreatsTranscriptReplacementAsReset(t 
 	}
 	if items[0].Get("id").String() != "fc-compact" || items[1].Get("id").String() != "msg-2" {
 		t.Fatalf("replacement transcript was not preserved as-is: %s", normalized)
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match replacement request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestTreatsCompactionTranscriptAsReset(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"},{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"apply_patch"},{"type":"custom_tool_call_output","id":"tool-out-1","call_id":"call-1"},{"type":"message","id":"assistant-1","role":"assistant"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"apply_patch"},
+		{"type":"message","id":"assistant-1","role":"assistant"}
+	]`)
+	raw := []byte(`{"type":"response.create","input":[{"type":"compaction","encrypted_content":"enc-summary"},{"type":"message","id":"msg-2","role":"user"}]}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id must not exist in compaction transcript replacement mode")
+	}
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("replacement input len = %d, want 2: %s", len(items), normalized)
+	}
+	if items[0].Get("type").String() != "compaction" || items[0].Get("encrypted_content").String() != "enc-summary" ||
+		items[1].Get("id").String() != "msg-2" {
+		t.Fatalf("compaction transcript was not preserved as replacement: %s", normalized)
 	}
 	if !bytes.Equal(next, normalized) {
 		t.Fatalf("next request snapshot should match replacement request")

@@ -293,12 +293,6 @@ func (c *Client) DeleteAPIKey(index int) error {
 	return nil
 }
 
-// GetGeminiKeys fetches Gemini API keys.
-// API returns {"gemini-api-key": [...]}.
-func (c *Client) GetGeminiKeys() ([]map[string]any, error) {
-	return c.getWrappedKeyList("/v0/management/gemini-api-key", "gemini-api-key")
-}
-
 // GetClaudeKeys fetches Claude API keys.
 func (c *Client) GetClaudeKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/claude-api-key", "claude-api-key")
@@ -307,11 +301,6 @@ func (c *Client) GetClaudeKeys() ([]map[string]any, error) {
 // GetCodexKeys fetches Codex API keys.
 func (c *Client) GetCodexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/codex-api-key", "codex-api-key")
-}
-
-// GetVertexKeys fetches Vertex API keys.
-func (c *Client) GetVertexKeys() ([]map[string]any, error) {
-	return c.getWrappedKeyList("/v0/management/vertex-api-key", "vertex-api-key")
 }
 
 // GetOpenAICompat fetches OpenAI compatibility entries.

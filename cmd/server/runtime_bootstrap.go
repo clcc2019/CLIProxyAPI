@@ -15,8 +15,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
@@ -61,7 +59,6 @@ func prepareStartup(flags runtimeFlags) (startupState, error) {
 		return startupState{}, err
 	}
 
-	managementasset.SetCurrentConfig(cfg)
 	sdkAuth.RegisterTokenStore(resolveTokenStore(result.tokenStore))
 	configaccess.Register(&cfg.SDKConfig)
 
@@ -132,12 +129,6 @@ func detectConfigReady(cloudDeploy bool, configFilePath string, cfg *config.Conf
 
 func dispatchCommand(flags runtimeFlags, state startupState) error {
 	switch {
-	case flags.vertexImport != "":
-		cmd.DoVertexImport(state.cfg, flags.vertexImport, flags.vertexImportPrefix)
-	case flags.login:
-		cmd.DoLogin(state.cfg, flags.projectID, state.loginOptions)
-	case flags.antigravityLogin:
-		cmd.DoAntigravityLogin(state.cfg, state.loginOptions)
 	case flags.codexLogin:
 		cmd.DoCodexLogin(state.cfg, state.loginOptions)
 	case flags.codexDeviceLogin:
@@ -146,14 +137,8 @@ func dispatchCommand(flags runtimeFlags, state startupState) error {
 		cmd.DoClaudeLogin(state.cfg, state.loginOptions)
 	case flags.kimiLogin:
 		cmd.DoKimiLogin(state.cfg, state.loginOptions)
-	case flags.kiroLogin:
-		cmd.DoKiroLogin(state.cfg, state.loginOptions)
 	case flags.xaiLogin:
 		cmd.DoXAILogin(state.cfg, state.loginOptions)
-	case flags.kiroImport:
-		cmd.DoKiroImport(state.cfg, state.loginOptions)
-	case flags.kiroRefresh:
-		cmd.DoKiroRefresh(state.cfg, state.loginOptions)
 	default:
 		return runApplication(flags, state)
 	}
@@ -195,8 +180,6 @@ func startSupportServices(configFilePath string, localModel bool) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	supportServicesShutdown.Store(&cancel)
 
-	managementasset.StartAutoUpdater(ctx, configFilePath)
-	misc.StartAntigravityVersionUpdater(ctx)
 	if !localModel {
 		registry.StartModelsUpdater(ctx)
 	}

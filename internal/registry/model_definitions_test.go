@@ -2,22 +2,6 @@ package registry
 
 import "testing"
 
-func TestKiroStaticModelsReturnsEmptyAfterDynamicOnlyMigration(t *testing.T) {
-	// Kiro now pulls its model catalog directly from the upstream API using the
-	// auth's access token (see sdk/cliproxy/service.go fetchKiroModels). The
-	// hard-coded static list was removed so the advertised catalog always
-	// matches what the upstream accepts for this account. GetKiroModels is
-	// kept as a stub that returns a non-nil empty slice so callers iterating
-	// over known channels keep working.
-	models := GetKiroModels()
-	if models == nil {
-		t.Fatalf("GetKiroModels() = nil, want non-nil empty slice")
-	}
-	if len(models) != 0 {
-		t.Fatalf("GetKiroModels() = %d entries, want 0 (dynamic-only)", len(models))
-	}
-}
-
 func TestCodexStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -147,18 +131,13 @@ func TestValidateModelsCatalogRejectsInvalidDefinitions(t *testing.T) {
 func validTestModelsCatalog() *staticModelsJSON {
 	models := []*ModelInfo{{ID: "test-model"}}
 	return &staticModelsJSON{
-		Claude:      models,
-		Gemini:      models,
-		Vertex:      models,
-		GeminiCLI:   models,
-		AIStudio:    models,
-		CodexFree:   models,
-		CodexTeam:   models,
-		CodexPlus:   models,
-		CodexPro:    models,
-		Kimi:        models,
-		Antigravity: models,
-		XAI:         models,
+		Claude:    models,
+		CodexFree: models,
+		CodexTeam: models,
+		CodexPlus: models,
+		CodexPro:  models,
+		Kimi:      models,
+		XAI:       models,
 	}
 }
 

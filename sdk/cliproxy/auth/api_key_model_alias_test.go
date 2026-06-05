@@ -9,13 +9,13 @@ import (
 
 func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 	cfg := &internalconfig.Config{
-		GeminiKey: []internalconfig.GeminiKey{
+		ClaudeKey: []internalconfig.ClaudeKey{
 			{
 				APIKey:  "k",
 				BaseURL: "https://example.com",
-				Models: []internalconfig.GeminiModel{
-					{Name: "gemini-2.5-pro-exp-03-25", Alias: "g25p"},
-					{Name: "gemini-2.5-flash(low)", Alias: "g25f"},
+				Models: []internalconfig.ClaudeModel{
+					{Name: "claude-sonnet-4", Alias: "cs4"},
+					{Name: "claude-haiku-4(low)", Alias: "ch4"},
 				},
 			},
 		},
@@ -25,7 +25,7 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 	mgr.SetConfig(cfg)
 
 	ctx := context.Background()
-	_, _ = mgr.Register(ctx, &Auth{ID: "a1", Provider: "gemini", Attributes: map[string]string{"api_key": "k", "base_url": "https://example.com"}})
+	_, _ = mgr.Register(ctx, &Auth{ID: "a1", Provider: "claude", Attributes: map[string]string{"api_key": "k", "base_url": "https://example.com"}})
 
 	tests := []struct {
 		name   string
@@ -34,25 +34,25 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 		want   string
 	}{
 		// Fast path + suffix preservation
-		{"alias with suffix", "a1", "g25p(8192)", "gemini-2.5-pro-exp-03-25(8192)"},
-		{"alias without suffix", "a1", "g25p", "gemini-2.5-pro-exp-03-25"},
+		{"alias with suffix", "a1", "cs4(8192)", "claude-sonnet-4(8192)"},
+		{"alias without suffix", "a1", "cs4", "claude-sonnet-4"},
 
 		// Config suffix takes priority
-		{"config suffix priority", "a1", "g25f(high)", "gemini-2.5-flash(low)"},
-		{"config suffix no user suffix", "a1", "g25f", "gemini-2.5-flash(low)"},
+		{"config suffix priority", "a1", "ch4(high)", "claude-haiku-4(low)"},
+		{"config suffix no user suffix", "a1", "ch4", "claude-haiku-4(low)"},
 
 		// Case insensitive
-		{"uppercase alias", "a1", "G25P", "gemini-2.5-pro-exp-03-25"},
-		{"mixed case with suffix", "a1", "G25p(4096)", "gemini-2.5-pro-exp-03-25(4096)"},
+		{"uppercase alias", "a1", "CS4", "claude-sonnet-4"},
+		{"mixed case with suffix", "a1", "Cs4(4096)", "claude-sonnet-4(4096)"},
 
 		// Direct name lookup
-		{"upstream name direct", "a1", "gemini-2.5-pro-exp-03-25", "gemini-2.5-pro-exp-03-25"},
-		{"upstream name with suffix", "a1", "gemini-2.5-pro-exp-03-25(8192)", "gemini-2.5-pro-exp-03-25(8192)"},
+		{"upstream name direct", "a1", "claude-sonnet-4", "claude-sonnet-4"},
+		{"upstream name with suffix", "a1", "claude-sonnet-4(8192)", "claude-sonnet-4(8192)"},
 
 		// Cache miss scenarios
-		{"non-existent auth", "non-existent", "g25p", ""},
+		{"non-existent auth", "non-existent", "cs4", ""},
 		{"unknown alias", "a1", "unknown-alias", ""},
-		{"empty auth ID", "", "g25p", ""},
+		{"empty auth ID", "", "cs4", ""},
 		{"empty model", "a1", "", ""},
 	}
 
@@ -68,10 +68,10 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 
 func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 	cfg := &internalconfig.Config{
-		GeminiKey: []internalconfig.GeminiKey{
+		ClaudeKey: []internalconfig.ClaudeKey{
 			{
 				APIKey: "k",
-				Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro-exp-03-25", Alias: "g25p"}},
+				Models: []internalconfig.ClaudeModel{{Name: "claude-sonnet-4", Alias: "cs4"}},
 			},
 		},
 	}
@@ -80,32 +80,31 @@ func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 	mgr.SetConfig(cfg)
 
 	ctx := context.Background()
-	_, _ = mgr.Register(ctx, &Auth{ID: "a1", Provider: "gemini", Attributes: map[string]string{"api_key": "k"}})
+	_, _ = mgr.Register(ctx, &Auth{ID: "a1", Provider: "claude", Attributes: map[string]string{"api_key": "k"}})
 
 	// Initial alias
-	if resolved := mgr.lookupAPIKeyUpstreamModel("a1", "g25p"); resolved != "gemini-2.5-pro-exp-03-25" {
-		t.Fatalf("before reload: got %q, want %q", resolved, "gemini-2.5-pro-exp-03-25")
+	if resolved := mgr.lookupAPIKeyUpstreamModel("a1", "cs4"); resolved != "claude-sonnet-4" {
+		t.Fatalf("before reload: got %q, want %q", resolved, "claude-sonnet-4")
 	}
 
 	// Hot reload with new alias
 	mgr.SetConfig(&internalconfig.Config{
-		GeminiKey: []internalconfig.GeminiKey{
+		ClaudeKey: []internalconfig.ClaudeKey{
 			{
 				APIKey: "k",
-				Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-flash", Alias: "g25p"}},
+				Models: []internalconfig.ClaudeModel{{Name: "claude-haiku-4", Alias: "cs4"}},
 			},
 		},
 	})
 
 	// New alias should take effect
-	if resolved := mgr.lookupAPIKeyUpstreamModel("a1", "g25p"); resolved != "gemini-2.5-flash" {
-		t.Fatalf("after reload: got %q, want %q", resolved, "gemini-2.5-flash")
+	if resolved := mgr.lookupAPIKeyUpstreamModel("a1", "cs4"); resolved != "claude-haiku-4" {
+		t.Fatalf("after reload: got %q, want %q", resolved, "claude-haiku-4")
 	}
 }
 
 func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 	cfg := &internalconfig.Config{
-		GeminiKey: []internalconfig.GeminiKey{{APIKey: "gemini-key", Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro", Alias: "gp"}}}},
 		ClaudeKey: []internalconfig.ClaudeKey{{APIKey: "claude-key", Models: []internalconfig.ClaudeModel{{Name: "claude-sonnet-4", Alias: "cs4"}}}},
 		CodexKey:  []internalconfig.CodexKey{{APIKey: "codex-key", Models: []internalconfig.CodexModel{{Name: "o3", Alias: "o"}}}},
 	}
@@ -114,14 +113,12 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 	mgr.SetConfig(cfg)
 
 	ctx := context.Background()
-	_, _ = mgr.Register(ctx, &Auth{ID: "gemini-auth", Provider: "gemini", Attributes: map[string]string{"api_key": "gemini-key"}})
 	_, _ = mgr.Register(ctx, &Auth{ID: "claude-auth", Provider: "claude", Attributes: map[string]string{"api_key": "claude-key"}})
 	_, _ = mgr.Register(ctx, &Auth{ID: "codex-auth", Provider: "codex", Attributes: map[string]string{"api_key": "codex-key"}})
 
 	tests := []struct {
 		authID, input, want string
 	}{
-		{"gemini-auth", "gp", "gemini-2.5-pro"},
 		{"claude-auth", "cs4", "claude-sonnet-4"},
 		{"codex-auth", "o", "o3"},
 	}
@@ -135,8 +132,8 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 
 func TestApplyAPIKeyModelAlias(t *testing.T) {
 	cfg := &internalconfig.Config{
-		GeminiKey: []internalconfig.GeminiKey{
-			{APIKey: "k", Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro-exp-03-25", Alias: "g25p"}}},
+		ClaudeKey: []internalconfig.ClaudeKey{
+			{APIKey: "k", Models: []internalconfig.ClaudeModel{{Name: "claude-sonnet-4", Alias: "cs4"}}},
 		},
 	}
 
@@ -144,8 +141,8 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 	mgr.SetConfig(cfg)
 
 	ctx := context.Background()
-	apiKeyAuth := &Auth{ID: "a1", Provider: "gemini", Attributes: map[string]string{"api_key": "k"}}
-	oauthAuth := &Auth{ID: "oauth-auth", Provider: "gemini", Attributes: map[string]string{"auth_kind": "oauth"}}
+	apiKeyAuth := &Auth{ID: "a1", Provider: "claude", Attributes: map[string]string{"api_key": "k"}}
+	oauthAuth := &Auth{ID: "oauth-auth", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}}
 	_, _ = mgr.Register(ctx, apiKeyAuth)
 
 	tests := []struct {
@@ -157,8 +154,8 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 		{
 			name:       "api_key auth with alias",
 			auth:       apiKeyAuth,
-			inputModel: "g25p(8192)",
-			wantModel:  "gemini-2.5-pro-exp-03-25(8192)",
+			inputModel: "cs4(8192)",
+			wantModel:  "claude-sonnet-4(8192)",
 		},
 		{
 			name:       "oauth auth passthrough",

@@ -1,6 +1,6 @@
 // Package handlers provides core API handler functionality for the CLI Proxy API server.
 // It includes common types, client management, load balancing, and error handling
-// shared across all API endpoint handlers (OpenAI, Claude, Gemini).
+// shared across all API endpoint handlers.
 package handlers
 
 import (
@@ -321,7 +321,7 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 
 // requestHeadersFromContext extracts the original HTTP request headers from the gin context
 // embedded in the provided context. This allows session affinity selectors to read
-// client headers like X-Amp-Thread-Id.
+// client headers used for session affinity.
 func requestHeadersFromContext(ctx context.Context) http.Header {
 	if ctx == nil {
 		return nil

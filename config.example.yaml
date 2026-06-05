@@ -189,27 +189,19 @@ disable-image-generation: false
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
-  antigravity-credits: true # Whether to use credits as last-resort fallback when all free-tier auths are exhausted for Claude models
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
-  # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
+  # X-Session-ID, Session_id (Codex),
   # X-Client-Request-Id (PI), metadata.user_id, prompt_cache_key,
   # conversation_id, or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
-  # With session-affinity enabled, new non-Kiro sessions are assigned by
+  # With session-affinity enabled, new sessions are assigned by
   # round-robin across same-priority auth files, then remain sticky for the TTL.
-  #
-  # RECOMMENDED: set to true when using Kiro with multiple auth files. Kiro's
-  # AGENTIC_REQUEST quota is a single bucket shared across all models, so a
-  # 429 on any model now marks the entire credential as exhausted and
-  # session affinity moves the binding to the next available auth. Without
-  # session affinity, Claude Code's concurrent multi-model requests spread
-  # across credentials and drain every account in parallel.
-  session-affinity: true # recommended for Kiro / Claude Code; default: false
+  session-affinity: true # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
 
@@ -223,10 +215,6 @@ codex:
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
-
-# When true, enable Gemini CLI internal endpoints (/v1internal:*).
-# Default is false for safety.
-enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
@@ -248,36 +236,6 @@ image-stream-data-interval-timeout-seconds: 0
 # limits:
 #   max-in-flight-requests: 0   # Default: 0 (disabled). Try 256–1024 in prod.
 #   retry-after-seconds: 5      # Advertised on 503 responses; 0 omits the header.
-
-# Signature cache validation for thinking blocks (Antigravity/Claude).
-# When true (default), cached signatures are preferred and validated.
-# When false, client signatures are used directly after normalization (bypass mode for testing).
-# antigravity-signature-cache-enabled: true
-
-# Bypass mode signature validation strictness (only applies when signature cache is disabled).
-# When true, validates full Claude protobuf tree (Field 2 -> Field 1 structure).
-# When false (default), only checks R/E prefix + base64 + first byte 0x12.
-# antigravity-signature-bypass-strict: false
-
-# Gemini API keys
-# gemini-api-key:
-#   - api-key: "AIzaSy...01"
-#     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
-#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
-#     base-url: "https://generativelanguage.googleapis.com"
-#     headers:
-#       X-Custom-Header: "custom-value"
-#     proxy-url: "socks5://proxy.example.com:1080"
-#     # proxy-url: "direct" # optional: explicit direct connect for this credential
-#     models:
-#       - name: "gemini-2.5-flash" # upstream model name
-#         alias: "gemini-flash"    # client alias mapped to the upstream model
-#     excluded-models:
-#       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
-#       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#       - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
-#   - api-key: "AIzaSy...02"
 
 # Codex API keys
 # codex-api-key:
@@ -385,81 +343,16 @@ image-stream-data-interval-timeout-seconds: 0
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
 
-# Vertex API keys (Vertex-compatible endpoints, base-url is optional)
-# vertex-api-key:
-#   - api-key: "vk-123..."                        # x-goog-api-key header
-#     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
-#     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
-#     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
-#     # proxy-url: "direct" # optional: explicit direct connect for this credential
-#     headers:
-#       X-Custom-Header: "custom-value"
-#     models:                                     # optional: map aliases to upstream model names
-#       - name: "gemini-2.5-flash"                # upstream model name
-#         alias: "vertex-flash"                   # client-visible alias
-#       - name: "gemini-2.5-pro"
-#         alias: "vertex-pro"
-#     excluded-models:                            # optional: models to exclude from listing
-#       - "imagen-3.0-generate-002"
-#       - "imagen-*"
-
-# Amp Integration
-# ampcode:
-#   # Configure upstream URL for Amp CLI OAuth and management features
-#   upstream-url: "https://ampcode.com"
-#   # Optional: Override API key for Amp upstream (otherwise uses env or file)
-#   upstream-api-key: ""
-#   # Per-client upstream API key mapping
-#   # Maps client API keys (from top-level api-keys) to different Amp upstream API keys.
-#   # Useful when different clients need to use different Amp accounts/quotas.
-#   # If a client key isn't mapped, falls back to upstream-api-key (default behavior).
-#   upstream-api-keys:
-#     - upstream-api-key: "amp_key_for_team_a"    # Upstream key to use for these clients
-#       api-keys:                                 # Client keys that use this upstream key
-#         - "client-key-team-a"
-#         - "client-key-team-a-ci"
-#     - upstream-api-key: "amp_key_for_team_b"
-#       api-keys:
-#         - "client-key-team-b"
-#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
-#   restrict-management-to-localhost: false
-#   # Force model mappings to run before checking local API keys (default: false)
-#   force-model-mappings: false
-#   # Amp Model Mappings
-#   # Route unavailable Amp models to alternative models available in your local proxy.
-#   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
-#   # but you have a similar model available (e.g., Claude Sonnet 4).
-#   model-mappings:
-#     - from: "claude-opus-4-5-20251101"          # Model requested by Amp CLI
-#       to: "gemini-claude-opus-4-5-thinking"     # Route to this available model instead
-#     - from: "claude-sonnet-4-5-20250929"
-#       to: "gemini-claude-sonnet-4-5-thinking"
-#     - from: "claude-haiku-4-5-20251001"
-#       to: "gemini-2.5-flash"
-
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# Supported channels: claude, codex, kimi, xai.
+# NOTE: Aliases do not apply to codex-api-key, claude-api-key, or openai-compatibility.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
 # you select the protocol surface, but inference backend selection can still follow the resolved
 # model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
-#   gemini-cli:
-#     - name: "gemini-2.5-pro"          # original model name under this channel
-#       alias: "g2.5p"                  # client-visible alias
-#       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
-#   vertex:
-#     - name: "gemini-2.5-pro"
-#       alias: "g2.5p"
-#   aistudio:
-#     - name: "gemini-2.5-pro"
-#       alias: "g2.5p"
-#   antigravity:
-#     - name: "gemini-3-pro-high"
-#       alias: "gemini-3-pro-preview"
 #   claude:
 #     - name: "claude-sonnet-4-5-20250929"
 #       alias: "cs4.5"
@@ -475,17 +368,6 @@ image-stream-data-interval-timeout-seconds: 0
 
 # OAuth provider excluded models
 # oauth-excluded-models:
-#   gemini-cli:
-#     - "gemini-2.5-pro"     # exclude specific models (exact match)
-#     - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#     - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#     - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
-#   vertex:
-#     - "gemini-3-pro-preview"
-#   aistudio:
-#     - "gemini-3-pro-preview"
-#   antigravity:
-#     - "gemini-3-pro-preview"
 #   claude:
 #     - "claude-3-5-haiku-20241022"
 #   codex:
@@ -499,9 +381,9 @@ image-stream-data-interval-timeout-seconds: 0
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.
 #     - models:
-#         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
-#           from-protocol: "responses" # restricts the rule to the source protocol, options: openai, responses, gemini, claude
+#         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, responses, claude, codex
+#           from-protocol: "responses" # restricts the rule to the source protocol, options: openai, responses, claude, codex
 #           headers: # all configured request headers must match; values support "*" wildcards
 #             X-Client-Tier: "tenant-*-region-*"
 #           match: # all payload JSON paths must equal the configured values
@@ -513,29 +395,29 @@ image-stream-data-interval-timeout-seconds: 0
 #           not-exist: # all payload JSON paths must be missing or null
 #             - "metadata.disable_payload"
 #       params: # JSON path (gjson/sjson syntax) -> value
-#         "generationConfig.thinkingConfig.thinkingBudget": 32768
+#         "reasoning.effort": "high"
 #   default-raw: # Default raw rules set parameters using raw JSON when missing (must be valid JSON).
 #     - models:
-#         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, responses, claude, codex
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
-#         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
+#         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
 #   override: # Override rules always set parameters, overwriting any existing values.
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, responses, claude, codex
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
 #   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, responses, claude, codex
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
 #   filter: # Filter rules remove specified parameters from the payload.
 #     - models:
-#         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, responses, claude, codex
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
-#         - "generationConfig.thinkingConfig.thinkingBudget"
-#         - "generationConfig.responseJsonSchema"
+#         - "reasoning.effort"
+#         - "response_format"

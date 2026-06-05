@@ -183,13 +183,10 @@ func TestNewAuthFromAuthFileMetadataIgnoresNonStringEditableText(t *testing.T) {
 	}
 }
 
-func TestPrepareAuthFileMetadataForSaveSetsDisabledAndCleansKiro(t *testing.T) {
+func TestPrepareAuthFileMetadataForSaveSetsDisabled(t *testing.T) {
 	auth := &Auth{
 		Disabled: true,
 		Metadata: map[string]any{
-			"type":         "kiro",
-			"email":        "  ",
-			"profile_arn":  nil,
 			"machine_id":   "machine-1",
 			"access_token": "token-1",
 		},
@@ -198,12 +195,6 @@ func TestPrepareAuthFileMetadataForSaveSetsDisabledAndCleansKiro(t *testing.T) {
 	metadata := PrepareAuthFileMetadataForSave(auth)
 	if disabled, _ := metadata["disabled"].(bool); !disabled {
 		t.Fatalf("disabled = %#v, want true", metadata["disabled"])
-	}
-	if _, ok := metadata["email"]; ok {
-		t.Fatalf("empty Kiro email should be removed: %#v", metadata)
-	}
-	if _, ok := metadata["profile_arn"]; ok {
-		t.Fatalf("nil Kiro profile_arn should be removed: %#v", metadata)
 	}
 	if metadata["machine_id"] != "machine-1" || metadata["access_token"] != "token-1" {
 		t.Fatalf("non-empty metadata should be preserved: %#v", metadata)

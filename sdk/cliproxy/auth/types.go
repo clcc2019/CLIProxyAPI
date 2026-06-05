@@ -51,9 +51,9 @@ type Auth struct {
 	ID string `json:"id"`
 	// Index is a stable runtime identifier derived from auth metadata (not persisted).
 	Index string `json:"-"`
-	// Provider is the upstream provider key (e.g. "gemini", "claude").
+	// Provider is the upstream provider key (e.g. "claude", "codex").
 	Provider string `json:"provider"`
-	// Prefix optionally namespaces models for routing (e.g., "teamA/gemini-3-pro-preview").
+	// Prefix optionally namespaces models for routing (e.g., "teamA/claude-sonnet-4-5").
 	Prefix string `json:"prefix,omitempty"`
 	// FileName stores the relative or absolute path of the backing auth file.
 	FileName string `json:"-"`
@@ -160,7 +160,7 @@ type QuotaState struct {
 	// runtime metadata; new quota cooldowns use NextRecoverAt directly.
 	BackoffLevel int `json:"backoff_level,omitempty"`
 	// AuthScope is set on the auth-level QuotaState (not per-model) when the
-	// failure that tripped the quota was auth-scoped — e.g. Kiro's shared
+	// failure that tripped the quota was auth-scoped — e.g. an upstream shared
 	// AGENTIC_REQUEST bucket. It tells the selector that every model on this
 	// credential is exhausted, not just the model that triggered the 429,
 	// so session affinity can move to the next auth instead of scattering
@@ -650,7 +650,6 @@ func cloneAuthAttributesForScheduler(src map[string]string) map[string]string {
 	}
 	add("priority")
 	add("websockets")
-	add("gemini_virtual_parent")
 	add("compat_name")
 	add("provider_key")
 	return dst
@@ -950,8 +949,6 @@ func (a *Auth) indexSeed() string {
 		switch {
 		case compatName != "" || strings.EqualFold(provider, "openai-compatibility"):
 			apiPrefix = "openai-compatibility"
-		case strings.EqualFold(provider, "gemini"):
-			apiPrefix = "gemini-api-key"
 		case strings.EqualFold(provider, "codex"):
 			apiPrefix = "codex-api-key"
 		case strings.EqualFold(provider, "claude"):
@@ -1194,23 +1191,6 @@ func (a *Auth) AccountInfo() (string, string) {
 	if a == nil {
 		return "", ""
 	}
-	// For Gemini CLI, include project ID in the OAuth account info if present.
-	if strings.ToLower(a.Provider) == "gemini-cli" {
-		if a.Metadata != nil {
-			email, _ := a.Metadata["email"].(string)
-			email = strings.TrimSpace(email)
-			if email != "" {
-				if p, ok := a.Metadata["project_id"].(string); ok {
-					p = strings.TrimSpace(p)
-					if p != "" {
-						return "oauth", email + " (" + p + ")"
-					}
-				}
-				return "oauth", email
-			}
-		}
-	}
-
 	// Check metadata for email first (OAuth-style auth)
 	if a.Metadata != nil {
 		if v, ok := a.Metadata["email"].(string); ok {

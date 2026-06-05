@@ -11,14 +11,11 @@ import (
 
 // providerAppliers maps provider names to their ProviderApplier implementations.
 var providerAppliers = map[string]ProviderApplier{
-	"gemini":      nil,
-	"gemini-cli":  nil,
-	"claude":      nil,
-	"openai":      nil,
-	"codex":       nil,
-	"antigravity": nil,
-	"kimi":        nil,
-	"xai":         nil,
+	"claude": nil,
+	"openai": nil,
+	"codex":  nil,
+	"kimi":   nil,
+	"xai":    nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
@@ -54,7 +51,7 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 // order defined in FR25: route check → model capability query → config extraction
 // → validation → application.
 //
-// Suffix Priority: When the model name includes a thinking suffix (e.g., "gemini-2.5-pro(8192)"),
+// Suffix Priority: When the model name includes a thinking suffix (e.g., "claude-sonnet-4-5(8192)"),
 // the suffix configuration takes priority over any thinking parameters in the request body.
 // This enables users to override thinking settings via the model name without modifying their
 // request payload.
@@ -62,8 +59,8 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 // Parameters:
 //   - body: Original request body JSON
 //   - model: Model name, optionally with thinking suffix (e.g., "claude-sonnet-4-5(16384)")
-//   - fromFormat: Source request format (e.g., openai, codex, gemini)
-//   - toFormat: Target provider format for the request body (gemini, gemini-cli, antigravity, claude, openai, codex, kimi, xai)
+//   - fromFormat: Source request format (e.g., openai, codex, claude)
+//   - toFormat: Target provider format for the request body (claude, openai, codex, kimi, xai)
 //   - providerKey: Provider identifier used for registry model lookups (may differ from toFormat, e.g., openrouter -> openai)
 //
 // Returns:
@@ -81,10 +78,10 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 // Example:
 //
 //	// With suffix - suffix config takes priority
-//	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro(8192)", "gemini", "gemini", "gemini")
+//	result, err := thinking.ApplyThinking(body, "claude-sonnet-4-5(8192)", "openai", "claude", "claude")
 //
 //	// Without suffix - uses body config
-//	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini")
+//	result, err := thinking.ApplyThinking(body, "claude-sonnet-4-5", "openai", "claude", "claude")
 func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
@@ -343,8 +340,6 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 	switch provider {
 	case "claude":
 		return extractClaudeConfig(body)
-	case "gemini", "gemini-cli", "antigravity":
-		return extractGeminiConfig(body, provider)
 	case "openai":
 		return extractOpenAIConfig(body)
 	case "codex", "xai":
@@ -484,67 +479,6 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	// If type="enabled" but no budget_tokens, treat as auto (user wants thinking but no budget specified)
 	if thinkingType == "enabled" {
 		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-	}
-
-	return ThinkingConfig{}
-}
-
-// extractGeminiConfig extracts thinking configuration from Gemini format request body.
-//
-// Gemini API format:
-//   - generationConfig.thinkingConfig.thinkingLevel: "none", "auto", or level name (Gemini 3)
-//   - generationConfig.thinkingConfig.thinkingBudget: integer (Gemini 2.5)
-//
-// For gemini-cli and antigravity providers, the path is prefixed with "request.".
-//
-// Priority: thinkingLevel is checked first (Gemini 3 format), then thinkingBudget (Gemini 2.5 format).
-// This allows newer Gemini 3 level-based configs to take precedence.
-func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
-	prefix := "generationConfig.thinkingConfig"
-	if provider == "gemini-cli" || provider == "antigravity" {
-		prefix = "request.generationConfig.thinkingConfig"
-	}
-	results := gjson.GetManyBytes(body,
-		prefix+".thinkingLevel",
-		prefix+".thinking_level",
-		prefix+".thinkingBudget",
-		prefix+".thinking_budget",
-	)
-
-	// Check thinkingLevel first (Gemini 3 format takes precedence)
-	level := results[0]
-	if !level.Exists() {
-		// Google official Gemini Python SDK sends snake_case field names
-		level = results[1]
-	}
-	if level.Exists() {
-		value := level.String()
-		switch value {
-		case "none":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "auto":
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-		}
-	}
-
-	// Check thinkingBudget (Gemini 2.5 format)
-	budget := results[2]
-	if !budget.Exists() {
-		// Google official Gemini Python SDK sends snake_case field names
-		budget = results[3]
-	}
-	if budget.Exists() {
-		value := int(budget.Int())
-		switch value {
-		case 0:
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case -1:
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			return ThinkingConfig{Mode: ModeBudget, Budget: value}
-		}
 	}
 
 	return ThinkingConfig{}

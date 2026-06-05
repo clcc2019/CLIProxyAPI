@@ -25,8 +25,8 @@ func TestWithSkipPersist_DisablesUpdatePersistence(t *testing.T) {
 	mgr := NewManager(store, nil, nil)
 	auth := &Auth{
 		ID:       "auth-1",
-		Provider: "antigravity",
-		Metadata: map[string]any{"type": "antigravity"},
+		Provider: "persist-test",
+		Metadata: map[string]any{"type": "persist-test"},
 	}
 
 	if _, err := mgr.Update(context.Background(), auth); err != nil {
@@ -50,8 +50,8 @@ func TestWithSkipPersist_DisablesRegisterPersistence(t *testing.T) {
 	mgr := NewManager(store, nil, nil)
 	auth := &Auth{
 		ID:       "auth-1",
-		Provider: "antigravity",
-		Metadata: map[string]any{"type": "antigravity"},
+		Provider: "persist-test",
+		Metadata: map[string]any{"type": "persist-test"},
 	}
 
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {

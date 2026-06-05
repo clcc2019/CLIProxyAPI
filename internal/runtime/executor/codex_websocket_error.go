@@ -10,7 +10,7 @@ import (
 
 const codexWebsocketConnectionLimitReachedCode = "websocket_connection_limit_reached"
 const codexPreviousResponseNotFoundCode = "previous_response_not_found"
-const codexNoToolCallFoundForFunctionOutputMessage = "no tool call found for function call output"
+const codexNoToolCallFoundMessage = "no tool call found"
 
 // statusErrWithHeaders decorates a statusErr with response headers that the
 // upstream websocket-level error carried. We keep the distinction because
@@ -102,7 +102,7 @@ func codexWebsocketNoToolCallFoundForFunctionOutput(payload []byte) bool {
 	}
 	for _, path := range []string{"error.message", "message", "error"} {
 		message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, path).String()))
-		if strings.Contains(message, codexNoToolCallFoundForFunctionOutputMessage) {
+		if strings.Contains(message, codexNoToolCallFoundMessage) && strings.Contains(message, "call output") {
 			return true
 		}
 	}
@@ -112,7 +112,7 @@ func codexWebsocketNoToolCallFoundForFunctionOutput(payload []byte) bool {
 // normalizeCodexWebsocketErrorBody canonicalises the heterogeneous shapes
 // upstream hands back into a single {"error": {"type": ..., "message": ...}}
 // envelope. Every branch must keep the existing type + message fields intact
-// so downstream translators (claude/openai/gemini) can inspect them uniformly.
+// so downstream translators can inspect them uniformly.
 func normalizeCodexWebsocketErrorBody(payload []byte) []byte {
 	out := []byte(`{}`)
 	errNode := gjson.GetBytes(payload, "error")

@@ -2,7 +2,7 @@
 // This package implements Claude-compatible streaming chat completions with sophisticated
 // client rotation and quota management systems to ensure high availability and optimal
 // resource utilization across multiple backend clients. It handles request translation
-// between Claude API format and the underlying Gemini backend, providing seamless
+// between Claude API format and the underlying upstream backend, providing seamless
 // API compatibility while maintaining robust error handling and connection management.
 package claude
 
@@ -198,7 +198,7 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, modelN
 	cliCancel()
 }
 
-// handleStreamingResponse streams Claude-compatible responses backed by Gemini.
+// handleStreamingResponse streams Claude-compatible responses from upstream.
 // It sets up SSE, selects a backend client with rotation/quota logic,
 // forwards chunks, and translates them to Claude CLI format.
 //

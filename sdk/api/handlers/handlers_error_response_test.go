@@ -123,7 +123,7 @@ func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 
 func TestEnrichAuthSelectionError_PreservesExplicitStatus(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available", HTTPStatus: http.StatusTooManyRequests}
-	out := enrichAuthSelectionError(in, []string{"gemini"}, "gemini-2.5-pro")
+	out := enrichAuthSelectionError(in, []string{"openai"}, "gpt-5")
 
 	var got *coreauth.Error
 	if !errors.As(out, &got) || got == nil {

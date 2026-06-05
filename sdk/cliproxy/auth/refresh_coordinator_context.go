@@ -9,9 +9,9 @@ type refreshCoordinatorContextKey struct{}
 // RefreshCoordinator refreshes credentials for the given auth under the
 // Manager's singleflight, ensuring that concurrent callers (request-time
 // refresh from the executor AND the background auto-refresh loop) never
-// use the same refresh token twice. This is critical because AWS SSO-OIDC
-// and the kiro.dev social endpoint rotate the refresh token on every call;
-// a concurrent double-use bricks the credentials with invalid_grant.
+// use the same refresh token twice. Some identity providers rotate the refresh
+// token on every call; a concurrent double-use bricks the credentials with
+// invalid_grant.
 //
 // Returns the refreshed auth (possibly nil on permanent failure) and any
 // error. Implementations MUST publish the refreshed auth through their
@@ -45,9 +45,8 @@ func RefreshCoordinatorFrom(ctx context.Context) RefreshCoordinator {
 
 // CoordinatedRefresh runs the fallback refresh function through the
 // Manager's singleflight when a coordinator is installed, otherwise
-// invokes fallback directly. This lets the kiro executor funnel its
-// request-time refresh through the same singleflight as the background
-// auto-refresh loop.
+// invokes fallback directly. This lets executors funnel request-time refresh
+// through the same singleflight as the background auto-refresh loop.
 func CoordinatedRefresh(ctx context.Context, auth *Auth, fallback func(context.Context, *Auth) (*Auth, error)) (*Auth, error) {
 	if fallback == nil {
 		return nil, nil

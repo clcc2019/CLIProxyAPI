@@ -276,9 +276,6 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
-// For gemini-cli virtual auths (identified by the gemini_virtual_parent attribute),
-// a two-level round-robin is used: first cycling across credential groups (parent
-// accounts), then cycling within each group's project auths.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
@@ -289,23 +286,6 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model)
 
-	// Check if any available auth has gemini_virtual_parent attribute,
-	// indicating gemini-cli virtual auths that should use credential-level polling.
-	groups, parentOrder := groupByVirtualParent(available)
-	if len(parentOrder) > 1 {
-		// Two-level round-robin: first select a credential group, then pick within it.
-		groupKey := key + "::group"
-		groupIndex := s.nextCursor(groupKey, uint64(len(parentOrder)))
-		selectedParent := parentOrder[groupIndex%uint64(len(parentOrder))]
-		group := groups[selectedParent]
-
-		// Second level: round-robin within the selected credential group.
-		innerKey := key + "::cred:" + selectedParent
-		innerIndex := s.nextCursor(innerKey, 0)
-		return group[innerIndex%uint64(len(group))], nil
-	}
-
-	// Flat round-robin for non-grouped auths (original behavior).
 	index := s.nextCursor(key, 0)
 	return available[index%uint64(len(available))], nil
 }
@@ -361,35 +341,6 @@ func (s *RoundRobinSelector) loadCursors() *sync.Map {
 		return fresh
 	}
 	return s.cursors.Load()
-}
-
-// groupByVirtualParent groups auths by their gemini_virtual_parent attribute.
-// Returns a map of parentID -> auths and a sorted slice of parent IDs for stable iteration.
-// Only auths with a non-empty gemini_virtual_parent are grouped; if any auth lacks
-// this attribute, nil/nil is returned so the caller falls back to flat round-robin.
-func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
-	if len(auths) == 0 {
-		return nil, nil
-	}
-	groups := make(map[string][]*Auth)
-	for _, a := range auths {
-		parent := ""
-		if a.Attributes != nil {
-			parent = strings.TrimSpace(a.Attributes["gemini_virtual_parent"])
-		}
-		if parent == "" {
-			// Non-virtual auth present; fall back to flat round-robin.
-			return nil, nil
-		}
-		groups[parent] = append(groups[parent], a)
-	}
-	// Collect parent IDs in sorted order for stable cursor indexing.
-	parentOrder := make([]string, 0, len(groups))
-	for p := range groups {
-		parentOrder = append(parentOrder, p)
-	}
-	sort.Strings(parentOrder)
-	return groups, parentOrder
 }
 
 // Pick selects the first available auth for the provider in a deterministic manner.
@@ -449,8 +400,8 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			}
 		}
 		// Fall through to auth-level check ONLY when this credential carries
-		// the auth-scope quota flag — i.e. an AuthScopedFailure like Kiro's
-		// shared AGENTIC_REQUEST 429 marked every model on this auth as
+		// the auth-scope quota flag — i.e. an AuthScopedFailure marked every
+		// model on this auth as
 		// exhausted. Without this narrow scope, ordinary per-model 429s
 		// would accidentally block unrelated models through the aggregate
 		// Unavailable flag, breaking multi-model routing on other providers.
@@ -539,9 +490,8 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 //  3. execution session metadata / explicit body session identifiers
 //  4. metadata.user_id (non-Claude Code format)
 //  5. prompt_cache_key / metadata.prompt_cache_key
-//  6. Kiro native conversationState identifiers
-//  7. client principal metadata
-//  8. Hash-based fallback from messages
+//  6. client principal metadata
+//  7. Hash-based fallback from messages
 //
 // Note: The cache key includes provider and session ID, but intentionally does
 // not include model. Claude Code and similar clients can issue multiple model
@@ -691,16 +641,14 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 //  3. X-Session-ID header
 //  4. Conversation_id header
 //  5. Session_id / session-id header (Codex)
-//  6. X-Amp-Thread-Id header (Amp CLI thread ID)
-//  7. execution session metadata
-//  8. explicit body session_id / thread_id fields
-//  9. X-Client-Request-Id header (PI)
-//  10. metadata.user_id (non-Claude Code format)
-//  11. explicit conversation_id fields
-//  12. prompt_cache_key / metadata.prompt_cache_key in request body
-//  13. Kiro native conversationState identifiers
-//  14. client principal metadata
-//  15. Stable hash from first few messages content (fallback)
+//  6. execution session metadata
+//  7. explicit body session_id / thread_id fields
+//  8. X-Client-Request-Id header (PI)
+//  9. metadata.user_id (non-Claude Code format)
+//  10. explicit conversation_id fields
+//  11. prompt_cache_key / metadata.prompt_cache_key in request body
+//  12. client principal metadata
+//  13. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -783,14 +731,7 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 6. X-Amp-Thread-Id header (Amp CLI thread ID)
-	if headers != nil {
-		if tid := headers.Get("X-Amp-Thread-Id"); tid != "" {
-			return "amp:" + tid, ""
-		}
-	}
-
-	// 7. explicit execution session metadata (Responses websocket/session handlers)
+	// 6. explicit execution session metadata (Responses websocket/session handlers)
 	if sessionID := metadataStringValue(metadata, cliproxyexecutor.ExecutionSessionMetadataKey); sessionID != "" {
 		return "exec:" + sessionID, ""
 	}
@@ -802,7 +743,7 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "", ""
 	}
 
-	// 8. explicit body session/thread identifiers
+	// 7. explicit body session/thread identifiers
 	for _, candidate := range []struct {
 		path   string
 		prefix string
@@ -831,7 +772,7 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 9. X-Client-Request-Id header (PI). Keep this behind Codex turn/session
+	// 8. X-Client-Request-Id header (PI). Keep this behind Codex turn/session
 	// identity because some clients send a fresh request id every turn while
 	// carrying the stable thread id in the request body.
 	if headers != nil {
@@ -840,13 +781,13 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 10. metadata.user_id (non-Claude Code format)
+	// 9. metadata.user_id (non-Claude Code format)
 	userID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if userID != "" {
 		return "user:" + userID, ""
 	}
 
-	// 11. explicit conversation identifiers
+	// 10. explicit conversation identifiers
 	for _, path := range []string{
 		"metadata.conversation_id",
 		"metadata.conversationId",
@@ -858,7 +799,7 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 12. prompt_cache_key / metadata.prompt_cache_key
+	// 11. prompt_cache_key / metadata.prompt_cache_key
 	if promptCacheKey := gjson.GetBytes(payload, "prompt_cache_key").String(); promptCacheKey != "" {
 		return "cache:" + promptCacheKey, ""
 	}
@@ -866,27 +807,12 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "cache:" + promptCacheKey, ""
 	}
 
-	// 13. Kiro native conversationState identifiers
-	if convID := gjson.GetBytes(payload, "conversationState.conversationId").String(); convID != "" {
-		fallbackID := ""
-		if continuationID := gjson.GetBytes(payload, "conversationState.agentContinuationId").String(); continuationID != "" && continuationID != convID {
-			fallbackID = "kiro-cont:" + continuationID
-		}
-		return "conv:" + convID, fallbackID
-	}
-	if convID := gjson.GetBytes(payload, "conversationState.currentMessage.userInputMessage.userInputMessageContext.conversationId").String(); convID != "" {
-		return "conv:" + convID, ""
-	}
-	if continuationID := gjson.GetBytes(payload, "conversationState.agentContinuationId").String(); continuationID != "" {
-		return "kiro-cont:" + continuationID, ""
-	}
-
-	// 14. client principal metadata
+	// 12. client principal metadata
 	if principal := metadataStringValue(metadata, cliproxyexecutor.ClientPrincipalMetadataKey); principal != "" {
 		return "client:" + principal, ""
 	}
 
-	// 15. Hash-based fallback from message content
+	// 13. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
 }
 
@@ -961,7 +887,7 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 		}
 	}
 
-	// Gemini format
+	// Alternate provider format
 	if systemPrompt == "" && firstUserMsg == "" {
 		sysInstr := gjson.GetBytes(payload, "systemInstruction.parts")
 		if sysInstr.Exists() && sysInstr.IsArray() {

@@ -41,16 +41,16 @@ func TestCloneAuthForExecution_CodexUsesShallowClone(t *testing.T) {
 func TestCloneAuthForExecution_NonCodexDeepClonesMaps(t *testing.T) {
 	state := &ModelState{Status: StatusActive}
 	auth := &Auth{
-		ID:         "gemini-auth",
-		Provider:   "gemini",
+		ID:         "claude-auth",
+		Provider:   "claude",
 		Attributes: map[string]string{"priority": "10"},
 		Metadata:   map[string]any{"email": "x@example.com"},
 		ModelStates: map[string]*ModelState{
-			"gemini-2.5-pro": state,
+			"claude-3-5-sonnet": state,
 		},
 	}
 
-	cloned := cloneAuthForExecution("gemini", auth)
+	cloned := cloneAuthForExecution("claude", auth)
 	if cloned == nil {
 		t.Fatal("cloneAuthForExecution returned nil")
 	}
@@ -62,11 +62,11 @@ func TestCloneAuthForExecution_NonCodexDeepClonesMaps(t *testing.T) {
 	if auth.Metadata["email"] != "x@example.com" {
 		t.Fatal("expected non-codex execution clone to deep copy Metadata map")
 	}
-	cloned.ModelStates["gemini-2.5-pro"] = &ModelState{Status: StatusError}
-	if auth.ModelStates["gemini-2.5-pro"] != state {
+	cloned.ModelStates["claude-3-5-sonnet"] = &ModelState{Status: StatusError}
+	if auth.ModelStates["claude-3-5-sonnet"] != state {
 		t.Fatal("expected non-codex execution clone to deep copy ModelStates map")
 	}
-	if cloned.ModelStates["gemini-2.5-pro"] == state {
+	if cloned.ModelStates["claude-3-5-sonnet"] == state {
 		t.Fatal("expected non-codex execution clone to deep copy model state")
 	}
 }
@@ -74,22 +74,21 @@ func TestCloneAuthForExecution_NonCodexDeepClonesMaps(t *testing.T) {
 func TestAuthCloneForScheduler_MinimizesMutableMaps(t *testing.T) {
 	auth := &Auth{
 		ID:             "sched-auth",
-		Provider:       "gemini-cli",
+		Provider:       "claude",
 		Status:         StatusError,
 		Unavailable:    true,
 		NextRetryAfter: parseMustTime(t, "2026-04-26T12:00:00Z"),
 		Attributes: map[string]string{
-			"priority":              "10",
-			"gemini_virtual_parent": "parent-a",
-			"websockets":            "true",
-			"api_key":               "secret",
+			"priority":   "10",
+			"websockets": "true",
+			"api_key":    "secret",
 		},
 		Metadata: map[string]any{
 			"websockets": true,
 			"email":      "x@example.com",
 		},
 		ModelStates: map[string]*ModelState{
-			"gemini-2.5-pro": {
+			"claude-3-5-sonnet": {
 				Status:         StatusError,
 				Unavailable:    true,
 				NextRetryAfter: parseMustTime(t, "2026-04-26T12:05:00Z"),
@@ -104,7 +103,7 @@ func TestAuthCloneForScheduler_MinimizesMutableMaps(t *testing.T) {
 	if cloned == nil {
 		t.Fatal("CloneForScheduler returned nil")
 	}
-	if cloned.Attributes["priority"] != "10" || cloned.Attributes["gemini_virtual_parent"] != "parent-a" || cloned.Attributes["websockets"] != "true" {
+	if cloned.Attributes["priority"] != "10" || cloned.Attributes["websockets"] != "true" {
 		t.Fatalf("CloneForScheduler attributes = %#v", cloned.Attributes)
 	}
 	if _, ok := cloned.Attributes["api_key"]; ok {
@@ -119,7 +118,7 @@ func TestAuthCloneForScheduler_MinimizesMutableMaps(t *testing.T) {
 	if cloned.LastError != nil {
 		t.Fatalf("CloneForScheduler should clear LastError, got %#v", cloned.LastError)
 	}
-	state := cloned.ModelStates["gemini-2.5-pro"]
+	state := cloned.ModelStates["claude-3-5-sonnet"]
 	if state == nil {
 		t.Fatal("CloneForScheduler lost model state")
 	}
@@ -127,7 +126,7 @@ func TestAuthCloneForScheduler_MinimizesMutableMaps(t *testing.T) {
 		t.Fatalf("CloneForScheduler model state should clear LastError, got %#v", state.LastError)
 	}
 	state.Quota.BackoffLevel = 9
-	if auth.ModelStates["gemini-2.5-pro"].Quota.BackoffLevel != 2 {
+	if auth.ModelStates["claude-3-5-sonnet"].Quota.BackoffLevel != 2 {
 		t.Fatal("CloneForScheduler should deep copy model state quota")
 	}
 }
@@ -337,21 +336,20 @@ func BenchmarkCloneAuthForExecutionCodex(b *testing.B) {
 func BenchmarkCloneAuthForScheduler(b *testing.B) {
 	auth := &Auth{
 		ID:          "sched-auth",
-		Provider:    "gemini-cli",
+		Provider:    "claude",
 		Status:      StatusError,
 		Unavailable: true,
 		Attributes: map[string]string{
-			"priority":              "10",
-			"gemini_virtual_parent": "parent-a",
-			"websockets":            "true",
-			"api_key":               "secret",
+			"priority":   "10",
+			"websockets": "true",
+			"api_key":    "secret",
 		},
 		Metadata: map[string]any{
 			"websockets": true,
 			"email":      "x@example.com",
 		},
 		ModelStates: map[string]*ModelState{
-			"gemini-2.5-pro": {
+			"claude-3-5-sonnet": {
 				Status:         StatusError,
 				Unavailable:    true,
 				NextRetryAfter: parseMustTime(b, "2026-04-26T12:05:00Z"),
@@ -395,7 +393,7 @@ func BenchmarkCloneAuthForExecutionGemini(b *testing.B) {
 			"websockets": true,
 		},
 		ModelStates: map[string]*ModelState{
-			"gemini-2.5-pro": {Status: StatusActive},
+			"gpt-5": {Status: StatusActive},
 		},
 	}
 

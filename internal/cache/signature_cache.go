@@ -52,9 +52,6 @@ type groupCache struct {
 }
 
 func missingCachedSignature(groupKey string) string {
-	if groupKey == "gemini" {
-		return "skip_thought_signature_validator"
-	}
 	return ""
 }
 
@@ -312,7 +309,7 @@ func ClearSignatureCache(modelName string) {
 
 // HasValidSignature checks if a signature is valid (non-empty and long enough)
 func HasValidSignature(modelName, signature string) bool {
-	return (signature != "" && len(signature) >= MinValidSignatureLen) || (signature == "skip_thought_signature_validator" && GetModelGroup(modelName) == "gemini")
+	return signature != "" && len(signature) >= MinValidSignatureLen
 }
 
 func GetModelGroup(modelName string) string {
@@ -320,8 +317,6 @@ func GetModelGroup(modelName string) string {
 		return "gpt"
 	} else if strings.Contains(modelName, "claude") {
 		return "claude"
-	} else if strings.Contains(modelName, "gemini") {
-		return "gemini"
 	}
 	return modelName
 }
@@ -334,14 +329,14 @@ func init() {
 	signatureBypassStrictMode.Store(false)
 }
 
-// SetSignatureCacheEnabled switches Antigravity signature handling between cache mode and bypass mode.
+// SetSignatureCacheEnabled switches signature handling between cache mode and bypass mode.
 func SetSignatureCacheEnabled(enabled bool) {
 	previous := signatureCacheEnabled.Swap(enabled)
 	if previous == enabled {
 		return
 	}
 	if !enabled {
-		log.Info("antigravity signature cache DISABLED - bypass mode active, cached signatures will not be used for request translation")
+		log.Info("signature cache DISABLED - bypass mode active, cached signatures will not be used for request translation")
 	}
 }
 
@@ -357,9 +352,9 @@ func SetSignatureBypassStrictMode(strict bool) {
 		return
 	}
 	if strict {
-		log.Debug("antigravity bypass signature validation: strict mode (protobuf tree)")
+		log.Debug("bypass signature validation: strict mode (protobuf tree)")
 	} else {
-		log.Debug("antigravity bypass signature validation: basic mode (R/E + 0x12)")
+		log.Debug("bypass signature validation: basic mode (R/E + 0x12)")
 	}
 }
 

@@ -146,7 +146,7 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	t.Parallel()
 
-	model := "gemini-2.5-pro"
+	model := "gpt-5"
 	registerSchedulerModels(t, "gemini", model, "cooldown-expired")
 	scheduler := newSchedulerForTest(
 		&RoundRobinSelector{},
@@ -172,37 +172,6 @@ func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	}
 	if got.ID != "cooldown-expired" {
 		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "cooldown-expired")
-	}
-}
-
-func TestSchedulerPick_GeminiVirtualParentUsesTwoLevelRotation(t *testing.T) {
-	t.Parallel()
-
-	registerSchedulerModels(t, "gemini-cli", "gemini-2.5-pro", "cred-a::proj-1", "cred-a::proj-2", "cred-b::proj-1", "cred-b::proj-2")
-	scheduler := newSchedulerForTest(
-		&RoundRobinSelector{},
-		&Auth{ID: "cred-a::proj-1", Provider: "gemini-cli", Attributes: map[string]string{"gemini_virtual_parent": "cred-a"}},
-		&Auth{ID: "cred-a::proj-2", Provider: "gemini-cli", Attributes: map[string]string{"gemini_virtual_parent": "cred-a"}},
-		&Auth{ID: "cred-b::proj-1", Provider: "gemini-cli", Attributes: map[string]string{"gemini_virtual_parent": "cred-b"}},
-		&Auth{ID: "cred-b::proj-2", Provider: "gemini-cli", Attributes: map[string]string{"gemini_virtual_parent": "cred-b"}},
-	)
-
-	wantParents := []string{"cred-a", "cred-b", "cred-a", "cred-b"}
-	wantIDs := []string{"cred-a::proj-1", "cred-b::proj-1", "cred-a::proj-2", "cred-b::proj-2"}
-	for index := range wantIDs {
-		got, errPick := scheduler.pickSingle(context.Background(), "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("pickSingle() #%d auth = nil", index)
-		}
-		if got.ID != wantIDs[index] {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
-		}
-		if got.Attributes["gemini_virtual_parent"] != wantParents[index] {
-			t.Fatalf("pickSingle() #%d parent = %q, want %q", index, got.Attributes["gemini_virtual_parent"], wantParents[index])
-		}
 	}
 }
 
@@ -629,7 +598,7 @@ func TestManagerPickNextSessionAffinityFallbackCachePropagatesPickError(t *testi
 	defer selector.Stop()
 	manager := NewManager(nil, selector, nil)
 
-	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversationState":{"conversationId":"primary-conv","agentContinuationId":"fallback-cont"}}`)}
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"}]}`)}
 	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	if primaryID == "" || fallbackID == "" || primaryID == fallbackID {
 		t.Fatalf("extractSessionIDs() = %q/%q, want distinct primary and fallback IDs", primaryID, fallbackID)

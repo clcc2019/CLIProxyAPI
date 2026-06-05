@@ -13,7 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Manager exposes a websocket endpoint that proxies Gemini requests to
+// Manager exposes a websocket endpoint that proxies upstream requests to
 // connected clients.
 type Manager struct {
 	path      string
@@ -199,10 +199,10 @@ func randomProviderName() string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		return fmt.Sprintf("aistudio-%x", time.Now().UnixNano())
+		return fmt.Sprintf("wsrelay-%x", time.Now().UnixNano())
 	}
 	for i := range buf {
 		buf[i] = alphabet[int(buf[i])%len(alphabet)]
 	}
-	return "aistudio-" + string(buf)
+	return "wsrelay-" + string(buf)
 }

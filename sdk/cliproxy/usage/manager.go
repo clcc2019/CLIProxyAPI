@@ -53,13 +53,13 @@ type Failure struct {
 // Field mapping across upstream providers:
 //
 //   - InputTokens         = upstream-reported total prompt/input tokens. For
-//     providers that split input into uncached + cache-read + cache-write
-//     (Kiro, Claude, Gemini), this aggregates all three so downstream cost
+//     providers that split input into uncached + cache-read + cache-write,
+//     this aggregates all three so downstream cost
 //     calculators can still derive a total. Set individual buckets below.
 //   - OutputTokens        = upstream-reported assistant response/output tokens.
 //   - ReasoningTokens     = extended-thinking / chain-of-thought tokens that
 //     upstream bills separately from OutputTokens (Claude thinking, o-series
-//     reasoning, Gemini thoughts). Clients that display "thinking" counts
+//     reasoning, provider-specific thoughts). Clients that display "thinking" counts
 //     read this field.
 //   - CachedTokens        = tokens served from a cache HIT (cheap). Maps to
 //     Claude's cache_read_input_tokens and OpenAI's cached_tokens. This is
@@ -68,8 +68,8 @@ type Failure struct {
 //     CachedTokens for providers that report only one cache-hit field, and is
 //     kept for sinks that need read/write cache buckets by name.
 //   - CacheCreationTokens = tokens billed for cache CREATION / write on a
-//     prompt that populates a new cache entry (Claude prompt caching,
-//     AWS CodeWhisperer / Kiro cacheWriteInputTokens). Also a subset of
+//     prompt that populates a new cache entry (for example, Claude prompt
+//     caching). Also a subset of
 //     InputTokens. Set this so downstream translators can emit the
 //     cache_creation_input_tokens field Claude clients rely on to display
 //     prompt-cache effectiveness.

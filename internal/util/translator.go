@@ -278,7 +278,7 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 
 // SanitizedToolNameMap builds a sanitized-name → original-name map from Claude request tools.
 // It is used to restore exact tool names for clients (e.g. Claude Code) after the proxy
-// sanitizes tool names for Gemini/Vertex API compatibility via SanitizeFunctionName.
+// sanitizes tool names for upstream API compatibility via SanitizeFunctionName.
 // Only entries where sanitization actually changes the name are included.
 func SanitizedToolNameMap(rawJSON []byte) map[string]string {
 	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {

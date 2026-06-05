@@ -57,32 +57,6 @@ func TestComputeOpenAICompatModelsHash_NormalizesAndDedups(t *testing.T) {
 	}
 }
 
-func TestComputeVertexCompatModelsHash_DifferentInputs(t *testing.T) {
-	models := []config.VertexCompatModel{{Name: "gemini-pro", Alias: "pro"}}
-	hash1 := ComputeVertexCompatModelsHash(models)
-	hash2 := ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "gemini-1.5-pro", Alias: "pro"}})
-	if hash1 == "" || hash2 == "" {
-		t.Fatal("hashes should not be empty for non-empty models")
-	}
-	if hash1 == hash2 {
-		t.Fatal("hash should differ when model content differs")
-	}
-}
-
-func TestComputeVertexCompatModelsHash_IgnoresBlankAndOrder(t *testing.T) {
-	a := []config.VertexCompatModel{
-		{Name: "m1", Alias: "a1"},
-		{Name: " "},
-		{Name: "M1", Alias: "A1"},
-	}
-	b := []config.VertexCompatModel{
-		{Name: "m1", Alias: "a1"},
-	}
-	if h1, h2 := ComputeVertexCompatModelsHash(a), ComputeVertexCompatModelsHash(b); h1 == "" || h1 != h2 {
-		t.Fatalf("expected same hash ignoring blanks/dupes, got %q / %q", h1, h2)
-	}
-}
-
 func TestComputeClaudeModelsHash_Empty(t *testing.T) {
 	if got := ComputeClaudeModelsHash(nil); got != "" {
 		t.Fatalf("expected empty hash for nil models, got %q", got)
@@ -152,18 +126,6 @@ func TestComputeOpenAICompatModelsHash_Empty(t *testing.T) {
 		t.Fatalf("expected empty hash for empty slice, got %q", got)
 	}
 	if got := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: " "}, {Alias: ""}}); got != "" {
-		t.Fatalf("expected empty hash for blank models, got %q", got)
-	}
-}
-
-func TestComputeVertexCompatModelsHash_Empty(t *testing.T) {
-	if got := ComputeVertexCompatModelsHash(nil); got != "" {
-		t.Fatalf("expected empty hash for nil input, got %q", got)
-	}
-	if got := ComputeVertexCompatModelsHash([]config.VertexCompatModel{}); got != "" {
-		t.Fatalf("expected empty hash for empty slice, got %q", got)
-	}
-	if got := ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: " "}}); got != "" {
 		t.Fatalf("expected empty hash for blank models, got %q", got)
 	}
 }

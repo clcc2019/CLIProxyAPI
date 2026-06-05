@@ -154,9 +154,9 @@ const (
 // This is an internal function used by validation and conversion helpers.
 // It analyzes the model's ThinkingSupport configuration to classify the model:
 //   - CapabilityNone: modelInfo.Thinking is nil (model doesn't support thinking)
-//   - CapabilityBudgetOnly: Has Min/Max but no Levels (Claude, Gemini 2.5)
+//   - CapabilityBudgetOnly: Has Min/Max but no Levels (Claude)
 //   - CapabilityLevelOnly: Has Levels but no Min/Max (OpenAI, Codex, Kimi)
-//   - CapabilityHybrid: Has both Min/Max and Levels (Gemini 3)
+//   - CapabilityHybrid: Has both Min/Max and Levels
 //
 // Note: Returns a special sentinel value when modelInfo itself is nil (unknown model).
 func detectModelCapability(modelInfo *registry.ModelInfo) ModelCapability {

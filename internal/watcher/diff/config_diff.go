@@ -105,9 +105,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.QuotaExceeded.SwitchPreviewModel != newCfg.QuotaExceeded.SwitchPreviewModel {
 		changes = append(changes, fmt.Sprintf("quota-exceeded.switch-preview-model: %t -> %t", oldCfg.QuotaExceeded.SwitchPreviewModel, newCfg.QuotaExceeded.SwitchPreviewModel))
 	}
-	if oldCfg.QuotaExceeded.AntigravityCredits != newCfg.QuotaExceeded.AntigravityCredits {
-		changes = append(changes, fmt.Sprintf("quota-exceeded.antigravity-credits: %t -> %t", oldCfg.QuotaExceeded.AntigravityCredits, newCfg.QuotaExceeded.AntigravityCredits))
-	}
 
 	if oldCfg.Codex.IdentityConfuse != newCfg.Codex.IdentityConfuse {
 		changes = append(changes, fmt.Sprintf("codex.identity-confuse: %t -> %t", oldCfg.Codex.IdentityConfuse, newCfg.Codex.IdentityConfuse))
@@ -126,40 +123,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	} else if !reflect.DeepEqual(redactedClientAPIKeys(oldCfg.APIKeys), redactedClientAPIKeys(newCfg.APIKeys)) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
-	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
-		changes = append(changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)))
-	} else {
-		for i := range oldCfg.GeminiKey {
-			o := oldCfg.GeminiKey[i]
-			n := newCfg.GeminiKey[i]
-			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
-			}
-			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
-			}
-			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
-			}
-			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].api-key: updated", i))
-			}
-			if !equalStringMap(o.Headers, n.Headers) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].headers: updated", i))
-			}
-			oldModels := SummarizeGeminiModels(o.Models)
-			newModels := SummarizeGeminiModels(n.Models)
-			if oldModels.hash != newModels.hash {
-				changes = append(changes, fmt.Sprintf("gemini[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
-			}
-			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
-			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
-			if oldExcluded.hash != newExcluded.hash {
-				changes = append(changes, fmt.Sprintf("gemini[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
-			}
-		}
-	}
-
 	// Claude keys (do not print key material)
 	if len(oldCfg.ClaudeKey) != len(newCfg.ClaudeKey) {
 		changes = append(changes, fmt.Sprintf("claude-api-key count: %d -> %d", len(oldCfg.ClaudeKey), len(newCfg.ClaudeKey)))
@@ -244,39 +207,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
-	// AmpCode settings (redacted where needed)
-	oldAmpURL := strings.TrimSpace(oldCfg.AmpCode.UpstreamURL)
-	newAmpURL := strings.TrimSpace(newCfg.AmpCode.UpstreamURL)
-	if oldAmpURL != newAmpURL {
-		changes = append(changes, fmt.Sprintf("ampcode.upstream-url: %s -> %s", oldAmpURL, newAmpURL))
-	}
-	oldAmpKey := strings.TrimSpace(oldCfg.AmpCode.UpstreamAPIKey)
-	newAmpKey := strings.TrimSpace(newCfg.AmpCode.UpstreamAPIKey)
-	switch {
-	case oldAmpKey == "" && newAmpKey != "":
-		changes = append(changes, "ampcode.upstream-api-key: added")
-	case oldAmpKey != "" && newAmpKey == "":
-		changes = append(changes, "ampcode.upstream-api-key: removed")
-	case oldAmpKey != newAmpKey:
-		changes = append(changes, "ampcode.upstream-api-key: updated")
-	}
-	if oldCfg.AmpCode.RestrictManagementToLocalhost != newCfg.AmpCode.RestrictManagementToLocalhost {
-		changes = append(changes, fmt.Sprintf("ampcode.restrict-management-to-localhost: %t -> %t", oldCfg.AmpCode.RestrictManagementToLocalhost, newCfg.AmpCode.RestrictManagementToLocalhost))
-	}
-	oldMappings := SummarizeAmpModelMappings(oldCfg.AmpCode.ModelMappings)
-	newMappings := SummarizeAmpModelMappings(newCfg.AmpCode.ModelMappings)
-	if oldMappings.hash != newMappings.hash {
-		changes = append(changes, fmt.Sprintf("ampcode.model-mappings: updated (%d -> %d entries)", oldMappings.count, newMappings.count))
-	}
-	if oldCfg.AmpCode.ForceModelMappings != newCfg.AmpCode.ForceModelMappings {
-		changes = append(changes, fmt.Sprintf("ampcode.force-model-mappings: %t -> %t", oldCfg.AmpCode.ForceModelMappings, newCfg.AmpCode.ForceModelMappings))
-	}
-	oldUpstreamAPIKeysCount := len(oldCfg.AmpCode.UpstreamAPIKeys)
-	newUpstreamAPIKeysCount := len(newCfg.AmpCode.UpstreamAPIKeys)
-	if !equalUpstreamAPIKeys(oldCfg.AmpCode.UpstreamAPIKeys, newCfg.AmpCode.UpstreamAPIKeys) {
-		changes = append(changes, fmt.Sprintf("ampcode.upstream-api-keys: updated (%d -> %d entries)", oldUpstreamAPIKeysCount, newUpstreamAPIKeysCount))
-	}
-
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
@@ -287,22 +217,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	// Remote management (never print the key)
 	if oldCfg.RemoteManagement.AllowRemote != newCfg.RemoteManagement.AllowRemote {
 		changes = append(changes, fmt.Sprintf("remote-management.allow-remote: %t -> %t", oldCfg.RemoteManagement.AllowRemote, newCfg.RemoteManagement.AllowRemote))
-	}
-	if oldCfg.RemoteManagement.DisableControlPanel != newCfg.RemoteManagement.DisableControlPanel {
-		changes = append(changes, fmt.Sprintf("remote-management.disable-control-panel: %t -> %t", oldCfg.RemoteManagement.DisableControlPanel, newCfg.RemoteManagement.DisableControlPanel))
-	}
-	if oldCfg.RemoteManagement.DisableAutoUpdatePanel != newCfg.RemoteManagement.DisableAutoUpdatePanel {
-		changes = append(changes, fmt.Sprintf("remote-management.disable-auto-update-panel: %t -> %t", oldCfg.RemoteManagement.DisableAutoUpdatePanel, newCfg.RemoteManagement.DisableAutoUpdatePanel))
-	}
-	oldPanelRepo := strings.TrimSpace(oldCfg.RemoteManagement.PanelGitHubRepository)
-	newPanelRepo := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubRepository)
-	if oldPanelRepo != newPanelRepo {
-		changes = append(changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", oldPanelRepo, newPanelRepo))
-	}
-	oldPanelTag := strings.TrimSpace(oldCfg.RemoteManagement.PanelGitHubTag)
-	newPanelTag := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubTag)
-	if oldPanelTag != newPanelTag {
-		changes = append(changes, fmt.Sprintf("remote-management.panel-github-tag: %s -> %s", oldPanelTag, newPanelTag))
 	}
 	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {
 		switch {
@@ -320,41 +234,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, "openai-compatibility:")
 		for _, c := range compat {
 			changes = append(changes, "  "+c)
-		}
-	}
-
-	// Vertex-compatible API keys
-	if len(oldCfg.VertexCompatAPIKey) != len(newCfg.VertexCompatAPIKey) {
-		changes = append(changes, fmt.Sprintf("vertex-api-key count: %d -> %d", len(oldCfg.VertexCompatAPIKey), len(newCfg.VertexCompatAPIKey)))
-	} else {
-		for i := range oldCfg.VertexCompatAPIKey {
-			o := oldCfg.VertexCompatAPIKey[i]
-			n := newCfg.VertexCompatAPIKey[i]
-			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("vertex[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
-			}
-			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
-				changes = append(changes, fmt.Sprintf("vertex[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
-			}
-			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
-				changes = append(changes, fmt.Sprintf("vertex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
-			}
-			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
-				changes = append(changes, fmt.Sprintf("vertex[%d].api-key: updated", i))
-			}
-			oldModels := SummarizeVertexModels(o.Models)
-			newModels := SummarizeVertexModels(n.Models)
-			if oldModels.hash != newModels.hash {
-				changes = append(changes, fmt.Sprintf("vertex[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
-			}
-			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
-			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
-			if oldExcluded.hash != newExcluded.hash {
-				changes = append(changes, fmt.Sprintf("vertex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
-			}
-			if !equalStringMap(o.Headers, n.Headers) {
-				changes = append(changes, fmt.Sprintf("vertex[%d].headers: updated", i))
-			}
 		}
 	}
 
@@ -465,23 +344,6 @@ func equalStringSet(a, b []string) bool {
 	}
 	for k := range aSet {
 		if _, ok := bSet[k]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-// equalUpstreamAPIKeys compares two slices of AmpUpstreamAPIKeyEntry for equality.
-// Comparison is done by count and content (upstream key and client keys).
-func equalUpstreamAPIKeys(a, b []config.AmpUpstreamAPIKeyEntry) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if strings.TrimSpace(a[i].UpstreamAPIKey) != strings.TrimSpace(b[i].UpstreamAPIKey) {
-			return false
-		}
-		if !equalStringSet(a[i].APIKeys, b[i].APIKeys) {
 			return false
 		}
 	}

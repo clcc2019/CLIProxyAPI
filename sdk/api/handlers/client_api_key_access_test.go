@@ -14,7 +14,7 @@ func TestClientModelAllowedForContext(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Set("accessMetadata", map[string]string{
-		"allowed_models":  "gpt-5*, gemini-2.5-*",
+		"allowed_models":  "gpt-5*, claude-*",
 		"excluded_models": "*-mini",
 	})
 
@@ -23,7 +23,7 @@ func TestClientModelAllowedForContext(t *testing.T) {
 	if !clientModelAllowedForContext(ctx, "gpt-5") {
 		t.Fatalf("expected gpt-5 to be allowed")
 	}
-	if !clientModelAllowedForContext(ctx, "models/gemini-2.5-pro") {
+	if !clientModelAllowedForContext(ctx, "models/gpt-5") {
 		t.Fatalf("expected gemini model prefix to be canonicalized")
 	}
 	if clientModelAllowedForContext(ctx, "gpt-5-mini") {

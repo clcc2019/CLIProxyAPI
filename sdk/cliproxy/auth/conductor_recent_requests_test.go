@@ -10,12 +10,12 @@ func TestManagerMarkResultRecordsRecentRequests(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
 	auth := &Auth{
 		ID:       "auth-1",
-		Provider: "antigravity",
+		Provider: "recent-test",
 		Attributes: map[string]string{
 			"runtime_only": "true",
 		},
 		Metadata: map[string]any{
-			"type": "antigravity",
+			"type": "recent-test",
 		},
 	}
 
@@ -23,8 +23,8 @@ func TestManagerMarkResultRecordsRecentRequests(t *testing.T) {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
-	mgr.MarkResult(context.Background(), Result{AuthID: "auth-1", Provider: "antigravity", Model: "gpt-5", Success: true})
-	mgr.MarkResult(context.Background(), Result{AuthID: "auth-1", Provider: "antigravity", Model: "gpt-5", Success: false})
+	mgr.MarkResult(context.Background(), Result{AuthID: "auth-1", Provider: "recent-test", Model: "gpt-5", Success: true})
+	mgr.MarkResult(context.Background(), Result{AuthID: "auth-1", Provider: "recent-test", Model: "gpt-5", Success: false})
 
 	gotAuth, ok := mgr.GetByID("auth-1")
 	if !ok || gotAuth == nil {
@@ -51,22 +51,22 @@ func TestManagerUpdatePreservesRecentRequestsAndTotals(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
 	auth := &Auth{
 		ID:       "auth-1",
-		Provider: "antigravity",
+		Provider: "recent-test",
 		Metadata: map[string]any{
-			"type": "antigravity",
+			"type": "recent-test",
 		},
 	}
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 
-	mgr.MarkResult(context.Background(), Result{AuthID: "auth-1", Provider: "antigravity", Model: "gpt-5", Success: true})
+	mgr.MarkResult(context.Background(), Result{AuthID: "auth-1", Provider: "recent-test", Model: "gpt-5", Success: true})
 
 	updated := &Auth{
 		ID:       "auth-1",
-		Provider: "antigravity",
+		Provider: "recent-test",
 		Metadata: map[string]any{
-			"type": "antigravity",
+			"type": "recent-test",
 			"note": "updated",
 		},
 	}

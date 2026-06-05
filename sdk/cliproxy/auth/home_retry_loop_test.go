@@ -80,7 +80,7 @@ func TestManagerExecuteHomeStopsWhenDispatchRepeatsTriedAuth(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, err := manager.Execute(ctx, []string{"home-loop-test"}, cliproxyexecutor.Request{Model: "gemini-3.5-flash-low"}, cliproxyexecutor.Options{})
+	_, err := manager.Execute(ctx, []string{"home-loop-test"}, cliproxyexecutor.Request{Model: "gpt-5"}, cliproxyexecutor.Options{})
 	if err == nil {
 		t.Fatal("Execute error = nil, want missing access token")
 	}

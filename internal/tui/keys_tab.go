@@ -18,10 +18,8 @@ type keysTabModel struct {
 	client   *Client
 	viewport viewport.Model
 	keys     []string
-	gemini   []map[string]any
 	claude   []map[string]any
 	codex    []map[string]any
-	vertex   []map[string]any
 	openai   []map[string]any
 	err      error
 	width    int
@@ -40,10 +38,8 @@ type keysTabModel struct {
 
 type keysDataMsg struct {
 	apiKeys []string
-	gemini  []map[string]any
 	claude  []map[string]any
 	codex   []map[string]any
-	vertex  []map[string]any
 	openai  []map[string]any
 	err     error
 }
@@ -76,10 +72,8 @@ func (m keysTabModel) fetchKeys() tea.Msg {
 		return result
 	}
 	result.apiKeys = apiKeys
-	result.gemini, _ = m.client.GetGeminiKeys()
 	result.claude, _ = m.client.GetClaudeKeys()
 	result.codex, _ = m.client.GetCodexKeys()
-	result.vertex, _ = m.client.GetVertexKeys()
 	result.openai, _ = m.client.GetOpenAICompat()
 	return result
 }
@@ -95,10 +89,8 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 		} else {
 			m.err = nil
 			m.keys = msg.apiKeys
-			m.gemini = msg.gemini
 			m.claude = msg.claude
 			m.codex = msg.codex
-			m.vertex = msg.vertex
 			m.openai = msg.openai
 			if m.cursor >= len(m.keys) {
 				m.cursor = max(0, len(m.keys)-1)
@@ -341,10 +333,8 @@ func (m keysTabModel) renderContent() string {
 	sb.WriteString("\n")
 
 	// ━━━ Provider Keys (read-only display) ━━━
-	renderProviderKeys(&sb, "Gemini API Keys", m.gemini)
 	renderProviderKeys(&sb, "Claude API Keys", m.claude)
 	renderProviderKeys(&sb, "Codex API Keys", m.codex)
-	renderProviderKeys(&sb, "Vertex API Keys", m.vertex)
 
 	if len(m.openai) > 0 {
 		renderSection(&sb, "OpenAI Compatibility", len(m.openai))

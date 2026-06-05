@@ -15,7 +15,7 @@ import (
 // Examples:
 //   - "claude-sonnet-4-5(16384)" -> ModelName="claude-sonnet-4-5", RawSuffix="16384"
 //   - "gpt-5.2(high)" -> ModelName="gpt-5.2", RawSuffix="high"
-//   - "gemini-2.5-pro" -> ModelName="gemini-2.5-pro", HasSuffix=false
+//   - "codex-mini-latest" -> ModelName="codex-mini-latest", HasSuffix=false
 //
 // This function only extracts the suffix; it does not validate or interpret
 // the suffix content. Use ParseNumericSuffix, ParseLevelSuffix, etc. for

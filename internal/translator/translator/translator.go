@@ -1,7 +1,7 @@
 // Package translator provides request and response translation functionality
 // between different AI API formats. It acts as a wrapper around the SDK translator
 // registry, providing convenient functions for translating requests and responses
-// between OpenAI, Claude, Gemini, and other API formats.
+// between OpenAI, Claude, and other API formats.
 package translator
 
 import (

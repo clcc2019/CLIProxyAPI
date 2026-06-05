@@ -787,101 +787,6 @@ func TestManager_OuterRetryPreservesForcedUpstreamSession(t *testing.T) {
 	}
 }
 
-func TestManager_KiroFailureDoesNotCrossCredentialRetryByDefault(t *testing.T) {
-	request := cliproxyexecutor.Request{Model: "test-model"}
-	testCases := []struct {
-		name   string
-		invoke func(*Manager) error
-	}{
-		{
-			name: "execute",
-			invoke: func(m *Manager) error {
-				_, errExecute := m.Execute(context.Background(), []string{"kiro"}, request, cliproxyexecutor.Options{})
-				return errExecute
-			},
-		},
-		{
-			name: "execute_count",
-			invoke: func(m *Manager) error {
-				_, errExecute := m.ExecuteCount(context.Background(), []string{"kiro"}, request, cliproxyexecutor.Options{})
-				return errExecute
-			},
-		},
-		{
-			name: "execute_stream",
-			invoke: func(m *Manager) error {
-				_, errExecute := m.ExecuteStream(context.Background(), []string{"kiro"}, request, cliproxyexecutor.Options{})
-				return errExecute
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			m, executor := newKiroCredentialStabilityTestManager(t)
-			if errInvoke := tc.invoke(m); errInvoke == nil {
-				t.Fatalf("expected error for failing kiro execution")
-			}
-			if calls := executor.Calls(); calls != 1 {
-				t.Fatalf("expected Kiro failure to stay on one credential, got %d upstream calls", calls)
-			}
-		})
-	}
-}
-
-func TestManager_Execute_KiroMonthlyRequestCountFailsOverCredential(t *testing.T) {
-	m := NewManager(nil, nil, nil)
-	executor := &authFallbackExecutor{
-		id: "kiro",
-		executeErrors: map[string]error{
-			"aa-monthly-limit": &credentialFailoverStatusError{
-				status:  http.StatusPaymentRequired,
-				message: `{"message":"You have reached the limit.","reason":"MONTHLY_REQUEST_COUNT"}`,
-			},
-		},
-	}
-	m.RegisterExecutor(executor)
-
-	model := "test-model-kiro-monthly-failover"
-	limitedAuth := &Auth{ID: "aa-monthly-limit", Provider: "kiro", Metadata: map[string]any{"type": "kiro"}}
-	backupAuth := &Auth{ID: "bb-backup", Provider: "kiro", Metadata: map[string]any{"type": "kiro"}}
-
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(limitedAuth.ID, "kiro", []*registry.ModelInfo{{ID: model}})
-	reg.RegisterClient(backupAuth.ID, "kiro", []*registry.ModelInfo{{ID: model}})
-	t.Cleanup(func() {
-		reg.UnregisterClient(limitedAuth.ID)
-		reg.UnregisterClient(backupAuth.ID)
-	})
-
-	if _, errRegister := m.Register(context.Background(), limitedAuth); errRegister != nil {
-		t.Fatalf("register limited auth: %v", errRegister)
-	}
-	if _, errRegister := m.Register(context.Background(), backupAuth); errRegister != nil {
-		t.Fatalf("register backup auth: %v", errRegister)
-	}
-
-	resp, errExecute := m.Execute(context.Background(), []string{"kiro"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if errExecute != nil {
-		t.Fatalf("execute error = %v, want failover success", errExecute)
-	}
-	if string(resp.Payload) != backupAuth.ID {
-		t.Fatalf("payload = %q, want %q", string(resp.Payload), backupAuth.ID)
-	}
-
-	got := executor.ExecuteCalls()
-	want := []string{limitedAuth.ID, backupAuth.ID}
-	if len(got) != len(want) {
-		t.Fatalf("execute calls = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
 func TestManager_Execute_CodexUsageLimitFailsOverCredential(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
@@ -1025,65 +930,6 @@ func TestManager_Execute_CodexUsageLimitDoesNotLeakWhenMaxRetryCredentialsStopsF
 	}
 	if calls := executor.ExecuteCalls(); len(calls) != 1 {
 		t.Fatalf("execute calls = %v, want one credential attempted", calls)
-	}
-}
-
-func TestManager_ExecuteStream_KiroMonthlyRequestCountFailsOverCredential(t *testing.T) {
-	m := NewManager(nil, nil, nil)
-	executor := &authFallbackExecutor{
-		id: "kiro",
-		streamErrors: map[string]error{
-			"aa-monthly-limit-stream": &credentialFailoverStatusError{
-				status:  http.StatusPaymentRequired,
-				message: `{"message":"You have reached the limit.","reason":"MONTHLY_REQUEST_COUNT"}`,
-			},
-		},
-	}
-	m.RegisterExecutor(executor)
-
-	model := "test-model-kiro-monthly-stream-failover"
-	limitedAuth := &Auth{ID: "aa-monthly-limit-stream", Provider: "kiro", Metadata: map[string]any{"type": "kiro"}}
-	backupAuth := &Auth{ID: "bb-backup-stream", Provider: "kiro", Metadata: map[string]any{"type": "kiro"}}
-
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(limitedAuth.ID, "kiro", []*registry.ModelInfo{{ID: model}})
-	reg.RegisterClient(backupAuth.ID, "kiro", []*registry.ModelInfo{{ID: model}})
-	t.Cleanup(func() {
-		reg.UnregisterClient(limitedAuth.ID)
-		reg.UnregisterClient(backupAuth.ID)
-	})
-
-	if _, errRegister := m.Register(context.Background(), limitedAuth); errRegister != nil {
-		t.Fatalf("register limited auth: %v", errRegister)
-	}
-	if _, errRegister := m.Register(context.Background(), backupAuth); errRegister != nil {
-		t.Fatalf("register backup auth: %v", errRegister)
-	}
-
-	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"kiro"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if errExecute != nil {
-		t.Fatalf("execute stream error = %v, want failover success", errExecute)
-	}
-	var payload []byte
-	for chunk := range streamResult.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("stream chunk error = %v, want success", chunk.Err)
-		}
-		payload = append(payload, chunk.Payload...)
-	}
-	if string(payload) != backupAuth.ID {
-		t.Fatalf("payload = %q, want %q", string(payload), backupAuth.ID)
-	}
-
-	got := executor.StreamCalls()
-	want := []string{limitedAuth.ID, backupAuth.ID}
-	if len(got) != len(want) {
-		t.Fatalf("stream calls = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
-		}
 	}
 }
 
@@ -1310,37 +1156,6 @@ func TestManagerExecuteStream_InvalidStreamResultFailsOverCredential(t *testing.
 			}
 		})
 	}
-}
-
-func newKiroCredentialStabilityTestManager(t *testing.T) (*Manager, *credentialRetryLimitExecutor) {
-	t.Helper()
-
-	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(0, 0, 0)
-
-	executor := &credentialRetryLimitExecutor{id: "kiro"}
-	m.RegisterExecutor(executor)
-
-	baseID := uuid.NewString()
-	auth1 := &Auth{ID: baseID + "-kiro-auth-1", Provider: "kiro", Metadata: map[string]any{"type": "kiro"}}
-	auth2 := &Auth{ID: baseID + "-kiro-auth-2", Provider: "kiro", Metadata: map[string]any{"type": "kiro"}}
-
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth1.ID, "kiro", []*registry.ModelInfo{{ID: "test-model"}})
-	reg.RegisterClient(auth2.ID, "kiro", []*registry.ModelInfo{{ID: "test-model"}})
-	t.Cleanup(func() {
-		reg.UnregisterClient(auth1.ID)
-		reg.UnregisterClient(auth2.ID)
-	})
-
-	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
-		t.Fatalf("register auth1: %v", errRegister)
-	}
-	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
-		t.Fatalf("register auth2: %v", errRegister)
-	}
-
-	return m, executor
 }
 
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
@@ -1628,6 +1443,58 @@ func TestManagerExecute_UnauthorizedSuspendsAuthFileAcrossModels(t *testing.T) {
 	}
 }
 
+func TestManagerExecute_ForbiddenFailsOverWithinSingleProvider(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"aa-forbidden": &Error{
+				HTTPStatus: http.StatusForbidden,
+				Message:    "forbidden",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "gpt-5-forbidden-failover"
+	badAuth := &Auth{ID: "aa-forbidden", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	goodAuth := &Auth{ID: "bb-valid-forbidden", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want failover success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestManagerExecute_UnauthorizedIgnoresDisableCooling(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
@@ -1787,6 +1654,7 @@ func TestIsRequestInvalidError_BadRequestDoesNotBlockCredentialFailover(t *testi
 func TestManagerMarkResult_SessionContextBadRequestDoesNotSuspendAuth(t *testing.T) {
 	tests := []struct {
 		name    string
+		code    string
 		message string
 	}{
 		{
@@ -1796,6 +1664,19 @@ func TestManagerMarkResult_SessionContextBadRequestDoesNotSuspendAuth(t *testing
 		{
 			name:    "tool call missing",
 			message: `{"error":{"message":"No tool call found for function call output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn.","param":"input","type":"invalid_request_error"}}`,
+		},
+		{
+			name:    "custom tool call missing",
+			message: `{"type":"error","status":400,"error":{"message":"No tool call found for custom tool call output with call_id call_jzaeS5GDDushxTKTsXR9CTWL.","param":"input","type":"invalid_request_error"}}`,
+		},
+		{
+			name:    "context too large code",
+			code:    "context_too_large",
+			message: "Your input exceeds the context window of this model. Please adjust your input and try again.",
+		},
+		{
+			name:    "context length exceeded payload",
+			message: `{"type":"error","status":400,"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again.","param":"input","type":"invalid_request_error"}}`,
 		},
 	}
 
@@ -1814,6 +1695,7 @@ func TestManagerMarkResult_SessionContextBadRequestDoesNotSuspendAuth(t *testing
 				Success:  false,
 				Error: &Error{
 					HTTPStatus: http.StatusBadRequest,
+					Code:       tt.code,
 					Message:    tt.message,
 				},
 			})
@@ -1970,44 +1852,6 @@ func TestManager_MarkResult_PreservesStructuredAuthError(t *testing.T) {
 	}
 	if state.LastError.HTTPStatus != http.StatusTooManyRequests {
 		t.Fatalf("model LastError.HTTPStatus = %d, want %d", state.LastError.HTTPStatus, http.StatusTooManyRequests)
-	}
-}
-
-func TestManager_MarkResult_SkipsKiroInsufficientModelCapacity(t *testing.T) {
-	m := NewManager(nil, nil, nil)
-
-	auth := &Auth{
-		ID:       "auth-kiro-capacity",
-		Provider: "kiro",
-	}
-	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
-		t.Fatalf("register auth: %v", errRegister)
-	}
-
-	model := "claude-sonnet-4.5"
-	m.MarkResult(context.Background(), Result{
-		AuthID:   auth.ID,
-		Provider: auth.Provider,
-		Model:    model,
-		Success:  false,
-		Error: &Error{
-			HTTPStatus: http.StatusTooManyRequests,
-			Message:    `{"message":"I am experiencing high traffic, please try again shortly.","reason":"INSUFFICIENT_MODEL_CAPACITY"}`,
-		},
-	})
-
-	updated, ok := m.GetByID(auth.ID)
-	if !ok || updated == nil {
-		t.Fatalf("expected auth to be present")
-	}
-	if updated.Failed != 0 {
-		t.Fatalf("Failed = %d, want 0", updated.Failed)
-	}
-	if updated.LastError != nil || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
-		t.Fatalf("capacity error should not be recorded: last=%v unavailable=%v next=%v", updated.LastError, updated.Unavailable, updated.NextRetryAfter)
-	}
-	if state := updated.ModelStates[model]; state != nil {
-		t.Fatalf("capacity error should not create model state, got %#v", state)
 	}
 }
 

@@ -133,9 +133,8 @@ type Result struct {
 	Error *Error
 	// AuthScoped indicates the failure applies to the entire auth (all models),
 	// not only the model that triggered it. Set when the originating error
-	// implements AuthScopedFailure — canonical case is Kiro's AGENTIC_REQUEST
-	// 429 where the quota is a single bucket shared across models. When true,
-	// MarkResult suspends the auth as a whole instead of only Model.
+	// implements AuthScopedFailure. When true, MarkResult suspends the auth as
+	// a whole instead of only Model.
 	AuthScoped bool
 }
 
@@ -180,7 +179,6 @@ type Manager struct {
 	proxyLeaseStore   ProxyLeaseStore
 	executors         map[string]ProviderExecutor
 	selector          Selector
-	kiroSelector      Selector
 	hook              Hook
 	mu                sync.RWMutex
 	auths             map[string]*Auth
@@ -267,7 +265,6 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		store:            store,
 		executors:        make(map[string]ProviderExecutor),
 		selector:         selector,
-		kiroSelector:     newKiroSelector(time.Hour),
 		hook:             hook,
 		auths:            make(map[string]*Auth),
 		removedAuths:     make(map[string]authRemovalTombstone),
@@ -282,44 +279,6 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.persistEnabled.Store(store != nil)
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
-}
-
-func newKiroSelector(ttl time.Duration) Selector {
-	return NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &FillFirstSelector{},
-		TTL:      ttl,
-	})
-}
-
-func sessionAffinityTTLFromConfig(cfg *internalconfig.Config) time.Duration {
-	ttl := time.Hour
-	if cfg == nil {
-		return ttl
-	}
-	if ttlStr := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttlStr != "" {
-		if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
-			return parsed
-		}
-	}
-	return ttl
-}
-
-func (m *Manager) refreshKiroSelector(cfg *internalconfig.Config) {
-	if m == nil {
-		return
-	}
-	next := newKiroSelector(sessionAffinityTTLFromConfig(cfg))
-	var previous Selector
-	m.mu.Lock()
-	previous = m.kiroSelector
-	m.kiroSelector = next
-	m.mu.Unlock()
-	if previous == nil || previous == next {
-		return
-	}
-	if stoppable, ok := previous.(StoppableSelector); ok {
-		stoppable.Stop()
-	}
 }
 
 func isBuiltInSelector(selector Selector) bool {
@@ -898,7 +857,6 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()
 	}
-	m.refreshKiroSelector(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	m.ReconcileProxyPoolLeases(context.Background())
 }
@@ -1326,14 +1284,6 @@ func (m *Manager) selectorForProvider(provider string) Selector {
 	if m == nil {
 		return nil
 	}
-	if strings.EqualFold(strings.TrimSpace(provider), "kiro") {
-		m.mu.RLock()
-		selector := m.kiroSelector
-		m.mu.RUnlock()
-		if selector != nil {
-			return selector
-		}
-	}
 	m.mu.RLock()
 	selector := m.selector
 	m.mu.RUnlock()
@@ -1659,20 +1609,12 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		byAlias := make(map[string]string)
 		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 		switch provider {
-		case "gemini":
-			if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
-				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
-			}
 		case "claude":
 			if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
 		case "codex":
 			if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
-				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
-			}
-		case "vertex":
-			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
 		default:
@@ -2674,11 +2616,6 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 	}
 	if lastErr != nil {
-		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-			if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
-				return resp, nil
-			}
-		}
 		return cliproxyexecutor.Response{}, lastErr
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -2744,11 +2681,6 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
-		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-			if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
-				return result, nil
-			}
-		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
 			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
@@ -3386,37 +3318,6 @@ func selectedAuthIDFromMetadata(meta map[string]any) string {
 	}
 }
 
-func pinSelectedKiroAuthForProvider(provider string, opts cliproxyexecutor.Options) cliproxyexecutor.Options {
-	if !strings.EqualFold(strings.TrimSpace(provider), "kiro") {
-		return opts
-	}
-	return pinSelectedKiroAuth(opts)
-}
-
-func pinSelectedKiroAuthForProviders(providers []string, opts cliproxyexecutor.Options) cliproxyexecutor.Options {
-	if len(providers) != 1 || !strings.EqualFold(strings.TrimSpace(providers[0]), "kiro") {
-		return opts
-	}
-	return pinSelectedKiroAuth(opts)
-}
-
-func pinSelectedKiroAuth(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
-	if pinnedAuthIDFromMetadata(opts.Metadata) != "" {
-		return opts
-	}
-	selected := selectedAuthIDFromMetadata(opts.Metadata)
-	if selected == "" {
-		return opts
-	}
-	metadata := make(map[string]any, len(opts.Metadata)+1)
-	for key, value := range opts.Metadata {
-		metadata[key] = value
-	}
-	metadata[cliproxyexecutor.PinnedAuthMetadataKey] = selected
-	opts.Metadata = metadata
-	return opts
-}
-
 func withProviderScopeMetadata(opts cliproxyexecutor.Options, providers []string) cliproxyexecutor.Options {
 	providers = normalizeProviderKeys(providers)
 	if len(providers) == 0 {
@@ -3483,9 +3384,6 @@ func clearSelectedAuthMetadataForCredentialFailover(provider string, meta map[st
 	if len(meta) == 0 || !isCredentialFailoverFailure(err) {
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(provider), "kiro") {
-		return
-	}
 	if selectedAuthIDFromMetadata(meta) != strings.TrimSpace(authID) {
 		return
 	}
@@ -3537,14 +3435,10 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	upstreamModel := ""
 	switch provider {
-	case "gemini":
-		upstreamModel = resolveUpstreamModelForGeminiAPIKey(cfg, auth, requestedModel)
 	case "claude":
 		upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
 	case "codex":
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
-	case "vertex":
-		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
 	default:
 		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
 	}
@@ -3601,13 +3495,6 @@ func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
 	return nil
 }
 
-func resolveGeminiAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.GeminiKey {
-	if cfg == nil {
-		return nil
-	}
-	return resolveAPIKeyConfig(cfg.GeminiKey, auth)
-}
-
 func resolveClaudeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.ClaudeKey {
 	if cfg == nil {
 		return nil
@@ -3622,21 +3509,6 @@ func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalc
 	return resolveAPIKeyConfig(cfg.CodexKey, auth)
 }
 
-func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {
-	if cfg == nil {
-		return nil
-	}
-	return resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth)
-}
-
-func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
-	entry := resolveGeminiAPIKeyConfig(cfg, auth)
-	if entry == nil {
-		return ""
-	}
-	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
-}
-
 func resolveUpstreamModelForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveClaudeAPIKeyConfig(cfg, auth)
 	if entry == nil {
@@ -3647,14 +3519,6 @@ func resolveUpstreamModelForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth,
 
 func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveCodexAPIKeyConfig(cfg, auth)
-	if entry == nil {
-		return ""
-	}
-	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
-}
-
-func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
-	entry := resolveVertexAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
@@ -3930,9 +3794,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
-	if shouldSkipFailureResultRecord(result) {
-		return
-	}
 	if m.markCleanModelSuccessResult(ctx, result) {
 		return
 	}
@@ -4064,8 +3925,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			} else {
 				// Auth-wide failures suspend the credential itself, not just the
-				// triggering model. Kiro auth-scoped quota errors and generic 401s
-				// both need future routing to move to a different auth file.
+				// triggering model. Auth-scoped quota errors and generic 401s both
+				// need future routing to move to a different auth file.
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 				// Mark auth-scoped failures so isAuthBlockedForModel treats every
 				// model as unavailable, even ones with no per-model state.
@@ -4214,11 +4075,9 @@ func (m *Manager) invalidateSessionAffinityForAuth(authID string) {
 
 	m.mu.RLock()
 	selector := m.selector
-	kiroSelector := m.kiroSelector
 	m.mu.RUnlock()
 
 	invalidate(selector)
-	invalidate(kiroSelector)
 }
 
 func (m *Manager) markCleanModelSuccessResult(ctx context.Context, result Result) bool {
@@ -4244,39 +4103,6 @@ func (m *Manager) markCleanModelSuccessResult(ctx context.Context, result Result
 	m.recordProxyPoolResult(ctx, result)
 	m.hook.OnResult(ctx, result)
 	return true
-}
-
-func shouldSkipFailureResultRecord(result Result) bool {
-	if result.Success || result.Error == nil {
-		return false
-	}
-	if !strings.EqualFold(strings.TrimSpace(result.Provider), "kiro") {
-		return false
-	}
-	return isKiroTransientModelCapacityResultError(result.Error)
-}
-
-func isKiroTransientModelCapacityResultError(err *Error) bool {
-	if err == nil || statusCodeFromResult(err) != http.StatusTooManyRequests {
-		return false
-	}
-	lower := strings.ToLower(strings.TrimSpace(err.Message))
-	if lower == "" {
-		return false
-	}
-	patterns := [...]string{
-		"insufficient_model_capacity",
-		"insufficient model capacity",
-		"experiencing high traffic",
-		"high traffic",
-		"please try again shortly",
-	}
-	for _, pattern := range patterns {
-		if strings.Contains(lower, pattern) {
-			return true
-		}
-	}
-	return false
 }
 
 func lookupModelState(auth *Auth, model string) *ModelState {
@@ -4501,7 +4327,7 @@ func resultErrorFromError(err error) *Error {
 // underlying executor error. It preserves existing type information (status
 // codes, retry hints) that would otherwise be lost when resultErrorFromError
 // flattens the error, and it propagates the AuthScopedFailure marker so
-// Kiro-style shared-bucket quota errors suspend the auth globally instead of
+// Auth-wide shared-bucket quota errors suspend the auth globally instead of
 // only the triggering model.
 func applyResultError(result *Result, err error) {
 	if result == nil {
@@ -4713,6 +4539,9 @@ func isSessionContextErrorMessage(message string) bool {
 	if lower == "" {
 		return false
 	}
+	if isContextLengthErrorText(lower) {
+		return true
+	}
 	if strings.Contains(lower, "previous_response_not_found") {
 		return true
 	}
@@ -4721,17 +4550,30 @@ func isSessionContextErrorMessage(message string) bool {
 		return true
 	}
 	return strings.Contains(lower, "no tool call found") &&
-		strings.Contains(lower, "function call output")
+		strings.Contains(lower, "call output")
 }
 
 func isSessionContextResultError(err *Error) bool {
 	if err == nil || statusCodeFromResult(err) != http.StatusBadRequest {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(err.Code), "previous_response_not_found") {
+	code := strings.ToLower(strings.TrimSpace(err.Code))
+	if code == "previous_response_not_found" || isContextLengthErrorText(code) {
 		return true
 	}
 	return isSessionContextErrorMessage(err.Message)
+}
+
+func isContextLengthErrorText(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "context_too_large") ||
+		strings.Contains(text, "context_length_exceeded") ||
+		strings.Contains(text, "context window") ||
+		strings.Contains(text, "context length") ||
+		strings.Contains(text, "too many tokens")
 }
 
 func isRequestInvalidResultError(err *Error) bool {
@@ -5083,17 +4925,11 @@ func (m *Manager) useSchedulerFastPathForProvider(provider string) bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(provider), "kiro") {
-		return false
-	}
 	return isBuiltInSelector(m.selector) || schedulerBackedSessionAffinitySelector(m.selector) != nil
 }
 
 func useSchedulerFastPathForProviders(m *Manager, providers []string) bool {
 	if m == nil || m.scheduler == nil {
-		return false
-	}
-	if len(providers) == 1 && strings.EqualFold(strings.TrimSpace(providers[0]), "kiro") {
 		return false
 	}
 	return isBuiltInSelector(m.selector) || schedulerBackedSessionAffinitySelector(m.selector) != nil
@@ -5257,9 +5093,7 @@ func (m *Manager) oauthModelAliasChannelForAuth(auth *Auth) string {
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	switch provider {
-	case "gemini":
-		return ""
-	case "vertex", "claude", "codex":
+	case "claude", "codex":
 		if auth.Attributes != nil {
 			authKind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"]))
 			if authKind == "apikey" {
@@ -5273,7 +5107,7 @@ func (m *Manager) oauthModelAliasChannelForAuth(auth *Auth) string {
 			}
 		}
 		return provider
-	case "gemini-cli", "aistudio", "antigravity", "kimi", "kiro":
+	case "kimi", "xai":
 		return provider
 	default:
 		return ""
@@ -5359,7 +5193,6 @@ func (m *Manager) singleLegacySelectionRequired(provider, routeModel string, tri
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
-	opts = pinSelectedKiroAuthForProvider(provider, opts)
 	selector := m.selectorForProvider(provider)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
@@ -5430,7 +5263,6 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
-	opts = pinSelectedKiroAuthForProvider(provider, opts)
 	if m.HomeEnabled() {
 		auth, executor, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, executor, err
@@ -5597,12 +5429,8 @@ func (m *Manager) pickNextSingleWithScheduler(ctx context.Context, provider, mod
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	opts = pinSelectedKiroAuthForProviders(providers, opts)
 	opts = withProviderScopeMetadata(opts, normalizeProviderKeys(providers))
 	selector := m.selector
-	if len(providers) == 1 && strings.EqualFold(strings.TrimSpace(providers[0]), "kiro") {
-		selector = m.selectorForProvider("kiro")
-	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 
@@ -5706,7 +5534,6 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	opts = pinSelectedKiroAuthForProviders(eligibleProviders, opts)
 	opts = withProviderScopeMetadata(opts, eligibleProviders)
 	model = strings.TrimSpace(model)
 	if model != "" && m.mixedLegacySelectionRequired(eligibleProviders, model, tried) {
@@ -6247,185 +6074,6 @@ func requestedModelFromMetadata(metadata map[string]any, fallback string) string
 	return fallback
 }
 
-func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opts cliproxyexecutor.Options) []creditsCandidateEntry {
-	if m == nil {
-		return nil
-	}
-	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var known []creditsCandidateEntry
-	var unknown []creditsCandidateEntry
-	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
-			continue
-		}
-		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
-			continue
-		}
-		if !strings.Contains(strings.ToLower(strings.TrimSpace(routeModel)), "claude") {
-			continue
-		}
-		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
-		executor, ok := m.executors[providerKey]
-		if !ok {
-			continue
-		}
-
-		hint, okHint := GetAntigravityCreditsHint(auth.ID)
-		if okHint && hint.Known {
-			if !hint.Available {
-				continue
-			}
-			known = append(known, creditsCandidateEntry{
-				auth:     auth.Clone(),
-				executor: executor,
-				provider: providerKey,
-			})
-			continue
-		}
-		unknown = append(unknown, creditsCandidateEntry{
-			auth:     auth.Clone(),
-			executor: executor,
-			provider: providerKey,
-		})
-	}
-	sort.Slice(known, func(i, j int) bool {
-		return known[i].auth.ID < known[j].auth.ID
-	})
-	sort.Slice(unknown, func(i, j int) bool {
-		return unknown[i].auth.ID < unknown[j].auth.ID
-	})
-	return append(known, unknown...)
-}
-
-type creditsCandidateEntry struct {
-	auth     *Auth
-	executor ProviderExecutor
-	provider string
-}
-
-func hasAntigravityProvider(providers []string) bool {
-	for _, p := range providers {
-		if strings.EqualFold(strings.TrimSpace(p), "antigravity") {
-			return true
-		}
-	}
-	return false
-}
-
-func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
-	status := statusCodeFromError(lastErr)
-	log.WithFields(log.Fields{
-		"lastErr":   errorString(lastErr),
-		"status":    status,
-		"providers": providers,
-	}).Debug("shouldAttemptAntigravityCreditsFallback")
-	if m == nil || lastErr == nil {
-		return false
-	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil || !cfg.QuotaExceeded.AntigravityCredits {
-		return false
-	}
-	switch status {
-	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
-		return true
-	case 0:
-		var authErr *Error
-		if errors.As(lastErr, &authErr) && authErr != nil {
-			return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable" || authErr.Code == "model_cooldown"
-		}
-		var cooldownErr *modelCooldownError
-		if errors.As(lastErr, &cooldownErr) {
-			return true
-		}
-		return false
-	default:
-		return false
-	}
-}
-
-func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool) {
-	routeModel := req.Model
-	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
-	for _, c := range candidates {
-		if ctx.Err() != nil {
-			return cliproxyexecutor.Response{}, false
-		}
-		creditsCtx := WithAntigravityCredits(ctx)
-		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
-		}
-		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
-		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
-		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
-		if errPrepare != nil {
-			continue
-		}
-		c.auth = preparedAuth
-		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
-		models := m.executionModelCandidates(c.auth, routeModel)
-		if len(models) == 0 {
-			continue
-		}
-		for _, upstreamModel := range models {
-			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, len(models) > 1)
-			execReq := req
-			execReq.Model = upstreamModel
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
-			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
-			if errExec != nil {
-				applyResultError(&result, errExec)
-				if ra := retryAfterFromError(errExec); ra != nil {
-					result.RetryAfter = ra
-				}
-				m.MarkResult(creditsCtx, result)
-				continue
-			}
-			m.MarkResult(creditsCtx, result)
-			return resp, true
-		}
-	}
-	return cliproxyexecutor.Response{}, false
-}
-
-func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool) {
-	routeModel := req.Model
-	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
-	for _, c := range candidates {
-		if ctx.Err() != nil {
-			return nil, false
-		}
-		creditsCtx := WithAntigravityCredits(ctx)
-		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
-		}
-		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
-		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
-		if errPrepare != nil {
-			continue
-		}
-		c.auth = preparedAuth
-		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
-		models := m.executionModelCandidates(c.auth, routeModel)
-		if len(models) == 0 {
-			continue
-		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, len(models) > 1)
-		if errStream != nil {
-			continue
-		}
-		return result, true
-	}
-	return nil, false
-}
-
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if m.store == nil || auth == nil {
 		return nil
@@ -6837,7 +6485,6 @@ func (m *Manager) StopAutoRefresh() {
 	m.mu.Lock()
 	cancel := m.refreshCancel
 	mainSelector := m.selector
-	kiroSelector := m.kiroSelector
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
@@ -6849,11 +6496,6 @@ func (m *Manager) StopAutoRefresh() {
 	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
 	if stoppable, ok := mainSelector.(StoppableSelector); ok {
 		stoppable.Stop()
-	}
-	if kiroSelector != nil && kiroSelector != mainSelector {
-		if stoppable, ok := kiroSelector.(StoppableSelector); ok {
-			stoppable.Stop()
-		}
 	}
 }
 

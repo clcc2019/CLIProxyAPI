@@ -256,6 +256,7 @@ func TestCodexShouldRetryWithoutPreviousResponseWhenContextCanBeReplayed(t *test
 	errorPayload := []byte(`{"type":"error","status":400,"error":{"code":"previous_response_not_found","param":"previous_response_id"}}`)
 	messageOnlyErrorPayload := []byte(`{"type":"error","status":400,"error":{"message":"Previous response with id 'resp_038d5107ec6cc78c016a1fb143ac088191b14e6ca3097c696e' not found."}}`)
 	noToolCallPayload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"No tool call found for function call output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn."}}`)
+	noCustomToolCallPayload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"No tool call found for custom tool call output with call_id call_jzaeS5GDDushxTKTsXR9CTWL."}}`)
 	fullBody := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
 	internalIncremental := []byte(`{"type":"response.create","model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
 
@@ -267,6 +268,9 @@ func TestCodexShouldRetryWithoutPreviousResponseWhenContextCanBeReplayed(t *test
 	}
 	if !codexShouldRetryWithoutPreviousResponse(fullBody, internalIncremental, noToolCallPayload) {
 		t.Fatal("internally compressed tool output should retry with full transcript when upstream loses the tool call")
+	}
+	if !codexShouldRetryWithoutPreviousResponse(fullBody, internalIncremental, noCustomToolCallPayload) {
+		t.Fatal("internally compressed custom tool output should retry with full transcript when upstream loses the tool call")
 	}
 
 	explicitMessageBody := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)

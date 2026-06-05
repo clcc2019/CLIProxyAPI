@@ -19,11 +19,11 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "numeric suffix preserved",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"xai": {{Name: "grok-4-fast", Alias: "grok-4"}},
 			},
-			channel: "gemini-cli",
-			input:   "gemini-2.5-pro(8192)",
-			want:    "gemini-2.5-pro-exp-03-25(8192)",
+			channel: "xai",
+			input:   "grok-4(8192)",
+			want:    "grok-4-fast(8192)",
 		},
 		{
 			name: "level suffix preserved",
@@ -37,11 +37,11 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "no suffix unchanged",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"xai": {{Name: "grok-4-fast", Alias: "grok-4"}},
 			},
-			channel: "gemini-cli",
-			input:   "gemini-2.5-pro",
-			want:    "gemini-2.5-pro-exp-03-25",
+			channel: "xai",
+			input:   "grok-4",
+			want:    "grok-4-fast",
 		},
 		{
 			name: "config suffix takes priority",
@@ -55,20 +55,20 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "auto suffix preserved",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"xai": {{Name: "grok-4-fast", Alias: "grok-4"}},
 			},
-			channel: "gemini-cli",
-			input:   "gemini-2.5-pro(auto)",
-			want:    "gemini-2.5-pro-exp-03-25(auto)",
+			channel: "xai",
+			input:   "grok-4(auto)",
+			want:    "grok-4-fast(auto)",
 		},
 		{
 			name: "none suffix preserved",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"xai": {{Name: "grok-4-fast", Alias: "grok-4"}},
 			},
-			channel: "gemini-cli",
-			input:   "gemini-2.5-pro(none)",
-			want:    "gemini-2.5-pro-exp-03-25(none)",
+			channel: "xai",
+			input:   "grok-4(none)",
+			want:    "grok-4-fast(none)",
 		},
 		{
 			name: "kimi suffix preserved",
@@ -82,47 +82,47 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "case insensitive alias lookup with suffix",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "Gemini-2.5-Pro"}},
+				"xai": {{Name: "grok-4-fast", Alias: "Grok-4"}},
 			},
-			channel: "gemini-cli",
-			input:   "gemini-2.5-pro(high)",
-			want:    "gemini-2.5-pro-exp-03-25(high)",
+			channel: "xai",
+			input:   "grok-4(high)",
+			want:    "grok-4-fast(high)",
 		},
 		{
 			name: "no alias returns empty",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"xai": {{Name: "grok-4-fast", Alias: "grok-4"}},
 			},
-			channel: "gemini-cli",
+			channel: "xai",
 			input:   "unknown-model(high)",
 			want:    "",
 		},
 		{
 			name: "wrong channel returns empty",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"xai": {{Name: "grok-4-fast", Alias: "grok-4"}},
 			},
 			channel: "claude",
-			input:   "gemini-2.5-pro(high)",
+			input:   "grok-4(high)",
 			want:    "",
 		},
 		{
 			name: "empty suffix filtered out",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"xai": {{Name: "grok-4-fast", Alias: "grok-4"}},
 			},
-			channel: "gemini-cli",
-			input:   "gemini-2.5-pro()",
-			want:    "gemini-2.5-pro-exp-03-25",
+			channel: "xai",
+			input:   "grok-4()",
+			want:    "grok-4-fast",
 		},
 		{
 			name: "incomplete suffix treated as no suffix",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro(high"}},
+				"xai": {{Name: "grok-4-fast", Alias: "grok-4(high"}},
 			},
-			channel: "gemini-cli",
-			input:   "gemini-2.5-pro(high",
-			want:    "gemini-2.5-pro-exp-03-25",
+			channel: "xai",
+			input:   "grok-4(high",
+			want:    "grok-4-fast",
 		},
 	}
 
@@ -145,31 +145,23 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 
 func createAuthForChannel(channel string) *Auth {
 	switch channel {
-	case "gemini-cli":
-		return &Auth{Provider: "gemini-cli"}
 	case "claude":
 		return &Auth{Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}}
-	case "vertex":
-		return &Auth{Provider: "vertex", Attributes: map[string]string{"auth_kind": "oauth"}}
 	case "codex":
 		return &Auth{Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
-	case "aistudio":
-		return &Auth{Provider: "aistudio"}
-	case "antigravity":
-		return &Auth{Provider: "antigravity"}
 	case "kimi":
 		return &Auth{Provider: "kimi"}
-	case "kiro":
-		return &Auth{Provider: "kiro"}
+	case "xai":
+		return &Auth{Provider: "xai"}
 	default:
 		return &Auth{Provider: channel}
 	}
 }
 
-func TestOAuthModelAliasChannel_FileBackedProviders(t *testing.T) {
+func TestOAuthModelAliasChannel_DirectProviders(t *testing.T) {
 	t.Parallel()
 
-	for _, provider := range []string{"kimi", "kiro"} {
+	for _, provider := range []string{"kimi", "xai"} {
 		provider := provider
 		t.Run(provider, func(t *testing.T) {
 			t.Parallel()
@@ -184,17 +176,17 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	t.Parallel()
 
 	aliases := map[string][]internalconfig.OAuthModelAlias{
-		"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+		"claude": {{Name: "claude-sonnet-4-5-20250514", Alias: "claude-sonnet-4-5"}},
 	}
 
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(&internalconfig.Config{})
 	mgr.SetOAuthModelAlias(aliases)
 
-	auth := &Auth{ID: "test-auth-id", Provider: "gemini-cli"}
+	auth := &Auth{ID: "test-auth-id", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}}
 
-	resolvedModel := mgr.applyOAuthModelAlias(auth, "gemini-2.5-pro(8192)")
-	if resolvedModel != "gemini-2.5-pro-exp-03-25(8192)" {
-		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "claude-sonnet-4-5(8192)")
+	if resolvedModel != "claude-sonnet-4-5-20250514(8192)" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "claude-sonnet-4-5-20250514(8192)")
 	}
 }

@@ -5,24 +5,20 @@ package cliproxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisstate"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
@@ -35,22 +31,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
-
-const (
-	kiroModelCacheTTL       = 6 * time.Hour
-	kiroModelCacheNamespace = "kiro_models"
-	kiroModelCacheTimeout   = 2 * time.Second
-)
-
-type kiroModelCacheEntry struct {
-	models    []*ModelInfo
-	fetchedAt time.Time
-}
-
-type kiroModelCacheWire struct {
-	Models    []*ModelInfo `json:"models,omitempty"`
-	FetchedAt time.Time    `json:"fetched_at"`
-}
 
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
@@ -116,7 +96,7 @@ type Service struct {
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
 
-	// wsGateway manages websocket Gemini providers.
+	// wsGateway manages websocket relay providers.
 	wsGateway *wsrelay.Manager
 
 	// homeClient manages the optional remote home control connection.
@@ -136,11 +116,6 @@ type Service struct {
 
 	// redisState owns the optional Redis client used for durable runtime state.
 	redisState *redisstate.Store
-
-	// kiroModelCache keeps the last successful dynamic catalog per auth so a
-	// transient listAvailableModels failure does not unregister a working auth.
-	kiroModelCacheMu sync.RWMutex
-	kiroModelCache   map[string]kiroModelCacheEntry
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -152,14 +127,12 @@ func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 	usage.RegisterPlugin(plugin)
 }
 
-// newDefaultAuthManager creates a default authentication manager with all supported providers.
+// newDefaultAuthManager creates a default authentication manager with supported providers.
 func newDefaultAuthManager() *sdkAuth.Manager {
 	return sdkAuth.NewManager(
 		sdkAuth.GetTokenStore(),
-		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
-		sdkAuth.NewKiroAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
 	)
 }
@@ -284,33 +257,6 @@ func (s *Service) wsOnConnected(channelID string) {
 	if s == nil || channelID == "" {
 		return
 	}
-	if !strings.HasPrefix(strings.ToLower(channelID), "aistudio-") {
-		return
-	}
-	if s.coreManager != nil {
-		if existing, ok := s.coreManager.GetByID(channelID); ok && existing != nil {
-			if !existing.Disabled && existing.Status == coreauth.StatusActive {
-				return
-			}
-		}
-	}
-	now := time.Now().UTC()
-	auth := &coreauth.Auth{
-		ID:         channelID,  // keep channel identifier as ID
-		Provider:   "aistudio", // logical provider for switch routing
-		Label:      channelID,  // display original channel id
-		Status:     coreauth.StatusActive,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Attributes: map[string]string{"runtime_only": "true"},
-		Metadata:   map[string]any{"email": channelID}, // metadata drives logging and usage tracking
-	}
-	log.Infof("websocket provider connected: %s", channelID)
-	s.emitAuthUpdate(context.Background(), watcher.AuthUpdate{
-		Action: watcher.AuthUpdateActionAdd,
-		ID:     auth.ID,
-		Auth:   auth,
-	})
 }
 
 func (s *Service) wsOnDisconnected(channelID string, reason error) {
@@ -501,25 +447,10 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		return
 	}
 	switch strings.ToLower(a.Provider) {
-	case "gemini":
-		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
-	case "vertex":
-		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
-	case "gemini-cli":
-		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
-	case "aistudio":
-		if s.wsGateway != nil {
-			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, a.ID, s.wsGateway))
-		}
-		return
-	case "antigravity":
-		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
-	case "kiro":
-		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
 	default:
@@ -658,9 +589,7 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.WebsocketAuth = false
-	cfg.EnableGeminiCLIEndpoint = false
 	cfg.RemoteManagement.AllowRemote = false
-	cfg.RemoteManagement.DisableControlPanel = true
 }
 
 func (s *Service) registerHomeExecutors() {
@@ -672,11 +601,6 @@ func (s *Service) registerHomeExecutors() {
 	// requiring any local auth-dir credentials.
 	s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, "", s.wsGateway))
-	s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("openai-compatibility", s.cfg))
@@ -1205,12 +1129,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			authKind = "apikey"
 		}
 	}
-	if a.Attributes != nil {
-		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
-			GlobalModelRegistry().UnregisterClient(a.ID)
-			return
-		}
-	}
 	// Unregister legacy client ID (if present) to avoid double counting
 	if a.Runtime != nil {
 		if idGetter, ok := a.Runtime.(interface{ GetClientID() string }); ok {
@@ -1234,38 +1152,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	}
 	var models []*ModelInfo
 	switch provider {
-	case "gemini":
-		models = registry.GetGeminiModels()
-		if entry := s.resolveConfigGeminiKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildGeminiConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = applyExcludedModels(models, excluded)
-	case "vertex":
-		// Vertex AI Gemini supports the same model identifiers as Gemini.
-		models = registry.GetGeminiVertexModels()
-		if entry := s.resolveConfigVertexCompatKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildVertexCompatConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = applyExcludedModels(models, excluded)
-	case "gemini-cli":
-		models = registry.GetGeminiCLIModels()
-		models = applyExcludedModels(models, excluded)
-	case "aistudio":
-		models = registry.GetAIStudioModels()
-		models = applyExcludedModels(models, excluded)
-	case "antigravity":
-		models = registry.GetAntigravityModels()
-		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
 		if entry := s.resolveConfigClaudeKey(a); entry != nil {
@@ -1305,9 +1191,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
-		models = applyExcludedModels(models, excluded)
-	case "kiro":
-		models = s.fetchKiroModels(a)
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
@@ -1480,66 +1363,6 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 	return nil
 }
 
-func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.GeminiKey {
-		entry := &s.cfg.GeminiKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	return nil
-}
-
-func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.VertexCompatKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.VertexCompatAPIKey {
-		entry := &s.cfg.VertexCompatAPIKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range s.cfg.VertexCompatAPIKey {
-			entry := &s.cfg.VertexCompatAPIKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
-}
-
 func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 	if auth == nil || s.cfg == nil {
 		return nil
@@ -1612,404 +1435,6 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		}
 	}
 	return filtered
-}
-
-// fetchKiroModels returns the dynamic kiro model catalog pulled from the
-// upstream listAvailableModels API using the auth's access token.
-//
-// When the token is missing or the API call fails this returns nil, which
-// causes registerResolvedModelsForAuth to unregister the auth from the model
-// registry rather than serving stale hard-coded entries. Previous behaviour
-// merged the dynamic list with a hard-coded static fallback; that fallback
-// was removed so the advertised catalog always matches what the upstream
-// will actually accept for this account.
-func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
-	if s != nil && s.coreManager != nil && a != nil && a.ID != "" {
-		if current, ok := s.coreManager.GetByID(a.ID); ok && current != nil {
-			a = current
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	tokenData := extractKiroTokenData(a)
-	if tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" {
-		log.Debug("kiro: no access token available; no models will be registered for this auth")
-		return nil
-	}
-
-	modelClient := s.newKiroModelClient(ctx, a)
-	apiModels, err := modelClient.ListAvailableModels(ctx, tokenData)
-	if err != nil {
-		if cached, ok := s.cachedKiroModels(a); ok {
-			log.Warnf("kiro: failed to fetch dynamic model list: %v; using cached catalog with %d models", err, len(cached))
-			return cached
-		}
-		log.Warnf("kiro: failed to fetch dynamic model list: %v; no models will be registered for this auth", err)
-		return nil
-	}
-	if len(apiModels) == 0 {
-		if cached, ok := s.cachedKiroModels(a); ok {
-			log.Warnf("kiro: dynamic model list was empty; using cached catalog with %d models", len(cached))
-			return cached
-		}
-		log.Debug("kiro: dynamic model list was empty; no models will be registered for this auth")
-		return nil
-	}
-
-	dynamicModels := convertKiroAPIModels(apiModels)
-	if len(dynamicModels) == 0 {
-		if cached, ok := s.cachedKiroModels(a); ok {
-			log.Warnf("kiro: dynamic model list converted to zero models; using cached catalog with %d models", len(cached))
-			return cached
-		}
-		return nil
-	}
-	s.storeKiroModelCache(a, dynamicModels)
-	s.persistKiroResolvedProfileArn(ctx, a, tokenData.ProfileArn)
-	log.Infof("kiro: fetched %d dynamic models from API", len(dynamicModels))
-	return dynamicModels
-}
-
-func (s *Service) newKiroModelClient(ctx context.Context, a *coreauth.Auth) *kiroauth.KiroAuth {
-	var cfg *config.Config
-	if s != nil {
-		cfg = s.cfg
-	}
-	return kiroauth.NewKiroAuth(cfg).WithHTTPClient(helps.NewProxyAwareHTTPClient(ctx, cfg, a, 30*time.Second))
-}
-
-func (s *Service) cachedKiroModels(a *coreauth.Auth) ([]*ModelInfo, bool) {
-	if s == nil || a == nil || strings.TrimSpace(a.ID) == "" {
-		return nil, false
-	}
-	s.kiroModelCacheMu.RLock()
-	entry, ok := s.kiroModelCache[a.ID]
-	s.kiroModelCacheMu.RUnlock()
-	if ok && len(entry.models) > 0 {
-		if time.Since(entry.fetchedAt) <= kiroModelCacheTTL {
-			return cloneKiroModelInfos(entry.models), true
-		}
-		s.kiroModelCacheMu.Lock()
-		delete(s.kiroModelCache, a.ID)
-		s.kiroModelCacheMu.Unlock()
-	}
-	if models, ok := s.loadKiroModelCacheFromRedis(a); ok {
-		return models, true
-	}
-	return nil, false
-}
-
-func (s *Service) storeKiroModelCache(a *coreauth.Auth, models []*ModelInfo) {
-	if s == nil || a == nil || strings.TrimSpace(a.ID) == "" || len(models) == 0 {
-		return
-	}
-	fetchedAt := time.Now()
-	s.kiroModelCacheMu.Lock()
-	if s.kiroModelCache == nil {
-		s.kiroModelCache = make(map[string]kiroModelCacheEntry)
-	}
-	s.kiroModelCache[a.ID] = kiroModelCacheEntry{
-		models:    cloneKiroModelInfos(models),
-		fetchedAt: fetchedAt,
-	}
-	s.kiroModelCacheMu.Unlock()
-	s.storeKiroModelCacheToRedis(a, models, fetchedAt)
-}
-
-func (s *Service) loadKiroModelCacheFromRedis(a *coreauth.Auth) ([]*ModelInfo, bool) {
-	if s == nil || s.redisState == nil || a == nil || strings.TrimSpace(a.ID) == "" {
-		return nil, false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), kiroModelCacheTimeout)
-	defer cancel()
-	data, ok, err := s.redisState.LoadCache(ctx, kiroModelCacheNamespace, a.ID)
-	if err != nil {
-		log.Debugf("kiro: failed to load model cache from redis: %v", err)
-		return nil, false
-	}
-	if !ok || len(data) == 0 {
-		return nil, false
-	}
-	var wire kiroModelCacheWire
-	if err := json.Unmarshal(data, &wire); err != nil {
-		log.Debugf("kiro: failed to decode redis model cache: %v", err)
-		s.deleteKiroModelCacheFromRedis(a.ID)
-		return nil, false
-	}
-	if len(wire.Models) == 0 || wire.FetchedAt.IsZero() || time.Since(wire.FetchedAt) > kiroModelCacheTTL {
-		s.deleteKiroModelCacheFromRedis(a.ID)
-		return nil, false
-	}
-	models := cloneKiroModelInfos(wire.Models)
-	s.kiroModelCacheMu.Lock()
-	if s.kiroModelCache == nil {
-		s.kiroModelCache = make(map[string]kiroModelCacheEntry)
-	}
-	s.kiroModelCache[a.ID] = kiroModelCacheEntry{models: cloneKiroModelInfos(models), fetchedAt: wire.FetchedAt}
-	s.kiroModelCacheMu.Unlock()
-	return models, true
-}
-
-func (s *Service) storeKiroModelCacheToRedis(a *coreauth.Auth, models []*ModelInfo, fetchedAt time.Time) {
-	if s == nil || s.redisState == nil || a == nil || strings.TrimSpace(a.ID) == "" || len(models) == 0 {
-		return
-	}
-	data, err := json.Marshal(kiroModelCacheWire{Models: cloneKiroModelInfos(models), FetchedAt: fetchedAt})
-	if err != nil {
-		log.Debugf("kiro: failed to encode model cache: %v", err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), kiroModelCacheTimeout)
-	defer cancel()
-	if err := s.redisState.SaveCache(ctx, kiroModelCacheNamespace, a.ID, data, kiroModelCacheTTL); err != nil {
-		log.Debugf("kiro: failed to save model cache to redis: %v", err)
-	}
-}
-
-func (s *Service) deleteKiroModelCacheFromRedis(authID string) {
-	if s == nil || s.redisState == nil || strings.TrimSpace(authID) == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), kiroModelCacheTimeout)
-	defer cancel()
-	if err := s.redisState.DeleteCache(ctx, kiroModelCacheNamespace, authID); err != nil {
-		log.Debugf("kiro: failed to delete model cache from redis: %v", err)
-	}
-}
-
-func cloneKiroModelInfos(models []*ModelInfo) []*ModelInfo {
-	if len(models) == 0 {
-		return nil
-	}
-	out := make([]*ModelInfo, 0, len(models))
-	for _, model := range models {
-		if cloned := cloneKiroModelInfo(model); cloned != nil {
-			out = append(out, cloned)
-		}
-	}
-	return out
-}
-
-func (s *Service) persistKiroResolvedProfileArn(ctx context.Context, auth *coreauth.Auth, profileArn string) {
-	profileArn = strings.TrimSpace(profileArn)
-	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || profileArn == "" {
-		return
-	}
-	current, ok := s.coreManager.GetByID(auth.ID)
-	if ok && current != nil {
-		auth = current
-	} else {
-		return
-	}
-	if existing := kiroAuthMetadataString(auth.Metadata, "profile_arn", "profileArn"); existing == profileArn {
-		if auth.Attributes == nil || strings.TrimSpace(auth.Attributes["profile_arn"]) == profileArn {
-			return
-		}
-	}
-	updated := auth.Clone()
-	if updated.Metadata == nil {
-		updated.Metadata = map[string]any{}
-	}
-	updated.Metadata["profile_arn"] = profileArn
-	if updated.Attributes == nil {
-		updated.Attributes = map[string]string{}
-	}
-	updated.Attributes["profile_arn"] = profileArn
-	if _, err := s.coreManager.Update(ctx, updated); err != nil {
-		log.Warnf("kiro: failed to persist resolved profile arn for model list: %v", err)
-	}
-}
-
-func extractKiroTokenData(a *coreauth.Auth) *kiroauth.TokenData {
-	if a == nil {
-		return nil
-	}
-
-	tokenData := &kiroauth.TokenData{}
-	if a.Metadata != nil {
-		tokenData.AccessToken = kiroAuthMetadataString(a.Metadata, "access_token", "accessToken")
-		tokenData.RefreshToken = kiroAuthMetadataString(a.Metadata, "refresh_token", "refreshToken")
-		tokenData.ProfileArn = kiroAuthMetadataString(a.Metadata, "profile_arn", "profileArn")
-		tokenData.ClientID = kiroAuthMetadataString(a.Metadata, "client_id", "clientId")
-		tokenData.ClientSecret = kiroAuthMetadataString(a.Metadata, "client_secret", "clientSecret")
-		tokenData.AuthMethod = kiroAuthMetadataString(a.Metadata, "auth_method", "authMethod")
-		tokenData.Provider = kiroAuthMetadataString(a.Metadata, "provider")
-		tokenData.Email = kiroAuthMetadataString(a.Metadata, "email")
-		tokenData.Region = kiroAuthMetadataString(a.Metadata, "region")
-		tokenData.MachineID = kiroAuthMetadataString(a.Metadata, "machine_id", "machineId", "device_id", "deviceId")
-	}
-	if a.Attributes != nil {
-		if tokenData.AccessToken == "" {
-			tokenData.AccessToken = strings.TrimSpace(a.Attributes["access_token"])
-		}
-		if tokenData.RefreshToken == "" {
-			tokenData.RefreshToken = strings.TrimSpace(a.Attributes["refresh_token"])
-		}
-		if tokenData.ProfileArn == "" {
-			tokenData.ProfileArn = strings.TrimSpace(a.Attributes["profile_arn"])
-		}
-		if tokenData.AuthMethod == "" {
-			tokenData.AuthMethod = strings.TrimSpace(a.Attributes["auth_method"])
-		}
-		if tokenData.Provider == "" {
-			tokenData.Provider = strings.TrimSpace(a.Attributes["provider"])
-		}
-		if tokenData.MachineID == "" {
-			tokenData.MachineID = strings.TrimSpace(a.Attributes["machine_id"])
-		}
-	}
-	if tokenData.AccessToken == "" {
-		return nil
-	}
-	return tokenData
-}
-
-func convertKiroAPIModels(apiModels []*kiroauth.KiroModel) []*ModelInfo {
-	if len(apiModels) == 0 {
-		return nil
-	}
-
-	now := time.Now().Unix()
-	models := make([]*ModelInfo, 0, len(apiModels)*2)
-	seen := make(map[string]struct{}, len(apiModels)*2)
-	for _, apiModel := range apiModels {
-		if apiModel == nil || strings.TrimSpace(apiModel.ModelID) == "" {
-			continue
-		}
-
-		contextLength := apiModel.MaxInputTokens
-		if contextLength <= 0 {
-			contextLength = 200000
-		}
-		model := &ModelInfo{
-			ID:                  normalizeKiroModelID(apiModel.ModelID),
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "aws",
-			Type:                "kiro",
-			DisplayName:         formatKiroDisplayName(apiModel.ModelName, apiModel.RateMultiplier),
-			Description:         apiModel.Description,
-			ContextLength:       contextLength,
-			MaxCompletionTokens: 64000,
-			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
-		}
-		models = appendKiroModelWithAliases(models, seen, model)
-	}
-	return models
-}
-
-func appendKiroModelWithAliases(models []*ModelInfo, seen map[string]struct{}, model *ModelInfo) []*ModelInfo {
-	if model == nil || strings.TrimSpace(model.ID) == "" {
-		return models
-	}
-	models = appendKiroModelIfNew(models, seen, model)
-	aliasID := kiroHyphenModelAlias(model.ID)
-	if aliasID == model.ID {
-		return models
-	}
-	alias := cloneKiroModelInfo(model)
-	alias.ID = aliasID
-	return appendKiroModelIfNew(models, seen, alias)
-}
-
-func appendKiroModelIfNew(models []*ModelInfo, seen map[string]struct{}, model *ModelInfo) []*ModelInfo {
-	key := strings.ToLower(strings.TrimSpace(model.ID))
-	if key == "" {
-		return models
-	}
-	if _, ok := seen[key]; ok {
-		return models
-	}
-	seen[key] = struct{}{}
-	return append(models, model)
-}
-
-func kiroHyphenModelAlias(id string) string {
-	return strings.ReplaceAll(strings.TrimSpace(id), ".", "-")
-}
-
-func normalizeKiroModelID(modelID string) string {
-	modelID = strings.ToLower(strings.TrimSpace(modelID))
-	modelID = strings.TrimPrefix(modelID, "kiro-")
-	modelID = strings.TrimPrefix(modelID, "anthropic.")
-	modelID = strings.TrimPrefix(modelID, "amazon.")
-	modelID = strings.ReplaceAll(modelID, "_", "-")
-	return modelID
-}
-
-func formatKiroDisplayName(modelName string, rateMultiplier float64) string {
-	modelName = strings.TrimSpace(modelName)
-	if modelName == "" {
-		return ""
-	}
-	displayName := "Kiro " + modelName
-	if rateMultiplier > 0 && rateMultiplier != 1 {
-		displayName += fmt.Sprintf(" (%sx credit)", strconv.FormatFloat(rateMultiplier, 'f', -1, 64))
-	}
-	return displayName
-}
-
-func generateKiroAgenticVariants(models []*ModelInfo) []*ModelInfo {
-	if len(models) == 0 {
-		return models
-	}
-
-	out := make([]*ModelInfo, 0, len(models)*2)
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		out = append(out, model)
-		if strings.HasSuffix(model.ID, "-agentic") || model.ID == "auto" || strings.HasSuffix(model.ID, "-auto") {
-			continue
-		}
-		agentic := cloneKiroModelInfo(model)
-		agentic.ID = model.ID + "-agentic"
-		if model.DisplayName != "" {
-			agentic.DisplayName = model.DisplayName + " (Agentic)"
-		}
-		if model.Description != "" {
-			agentic.Description = model.Description + " - Optimized for coding agents"
-		} else {
-			agentic.Description = "Optimized for coding agents"
-		}
-		out = append(out, agentic)
-	}
-	return out
-}
-
-func cloneKiroModelInfo(model *ModelInfo) *ModelInfo {
-	if model == nil {
-		return nil
-	}
-	cloned := *model
-	if model.Thinking != nil {
-		thinking := *model.Thinking
-		if len(model.Thinking.Levels) > 0 {
-			thinking.Levels = append([]string(nil), model.Thinking.Levels...)
-		}
-		cloned.Thinking = &thinking
-	}
-	if len(model.SupportedParameters) > 0 {
-		cloned.SupportedParameters = append([]string(nil), model.SupportedParameters...)
-	}
-	if len(model.SupportedInputModalities) > 0 {
-		cloned.SupportedInputModalities = append([]string(nil), model.SupportedInputModalities...)
-	}
-	if len(model.SupportedOutputModalities) > 0 {
-		cloned.SupportedOutputModalities = append([]string(nil), model.SupportedOutputModalities...)
-	}
-	return &cloned
-}
-
-func kiroAuthMetadataString(metadata map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if value, ok := metadata[key].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {
@@ -2183,20 +1608,6 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		out = append(out, info)
 	}
 	return out
-}
-
-func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "google", "vertex")
-}
-
-func buildGeminiConfigModels(entry *config.GeminiKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "google", "gemini")
 }
 
 func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {

@@ -100,9 +100,9 @@ func TestMarkResult_ModelScoped429_OtherModelsStillRoutable(t *testing.T) {
 
 	auth := &Auth{
 		ID:       "per-model-quota",
-		Provider: "gemini",
+		Provider: "kimi",
 		Status:   StatusActive,
-		Metadata: map[string]any{"type": "gemini"},
+		Metadata: map[string]any{"type": "kimi"},
 	}
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -110,14 +110,14 @@ func TestMarkResult_ModelScoped429_OtherModelsStillRoutable(t *testing.T) {
 
 	// Register unrelated model as successful so it has clean per-model state.
 	mgr.MarkResult(context.Background(), Result{
-		AuthID: auth.ID, Provider: "gemini", Model: "gemini-2.5-flash", Success: true,
+		AuthID: auth.ID, Provider: "kimi", Model: "kimi-k2.5", Success: true,
 	})
 
 	// Now 429 the other model.
 	mgr.MarkResult(context.Background(), Result{
 		AuthID:   auth.ID,
-		Provider: "gemini",
-		Model:    "gemini-2.5-pro",
+		Provider: "kimi",
+		Model:    "gpt-5",
 		Success:  false,
 		Error:    &Error{HTTPStatus: 429, Message: "quota"},
 	})
@@ -129,10 +129,10 @@ func TestMarkResult_ModelScoped429_OtherModelsStillRoutable(t *testing.T) {
 		t.Fatal("auth missing after MarkResult")
 	}
 	now := time.Now()
-	if AuthAvailableForModel(stored, "gemini-2.5-pro", now) {
+	if AuthAvailableForModel(stored, "gpt-5", now) {
 		t.Fatal("triggering model should be blocked after 429")
 	}
-	state := stored.ModelStates["gemini-2.5-pro"]
+	state := stored.ModelStates["gpt-5"]
 	if state == nil {
 		t.Fatal("triggering model state missing")
 	}
@@ -142,7 +142,7 @@ func TestMarkResult_ModelScoped429_OtherModelsStillRoutable(t *testing.T) {
 	if !state.NextRetryAfter.Equal(state.Quota.NextRecoverAt) {
 		t.Fatalf("NextRetryAfter = %v, want quota recover time %v", state.NextRetryAfter, state.Quota.NextRecoverAt)
 	}
-	if !AuthAvailableForModel(stored, "gemini-2.5-flash", now) {
+	if !AuthAvailableForModel(stored, "kimi-k2.5", now) {
 		t.Fatal("unrelated model with clean per-model state should remain routable")
 	}
 }
