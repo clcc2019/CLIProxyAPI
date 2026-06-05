@@ -355,8 +355,8 @@ func TestUsageReporterBuildRecordDoesNotDoubleCountCodexReasoningWithoutTotal(t 
 
 func TestUsageReporterBuildRecordKeepsSeparateReasoningProviderTotals(t *testing.T) {
 	reporter := &UsageReporter{
-		provider:    "kiro",
-		model:       "kiro-model",
+		provider:    "oauth",
+		model:       "oauth-model",
 		requestedAt: time.Now(),
 	}
 
@@ -433,7 +433,7 @@ func TestUsageReporterBuildRecordIncludesErrorMessage(t *testing.T) {
 
 func TestResolveUsageAPIKeyPrefersClientAPIKeyWhenPresent(t *testing.T) {
 	auth := &cliproxyauth.Auth{
-		Provider:   "gemini",
+		Provider:   "codex",
 		Attributes: map[string]string{"api_key": "upstream-key"},
 	}
 
@@ -485,7 +485,7 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 
 func TestResolveUsageAPIKeyFallsBackToUpstreamAPIKeyAuth(t *testing.T) {
 	auth := &cliproxyauth.Auth{
-		Provider:   "gemini",
+		Provider:   "codex",
 		Attributes: map[string]string{"api_key": "upstream-key"},
 	}
 
@@ -497,7 +497,7 @@ func TestResolveUsageAPIKeyFallsBackToUpstreamAPIKeyAuth(t *testing.T) {
 
 func TestResolveUsageAPIKeyFallsBackToContextForOAuth(t *testing.T) {
 	auth := &cliproxyauth.Auth{
-		Provider: "gemini-cli",
+		Provider: "codex",
 		Metadata: map[string]any{"email": "user@example.com"},
 	}
 

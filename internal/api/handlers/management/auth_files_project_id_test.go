@@ -19,9 +19,9 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
-	fileName := "gemini-user@example.com-project-a.json"
+	fileName := "codex-user@example.com-project-a.json"
 	filePath := filepath.Join(authDir, fileName)
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"gemini","email":"user@example.com","project_id":"project-a"}`), 0o600); errWrite != nil {
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"user@example.com","project_id":"project-a"}`), 0o600); errWrite != nil {
 		t.Fatalf("failed to write auth file: %v", errWrite)
 	}
 
@@ -29,13 +29,13 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 	record := &coreauth.Auth{
 		ID:       fileName,
 		FileName: fileName,
-		Provider: "gemini-cli",
+		Provider: "codex",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"path": filePath,
 		},
 		Metadata: map[string]any{
-			"type":       "gemini",
+			"type":       "codex",
 			"email":      "user@example.com",
 			"project_id": "project-a",
 		},
@@ -58,8 +58,8 @@ func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
-	filePath := filepath.Join(authDir, "gemini-user@example.com-project-a.json")
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"gemini","email":"user@example.com","project_id":"project-a"}`), 0o600); errWrite != nil {
+	filePath := filepath.Join(authDir, "codex-user@example.com-project-a.json")
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"user@example.com","project_id":"project-a"}`), 0o600); errWrite != nil {
 		t.Fatalf("failed to write auth file: %v", errWrite)
 	}
 
@@ -112,8 +112,8 @@ func TestListAuthFilesFromDisk_IncludesRefreshTokenPresence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
-	filePath := filepath.Join(authDir, "gemini.json")
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"gemini","token":{"refresh_token":"refresh-token"}}`), 0o600); errWrite != nil {
+	filePath := filepath.Join(authDir, "codex.json")
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","token":{"refresh_token":"refresh-token"}}`), 0o600); errWrite != nil {
 		t.Fatalf("failed to write auth file: %v", errWrite)
 	}
 

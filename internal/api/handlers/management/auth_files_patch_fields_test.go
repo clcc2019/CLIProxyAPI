@@ -20,10 +20,10 @@ func TestListAuthFilesFromDisk_IncludesDisabledAndDisableCooling(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
-	filePath := filepath.Join(authDir, "kiro-google.json")
+	filePath := filepath.Join(authDir, "oauth-google.json")
 	initial := `{
-  "type": "kiro",
-  "email": "kiro@example.com",
+  "type": "oauth",
+  "email": "oauth@example.com",
   "priority": "7",
   "proxy_url": "http://127.0.0.1:7890",
   "disabled": true,
@@ -379,15 +379,15 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	}
 }
 
-func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) {
+func TestPatchAuthFileFields_OAuthPriorityAndProxyPersistAndReturn(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
-	filePath := filepath.Join(authDir, "kiro-google.json")
+	filePath := filepath.Join(authDir, "oauth-google.json")
 	initial := `{
-  "type": "kiro",
-  "email": "kiro@example.com",
+  "type": "oauth",
+  "email": "oauth@example.com",
   "access_token": "access-token",
   "refresh_token": "refresh-token",
   "expires_at": "2026-05-09T06:54:01Z",
@@ -410,7 +410,7 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	body := `{"name":"kiro-google.json","priority":9,"proxy_url":"http://127.0.0.1:7890","prefix":"kiro-main","disable-cooling":true}`
+	body := `{"name":"oauth-google.json","priority":9,"proxy_url":"http://127.0.0.1:7890","prefix":"oauth-main","disable-cooling":true}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -435,8 +435,8 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
 	if got, ok := response.File["proxy_url"].(string); !ok || got != "http://127.0.0.1:7890" {
 		t.Fatalf("response.file.proxy_url = %#v, want proxy", response.File["proxy_url"])
 	}
-	if got, ok := response.File["prefix"].(string); !ok || got != "kiro-main" {
-		t.Fatalf("response.file.prefix = %#v, want kiro-main", response.File["prefix"])
+	if got, ok := response.File["prefix"].(string); !ok || got != "oauth-main" {
+		t.Fatalf("response.file.prefix = %#v, want oauth-main", response.File["prefix"])
 	}
 	if got, ok := response.File["disable_cooling"].(bool); !ok || !got {
 		t.Fatalf("response.file.disable_cooling = %#v, want true", response.File["disable_cooling"])
@@ -452,8 +452,8 @@ func TestPatchAuthFileFields_KiroPriorityAndProxyPersistAndReturn(t *testing.T) 
 	if got := updated.ProxyURL; got != "http://127.0.0.1:7890" {
 		t.Fatalf("ProxyURL = %q, want proxy", got)
 	}
-	if got := updated.Prefix; got != "kiro-main" {
-		t.Fatalf("Prefix = %q, want kiro-main", got)
+	if got := updated.Prefix; got != "oauth-main" {
+		t.Fatalf("Prefix = %q, want oauth-main", got)
 	}
 	if got, ok := updated.Metadata["disable_cooling"].(bool); !ok || !got {
 		t.Fatalf("Metadata[disable_cooling] = %#v, want true", updated.Metadata["disable_cooling"])

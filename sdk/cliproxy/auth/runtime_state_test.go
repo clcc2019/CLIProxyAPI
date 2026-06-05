@@ -261,7 +261,7 @@ func TestManagerAppliesLoadedRuntimeStateOnRegister(t *testing.T) {
 	}
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), &Auth{
 		ID:       "auth-1",
-		Provider: "gemini",
+		Provider: "codex",
 		Status:   StatusActive,
 	}); err != nil {
 		t.Fatalf("Register error: %v", err)
@@ -285,7 +285,7 @@ func TestManagerPersistsRuntimeStateFromMarkResult(t *testing.T) {
 	mgr.SetRuntimeStateStore(store)
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), &Auth{
 		ID:       "auth-1",
-		Provider: "gemini",
+		Provider: "codex",
 		Status:   StatusActive,
 	}); err != nil {
 		t.Fatalf("Register error: %v", err)

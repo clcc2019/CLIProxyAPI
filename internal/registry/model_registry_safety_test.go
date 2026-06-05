@@ -32,20 +32,20 @@ func staticModelWithThinkingLevels(t *testing.T) string {
 
 func TestGetModelInfoReturnsClone(t *testing.T) {
 	r := newTestModelRegistry()
-	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
+	r.RegisterClient("client-1", "codex", []*ModelInfo{{
 		ID:          "m1",
 		DisplayName: "Model One",
 		Thinking:    &ThinkingSupport{Min: 1, Max: 2, Levels: []string{"low", "high"}},
 	}})
 
-	first := r.GetModelInfo("m1", "gemini")
+	first := r.GetModelInfo("m1", "codex")
 	if first == nil {
 		t.Fatal("expected model info")
 	}
 	first.DisplayName = "mutated"
 	first.Thinking.Levels[0] = "mutated"
 
-	second := r.GetModelInfo("m1", "gemini")
+	second := r.GetModelInfo("m1", "codex")
 	if second.DisplayName != "Model One" {
 		t.Fatalf("expected cloned display name, got %q", second.DisplayName)
 	}
@@ -56,7 +56,7 @@ func TestGetModelInfoReturnsClone(t *testing.T) {
 
 func TestGetModelsForClientReturnsClones(t *testing.T) {
 	r := newTestModelRegistry()
-	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
+	r.RegisterClient("client-1", "codex", []*ModelInfo{{
 		ID:          "m1",
 		DisplayName: "Model One",
 		Thinking:    &ThinkingSupport{Levels: []string{"low", "high"}},
@@ -83,7 +83,7 @@ func TestGetModelsForClientReturnsClones(t *testing.T) {
 
 func TestGetModelIDsForClientReturnsCopy(t *testing.T) {
 	r := newTestModelRegistry()
-	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
+	r.RegisterClient("client-1", "codex", []*ModelInfo{{
 		ID: "m1",
 	}, {
 		ID: "m2",
@@ -106,20 +106,20 @@ func TestGetModelIDsForClientReturnsCopy(t *testing.T) {
 
 func TestGetAvailableModelsByProviderReturnsClones(t *testing.T) {
 	r := newTestModelRegistry()
-	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
+	r.RegisterClient("client-1", "codex", []*ModelInfo{{
 		ID:          "m1",
 		DisplayName: "Model One",
 		Thinking:    &ThinkingSupport{Levels: []string{"low", "high"}},
 	}})
 
-	first := r.GetAvailableModelsByProvider("gemini")
+	first := r.GetAvailableModelsByProvider("codex")
 	if len(first) != 1 || first[0] == nil {
 		t.Fatalf("expected one model, got %+v", first)
 	}
 	first[0].DisplayName = "mutated"
 	first[0].Thinking.Levels[0] = "mutated"
 
-	second := r.GetAvailableModelsByProvider("gemini")
+	second := r.GetAvailableModelsByProvider("codex")
 	if len(second) != 1 || second[0] == nil {
 		t.Fatalf("expected one model on second fetch, got %+v", second)
 	}
@@ -200,7 +200,7 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 
 func TestLookupModelInfoReturnsCloneForDynamicRegistry(t *testing.T) {
 	r := GetGlobalRegistry()
-	r.RegisterClient("lookup-client-1", "gemini", []*ModelInfo{{
+	r.RegisterClient("lookup-client-1", "codex", []*ModelInfo{{
 		ID:          "lookup-model-1",
 		DisplayName: "Lookup Model",
 		Thinking:    &ThinkingSupport{Levels: []string{"low", "high"}},
@@ -209,14 +209,14 @@ func TestLookupModelInfoReturnsCloneForDynamicRegistry(t *testing.T) {
 		r.UnregisterClient("lookup-client-1")
 	})
 
-	first := LookupModelInfo("lookup-model-1", "gemini")
+	first := LookupModelInfo("lookup-model-1", "codex")
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
 		t.Fatalf("expected dynamic lookup model, got %+v", first)
 	}
 	first.DisplayName = "mutated"
 	first.Thinking.Levels[0] = "mutated"
 
-	second := LookupModelInfo("lookup-model-1", "gemini")
+	second := LookupModelInfo("lookup-model-1", "codex")
 	if second == nil {
 		t.Fatal("expected second dynamic lookup model")
 	}

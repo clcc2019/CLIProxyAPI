@@ -39,10 +39,10 @@ func (e schedulerBenchmarkExecutor) HttpRequest(ctx context.Context, auth *Auth,
 func benchmarkManagerSetup(b *testing.B, total int, mixed bool, withPriority bool) (*Manager, []string, string) {
 	b.Helper()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
-	providers := []string{"gemini"}
-	manager.executors["gemini"] = schedulerBenchmarkExecutor{id: "gemini"}
+	providers := []string{"codex"}
+	manager.executors["codex"] = schedulerBenchmarkExecutor{id: "codex"}
 	if mixed {
-		providers = []string{"gemini", "claude"}
+		providers = []string{"codex", "claude"}
 		manager.executors["claude"] = schedulerBenchmarkExecutor{id: "claude"}
 	}
 
@@ -86,14 +86,14 @@ func BenchmarkManagerPickNext500(b *testing.B) {
 	ctx := context.Background()
 	opts := cliproxyexecutor.Options{}
 	tried := map[string]struct{}{}
-	if _, _, errWarm := manager.pickNext(ctx, "gemini", model, opts, tried); errWarm != nil {
+	if _, _, errWarm := manager.pickNext(ctx, "codex", model, opts, tried); errWarm != nil {
 		b.Fatalf("warmup pickNext error = %v", errWarm)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		auth, exec, errPick := manager.pickNext(ctx, "gemini", model, opts, tried)
+		auth, exec, errPick := manager.pickNext(ctx, "codex", model, opts, tried)
 		if errPick != nil || auth == nil || exec == nil {
 			b.Fatalf("pickNext failed: auth=%v exec=%v err=%v", auth, exec, errPick)
 		}
@@ -105,14 +105,14 @@ func BenchmarkManagerPickNext1000(b *testing.B) {
 	ctx := context.Background()
 	opts := cliproxyexecutor.Options{}
 	tried := map[string]struct{}{}
-	if _, _, errWarm := manager.pickNext(ctx, "gemini", model, opts, tried); errWarm != nil {
+	if _, _, errWarm := manager.pickNext(ctx, "codex", model, opts, tried); errWarm != nil {
 		b.Fatalf("warmup pickNext error = %v", errWarm)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		auth, exec, errPick := manager.pickNext(ctx, "gemini", model, opts, tried)
+		auth, exec, errPick := manager.pickNext(ctx, "codex", model, opts, tried)
 		if errPick != nil || auth == nil || exec == nil {
 			b.Fatalf("pickNext failed: auth=%v exec=%v err=%v", auth, exec, errPick)
 		}
@@ -124,14 +124,14 @@ func BenchmarkManagerPickNextPriority500(b *testing.B) {
 	ctx := context.Background()
 	opts := cliproxyexecutor.Options{}
 	tried := map[string]struct{}{}
-	if _, _, errWarm := manager.pickNext(ctx, "gemini", model, opts, tried); errWarm != nil {
+	if _, _, errWarm := manager.pickNext(ctx, "codex", model, opts, tried); errWarm != nil {
 		b.Fatalf("warmup pickNext error = %v", errWarm)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		auth, exec, errPick := manager.pickNext(ctx, "gemini", model, opts, tried)
+		auth, exec, errPick := manager.pickNext(ctx, "codex", model, opts, tried)
 		if errPick != nil || auth == nil || exec == nil {
 			b.Fatalf("pickNext failed: auth=%v exec=%v err=%v", auth, exec, errPick)
 		}
@@ -143,14 +143,14 @@ func BenchmarkManagerPickNextPriority1000(b *testing.B) {
 	ctx := context.Background()
 	opts := cliproxyexecutor.Options{}
 	tried := map[string]struct{}{}
-	if _, _, errWarm := manager.pickNext(ctx, "gemini", model, opts, tried); errWarm != nil {
+	if _, _, errWarm := manager.pickNext(ctx, "codex", model, opts, tried); errWarm != nil {
 		b.Fatalf("warmup pickNext error = %v", errWarm)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		auth, exec, errPick := manager.pickNext(ctx, "gemini", model, opts, tried)
+		auth, exec, errPick := manager.pickNext(ctx, "codex", model, opts, tried)
 		if errPick != nil || auth == nil || exec == nil {
 			b.Fatalf("pickNext failed: auth=%v exec=%v err=%v", auth, exec, errPick)
 		}
@@ -200,25 +200,25 @@ func BenchmarkManagerPickNextAndMarkResult1000(b *testing.B) {
 	ctx := context.Background()
 	opts := cliproxyexecutor.Options{}
 	tried := map[string]struct{}{}
-	if _, _, errWarm := manager.pickNext(ctx, "gemini", model, opts, tried); errWarm != nil {
+	if _, _, errWarm := manager.pickNext(ctx, "codex", model, opts, tried); errWarm != nil {
 		b.Fatalf("warmup pickNext error = %v", errWarm)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		auth, _, errPick := manager.pickNext(ctx, "gemini", model, opts, tried)
+		auth, _, errPick := manager.pickNext(ctx, "codex", model, opts, tried)
 		if errPick != nil || auth == nil {
 			b.Fatalf("pickNext failed: auth=%v err=%v", auth, errPick)
 		}
-		manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "gemini", Model: model, Success: true})
+		manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "codex", Model: model, Success: true})
 	}
 }
 
 func BenchmarkManagerMarkCleanModelSuccessParallel(b *testing.B) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	model := "bench-clean-success-model"
-	auth := &Auth{ID: "bench-clean-success-auth", Provider: "gemini", Status: StatusActive}
+	auth := &Auth{ID: "bench-clean-success-auth", Provider: "codex", Status: StatusActive}
 	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
 		b.Fatalf("Register error = %v", errRegister)
 	}

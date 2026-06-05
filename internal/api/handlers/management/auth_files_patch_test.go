@@ -22,8 +22,8 @@ func TestListAuthFilesFromDiskExposesRuntimeStateError(t *testing.T) {
 	runtimeUpdatedAt := time.Date(2026, 5, 13, 9, 30, 0, 0, time.UTC)
 	runtimeSavedAt := runtimeUpdatedAt.Add(2 * time.Second)
 	raw := map[string]any{
-		"type":  "kiro",
-		"email": "kiro@example.com",
+		"type":  "oauth",
+		"email": "oauth@example.com",
 		"cliproxy_runtime_state": map[string]any{
 			"version":        1,
 			"status":         "error",
@@ -33,7 +33,7 @@ func TestListAuthFilesFromDiskExposesRuntimeStateError(t *testing.T) {
 			"saved_at":       runtimeSavedAt.Format(time.RFC3339),
 			"last_error": map[string]any{
 				"code":        "refresh_failed",
-				"message":     "kiro refresh rejected",
+				"message":     "oauth refresh rejected",
 				"retryable":   false,
 				"http_status": http.StatusUnauthorized,
 			},
@@ -43,7 +43,7 @@ func TestListAuthFilesFromDiskExposesRuntimeStateError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal auth file: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "kiro-google.json"), data, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "oauth-google.json"), data, 0o600); err != nil {
 		t.Fatalf("write auth file: %v", err)
 	}
 
@@ -72,7 +72,7 @@ func TestListAuthFilesFromDiskExposesRuntimeStateError(t *testing.T) {
 	if !ok {
 		t.Fatalf("last_error = %#v, want object", file["last_error"])
 	}
-	if got := lastError["message"]; got != "kiro refresh rejected" {
+	if got := lastError["message"]; got != "oauth refresh rejected" {
 		t.Fatalf("last_error.message = %#v", got)
 	}
 	if got := int(lastError["http_status"].(float64)); got != http.StatusUnauthorized {
@@ -93,7 +93,7 @@ func TestListAuthFiles_PaginatedManagerResponse(t *testing.T) {
 		{id: "alpha.json", name: "alpha.json", provider: "codex"},
 		{id: "alpha-copy", name: "alpha.json", provider: "codex"},
 		{id: "bravo.json", name: "bravo.json", provider: "codex"},
-		{id: "charlie.json", name: "charlie.json", provider: "kiro"},
+		{id: "charlie.json", name: "charlie.json", provider: "oauth"},
 	} {
 		path := filepath.Join(authDir, item.name)
 		if err := os.WriteFile(path, []byte(`{"type":"`+item.provider+`"}`), 0o600); err != nil {
@@ -150,7 +150,7 @@ func TestListAuthFiles_PaginatedManagerResponse(t *testing.T) {
 	if len(body.Files) != 1 || body.Files[0]["name"] != "bravo.json" {
 		t.Fatalf("files = %#v, want bravo.json", body.Files)
 	}
-	if body.TypeCounts["all"] != 3 || body.TypeCounts["codex"] != 2 || body.TypeCounts["kiro"] != 1 {
+	if body.TypeCounts["all"] != 3 || body.TypeCounts["codex"] != 2 || body.TypeCounts["oauth"] != 1 {
 		t.Fatalf("type_counts = %#v", body.TypeCounts)
 	}
 	if body.TypeCounts["claude"] != 0 {
@@ -514,15 +514,15 @@ func TestBuildAuthFileEntryExposesLastRefreshFromMetadata(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	lastRefresh := time.Date(2026, 5, 9, 13, 6, 47, 0, time.UTC)
 	auth := &coreauth.Auth{
-		ID:       "kiro-google.json",
-		FileName: "kiro-google.json",
-		Provider: "kiro",
+		ID:       "oauth-google.json",
+		FileName: "oauth-google.json",
+		Provider: "oauth",
 		Metadata: map[string]any{
-			"type":         "kiro",
+			"type":         "oauth",
 			"last_refresh": lastRefresh.Format(time.RFC3339),
 		},
 		Attributes: map[string]string{
-			"path": "/tmp/kiro-google.json",
+			"path": "/tmp/oauth-google.json",
 		},
 	}
 
@@ -538,11 +538,11 @@ func TestBuildAuthFileEntryExposesRuntimeStateTimes(t *testing.T) {
 	runtimeUpdatedAt := time.Date(2026, 5, 9, 13, 27, 26, 0, time.UTC)
 	runtimeSavedAt := time.Date(2026, 5, 9, 13, 27, 48, 0, time.UTC)
 	auth := &coreauth.Auth{
-		ID:       "kiro-google.json",
-		FileName: "kiro-google.json",
-		Provider: "kiro",
+		ID:       "oauth-google.json",
+		FileName: "oauth-google.json",
+		Provider: "oauth",
 		Metadata: map[string]any{
-			"type": "kiro",
+			"type": "oauth",
 			"cliproxy_runtime_state": map[string]any{
 				"version":    1,
 				"updated_at": runtimeUpdatedAt.Format(time.RFC3339),
@@ -550,7 +550,7 @@ func TestBuildAuthFileEntryExposesRuntimeStateTimes(t *testing.T) {
 			},
 		},
 		Attributes: map[string]string{
-			"path": "/tmp/kiro-google.json",
+			"path": "/tmp/oauth-google.json",
 		},
 	}
 

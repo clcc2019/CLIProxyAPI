@@ -24,7 +24,7 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 		{ID: "c"},
 	}
 
-	got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
@@ -48,7 +48,7 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 
 	want := []string{"a", "b", "c", "a", "b"}
 	for i, id := range want {
-		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
 		if err != nil {
 			t.Fatalf("Pick() #%d error = %v", i, err)
 		}
@@ -190,7 +190,7 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 			defer wg.Done()
 			<-start
 			for j := 0; j < iterations; j++ {
-				got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+				got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
 				if err != nil {
 					select {
 					case errCh <- err:
@@ -305,7 +305,7 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 		t.Parallel()
 
 		selector := &FillFirstSelector{}
-		_, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, auths)
+		_, err := selector.Pick(context.Background(), "codex", model, cliproxyexecutor.Options{}, auths)
 		if err == nil {
 			t.Fatalf("Pick() error = nil")
 		}
@@ -323,8 +323,8 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 		if !ok {
 			t.Fatalf("Error() payload missing error object: %v", payload)
 		}
-		if got, _ := rawErr["provider"].(string); got != "gemini" {
-			t.Fatalf("Error().error.provider = %q, want %q", got, "gemini")
+		if got, _ := rawErr["provider"].(string); got != "codex" {
+			t.Fatalf("Error().error.provider = %q, want %q", got, "codex")
 		}
 	})
 }
@@ -408,11 +408,11 @@ func TestRoundRobinSelectorPick_ThinkingSuffixSharesCursor(t *testing.T) {
 		{ID: "a"},
 	}
 
-	first, err := selector.Pick(context.Background(), "gemini", "test-model(high)", cliproxyexecutor.Options{}, auths)
+	first, err := selector.Pick(context.Background(), "codex", "test-model(high)", cliproxyexecutor.Options{}, auths)
 	if err != nil {
 		t.Fatalf("Pick() first error = %v", err)
 	}
-	second, err := selector.Pick(context.Background(), "gemini", "test-model(low)", cliproxyexecutor.Options{}, auths)
+	second, err := selector.Pick(context.Background(), "codex", "test-model(low)", cliproxyexecutor.Options{}, auths)
 	if err != nil {
 		t.Fatalf("Pick() second error = %v", err)
 	}
@@ -433,9 +433,9 @@ func TestRoundRobinSelectorPick_CursorKeyCap(t *testing.T) {
 	selector := &RoundRobinSelector{maxKeys: 2}
 	auths := []*Auth{{ID: "a"}}
 
-	_, _ = selector.Pick(context.Background(), "gemini", "m1", cliproxyexecutor.Options{}, auths)
-	_, _ = selector.Pick(context.Background(), "gemini", "m2", cliproxyexecutor.Options{}, auths)
-	_, _ = selector.Pick(context.Background(), "gemini", "m3", cliproxyexecutor.Options{}, auths)
+	_, _ = selector.Pick(context.Background(), "codex", "m1", cliproxyexecutor.Options{}, auths)
+	_, _ = selector.Pick(context.Background(), "codex", "m2", cliproxyexecutor.Options{}, auths)
+	_, _ = selector.Pick(context.Background(), "codex", "m3", cliproxyexecutor.Options{}, auths)
 
 	m := selector.cursors.Load()
 	if m == nil {
@@ -452,8 +452,8 @@ func TestRoundRobinSelectorPick_CursorKeyCap(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("cursor count = %d, want %d", count, 1)
 	}
-	if lastKey != "gemini:m3" {
-		t.Fatalf("remaining cursor key = %q, want %q", lastKey, "gemini:m3")
+	if lastKey != "codex:m3" {
+		t.Fatalf("remaining cursor key = %q, want %q", lastKey, "codex:m3")
 	}
 }
 
@@ -999,21 +999,21 @@ func TestExtractSessionID_ClaudeAPITopLevelSystem(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_GeminiFormat(t *testing.T) {
+func TestExtractSessionID_CodexFormat(t *testing.T) {
 	t.Parallel()
 
-	// Gemini format with systemInstruction and contents
+	// Codex format with systemInstruction and contents
 	payload := []byte(`{
 		"systemInstruction": {"parts": [{"text": "You are a helpful assistant."}]},
 		"contents": [
-			{"role": "user", "parts": [{"text": "Hello Gemini"}]},
+			{"role": "user", "parts": [{"text": "Hello Codex"}]},
 			{"role": "model", "parts": [{"text": "Hi there!"}]}
 		]
 	}`)
 
 	got := ExtractSessionID(nil, payload, nil)
 	if got == "" {
-		t.Error("ExtractSessionID() with Gemini format should return hash-based session ID")
+		t.Error("ExtractSessionID() with Codex format should return hash-based session ID")
 	}
 	if !strings.HasPrefix(got, "msg:") {
 		t.Errorf("ExtractSessionID() = %q, want prefix 'msg:'", got)
@@ -1130,19 +1130,19 @@ func TestSessionAffinitySelector_ThreeScenarios(t *testing.T) {
 			payload:  []byte(`{"messages":[{"role":"system","content":"You are helpful"},{"role":"user","content":"Hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"Help me"},{"role":"assistant","content":"Sure!"},{"role":"user","content":"Thanks"}]}`),
 		},
 		{
-			name:     "Gemini_Scenario1_NewRequest",
+			name:     "Codex_Scenario1_NewRequest",
 			scenario: "new",
-			payload:  []byte(`{"systemInstruction":{"parts":[{"text":"You are helpful"}]},"contents":[{"role":"user","parts":[{"text":"Hello Gemini"}]}]}`),
+			payload:  []byte(`{"systemInstruction":{"parts":[{"text":"You are helpful"}]},"contents":[{"role":"user","parts":[{"text":"Hello Codex"}]}]}`),
 		},
 		{
-			name:     "Gemini_Scenario2_SecondTurn",
+			name:     "Codex_Scenario2_SecondTurn",
 			scenario: "second",
-			payload:  []byte(`{"systemInstruction":{"parts":[{"text":"You are helpful"}]},"contents":[{"role":"user","parts":[{"text":"Hello Gemini"}]},{"role":"model","parts":[{"text":"Hi!"}]},{"role":"user","parts":[{"text":"Help"}]}]}`),
+			payload:  []byte(`{"systemInstruction":{"parts":[{"text":"You are helpful"}]},"contents":[{"role":"user","parts":[{"text":"Hello Codex"}]},{"role":"model","parts":[{"text":"Hi!"}]},{"role":"user","parts":[{"text":"Help"}]}]}`),
 		},
 		{
-			name:     "Gemini_Scenario3_ManyTurns",
+			name:     "Codex_Scenario3_ManyTurns",
 			scenario: "many",
-			payload:  []byte(`{"systemInstruction":{"parts":[{"text":"You are helpful"}]},"contents":[{"role":"user","parts":[{"text":"Hello Gemini"}]},{"role":"model","parts":[{"text":"Hi!"}]},{"role":"user","parts":[{"text":"Help"}]},{"role":"model","parts":[{"text":"Sure!"}]},{"role":"user","parts":[{"text":"Thanks"}]}]}`),
+			payload:  []byte(`{"systemInstruction":{"parts":[{"text":"You are helpful"}]},"contents":[{"role":"user","parts":[{"text":"Hello Codex"}]},{"role":"model","parts":[{"text":"Hi!"}]},{"role":"user","parts":[{"text":"Help"}]},{"role":"model","parts":[{"text":"Sure!"}]},{"role":"user","parts":[{"text":"Thanks"}]}]}`),
 		},
 		{
 			name:     "Claude_Scenario1_NewRequest",
@@ -1357,7 +1357,7 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
 	defer selector.Stop()
 
 	authClaude := &Auth{ID: "auth-claude"}
-	authGemini := &Auth{ID: "auth-gemini"}
+	authCodex := &Auth{ID: "auth-codex"}
 
 	// Same session ID for both providers
 	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_cross-provider-test"}}`)
@@ -1373,23 +1373,23 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
 	}
 
 	// Same session but via a different provider should get different auth
-	pickedGemini, err := selector.Pick(context.Background(), "kimi", "kimi-k2.5", opts, []*Auth{authGemini})
+	pickedCodex, err := selector.Pick(context.Background(), "kimi", "kimi-k2.5", opts, []*Auth{authCodex})
 	if err != nil {
 		t.Fatalf("Pick() for kimi error = %v", err)
 	}
-	if pickedGemini.ID != "auth-gemini" {
-		t.Fatalf("Pick() for kimi = %q, want auth-gemini", pickedGemini.ID)
+	if pickedCodex.ID != "auth-codex" {
+		t.Fatalf("Pick() for kimi = %q, want auth-codex", pickedCodex.ID)
 	}
 
 	// Verify both bindings remain stable
 	for i := 0; i < 5; i++ {
 		gotC, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, []*Auth{authClaude})
-		gotG, _ := selector.Pick(context.Background(), "kimi", "kimi-k2.5", opts, []*Auth{authGemini})
+		gotG, _ := selector.Pick(context.Background(), "kimi", "kimi-k2.5", opts, []*Auth{authCodex})
 		if gotC.ID != "auth-claude" {
 			t.Fatalf("Pick() #%d for claude = %q, want auth-claude", i, gotC.ID)
 		}
-		if gotG.ID != "auth-gemini" {
-			t.Fatalf("Pick() #%d for kimi = %q, want auth-gemini", i, gotG.ID)
+		if gotG.ID != "auth-codex" {
+			t.Fatalf("Pick() #%d for kimi = %q, want auth-codex", i, gotG.ID)
 		}
 	}
 }
@@ -1479,7 +1479,7 @@ func TestSessionAffinitySelector_ProviderScopeIsolation(t *testing.T) {
 
 	optsA := cliproxyexecutor.Options{
 		OriginalRequest: []byte(`{"metadata":{"session_id":"same-session"}}`),
-		Metadata:        map[string]any{cliproxyexecutor.ProviderScopeMetadataKey: "providers:claude,gemini"},
+		Metadata:        map[string]any{cliproxyexecutor.ProviderScopeMetadataKey: "providers:claude,codex"},
 	}
 	optsB := cliproxyexecutor.Options{
 		OriginalRequest: []byte(`{"metadata":{"session_id":"same-session"}}`),

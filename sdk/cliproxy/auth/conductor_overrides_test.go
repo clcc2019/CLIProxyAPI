@@ -1644,7 +1644,7 @@ func TestManagerExecuteStream_UnauthorizedBootstrapSuspendsAuthFileAcrossModels(
 func TestIsRequestInvalidError_BadRequestDoesNotBlockCredentialFailover(t *testing.T) {
 	err := &Error{
 		HTTPStatus: http.StatusBadRequest,
-		Message:    "kiro API error: ValidationException: Improperly formed request: missing currentMessage.content",
+		Message:    "oauth API error: ValidationException: Improperly formed request: missing currentMessage.content",
 	}
 	if isRequestInvalidError(err) {
 		t.Fatal("400 errors should not block credential failover and fresh upstream session creation")

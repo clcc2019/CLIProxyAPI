@@ -180,7 +180,7 @@ func TestManager_CoordinatedRefreshReturnsPersistError(t *testing.T) {
 	store := &failingRefreshPersistStore{err: saveErr}
 	manager := NewManager(store, &RoundRobinSelector{}, nil)
 	executor := &singleflightRefreshTestExecutor{
-		provider: "kiro",
+		provider: "oauth",
 		started:  make(chan string, 1),
 		release:  make(chan struct{}),
 		mutate: func(auth *Auth) *Auth {
@@ -198,10 +198,10 @@ func TestManager_CoordinatedRefreshReturnsPersistError(t *testing.T) {
 	manager.RegisterExecutor(executor)
 
 	auth := &Auth{
-		ID:       "kiro-persist-failure",
-		Provider: "kiro",
+		ID:       "oauth-persist-failure",
+		Provider: "oauth",
 		Metadata: map[string]any{
-			"type":          "kiro",
+			"type":          "oauth",
 			"access_token":  "old-token",
 			"refresh_token": "old-refresh-token",
 		},

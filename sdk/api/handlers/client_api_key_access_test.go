@@ -24,7 +24,7 @@ func TestClientModelAllowedForContext(t *testing.T) {
 		t.Fatalf("expected gpt-5 to be allowed")
 	}
 	if !clientModelAllowedForContext(ctx, "models/gpt-5") {
-		t.Fatalf("expected gemini model prefix to be canonicalized")
+		t.Fatalf("expected codex model prefix to be canonicalized")
 	}
 	if clientModelAllowedForContext(ctx, "gpt-5-mini") {
 		t.Fatalf("expected excluded model to be denied")

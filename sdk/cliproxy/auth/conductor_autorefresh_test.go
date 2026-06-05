@@ -60,18 +60,18 @@ func TestManagerRefreshAuthOncePersistsRefreshErrorRuntimeState(t *testing.T) {
 	store := &captureAuthStore{}
 	manager := NewManager(store, &RoundRobinSelector{}, nil)
 	executor := &autoRefreshTestExecutor{
-		provider: "kiro",
+		provider: "oauth",
 		refreshFunc: func(auth *Auth) (*Auth, error) {
-			return nil, &Error{Code: "refresh_failed", Message: "kiro refresh 502", Retryable: true, HTTPStatus: http.StatusBadGateway}
+			return nil, &Error{Code: "refresh_failed", Message: "oauth refresh 502", Retryable: true, HTTPStatus: http.StatusBadGateway}
 		},
 	}
 	manager.RegisterExecutor(executor)
 
 	auth := &Auth{
-		ID:       "kiro-refresh-error",
-		Provider: "kiro",
+		ID:       "oauth-refresh-error",
+		Provider: "oauth",
 		Status:   StatusActive,
-		Metadata: map[string]any{"type": "kiro", "refresh_interval_seconds": 1},
+		Metadata: map[string]any{"type": "oauth", "refresh_interval_seconds": 1},
 	}
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
@@ -99,7 +99,7 @@ func TestManagerRefreshAuthOncePersistsRefreshErrorRuntimeState(t *testing.T) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		t.Fatalf("unmarshal runtime state: %v", err)
 	}
-	if state.LastError == nil || state.LastError.Message != "kiro refresh 502" {
+	if state.LastError == nil || state.LastError.Message != "oauth refresh 502" {
 		t.Fatalf("runtime last_error = %#v, want refresh failure", state.LastError)
 	}
 	if state.LastError.HTTPStatus != http.StatusBadGateway || !state.LastError.Retryable {
@@ -524,7 +524,7 @@ func TestManager_InFlightRefreshDoesNotReviveDisabledAuth(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	executor := &autoRefreshTestExecutor{
-		provider: "kiro",
+		provider: "oauth",
 		refreshFunc: func(auth *Auth) (*Auth, error) {
 			close(started)
 			<-release
@@ -541,10 +541,10 @@ func TestManager_InFlightRefreshDoesNotReviveDisabledAuth(t *testing.T) {
 	manager.RegisterExecutor(executor)
 
 	auth := &Auth{
-		ID:       "kiro-inflight-refresh",
-		Provider: "kiro",
+		ID:       "oauth-inflight-refresh",
+		Provider: "oauth",
 		Status:   StatusActive,
-		Metadata: map[string]any{"type": "kiro", "refresh_token": "old-refresh-token"},
+		Metadata: map[string]any{"type": "oauth", "refresh_token": "old-refresh-token"},
 	}
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
@@ -592,10 +592,10 @@ func TestManager_PublishedRefreshUpdateDoesNotReviveDisabledAuth(t *testing.T) {
 	store := &countingStore{}
 	manager := NewManager(store, &RoundRobinSelector{}, nil)
 	auth := &Auth{
-		ID:       "kiro-published-refresh",
-		Provider: "kiro",
+		ID:       "oauth-published-refresh",
+		Provider: "oauth",
 		Status:   StatusActive,
-		Metadata: map[string]any{"type": "kiro", "refresh_token": "old-refresh-token"},
+		Metadata: map[string]any{"type": "oauth", "refresh_token": "old-refresh-token"},
 	}
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)

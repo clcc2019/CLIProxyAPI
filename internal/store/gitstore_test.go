@@ -123,7 +123,7 @@ func TestEnsureRepositoryInitializesEmptyRemoteUsingConfiguredBranch(t *testing.
 		t.Fatalf("init bare remote: %v", err)
 	}
 
-	branch := "feature/gemini-fix"
+	branch := "feature/codex-fix"
 	store := NewGitTokenStore(remoteDir, "", "", branch)
 	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
 

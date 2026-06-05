@@ -67,7 +67,7 @@ func TestMarkResultWithoutPersistenceStoreSkipsPersistLoop(t *testing.T) {
 	t.Cleanup(mgr.stopPersistLoop)
 	auth := &Auth{
 		ID:       "auth-1",
-		Provider: "gemini",
+		Provider: "codex",
 		Status:   StatusActive,
 	}
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {

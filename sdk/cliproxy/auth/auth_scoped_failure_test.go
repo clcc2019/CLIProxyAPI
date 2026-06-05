@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// authScopedTestErr is a minimal stand-in for the kiro executor's 429 wrapper
+// authScopedTestErr is a minimal stand-in for the oauth executor's 429 wrapper
 // used to exercise the conductor's MarkResult elevation logic without
 // importing the executor package.
 type authScopedTestErr struct{ code int }
@@ -16,7 +16,7 @@ func (e *authScopedTestErr) StatusCode() int           { return e.code }
 func (e *authScopedTestErr) IsAuthScopedFailure() bool { return true }
 
 // TestMarkResult_AuthScoped429_SuspendsEntireAuth verifies that when an
-// executor returns an auth-scoped failure (i.e., Kiro's shared-bucket
+// executor returns an auth-scoped failure (i.e., OAuth's shared-bucket
 // AGENTIC_REQUEST 429), the conductor suspends the whole auth so session
 // affinity can slide to the next credential instead of only blocking the
 // triggering model.
@@ -25,10 +25,10 @@ func TestMarkResult_AuthScoped429_SuspendsEntireAuth(t *testing.T) {
 	t.Cleanup(mgr.stopPersistLoop)
 
 	auth := &Auth{
-		ID:       "kiro-shared-bucket",
-		Provider: "kiro",
+		ID:       "oauth-shared-bucket",
+		Provider: "oauth",
 		Status:   StatusActive,
-		Metadata: map[string]any{"type": "kiro"},
+		Metadata: map[string]any{"type": "oauth"},
 	}
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -39,7 +39,7 @@ func TestMarkResult_AuthScoped429_SuspendsEntireAuth(t *testing.T) {
 	// "claude-haiku" unblocked on this same auth.
 	result := Result{
 		AuthID:   auth.ID,
-		Provider: "kiro",
+		Provider: "oauth",
 		Model:    "claude-sonnet-4.5",
 		Success:  false,
 	}
@@ -174,10 +174,10 @@ func TestMarkResult_AuthScoped429_AllModelsBlocked(t *testing.T) {
 	t.Cleanup(mgr.stopPersistLoop)
 
 	auth := &Auth{
-		ID:       "kiro-shared",
-		Provider: "kiro",
+		ID:       "oauth-shared",
+		Provider: "oauth",
 		Status:   StatusActive,
-		Metadata: map[string]any{"type": "kiro"},
+		Metadata: map[string]any{"type": "oauth"},
 	}
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -185,7 +185,7 @@ func TestMarkResult_AuthScoped429_AllModelsBlocked(t *testing.T) {
 
 	result := Result{
 		AuthID:   auth.ID,
-		Provider: "kiro",
+		Provider: "oauth",
 		Model:    "claude-sonnet-4.5",
 		Success:  false,
 	}

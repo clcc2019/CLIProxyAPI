@@ -12,7 +12,7 @@ import (
 func TestTranslateRequestWithOriginal_SkipsOriginalWithoutPayloadRules(t *testing.T) {
 	cfg := &config.Config{}
 	from := sdktranslator.FromString("openai")
-	to := sdktranslator.FromString("gemini")
+	to := sdktranslator.FromString("codex")
 	payload := []byte(`{"model":"gpt-4.1","messages":[{"role":"user","content":"hi"}]}`)
 
 	translated, originalTranslated := TranslateRequestWithOriginal(cfg, from, to, "gpt-4.1", payload, payload, false)
@@ -36,7 +36,7 @@ func TestTranslateRequestWithOriginal_ReusesTranslatedPayloadForIdenticalOrigina
 		},
 	}
 	from := sdktranslator.FromString("openai")
-	to := sdktranslator.FromString("gemini")
+	to := sdktranslator.FromString("codex")
 	payload := []byte(`{"model":"gpt-4.1","messages":[{"role":"user","content":"hi"}]}`)
 
 	translated, originalTranslated := TranslateRequestWithOriginal(cfg, from, to, "gpt-4.1", payload, payload, false)
@@ -59,7 +59,7 @@ func TestTranslateRequestWithOriginal_TranslatesDistinctOriginal(t *testing.T) {
 		},
 	}
 	from := sdktranslator.FromString("openai")
-	to := sdktranslator.FromString("gemini")
+	to := sdktranslator.FromString("codex")
 	payload := []byte(`{"model":"gpt-4.1","messages":[{"role":"user","content":"hi"}]}`)
 	original := []byte(`{"model":"gpt-4.1","temperature":0.5,"messages":[{"role":"user","content":"hi"}]}`)
 

@@ -2213,7 +2213,7 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 // must pass through unchanged) and a lowercase tool that we forward-rename.
 // Before the fix, triggering ANY forward rename caused the reverse pass to
 // lowercase every TitleCase tool in the response using a global reverse map,
-// corrupting tool names the client originally sent in TitleCase (notably Amp
+// corrupting tool names the client originally sent in TitleCase (notably client
 // CLI's `Bash`, which its registry lookup cannot find as `bash`).
 func TestRemapOAuthToolNames_MixedCase_OnlyRenamedToolsReversed(t *testing.T) {
 	body := []byte(`{"tools":[` +

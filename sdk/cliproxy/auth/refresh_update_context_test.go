@@ -25,7 +25,7 @@ func (s *refreshUpdateCaptureStore) Delete(context.Context, string) error { retu
 
 type refreshUpdateExecutor struct{}
 
-func (e refreshUpdateExecutor) Identifier() string { return "kiro" }
+func (e refreshUpdateExecutor) Identifier() string { return "oauth" }
 
 func (e refreshUpdateExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	updated := auth.Clone()
@@ -81,10 +81,10 @@ func TestManagerPersistsExecutionRefreshUpdate(t *testing.T) {
 	manager := NewManager(store, nil, nil)
 	manager.RegisterExecutor(refreshUpdateExecutor{})
 	if _, err := manager.Register(context.Background(), &Auth{
-		ID:       "kiro-auth",
-		Provider: "kiro",
+		ID:       "oauth-auth",
+		Provider: "oauth",
 		Metadata: map[string]any{
-			"type":         "kiro",
+			"type":         "oauth",
 			"access_token": "old-token",
 		},
 	}); err != nil {
@@ -92,7 +92,7 @@ func TestManagerPersistsExecutionRefreshUpdate(t *testing.T) {
 	}
 	store.last = nil
 
-	if _, err := manager.Execute(context.Background(), []string{"kiro"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
+	if _, err := manager.Execute(context.Background(), []string{"oauth"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if store.last == nil {
@@ -138,13 +138,13 @@ func TestManagerRefreshUpdatePreservesLatestEditableAuthFileFields(t *testing.T)
 	store := &refreshUpdateCaptureStore{}
 	manager := NewManager(store, nil, nil)
 	registered, err := manager.Register(context.Background(), &Auth{
-		ID:       "kiro-auth",
-		Provider: "kiro",
+		ID:       "oauth-auth",
+		Provider: "oauth",
 		Metadata: map[string]any{
-			"type":         "kiro",
+			"type":         "oauth",
 			"access_token": "old-token",
 		},
-		Attributes: map[string]string{"path": "/tmp/kiro-auth.json"},
+		Attributes: map[string]string{"path": "/tmp/oauth-auth.json"},
 	})
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)

@@ -383,10 +383,10 @@ func parseMustTime(tb timeParserTB, raw string) time.Time {
 	return parsed
 }
 
-func BenchmarkCloneAuthForExecutionGemini(b *testing.B) {
+func BenchmarkCloneAuthForExecutionCodex(b *testing.B) {
 	auth := &Auth{
-		ID:         "gemini-auth",
-		Provider:   "gemini",
+		ID:         "codex-auth",
+		Provider:   "codex",
 		Attributes: map[string]string{"priority": "10", "proxy_url": "http://127.0.0.1:7890"},
 		Metadata: map[string]any{
 			"email":      "x@example.com",
@@ -400,7 +400,7 @@ func BenchmarkCloneAuthForExecutionGemini(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		cloned := cloneAuthForExecution("gemini", auth)
+		cloned := cloneAuthForExecution("codex", auth)
 		if cloned == nil {
 			b.Fatal("cloneAuthForExecution returned nil")
 		}

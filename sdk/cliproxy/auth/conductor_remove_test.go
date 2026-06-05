@@ -45,7 +45,7 @@ func TestManagerRemoveSuppressesInFlightRefreshPersistence(t *testing.T) {
 	store := &removeCaptureStore{}
 	manager := NewManager(store, &RoundRobinSelector{}, nil)
 	executor := &singleflightRefreshTestExecutor{
-		provider: "kiro",
+		provider: "oauth",
 		started:  make(chan string, 1),
 		release:  make(chan struct{}),
 		mutate: func(auth *Auth) *Auth {
@@ -59,14 +59,14 @@ func TestManagerRemoveSuppressesInFlightRefreshPersistence(t *testing.T) {
 	manager.RegisterExecutor(executor)
 
 	auth := &Auth{
-		ID:       "kiro-delete-race.json",
-		Provider: "kiro",
+		ID:       "oauth-delete-race.json",
+		Provider: "oauth",
 		Status:   StatusActive,
 		Attributes: map[string]string{
-			"path": "/tmp/kiro-delete-race.json",
+			"path": "/tmp/oauth-delete-race.json",
 		},
 		Metadata: map[string]any{
-			"type":          "kiro",
+			"type":          "oauth",
 			"access_token":  "old-access",
 			"refresh_token": "old-refresh",
 		},

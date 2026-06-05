@@ -196,24 +196,24 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 	assertFileMissing(t, filePath)
 }
 
-func TestDeleteAuthFile_ByAuthIndexDoesNotRecreateKiroFile(t *testing.T) {
+func TestDeleteAuthFile_ByAuthIndexDoesNotRecreateOAuthFile(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
-	fileName := "kiro-google-user-example-com.json"
+	fileName := "oauth-google-user-example-com.json"
 	store := sdkauth.NewFileTokenStore()
 	store.SetBaseDir(authDir)
 	manager := coreauth.NewManager(store, nil, nil)
 	record := &coreauth.Auth{
 		ID:       fileName,
 		FileName: fileName,
-		Provider: "kiro",
+		Provider: "oauth",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"path": filepath.Join(authDir, fileName),
 		},
 		Metadata: map[string]any{
-			"type":          "kiro",
+			"type":          "oauth",
 			"provider":      "google",
 			"email":         "user@example.com",
 			"access_token":  "access-token",
@@ -252,8 +252,8 @@ func TestDeleteAuthFile_StoreDeleteRunsBeforeLocalRemove(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
-	fileName := "kiro-google-user-example-com.json"
-	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+	fileName := "oauth-google-user-example-com.json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"oauth"}`)
 
 	store := &statOnDeleteStore{}
 	h := newAuthDeleteTestHandler(authDir, nil, store)
@@ -273,18 +273,18 @@ func TestDeleteAuthFile_DeleteRecordFailureRestoresAuthState(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
-	fileName := "kiro-google-user-example-com.json"
-	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+	fileName := "oauth-google-user-example-com.json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"oauth"}`)
 	manager := coreauth.NewManager(nil, nil, nil)
 	auth := &coreauth.Auth{
 		ID:       fileName,
 		FileName: fileName,
-		Provider: "kiro",
+		Provider: "oauth",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"path": filePath,
 		},
-		Metadata: map[string]any{"type": "kiro"},
+		Metadata: map[string]any{"type": "oauth"},
 	}
 	if _, err := manager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
@@ -309,8 +309,8 @@ func TestDeleteAuthFile_AcceptsFilenameBody(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
-	fileName := "kiro-google-user-example-com.json"
-	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+	fileName := "oauth-google-user-example-com.json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"oauth"}`)
 
 	h := newAuthDeleteTestHandler(authDir, nil, &memoryAuthStore{})
 
@@ -319,23 +319,23 @@ func TestDeleteAuthFile_AcceptsFilenameBody(t *testing.T) {
 	assertFileMissing(t, filePath)
 }
 
-func TestDeleteAuthFile_RemovesLegacyKiroIDWithoutJSONSuffix(t *testing.T) {
+func TestDeleteAuthFile_RemovesLegacyOAuthIDWithoutJSONSuffix(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
-	legacyID := "kiro-google-user-example-com"
+	legacyID := "oauth-google-user-example-com"
 	fileName := legacyID + ".json"
-	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"oauth"}`)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
 		ID:       legacyID,
-		Provider: "kiro",
+		Provider: "oauth",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"path": filePath,
 		},
-		Metadata: map[string]any{"type": "kiro"},
+		Metadata: map[string]any{"type": "oauth"},
 	}); errRegister != nil {
 		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
@@ -348,21 +348,21 @@ func TestDeleteAuthFile_RemovesLegacyKiroIDWithoutJSONSuffix(t *testing.T) {
 	assertAuthRemoved(t, manager, legacyID)
 }
 
-func TestDeleteAuthFile_LegacyKiroRecordWithoutPathDeletesJSONFile(t *testing.T) {
+func TestDeleteAuthFile_LegacyOAuthRecordWithoutPathDeletesJSONFile(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
-	legacyName := "kiro-google-user-example-com"
+	legacyName := "oauth-google-user-example-com"
 	fileName := legacyName + ".json"
-	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"oauth"}`)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
 		ID:       legacyName,
 		FileName: legacyName,
-		Provider: "kiro",
+		Provider: "oauth",
 		Status:   coreauth.StatusActive,
-		Metadata: map[string]any{"type": "kiro"},
+		Metadata: map[string]any{"type": "oauth"},
 	}); errRegister != nil {
 		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
@@ -379,19 +379,19 @@ func TestListAuthFiles_HidesFileBackedAuthMissingOnDisk(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
-	fileName := "kiro-google-user-example-com.json"
+	fileName := "oauth-google-user-example-com.json"
 	filePath := filepath.Join(authDir, fileName)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
 		ID:       fileName,
 		FileName: fileName,
-		Provider: "kiro",
+		Provider: "oauth",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"path": filePath,
 		},
-		Metadata: map[string]any{"type": "kiro"},
+		Metadata: map[string]any{"type": "oauth"},
 	}); errRegister != nil {
 		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
@@ -408,19 +408,19 @@ func TestDeleteAuthFile_ByAbsolutePathFromManagedAuth(t *testing.T) {
 	setupManagementDeleteTest(t)
 
 	authDir := t.TempDir()
-	fileName := "kiro-google-user-example-com.json"
-	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"kiro"}`)
+	fileName := "oauth-google-user-example-com.json"
+	filePath := writeAuthTestFile(t, authDir, fileName, `{"type":"oauth"}`)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
 		ID:       fileName,
 		FileName: fileName,
-		Provider: "kiro",
+		Provider: "oauth",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"path": filePath,
 		},
-		Metadata: map[string]any{"type": "kiro"},
+		Metadata: map[string]any{"type": "oauth"},
 	}); errRegister != nil {
 		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
