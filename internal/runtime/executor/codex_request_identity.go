@@ -52,11 +52,34 @@ func codexAuthKindHint(auth *cliproxyauth.Auth) string {
 		return ""
 	}
 	if auth.Attributes != nil {
-		if authKind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"])); authKind != "" {
+		if authKind := codexAuthKind(auth.Attributes["auth_kind"]); authKind != "" {
 			return authKind
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(metadataString(auth.Metadata, "auth_kind", "authKind", "auth_mode", "authMode")))
+	return codexAuthKind(metadataString(auth.Metadata, "auth_kind", "authKind", "auth_mode", "authMode"))
+}
+
+func codexAuthKind(authKind string) string {
+	authKind = strings.TrimSpace(authKind)
+	if authKind == "" {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(authKind, "apikey"):
+		return "apikey"
+	case strings.EqualFold(authKind, "api_key"):
+		return "api_key"
+	case strings.EqualFold(authKind, "oauth"):
+		return "oauth"
+	case strings.EqualFold(authKind, "chatgpt"):
+		return "chatgpt"
+	case strings.EqualFold(authKind, "chatgpt_auth_tokens"):
+		return "chatgpt_auth_tokens"
+	case strings.EqualFold(authKind, "agent_identity"):
+		return "agent_identity"
+	default:
+		return strings.ToLower(authKind)
+	}
 }
 
 func codexMetadataHasOAuthIdentity(metadata map[string]any) bool {
@@ -78,32 +101,34 @@ func codexResolvedUserAgent(target http.Header, source http.Header, auth *clipro
 	return codexResolvedIdentity(target, source, auth, cfg).userAgent
 }
 
-func codexConfiguredUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
-	userAgent, _ := codexHeaderDefaults(cfg, auth)
-	return userAgent
-}
-
 func codexResolvedOriginator(target http.Header, source http.Header, auth *cliproxyauth.Auth) string {
 	return codexResolvedIdentity(target, source, auth, nil).originator
 }
 
 func codexResolvedIdentity(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) codexRequestIdentity {
+	userAgent, _ := codexHeaderDefaults(cfg, auth)
+	return codexIdentity(target, source, auth, userAgent)
+}
+
+func codexIdentity(target http.Header, source http.Header, auth *cliproxyauth.Auth, userAgent string) codexRequestIdentity {
 	identity := codexRequestIdentity{
 		originator: codexResolvedOriginatorValue(target, source, auth),
 	}
-	configuredUserAgent := codexConfiguredUserAgent(cfg, auth)
+	userAgent = strings.TrimSpace(userAgent)
 	authUserAgent := codexAuthUserAgent(auth)
 	switch {
-	case configuredUserAgent != "":
-		identity.userAgent = configuredUserAgent
+	case userAgent != "":
+		identity.userAgent = userAgent
 	case authUserAgent != "":
 		identity.userAgent = authUserAgent
-	case target != nil && strings.TrimSpace(target.Get("User-Agent")) != "":
-		identity.userAgent = strings.TrimSpace(target.Get("User-Agent"))
-	case source != nil && strings.TrimSpace(source.Get("User-Agent")) != "":
-		identity.userAgent = strings.TrimSpace(source.Get("User-Agent"))
 	default:
-		identity.userAgent = misc.CodexCLIUserAgentWithOriginator(identity.originator)
+		if targetUserAgent := trimHeaderValue(target, "User-Agent"); targetUserAgent != "" {
+			identity.userAgent = targetUserAgent
+		} else if sourceUserAgent := trimHeaderValue(source, "User-Agent"); sourceUserAgent != "" {
+			identity.userAgent = sourceUserAgent
+		} else {
+			identity.userAgent = misc.CodexCLIUserAgentWithOriginator(identity.originator)
+		}
 	}
 	return identity
 }
@@ -112,15 +137,11 @@ func codexResolvedOriginatorValue(target http.Header, source http.Header, auth *
 	if authOriginator := codexAuthOriginator(auth); authOriginator != "" {
 		return authOriginator
 	}
-	if target != nil {
-		if originator := strings.TrimSpace(target.Get("Originator")); originator != "" {
-			return originator
-		}
+	if originator := trimHeaderValue(target, "Originator"); originator != "" {
+		return originator
 	}
-	if source != nil {
-		if originator := strings.TrimSpace(source.Get("Originator")); originator != "" {
-			return originator
-		}
+	if originator := trimHeaderValue(source, "Originator"); originator != "" {
+		return originator
 	}
 	return codexOriginator
 }

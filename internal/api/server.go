@@ -619,14 +619,6 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
 
-		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
-		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
-		mgmt.PATCH("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
-
-		mgmt.GET("/quota-exceeded/switch-preview-model", s.mgmt.GetSwitchPreviewModel)
-		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
-		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
-
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)

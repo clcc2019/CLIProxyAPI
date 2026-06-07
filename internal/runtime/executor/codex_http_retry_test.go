@@ -100,6 +100,98 @@ func TestDoCodexHTTPRequestRetriesZstdEOFWithoutCompression(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPRequestForAttemptTreatsZstdEncodingCaseInsensitively(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex"}`)
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Encoding", "ZsTd")
+
+	retryReq, err := codexHTTPRequestForAttempt(codexPreparedRequest{
+		httpReq: req,
+		body:    body,
+	}, "ZsTd", 1)
+	if err != nil {
+		t.Fatalf("codexHTTPRequestForAttempt() error = %v", err)
+	}
+	if got := retryReq.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("retry Content-Encoding = %q, want empty", got)
+	}
+}
+
+func TestDoCodexHTTPRequestRetriesMixedCaseZstdStatusWithoutCompression(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+
+	var attempts int
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(codexRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		gotBody, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatalf("ReadAll(request body) error = %v", errRead)
+		}
+		switch attempts {
+		case 1:
+			if got := req.Header.Get("Content-Encoding"); got != "ZsTd" {
+				t.Fatalf("first Content-Encoding = %q, want ZsTd", got)
+			}
+			if !bytes.Equal(gotBody, []byte("compressed-body")) {
+				t.Fatalf("first body = %s, want compressed-body", gotBody)
+			}
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"temporary"}}`)),
+			}, nil
+		case 2:
+			if got := req.Header.Get("Content-Encoding"); got != "" {
+				t.Fatalf("retry Content-Encoding = %q, want empty", got)
+			}
+			if !bytes.Equal(gotBody, body) {
+				t.Fatalf("retry body = %s, want %s", gotBody, body)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		default:
+			t.Fatalf("unexpected attempt %d", attempts)
+			return nil, nil
+		}
+	})))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader([]byte("compressed-body")))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	req.Header.Set("Content-Encoding", "ZsTd")
+	codexResetRequestBody(req, []byte("compressed-body"))
+
+	resp, err := (&CodexExecutor{}).doCodexHTTPRequest(ctx, auth, codexPreparedRequest{httpReq: req, body: body})
+	if err != nil {
+		t.Fatalf("doCodexHTTPRequest() error = %v", err)
+	}
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("response = %#v, want 200", resp)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func BenchmarkCodexHTTPEncodingIsZstd(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if !codexHTTPEncodingIsZstd(" ZsTd ") {
+			b.Fatal("expected zstd encoding")
+		}
+	}
+}
+
 func TestDoCodexHTTPRequestRetriesZstdRejectionWithoutCompression(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{
@@ -247,6 +339,31 @@ func TestCodexShouldRetryHTTPStatusWithoutCompressionSniffsBoundedPrefixAndPrese
 	}
 	if !source.closed {
 		t.Fatal("restored response body Close() did not close original body")
+	}
+}
+
+func TestCodexShouldRetryHTTPStatusWithoutCompressionMatchesMixedCaseEncodingError(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Unsupported Content-Encoding ZSTD"}}`)),
+	}
+
+	if !codexShouldRetryHTTPStatusWithoutCompression(resp) {
+		t.Fatal("mixed-case content-encoding rejection should retry without compression")
+	}
+}
+
+func BenchmarkCodexShouldRetryHTTPStatusWithoutCompressionEncodingError(b *testing.B) {
+	body := []byte(`{"error":{"message":"Unsupported Content-Encoding ZSTD"}}`)
+	for b.Loop() {
+		resp := &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(bytes.NewReader(body)),
+		}
+		if !codexShouldRetryHTTPStatusWithoutCompression(resp) {
+			b.Fatal("expected retry without compression")
+		}
+		_ = resp.Body.Close()
 	}
 }
 
@@ -432,6 +549,22 @@ func TestCodexShouldRetryHTTPTransportErrorHonorsCanceledParentContext(t *testin
 	}
 }
 
+func TestCodexShouldRetryHTTPTransportErrorMatchesMixedCaseMarker(t *testing.T) {
+	err := errors.New("HTTP2: Stream Closed")
+	if !codexShouldRetryHTTPTransportError(context.Background(), err) {
+		t.Fatal("mixed-case HTTP/2 stream marker should be retryable")
+	}
+}
+
+func BenchmarkCodexShouldRetryHTTPTransportErrorMarker(b *testing.B) {
+	err := errors.New("HTTP2: Stream Closed")
+	for b.Loop() {
+		if !codexShouldRetryHTTPTransportError(context.Background(), err) {
+			b.Fatal("expected retryable transport error")
+		}
+	}
+}
+
 func TestCodexRequestContextDoneRequiresCanceledParent(t *testing.T) {
 	err := errors.New(`Post "https://chatgpt.com/backend-api/codex/responses": context canceled`)
 	if codexRequestContextDone(context.Background(), err) {
@@ -446,8 +579,21 @@ func TestCodexRequestContextDoneRequiresCanceledParent(t *testing.T) {
 	if !codexRequestContextDone(ctx, err) {
 		t.Fatal("canceled parent context should classify context-canceled POST errors as downstream cancellation")
 	}
+	mixedCaseErr := errors.New(`Post "https://chatgpt.com/backend-api/codex/responses": Context Deadline Exceeded`)
+	if !codexRequestContextDone(ctx, mixedCaseErr) {
+		t.Fatal("canceled parent context should classify mixed-case context deadline errors as downstream cancellation")
+	}
 	if codexRequestContextDone(ctx, errors.New("stream error: stream ID 33; INTERNAL_ERROR; received from peer")) {
 		t.Fatal("non-context transport errors must remain visible even after cancellation")
+	}
+}
+
+func BenchmarkErrorsIsContextDoneText(b *testing.B) {
+	err := errors.New(`Post "https://chatgpt.com/backend-api/codex/responses": Context Deadline Exceeded`)
+	for b.Loop() {
+		if !errorsIsContextDone(err) {
+			b.Fatal("expected context done error")
+		}
 	}
 }
 

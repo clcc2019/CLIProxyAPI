@@ -85,7 +85,7 @@ func codexGinHeadersFromContextUncached(ctx context.Context) http.Header {
 }
 
 func codexApplyHTTPClientMetadata(body []byte, req *http.Request, auth *cliproxyauth.Auth, cfg *config.Config) []byte {
-	if len(bytes.TrimSpace(body)) == 0 || req == nil {
+	if req == nil {
 		return body
 	}
 	return codexApplyHTTPClientMetadataWithSource(body, req.Header, codexGinHeadersFromContext(req.Context()), auth, cfg)
@@ -95,10 +95,12 @@ func codexApplyHTTPClientMetadataWithSource(body []byte, target http.Header, sou
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
-	return codexSetClientMetadataString(
+	return codexSetClientMetadata(
 		body,
-		codexClientMetadataInstallationID,
-		codexResolvedInstallationID(target, source, auth, cfg),
+		[]codexClientMetadataEntry{{
+			key:   codexClientMetadataInstallationID,
+			value: codexResolvedInstallationID(target, source, auth, cfg),
+		}},
 		true,
 	)
 }
@@ -113,7 +115,7 @@ func codexApplyWebsocketClientMetadataWithStreamStartMS(ctx context.Context, bod
 	}
 
 	source := codexGinHeadersFromContext(ctx)
-	body = codexSetClientMetadataStrings(body, []codexClientMetadataEntry{
+	body = codexSetClientMetadata(body, []codexClientMetadataEntry{
 		{key: codexClientMetadataInstallationID, value: codexResolvedInstallationID(headers, source, auth, cfg)},
 		{key: codexClientMetadataWindowID, value: firstNonEmptyHeaderValue(headers, source, codexHeaderWindowID)},
 		{key: codexClientMetadataSubagent, value: firstNonEmptyHeaderValue(headers, source, codexWireHeaderOpenAISubagent)},
@@ -171,11 +173,14 @@ type codexClientMetadataEntry struct {
 }
 
 func codexSetClientMetadataString(body []byte, key string, value string, overwrite bool) []byte {
-	return codexSetClientMetadataStrings(body, []codexClientMetadataEntry{{key: key, value: value}}, overwrite)
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body
+	}
+	return codexSetClientMetadata(body, []codexClientMetadataEntry{{key: key, value: value}}, overwrite)
 }
 
-func codexSetClientMetadataStrings(body []byte, entries []codexClientMetadataEntry, overwrite bool) []byte {
-	if len(entries) == 0 || len(bytes.TrimSpace(body)) == 0 {
+func codexSetClientMetadata(body []byte, entries []codexClientMetadataEntry, overwrite bool) []byte {
+	if len(entries) == 0 {
 		return body
 	}
 	metadata := gjson.GetBytes(body, "client_metadata")
@@ -186,11 +191,6 @@ func codexSetClientMetadataStrings(body []byte, entries []codexClientMetadataEnt
 			}
 		}
 		if metadataBody, ok := codexBuildClientMetadataObject(entries); ok {
-			if !metadata.Exists() {
-				if updated, ok := codexAppendTopLevelRawField(body, "client_metadata", metadataBody); ok {
-					return updated
-				}
-			}
 			if updated, ok := codexReplaceClientMetadataRaw(body, metadata, metadataBody); ok {
 				return updated
 			}
@@ -441,8 +441,8 @@ func codexClientMetadataStringMapRaw(metadata gjson.Result, collectExistingKeys 
 		return []byte(`{}`), existingKeys, true
 	}
 
-	var buf bytes.Buffer
-	buf.WriteByte('{')
+	buf := make([]byte, 0, len(metadata.Raw)+2)
+	buf = append(buf, '{')
 	first := true
 	changed := false
 	metadata.ForEach(func(key, value gjson.Result) bool {
@@ -452,19 +452,19 @@ func codexClientMetadataStringMapRaw(metadata gjson.Result, collectExistingKeys 
 			return true
 		}
 		if !first {
-			buf.WriteByte(',')
+			buf = append(buf, ',')
 		}
-		buf.Write(strconv.AppendQuote(nil, keyString))
-		buf.WriteByte(':')
-		buf.Write(strconv.AppendQuote(nil, value.String()))
+		buf = strconv.AppendQuote(buf, keyString)
+		buf = append(buf, ':')
+		buf = strconv.AppendQuote(buf, value.String())
 		if existingKeys != nil {
 			existingKeys[keyString] = struct{}{}
 		}
 		first = false
 		return true
 	})
-	buf.WriteByte('}')
-	return buf.Bytes(), existingKeys, changed
+	buf = append(buf, '}')
+	return buf, existingKeys, changed
 }
 
 func codexResolvedInstallationID(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) string {

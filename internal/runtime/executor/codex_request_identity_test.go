@@ -47,7 +47,7 @@ func TestCodexIsAPIKeyAuthHonorsMetadataOAuthKind(t *testing.T) {
 			"api_key": "access-token",
 		},
 		Metadata: map[string]any{
-			"auth_kind":    "oauth",
+			"auth_kind":    " OAuth ",
 			"access_token": "access-token",
 		},
 	}
@@ -61,7 +61,7 @@ func TestCodexIsAPIKeyAuthHonorsExplicitAPIKeyKind(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
 		Attributes: map[string]string{
-			"auth_kind": "apikey",
+			"auth_kind": " APIKey ",
 			"api_key":   "sk-test",
 		},
 		Metadata: map[string]any{
@@ -71,6 +71,14 @@ func TestCodexIsAPIKeyAuthHonorsExplicitAPIKeyKind(t *testing.T) {
 
 	if !codexIsAPIKeyAuth(auth) {
 		t.Fatal("explicit API key auth kind should be treated as API key auth")
+	}
+}
+
+func BenchmarkCodexAuthKind(b *testing.B) {
+	for b.Loop() {
+		if got := codexAuthKind(" ChatGPT_Auth_Tokens "); got != "chatgpt_auth_tokens" {
+			b.Fatalf("codexAuthKind() = %q", got)
+		}
 	}
 }
 

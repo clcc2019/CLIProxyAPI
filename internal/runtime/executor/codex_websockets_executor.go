@@ -1435,13 +1435,24 @@ func codexWebsocketResponseProcessedEnabled(headers http.Header) bool {
 		return false
 	}
 	for _, raw := range headers.Values("X-Codex-Beta-Features") {
-		for _, feature := range strings.Split(raw, ",") {
-			if strings.EqualFold(strings.TrimSpace(feature), codexBetaFeatureResponseProcessed) {
-				return true
-			}
+		if commaSeparatedValueContainsFold(raw, codexBetaFeatureResponseProcessed) {
+			return true
 		}
 	}
 	return false
+}
+
+func commaSeparatedValueContainsFold(value, target string) bool {
+	for {
+		token, remaining, found := strings.Cut(value, ",")
+		if strings.EqualFold(strings.TrimSpace(token), target) {
+			return true
+		}
+		if !found {
+			return false
+		}
+		value = remaining
+	}
 }
 
 func codexWebsocketShouldSendResponseProcessed(headers http.Header, requestBody []byte) bool {
@@ -2338,10 +2349,9 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http":
+	if strings.EqualFold(parsed.Scheme, "http") {
 		parsed.Scheme = "ws"
-	case "https":
+	} else if strings.EqualFold(parsed.Scheme, "https") {
 		parsed.Scheme = "wss"
 	}
 	return parsed.String(), nil
@@ -2430,7 +2440,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderOAIAttestation, "")
 
 	headers.Set(codexWireHeaderOpenAIBeta, codexResponsesWebsocketBetaHeaderValue)
-	identity := codexResolvedIdentity(headers, profileHeaders, auth, cfg)
+	identity := codexIdentity(headers, profileHeaders, auth, cfgUserAgent)
 	headers.Set("User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: true,
@@ -2446,16 +2456,11 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	})
 	misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	headers.Set("Originator", identity.originator)
-	if !codexIsAPIKeyAuth(auth) {
-		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, trimmed)
-				}
-			}
-		}
+	apiKeyAuth := codexIsAPIKeyAuth(auth)
+	if accountID := codexAccountID(auth, apiKeyAuth); accountID != "" {
+		codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, accountID)
 	}
-	codexEnsureFedrampHeader(headers, profileHeaders, auth)
+	codexEnsureFedramp(headers, profileHeaders, auth, apiKeyAuth)
 
 	var attrs map[string]string
 	if auth != nil {

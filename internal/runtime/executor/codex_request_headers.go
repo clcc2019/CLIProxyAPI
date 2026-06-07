@@ -41,7 +41,7 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderOAIAttestation, "")
 	misc.EnsureHeader(headers, profileHeaders, "Traceparent", "")
 	misc.EnsureHeader(headers, profileHeaders, "Tracestate", "")
-	identity := codexResolvedIdentity(headers, profileHeaders, auth, cfg)
+	identity := codexIdentity(headers, profileHeaders, auth, cfgUserAgent)
 	headers.Set("User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: requestKind != codexFinalUpstreamCompact,
@@ -84,14 +84,10 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 	} else if residency := codexResidencyFor(cfg); residency != "" {
 		headers.Set(misc.CodexResidencyHeader, residency)
 	}
-	if !apiKeyAuth && auth != nil && auth.Metadata != nil {
-		if accountID, ok := auth.Metadata["account_id"].(string); ok {
-			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-				codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, trimmed)
-			}
-		}
+	if accountID := codexAccountID(auth, apiKeyAuth); accountID != "" {
+		codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, accountID)
 	}
-	codexEnsureFedrampHeader(headers, profileHeaders, auth)
+	codexEnsureFedramp(headers, profileHeaders, auth, apiKeyAuth)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -132,8 +128,8 @@ func codexSetHeaderCasePreserved(headers http.Header, key string, value string) 
 	headers[key] = []string{value}
 }
 
-func codexEnsureFedrampHeader(target http.Header, source http.Header, auth *cliproxyauth.Auth) {
-	if target == nil || codexIsAPIKeyAuth(auth) {
+func codexEnsureFedramp(target http.Header, source http.Header, auth *cliproxyauth.Auth, apiKeyAuth bool) {
+	if target == nil || apiKeyAuth {
 		return
 	}
 	if value := firstNonEmptyHeaderValue(target, source, codexWireHeaderOpenAIFedramp); value != "" {
@@ -145,6 +141,17 @@ func codexEnsureFedrampHeader(target http.Header, source http.Header, auth *clip
 	if codexAuthBoolValue(auth, []string{"fedramp", "openai_fedramp", "x_openai_fedramp", codexHeaderOpenAIFedramp, codexWireHeaderOpenAIFedramp}) {
 		target.Set(codexWireHeaderOpenAIFedramp, "true")
 	}
+}
+
+func codexAccountID(auth *cliproxyauth.Auth, apiKeyAuth bool) string {
+	if apiKeyAuth || auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	accountID, ok := auth.Metadata["account_id"].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(accountID)
 }
 
 func codexAuthBoolValue(auth *cliproxyauth.Auth, keys []string) bool {

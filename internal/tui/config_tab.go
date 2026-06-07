@@ -345,10 +345,6 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 	fields = append(fields, configField{"Usage Detail Limit", "usage-detail-retention-limit", "int", fmt.Sprintf("%.0f", getFloat(cfg, "usage-detail-retention-limit")), nil})
 	fields = append(fields, configField{"Request Log", "request-log", "bool", fmt.Sprintf("%v", getBool(cfg, "request-log")), nil})
 
-	// Quota exceeded
-	fields = append(fields, configField{"Switch Project on Quota", "quota-exceeded/switch-project", "bool", fmt.Sprintf("%v", getBoolNested(cfg, "quota-exceeded", "switch-project")), nil})
-	fields = append(fields, configField{"Switch Preview Model", "quota-exceeded/switch-preview-model", "bool", fmt.Sprintf("%v", getBoolNested(cfg, "quota-exceeded", "switch-preview-model")), nil})
-
 	// Routing
 	if routing, ok := cfg["routing"].(map[string]any); ok {
 		fields = append(fields, configField{"Routing Strategy", "routing/strategy", "string", getString(routing, "strategy"), nil})

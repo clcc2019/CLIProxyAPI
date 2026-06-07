@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -39,7 +40,8 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 		return nil, errors.New("codex executor: request is nil")
 	}
 	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth, 0)
-	encoding := strings.ToLower(strings.TrimSpace(prepared.httpReq.Header.Get("Content-Encoding")))
+	encoding := strings.TrimSpace(prepared.httpReq.Header.Get("Content-Encoding"))
+	encodingIsZstd := codexHTTPEncodingIsZstd(encoding)
 	turnStateRetryUsed := false
 	for attempt := 0; ; attempt++ {
 		req, errBuild := codexHTTPRequestForAttempt(prepared, encoding, attempt)
@@ -48,7 +50,7 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 		}
 
 		httpResp, err := httpClient.Do(req)
-		if err == nil && encoding == "zstd" && attempt == 0 && codexShouldRetryHTTPStatusWithoutCompression(httpResp) {
+		if err == nil && encodingIsZstd && attempt == 0 && codexShouldRetryHTTPStatusWithoutCompression(httpResp) {
 			statusCode := 0
 			if httpResp != nil {
 				statusCode = httpResp.StatusCode
@@ -61,7 +63,7 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 			helps.LogWithRequestID(ctx).Debugf("codex executor: retrying HTTP request without zstd after status=%d", statusCode)
 			continue
 		}
-		if err == nil && !turnStateRetryUsed && (encoding == "" || encoding == "zstd") && codexShouldRetryHTTPResponseWithoutTurnState(httpResp, prepared) {
+		if err == nil && !turnStateRetryUsed && (encoding == "" || encodingIsZstd) && codexShouldRetryHTTPResponseWithoutTurnState(httpResp, prepared) {
 			turnStateRetryUsed = true
 			statusCode := 0
 			if httpResp != nil {
@@ -81,7 +83,7 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 		if attempt >= codexHTTPMaxRequestRetries {
 			return httpResp, err
 		}
-		if encoding != "" && encoding != "zstd" {
+		if encoding != "" && !encodingIsZstd {
 			return httpResp, err
 		}
 		if err != nil {
@@ -203,12 +205,16 @@ func codexHTTPRequestForAttempt(prepared codexPreparedRequest, encoding string, 
 	if req == nil {
 		return nil, errors.New("codex executor: cannot rebuild request for retry")
 	}
-	if encoding == "zstd" {
+	if codexHTTPEncodingIsZstd(encoding) {
 		req.Header.Del("Content-Encoding")
 	} else if encoding != "" {
 		return nil, errors.New("codex executor: cannot retry request with pre-encoded body")
 	}
 	return req, nil
+}
+
+func codexHTTPEncodingIsZstd(encoding string) bool {
+	return strings.EqualFold(strings.TrimSpace(encoding), "zstd")
 }
 
 func codexClonePreparedHTTPRequestForFirstAttempt(prepared codexPreparedRequest) (*http.Request, error) {
@@ -264,12 +270,11 @@ func codexShouldRetryHTTPStatusWithoutCompression(resp *http.Response) bool {
 		if err != nil {
 			return false
 		}
-		lower := strings.ToLower(string(data))
-		return strings.Contains(lower, "content-encoding") ||
-			strings.Contains(lower, "content encoding") ||
-			strings.Contains(lower, "unsupported encoding") ||
-			strings.Contains(lower, "unsupported compression") ||
-			strings.Contains(lower, "zstd")
+		return asciifold.ContainsBytes(data, "content-encoding") ||
+			asciifold.ContainsBytes(data, "content encoding") ||
+			asciifold.ContainsBytes(data, "unsupported encoding") ||
+			asciifold.ContainsBytes(data, "unsupported compression") ||
+			asciifold.ContainsBytes(data, "zstd")
 	default:
 		return false
 	}
@@ -282,29 +287,38 @@ func codexReadHTTPResponseBodyPrefix(resp *http.Response, maxBytes int64) ([]byt
 	original := resp.Body
 	data, err := io.ReadAll(io.LimitReader(original, maxBytes))
 	resp.Body = &codexReplayHTTPResponseBody{
-		reader: io.MultiReader(bytes.NewReader(data), original),
-		closer: original,
+		prefix: data,
+		body:   original,
 	}
 	return data, err
 }
 
 type codexReplayHTTPResponseBody struct {
-	reader io.Reader
-	closer io.Closer
+	prefix []byte
+	offset int
+	body   io.ReadCloser
 }
 
 func (b *codexReplayHTTPResponseBody) Read(p []byte) (int, error) {
-	if b == nil || b.reader == nil {
+	if b == nil {
 		return 0, io.EOF
 	}
-	return b.reader.Read(p)
+	if b.offset < len(b.prefix) {
+		n := copy(p, b.prefix[b.offset:])
+		b.offset += n
+		return n, nil
+	}
+	if b.body == nil {
+		return 0, io.EOF
+	}
+	return b.body.Read(p)
 }
 
 func (b *codexReplayHTTPResponseBody) Close() error {
-	if b == nil || b.closer == nil {
+	if b == nil || b.body == nil {
 		return nil
 	}
-	return b.closer.Close()
+	return b.body.Close()
 }
 
 func codexSleepBeforeHTTPRetry(ctx context.Context, attempt int) error {
@@ -343,16 +357,16 @@ func codexShouldRetryHTTPTransportError(ctx context.Context, err error) bool {
 		return true
 	}
 
+	errText := err.Error()
+	for _, marker := range codexHTTPRetryableTransportMarkers {
+		if asciifold.Contains(errText, marker) {
+			return true
+		}
+	}
+
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
-	}
-
-	lower := strings.ToLower(err.Error())
-	for _, marker := range codexHTTPRetryableTransportMarkers {
-		if strings.Contains(lower, marker) {
-			return true
-		}
 	}
 	return false
 }
