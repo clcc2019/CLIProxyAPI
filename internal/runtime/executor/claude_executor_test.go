@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -977,6 +979,70 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsIncompleteClaudeStream(t *t
 	}
 }
 
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsMixedCaseClaudeStreamContentType(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	_, err := executeOpenAIChatCompletionThroughClaudeWithContentType(t, body, "Text/Event-Stream; charset=utf-8")
+	if err == nil {
+		t.Fatal("Execute error = nil, want incomplete stream error")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "ended before message completion") {
+		t.Fatalf("Execute error = %q, want incomplete stream error", err.Error())
+	}
+}
+
+func BenchmarkClaudeStreamContentTypeContainsASCIIFold(b *testing.B) {
+	for b.Loop() {
+		if !asciifold.Contains("Text/Event-Stream; charset=utf-8", "text/event-stream") {
+			b.Fatal("expected SSE content type")
+		}
+	}
+}
+
+func TestForEachResponseLinePreservesSplitSemanticsAndStopsEarly(t *testing.T) {
+	var lines []string
+	forEachResponseLine([]byte("first\r\nsecond\n"), func(line []byte) bool {
+		lines = append(lines, string(line))
+		return true
+	})
+	want := []string{"first\r", "second", ""}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("lines = %#v, want %#v", lines, want)
+	}
+
+	lines = lines[:0]
+	forEachResponseLine([]byte("first\nsecond\nthird"), func(line []byte) bool {
+		lines = append(lines, string(line))
+		return len(lines) < 2
+	})
+	want = []string{"first", "second"}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("early-stop lines = %#v, want %#v", lines, want)
+	}
+}
+
+func BenchmarkForEachResponseLine(b *testing.B) {
+	data := []byte("event: message_start\ndata: {\"type\":\"message_start\"}\nevent: message_delta\ndata: {\"type\":\"message_delta\"}\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n")
+	b.ReportAllocs()
+	for b.Loop() {
+		count := 0
+		forEachResponseLine(data, func(line []byte) bool {
+			if len(line) > 0 {
+				count++
+			}
+			return true
+		})
+		if count != 6 {
+			b.Fatalf("line count = %d, want 6", count)
+		}
+	}
+}
+
 func TestClaudeExecutor_ExecuteOpenAINonStreamConvertsValidClaudeStream(t *testing.T) {
 	body := strings.Join([]string{
 		`event: message_start`,
@@ -1030,10 +1096,14 @@ func TestMergeClaudeStreamUsageKeepsMostCompleteUsage(t *testing.T) {
 }
 
 func executeOpenAIChatCompletionThroughClaude(t *testing.T, upstreamBody string) (cliproxyexecutor.Response, error) {
+	return executeOpenAIChatCompletionThroughClaudeWithContentType(t, upstreamBody, "text/event-stream")
+}
+
+func executeOpenAIChatCompletionThroughClaudeWithContentType(t *testing.T, upstreamBody string, contentType string) (cliproxyexecutor.Response, error) {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", contentType)
 		_, _ = w.Write([]byte(upstreamBody))
 	}))
 	defer server.Close()
@@ -1678,6 +1748,29 @@ func TestDecodeResponseBody_MagicByteGzipNoHeader(t *testing.T) {
 	}
 }
 
+func TestDecodeResponseBody_GzipAfterIgnoredEncodings(t *testing.T) {
+	const plaintext = "data: {\"type\":\"message_stop\"}\n"
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte(plaintext))
+	_ = gz.Close()
+
+	decoded, err := decodeResponseBody(io.NopCloser(&buf), "identity, unknown, gzip")
+	if err != nil {
+		t.Fatalf("decodeResponseBody error: %v", err)
+	}
+	defer decoded.Close()
+
+	got, err := io.ReadAll(decoded)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(got) != plaintext {
+		t.Errorf("decoded = %q, want %q", got, plaintext)
+	}
+}
+
 // TestDecodeResponseBody_MagicByteZstdNoHeader verifies that decodeResponseBody
 // detects zstd-compressed content via magic bytes even when Content-Encoding is absent.
 func TestDecodeResponseBody_MagicByteZstdNoHeader(t *testing.T) {
@@ -1724,6 +1817,24 @@ func TestDecodeResponseBody_PlainTextNoHeader(t *testing.T) {
 	}
 	if string(got) != plaintext {
 		t.Errorf("decoded = %q, want %q", got, plaintext)
+	}
+}
+
+func BenchmarkDecodeResponseBodyIdentityChain(b *testing.B) {
+	const plaintext = "data: {\"type\":\"message_stop\"}\n"
+	for i := 0; i < b.N; i++ {
+		decoded, err := decodeResponseBody(io.NopCloser(strings.NewReader(plaintext)), "identity, identity, identity")
+		if err != nil {
+			b.Fatal(err)
+		}
+		got, err := io.ReadAll(decoded)
+		_ = decoded.Close()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(got) != len(plaintext) {
+			b.Fatal("unexpected decoded length")
+		}
 	}
 }
 
@@ -1921,6 +2032,39 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 }
 
 // Test case 1: String system prompt is preserved by forwarding it to the first user message
+func TestParseEntrypointFromUA(t *testing.T) {
+	tests := []struct {
+		name      string
+		userAgent string
+		want      string
+	}{
+		{name: "cli", userAgent: "claude-cli/2.1.0 (external, cli)", want: "cli"},
+		{name: "vscode with extra field", userAgent: "claude-cli/2.1.0 (external, vscode, extra)", want: "vscode"},
+		{name: "trims entrypoint", userAgent: "claude-cli/2.1.0 (external,   desktop  )", want: "desktop"},
+		{name: "missing parentheses", userAgent: "claude-cli/2.1.0 external, vscode", want: "cli"},
+		{name: "missing second field", userAgent: "claude-cli/2.1.0 (external)", want: "cli"},
+		{name: "empty second field", userAgent: "claude-cli/2.1.0 (external, , extra)", want: "cli"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseEntrypointFromUA(tt.userAgent); got != tt.want {
+				t.Fatalf("parseEntrypointFromUA(%q) = %q, want %q", tt.userAgent, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkParseEntrypointFromUA(b *testing.B) {
+	const userAgent = "claude-cli/2.1.0 (external, vscode, extra)"
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := parseEntrypointFromUA(userAgent); got != "vscode" {
+			b.Fatalf("entrypoint = %q, want vscode", got)
+		}
+	}
+}
+
 func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -2132,6 +2276,36 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 }
 
+func TestGetCloakConfigFromAuthStrictModeEqualFoldWithoutTrim(t *testing.T) {
+	_, strictMode, _, _ := getCloakConfigFromAuth(&cliproxyauth.Auth{Attributes: map[string]string{
+		"cloak_strict_mode": "TRUE",
+	}})
+	if !strictMode {
+		t.Fatal("strictMode = false, want true for mixed-case true")
+	}
+
+	_, strictMode, _, _ = getCloakConfigFromAuth(&cliproxyauth.Auth{Attributes: map[string]string{
+		"cloak_strict_mode": " true ",
+	}})
+	if strictMode {
+		t.Fatal("strictMode = true, want false for whitespace-padded true")
+	}
+}
+
+func BenchmarkGetCloakConfigFromAuthStrictMode(b *testing.B) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"cloak_mode":          "auto",
+		"cloak_strict_mode":   "TRUE",
+		"cloak_cache_user_id": "FALSE",
+	}}
+	for b.Loop() {
+		_, strictMode, _, cacheUserID := getCloakConfigFromAuth(auth)
+		if !strictMode || cacheUserID {
+			b.Fatalf("unexpected cloak config: strict=%t cache=%t", strictMode, cacheUserID)
+		}
+	}
+}
+
 func TestNormalizeClaudeTemperatureForThinking_AdaptiveCoercesToOne(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
 	out := normalizeClaudeTemperatureForThinking(payload)
@@ -2143,6 +2317,15 @@ func TestNormalizeClaudeTemperatureForThinking_AdaptiveCoercesToOne(t *testing.T
 
 func TestNormalizeClaudeTemperatureForThinking_EnabledCoercesToOne(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
+		t.Fatalf("temperature = %v, want 1", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinking_MixedCaseCoercesToOne(t *testing.T) {
+	payload := []byte(`{"temperature":0.2,"thinking":{"type":" Auto "}}`)
 	out := normalizeClaudeTemperatureForThinking(payload)
 
 	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
@@ -2169,6 +2352,16 @@ func TestNormalizeClaudeTemperatureForThinking_AfterForcedToolChoiceKeepsOrigina
 	}
 	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
 		t.Fatalf("temperature = %v, want 0", got)
+	}
+}
+
+func BenchmarkNormalizeClaudeTemperatureForThinking(b *testing.B) {
+	payload := []byte(`{"temperature":0.2,"thinking":{"type":" Auto "}}`)
+	for b.Loop() {
+		out := normalizeClaudeTemperatureForThinking(payload)
+		if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
+			b.Fatalf("temperature = %v, want 1", got)
+		}
 	}
 }
 

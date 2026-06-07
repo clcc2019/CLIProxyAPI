@@ -24,7 +24,7 @@ func TestAuthenticateIncludesClientAPIKeyQuotaMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request failed: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer quota-key")
+	req.Header.Set("Authorization", "bEaReR quota-key")
 
 	result, authErr := provider.Authenticate(context.Background(), req)
 	if authErr != nil {
@@ -36,6 +36,14 @@ func TestAuthenticateIncludesClientAPIKeyQuotaMetadata(t *testing.T) {
 	got := internalconfig.ClientAPIKeyQuotaFromMetadata(result.Metadata)
 	if !reflect.DeepEqual(got, quota) {
 		t.Fatalf("quota metadata = %#v, want %#v", got, quota)
+	}
+}
+
+func BenchmarkExtractBearerTokenMixedCase(b *testing.B) {
+	for b.Loop() {
+		if got := extractBearerToken("bEaReR quota-key"); got != "quota-key" {
+			b.Fatalf("extractBearerToken() = %q", got)
+		}
 	}
 }
 

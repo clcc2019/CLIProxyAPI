@@ -94,7 +94,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 						continue
 					}
 					name := entry.Name()
-					if !strings.HasSuffix(strings.ToLower(name), ".json") {
+					if !util.HasJSONFileName(name) {
 						continue
 					}
 					fullPath := filepath.Join(resolvedAuthDir, name)
@@ -324,7 +324,7 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		if !util.HasJSONFileName(name) {
 			continue
 		}
 		authFileCount++

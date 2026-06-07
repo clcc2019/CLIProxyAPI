@@ -125,6 +125,73 @@ func TestMaybeEnableCodexRequestCompression_EnabledForOAuth(t *testing.T) {
 	}
 }
 
+func TestMaybeEnableCodexRequestCompression_MixedCaseJSONContentType(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
+
+	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", " Application/JSON; charset=utf-8 ")
+
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+
+	if err := maybeEnableCodexRequestCompression(req, auth); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompression() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("Content-Encoding = %q, want zstd", got)
+	}
+}
+
+func TestCodexRequestContentTypeIsJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		want        bool
+	}{
+		{name: "exact", contentType: "application/json", want: true},
+		{name: "mixed case with parameters", contentType: " Application/JSON; charset=utf-8 ", want: true},
+		{name: "short", contentType: "json", want: false},
+		{name: "text", contentType: "text/plain", want: false},
+	}
+
+	for i := range tests {
+		if got := codexRequestContentTypeIsJSON(tests[i].contentType); got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func TestCodexRequestCompressionEnvEnabled(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "empty defaults enabled", value: "", want: true},
+		{name: "one", value: "1", want: true},
+		{name: "true mixed case", value: " TrUe ", want: true},
+		{name: "yes", value: "YES", want: true},
+		{name: "on", value: "on", want: true},
+		{name: "zero", value: "0", want: false},
+		{name: "false mixed case", value: " FaLsE ", want: false},
+		{name: "no", value: "NO", want: false},
+		{name: "off", value: "off", want: false},
+		{name: "unknown defaults enabled", value: "maybe", want: true},
+	}
+
+	for i := range tests {
+		if got := codexRequestCompressionEnvEnabled(tests[i].value); got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
 func TestMaybeEnableCodexRequestCompression_EnabledForMirroredOAuthAccessToken(t *testing.T) {
 	t.Setenv(codexCompressionEnv, "1")
 
@@ -267,6 +334,23 @@ func BenchmarkCompressCodexRequestBody(b *testing.B) {
 		}
 		if len(compressed) == 0 {
 			b.Fatal("compressed body is empty")
+		}
+	}
+}
+
+func BenchmarkCodexRequestContentTypeIsJSON(b *testing.B) {
+	contentType := " Application/JSON; charset=utf-8 "
+	for b.Loop() {
+		if !codexRequestContentTypeIsJSON(contentType) {
+			b.Fatal("expected JSON content type")
+		}
+	}
+}
+
+func BenchmarkCodexRequestCompressionEnvEnabled(b *testing.B) {
+	for b.Loop() {
+		if codexRequestCompressionEnvEnabled(" FaLsE ") {
+			b.Fatal("expected disabled compression")
 		}
 	}
 }

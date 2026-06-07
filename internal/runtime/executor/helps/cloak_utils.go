@@ -39,10 +39,10 @@ func IsValidUserID(userID string) bool {
 // ShouldCloak determines if request should be cloaked based on config and client User-Agent.
 // Returns true if cloaking should be applied.
 func ShouldCloak(cloakMode string, userAgent string) bool {
-	switch strings.ToLower(cloakMode) {
-	case "always":
+	switch {
+	case strings.EqualFold(cloakMode, "always"):
 		return true
-	case "never":
+	case strings.EqualFold(cloakMode, "never"):
 		return false
 	default: // "auto" or empty
 		// If client is Claude Code, don't cloak

@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -922,7 +923,7 @@ func (a *Auth) indexSeed() string {
 		filePath = strings.TrimSpace(a.ID)
 	}
 
-	if filePath != "" && strings.HasSuffix(strings.ToLower(filePath), ".json") {
+	if filePath != "" && util.HasJSONFileName(filePath) {
 		abs, errAbs := filepath.Abs(filePath)
 		if errAbs == nil && strings.TrimSpace(abs) != "" {
 			filePath = abs

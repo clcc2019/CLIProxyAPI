@@ -23,6 +23,10 @@ const usageFlushTimeout = 5 * time.Second
 // for backups and forensic inspection.
 const dashboardDetailResponseLimit = 30
 
+// dashboardRecentDetailMaxLimit bounds explicit global-recent detail queries
+// used by the request detail page.
+const dashboardRecentDetailMaxLimit = 500
+
 type usageExportPayload struct {
 	Version    int                            `json:"version"`
 	ExportedAt time.Time                      `json:"exported_at"`
@@ -66,10 +70,22 @@ func (h *Handler) GetDetailedUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "usage statistics are still being processed"})
 		return
 	}
-	snapshot := usage.TrimDetailedSnapshot(
-		h.detailedUsageSnapshot(),
-		dashboardDetailResponseLimit,
-	)
+
+	recentLimit, errLimit := parseUsageRecentLimit(c.Query("recent"))
+	if errLimit != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errLimit.Error()})
+		return
+	}
+
+	var snapshot usage.StatisticsSnapshot
+	if recentLimit > 0 {
+		snapshot = h.recentDetailedUsageSnapshot(recentLimit)
+	} else {
+		snapshot = usage.TrimDetailedSnapshot(
+			h.detailedUsageSnapshot(),
+			dashboardDetailResponseLimit,
+		)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
 		"failed_requests": snapshot.FailureCount,
@@ -248,6 +264,21 @@ func parseUsageQueueCount(value string) (int, error) {
 	return count, nil
 }
 
+func parseUsageRecentLimit(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	limit, errLimit := strconv.Atoi(value)
+	if errLimit != nil || limit <= 0 {
+		return 0, errors.New("recent must be a positive integer")
+	}
+	if limit > dashboardRecentDetailMaxLimit {
+		return 0, errors.New("recent is too large")
+	}
+	return limit, nil
+}
+
 func usageSnapshotContainsDetails(snapshot usage.StatisticsSnapshot) bool {
 	for _, apiSnapshot := range snapshot.APIs {
 		for _, modelSnapshot := range apiSnapshot.Models {
@@ -271,6 +302,13 @@ func (h *Handler) detailedUsageSnapshot() usage.StatisticsSnapshot {
 		return usage.StatisticsSnapshot{}
 	}
 	return h.usageStats.Snapshot()
+}
+
+func (h *Handler) recentDetailedUsageSnapshot(limit int) usage.StatisticsSnapshot {
+	if h == nil || h.usageStats == nil {
+		return usage.StatisticsSnapshot{}
+	}
+	return h.usageStats.SnapshotRecentDetails(limit)
 }
 
 func (h *Handler) aggregatedUsageSnapshot(now time.Time) usage.AggregatedUsageSnapshot {

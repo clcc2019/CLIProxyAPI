@@ -74,6 +74,53 @@ func TestRefreshTokensInvalidGrantIsPermanent(t *testing.T) {
 	}
 }
 
+func TestTokenRequestErrorIsPermanentAuthError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *tokenRequestError
+		want bool
+	}{
+		{
+			name: "mixed case invalid grant",
+			err:  &tokenRequestError{oauthError: " Invalid_Grant "},
+			want: true,
+		},
+		{
+			name: "mixed case invalid client",
+			err:  &tokenRequestError{oauthError: "\tINVALID_CLIENT\n"},
+			want: true,
+		},
+		{
+			name: "mixed case unauthorized client",
+			err:  &tokenRequestError{oauthError: "unauthorized_CLIENT"},
+			want: true,
+		},
+		{
+			name: "unauthorized status fallback",
+			err:  &tokenRequestError{statusCode: http.StatusUnauthorized, oauthError: "temporarily_unavailable"},
+			want: true,
+		},
+		{
+			name: "non permanent oauth error",
+			err:  &tokenRequestError{statusCode: http.StatusBadRequest, oauthError: "temporarily_unavailable"},
+			want: false,
+		},
+		{
+			name: "nil",
+			err:  nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.IsPermanentAuthError(); got != tt.want {
+				t.Fatalf("IsPermanentAuthError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateOAuthEndpointRejectsNonXAIOrigin(t *testing.T) {
 	if _, err := ValidateOAuthEndpoint("https://auth.x.ai/oauth/token", "token_endpoint"); err != nil {
 		t.Fatalf("ValidateOAuthEndpoint(xai) error = %v", err)
@@ -125,5 +172,18 @@ func TestRefreshTokensPostsClientIDAndRefreshToken(t *testing.T) {
 	}
 	if gotForm.Get("refresh_token") != "old-refresh" {
 		t.Fatalf("refresh_token = %q, want old-refresh", gotForm.Get("refresh_token"))
+	}
+}
+
+func BenchmarkTokenRequestErrorIsPermanentAuthError(b *testing.B) {
+	err := &tokenRequestError{
+		statusCode: http.StatusBadRequest,
+		oauthError: " Invalid_Grant ",
+	}
+
+	for b.Loop() {
+		if !err.IsPermanentAuthError() {
+			b.Fatal("expected permanent auth error")
+		}
 	}
 }

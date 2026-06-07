@@ -67,7 +67,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Convert OpenAI reasoning_effort to Claude thinking config.
 	if v := root.Get("reasoning_effort"); v.Exists() {
-		effort := strings.ToLower(strings.TrimSpace(v.String()))
+		effort := normalizeReasoningEffort(v.String())
 		if effort != "" {
 			mi := registry.LookupModelInfo(modelName, "claude")
 			supportsAdaptive := mi != nil && mi.Thinking != nil && len(mi.Thinking.Levels) > 0
@@ -328,6 +328,35 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+func normalizeReasoningEffort(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(value, "none"):
+		return "none"
+	case strings.EqualFold(value, "minimal"):
+		return "minimal"
+	case strings.EqualFold(value, "low"):
+		return "low"
+	case strings.EqualFold(value, "medium"):
+		return "medium"
+	case strings.EqualFold(value, "high"):
+		return "high"
+	case strings.EqualFold(value, "xhigh"):
+		return "xhigh"
+	case strings.EqualFold(value, "max"):
+		return "max"
+	case strings.EqualFold(value, "auto"):
+		return "auto"
+	case strings.EqualFold(value, "adaptive"):
+		return "adaptive"
+	default:
+		return strings.ToLower(value)
+	}
 }
 
 func convertOpenAIContentPartToClaudePart(part gjson.Result) string {

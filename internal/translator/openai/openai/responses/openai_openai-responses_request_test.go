@@ -122,3 +122,37 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntil
 		t.Fatalf("messages.3.content = %q, want %q", got, "next")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NormalizesReasoningEffort(t *testing.T) {
+	raw := []byte(`{"reasoning":{"effort":" XHIGH "},"input":"hi"}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.2", raw, false)
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning_effort = %q, want xhigh: %s", got, string(out))
+	}
+}
+
+func TestNormalizeReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: " ", want: ""},
+		{name: "known mixed case", value: "\tAdaptive\r\n", want: "adaptive"},
+		{name: "unknown lower fallback", value: "Custom-Effort", want: "custom-effort"},
+	}
+
+	for i := range tests {
+		if got := normalizeReasoningEffort(tests[i].value); got != tests[i].want {
+			t.Fatalf("%s: got %q, want %q", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkNormalizeReasoningEffort(b *testing.B) {
+	for b.Loop() {
+		if got := normalizeReasoningEffort(" XHIGH "); got != "xhigh" {
+			b.Fatalf("normalizeReasoningEffort() = %q", got)
+		}
+	}
+}

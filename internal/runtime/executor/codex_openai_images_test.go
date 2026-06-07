@@ -18,6 +18,35 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestCodexMimeTypeFromOutputFormat(t *testing.T) {
+	tests := []struct {
+		name         string
+		outputFormat string
+		want         string
+	}{
+		{name: "empty defaults to png", outputFormat: "", want: "image/png"},
+		{name: "png defaults to png", outputFormat: " PNG ", want: "image/png"},
+		{name: "jpg", outputFormat: "JPG", want: "image/jpeg"},
+		{name: "jpeg", outputFormat: "\tJpeg\r\n", want: "image/jpeg"},
+		{name: "webp", outputFormat: "WebP", want: "image/webp"},
+		{name: "unknown defaults to png", outputFormat: "bmp", want: "image/png"},
+	}
+
+	for i := range tests {
+		if got := codexMimeTypeFromOutputFormat(tests[i].outputFormat); got != tests[i].want {
+			t.Fatalf("%s: got %q, want %q", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkCodexMimeTypeFromOutputFormat(b *testing.B) {
+	for b.Loop() {
+		if got := codexMimeTypeFromOutputFormat(" WebP "); got != "image/webp" {
+			b.Fatalf("codexMimeTypeFromOutputFormat() = %q", got)
+		}
+	}
+}
+
 func TestCodexExecutorNativeImagesGenerationUsesResponsesPath(t *testing.T) {
 	var gotPath string
 	var gotAuth string
@@ -33,7 +62,8 @@ func TestCodexExecutorNativeImagesGenerationUsesResponsesPath(t *testing.T) {
 		}
 		gotBody = body
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"created_at":123,"output":[{"type":"image_generation_call","result":"img","output_format":"png","revised_prompt":"draw revised","size":"1024x1024"}],"tool_usage":{"image_gen":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"img","output_format":"png","revised_prompt":"draw revised","size":"1024x1024"},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"created_at":123,"output":[],"tool_usage":{"image_gen":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}` + "\n\n"))
 	}))
 	defer server.Close()
 
@@ -123,6 +153,27 @@ func TestCodexExecutorNativeImagesUsesConfiguredBaseModel(t *testing.T) {
 	})
 	if got := invalid.resolveGPTImage2BaseModel(); got != codexOpenAIImagesMainModel {
 		t.Fatalf("invalid configured model resolved to %q, want fallback %q", got, codexOpenAIImagesMainModel)
+	}
+}
+
+func TestCodexExecutorNativeImagesConfiguredBaseModelPrefixEqualFold(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{
+		SDKConfig: config.SDKConfig{GPTImage2BaseModel: " GPT-5.4-Mini "},
+	})
+
+	if got := executor.resolveGPTImage2BaseModel(); got != "GPT-5.4-Mini" {
+		t.Fatalf("resolved main model = %q, want configured model with original casing", got)
+	}
+}
+
+func BenchmarkResolveGPTImage2BaseModelMixedCasePrefix(b *testing.B) {
+	executor := NewCodexExecutor(&config.Config{
+		SDKConfig: config.SDKConfig{GPTImage2BaseModel: " GPT-5.4-Mini "},
+	})
+	for b.Loop() {
+		if got := executor.resolveGPTImage2BaseModel(); got != "GPT-5.4-Mini" {
+			b.Fatalf("resolveGPTImage2BaseModel() = %q", got)
+		}
 	}
 }
 
@@ -274,6 +325,55 @@ func TestCodexExecutorNativeImagesVariationUsesEditToolWithDefaultPrompt(t *test
 	}
 	if got := gjson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "variation" {
 		t.Fatalf("response b64_json = %q, want variation; payload=%s", got, string(resp.Payload))
+	}
+}
+
+func TestCodexPrepareOpenAIImageRequestMixedCaseMultipartMediaType(t *testing.T) {
+	var raw bytes.Buffer
+	writer := multipart.NewWriter(&raw)
+	part, err := writer.CreateFormFile("image", "input.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+	if _, err = part.Write([]byte("fake-png")); err != nil {
+		t.Fatalf("Write(image) error = %v", err)
+	}
+	if err = writer.WriteField("style", "vivid"); err != nil {
+		t.Fatalf("WriteField(style) error = %v", err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	contentType := strings.Replace(writer.FormDataContentType(), "multipart/form-data", "Multipart/Form-Data", 1)
+	prepared, err := codexPrepareOpenAIImageRequest(cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: raw.Bytes(),
+	}, cliproxyexecutor.Options{
+		Alt:          "images/variations",
+		SourceFormat: sdktranslator.FromString("openai"),
+		Headers: http.Header{
+			"Content-Type": []string{contentType},
+		},
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/variations",
+		},
+	})
+	if err != nil {
+		t.Fatalf("codexPrepareOpenAIImageRequest() error = %v", err)
+	}
+
+	if prepared.StreamPrefix != "image_variation" {
+		t.Fatalf("StreamPrefix = %q, want image_variation", prepared.StreamPrefix)
+	}
+	if action := gjson.GetBytes(prepared.Body, "tools.0.action").String(); action != "edit" {
+		t.Fatalf("tools.0.action = %q, want edit; body=%s", action, string(prepared.Body))
+	}
+	if style := gjson.GetBytes(prepared.Body, "tools.0.style").String(); style != "vivid" {
+		t.Fatalf("tools.0.style = %q, want vivid; body=%s", style, string(prepared.Body))
+	}
+	if prompt := gjson.GetBytes(prepared.Body, "input.0.content.0.text").String(); prompt != codexOpenAIImageVariationPrompt {
+		t.Fatalf("prompt = %q, want variation default; body=%s", prompt, string(prepared.Body))
 	}
 }
 

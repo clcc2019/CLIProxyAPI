@@ -439,7 +439,7 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 }
 
 // GetContextWithCancel creates a new context with cancellation capabilities.
-// It embeds the Gin context and the API handler into the new context for later use.
+// It embeds the Gin context into the new context for later use.
 // The returned cancel function also handles logging the API response if request logging is enabled.
 //
 // Parameters:
@@ -482,19 +482,16 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		}
 	}
 
-	newCtx, cancel := context.WithCancel(baseCtx)
+	newCtx, cancelContext := context.WithCancel(baseCtx)
+	cancel := cancelContext
 	if bridgeRequestCancel {
-		cancelCtx := newCtx
-		go func() {
-			select {
-			case <-requestCtx.Done():
-				cancel()
-			case <-cancelCtx.Done():
-			}
-		}()
+		stopRequestCancel := context.AfterFunc(requestCtx, cancelContext)
+		cancel = func() {
+			stopRequestCancel()
+			cancelContext()
+		}
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
-	newCtx = context.WithValue(newCtx, "handler", handler)
 	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
 	return newCtx, func(params ...interface{}) {
 		if requestLogEnabled && len(params) == 1 {
@@ -1140,7 +1137,12 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 }
 
 func isOpenAIImageOnlyModel(modelName string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "gpt-image-")
+	const prefix = "gpt-image-"
+	modelName = strings.TrimSpace(modelName)
+	if len(modelName) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(modelName[:len(prefix)], prefix)
 }
 
 func cloneBytes(src []byte) []byte {

@@ -2,15 +2,13 @@ package executor
 
 import (
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
-
-var codexOrdinalDaySuffixRE = regexp.MustCompile(`\b(\d{1,2})(st|nd|rd|th)\b`)
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	usageLimit := isCodexUsageLimitError(body)
@@ -33,20 +31,19 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 	if len(errorBody) == 0 {
 		return false
 	}
-	candidates := []string{
-		gjson.GetBytes(errorBody, "error.message").String(),
-		gjson.GetBytes(errorBody, "message").String(),
-		string(errorBody),
+	if asciifold.ContainsBytes(errorBody, "selected model is at capacity") ||
+		asciifold.ContainsBytes(errorBody, "model is at capacity. please try a different model") {
+		return true
 	}
-	for _, candidate := range candidates {
-		lower := strings.ToLower(strings.TrimSpace(candidate))
-		if lower == "" {
-			continue
-		}
-		if strings.Contains(lower, "selected model is at capacity") ||
-			strings.Contains(lower, "model is at capacity. please try a different model") {
-			return true
-		}
+	if codexStatusResultContainsAnyFold(gjson.GetBytes(errorBody, "error.message"),
+		"selected model is at capacity",
+		"model is at capacity. please try a different model") {
+		return true
+	}
+	if codexStatusResultContainsAnyFold(gjson.GetBytes(errorBody, "message"),
+		"selected model is at capacity",
+		"model is at capacity. please try a different model") {
+		return true
 	}
 	return false
 }
@@ -55,31 +52,30 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 	if len(errorBody) == 0 {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(errorBody, "error.type").String()), "usage_limit_reached") {
+	if asciifold.ContainsBytes(errorBody, "usage_limit_reached") ||
+		asciifold.ContainsBytes(errorBody, "usage_not_included") ||
+		asciifold.ContainsBytes(errorBody, "insufficient_quota") ||
+		asciifold.ContainsBytes(errorBody, "rate_limit_exceeded") ||
+		asciifold.ContainsBytes(errorBody, "usage limit has been reached") ||
+		asciifold.ContainsBytes(errorBody, "you've hit your usage limit") ||
+		asciifold.ContainsBytes(errorBody, "upgrade to plus") ||
+		asciifold.ContainsBytes(errorBody, "continue using codex") {
 		return true
 	}
-	candidates := []string{
-		gjson.GetBytes(errorBody, "error.code").String(),
-		gjson.GetBytes(errorBody, "code").String(),
-		gjson.GetBytes(errorBody, "error.message").String(),
-		gjson.GetBytes(errorBody, "message").String(),
-		string(errorBody),
+	if strings.EqualFold(strings.TrimSpace(codexStatusResultString(gjson.GetBytes(errorBody, "error.type"))), "usage_limit_reached") {
+		return true
 	}
-	for _, candidate := range candidates {
-		lower := strings.ToLower(strings.TrimSpace(candidate))
-		if lower == "" {
-			continue
-		}
-		if strings.Contains(lower, "usage_limit_reached") ||
-			strings.Contains(lower, "usage_not_included") ||
-			strings.Contains(lower, "insufficient_quota") ||
-			strings.Contains(lower, "rate_limit_exceeded") ||
-			strings.Contains(lower, "usage limit has been reached") ||
-			strings.Contains(lower, "you've hit your usage limit") ||
-			strings.Contains(lower, "upgrade to plus") ||
-			strings.Contains(lower, "continue using codex") {
-			return true
-		}
+	if codexStatusResultContainsUsageLimit(gjson.GetBytes(errorBody, "error.code")) {
+		return true
+	}
+	if codexStatusResultContainsUsageLimit(gjson.GetBytes(errorBody, "code")) {
+		return true
+	}
+	if codexStatusResultContainsUsageLimit(gjson.GetBytes(errorBody, "error.message")) {
+		return true
+	}
+	if codexStatusResultContainsUsageLimit(gjson.GetBytes(errorBody, "message")) {
+		return true
 	}
 	return false
 }
@@ -88,30 +84,33 @@ func isCodexUnauthorizedError(errorBody []byte) bool {
 	if len(errorBody) == 0 {
 		return false
 	}
-	candidates := []string{
-		gjson.GetBytes(errorBody, "error.type").String(),
-		gjson.GetBytes(errorBody, "type").String(),
-		gjson.GetBytes(errorBody, "error.code").String(),
-		gjson.GetBytes(errorBody, "code").String(),
-		gjson.GetBytes(errorBody, "error.message").String(),
-		gjson.GetBytes(errorBody, "message").String(),
-		string(errorBody),
+	if asciifold.ContainsBytes(errorBody, "authentication_error") ||
+		asciifold.ContainsBytes(errorBody, "unauthorized") ||
+		asciifold.ContainsBytes(errorBody, "invalid_api_key") ||
+		asciifold.ContainsBytes(errorBody, "invalid bearer") ||
+		asciifold.ContainsBytes(errorBody, "token has been invalidated") ||
+		(asciifold.ContainsBytes(errorBody, "authentication token") && asciifold.ContainsBytes(errorBody, "invalidated")) ||
+		asciifold.ContainsBytes(errorBody, "please try signing in again") ||
+		asciifold.ContainsBytes(errorBody, "sign in again") {
+		return true
 	}
-	for _, candidate := range candidates {
-		lower := strings.ToLower(strings.TrimSpace(candidate))
-		if lower == "" {
-			continue
-		}
-		if strings.Contains(lower, "authentication_error") ||
-			strings.Contains(lower, "unauthorized") ||
-			strings.Contains(lower, "invalid_api_key") ||
-			strings.Contains(lower, "invalid bearer") ||
-			strings.Contains(lower, "token has been invalidated") ||
-			(strings.Contains(lower, "authentication token") && strings.Contains(lower, "invalidated")) ||
-			strings.Contains(lower, "please try signing in again") ||
-			strings.Contains(lower, "sign in again") {
-			return true
-		}
+	if codexStatusResultContainsUnauthorized(gjson.GetBytes(errorBody, "error.type")) {
+		return true
+	}
+	if codexStatusResultContainsUnauthorized(gjson.GetBytes(errorBody, "type")) {
+		return true
+	}
+	if codexStatusResultContainsUnauthorized(gjson.GetBytes(errorBody, "error.code")) {
+		return true
+	}
+	if codexStatusResultContainsUnauthorized(gjson.GetBytes(errorBody, "code")) {
+		return true
+	}
+	if codexStatusResultContainsUnauthorized(gjson.GetBytes(errorBody, "error.message")) {
+		return true
+	}
+	if codexStatusResultContainsUnauthorized(gjson.GetBytes(errorBody, "message")) {
+		return true
 	}
 	return false
 }
@@ -138,116 +137,13 @@ func codexErrorCode(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	for _, path := range []string{"error.code", "code"} {
-		if code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String())); code != "" {
-			return code
-		}
+	if code := codexErrorCodeFromResult(gjson.GetBytes(body, "error.code")); code != "" {
+		return code
+	}
+	if code := codexErrorCodeFromResult(gjson.GetBytes(body, "code")); code != "" {
+		return code
 	}
 	return ""
-}
-
-func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
-	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
-		return nil
-	}
-	if !isCodexUsageLimitError(errorBody) {
-		return nil
-	}
-	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {
-		resetAtTime := time.Unix(resetsAt, 0)
-		if resetAtTime.After(now) {
-			retryAfter := resetAtTime.Sub(now)
-			return &retryAfter
-		}
-	}
-	if resetsInSeconds := gjson.GetBytes(errorBody, "error.resets_in_seconds").Int(); resetsInSeconds > 0 {
-		retryAfter := time.Duration(resetsInSeconds) * time.Second
-		return &retryAfter
-	}
-	if retryAfter := parseCodexRetryAfterMessage(errorBody, now); retryAfter != nil {
-		return retryAfter
-	}
-	return nil
-}
-
-func parseCodexRetryAfterMessage(errorBody []byte, now time.Time) *time.Duration {
-	candidates := []string{
-		gjson.GetBytes(errorBody, "error.retry_at").String(),
-		gjson.GetBytes(errorBody, "error.try_again_at").String(),
-		gjson.GetBytes(errorBody, "error.message").String(),
-		gjson.GetBytes(errorBody, "message").String(),
-	}
-	for _, candidate := range candidates {
-		if retryAfter := parseCodexRetryAfterCandidate(candidate, now); retryAfter != nil {
-			return retryAfter
-		}
-	}
-	return nil
-}
-
-func parseCodexRetryAfterCandidate(candidate string, now time.Time) *time.Duration {
-	for _, retryAt := range codexRetryAtCandidates(candidate, now.Location()) {
-		retryAfter := retryAt.Sub(now)
-		if retryAfter > 0 {
-			return &retryAfter
-		}
-	}
-	return nil
-}
-
-func codexRetryAtCandidates(candidate string, loc *time.Location) []time.Time {
-	candidate = strings.TrimSpace(candidate)
-	if candidate == "" {
-		return nil
-	}
-	normalized := codexOrdinalDaySuffixRE.ReplaceAllString(candidate, `$1`)
-	candidates := []string{strings.TrimSpace(strings.Trim(normalized, `"'`))}
-	lower := strings.ToLower(normalized)
-	if idx := strings.Index(lower, "try again at "); idx >= 0 {
-		candidates = append(candidates, strings.TrimSpace(normalized[idx+len("try again at "):]))
-	}
-
-	out := make([]time.Time, 0, len(candidates))
-	for _, value := range candidates {
-		value = strings.TrimSpace(strings.TrimSuffix(strings.Trim(value, `"'`), "."))
-		if value == "" {
-			continue
-		}
-		if retryAt, ok := parseCodexRetryAtTime(value, loc); ok {
-			out = append(out, retryAt)
-		}
-	}
-	return out
-}
-
-func parseCodexRetryAtTime(value string, loc *time.Location) (time.Time, bool) {
-	layoutsWithLocation := []string{
-		"January 2, 2006 3:04:05 PM",
-		"January 2, 2006 3:04 PM",
-		"Jan 2, 2006 3:04:05 PM",
-		"Jan 2, 2006 3:04 PM",
-	}
-	for _, layout := range layoutsWithLocation {
-		if parsed, err := time.ParseInLocation(layout, value, loc); err == nil {
-			return parsed, true
-		}
-	}
-
-	layouts := []string{
-		"January 2, 2006 3:04:05 PM MST",
-		"January 2, 2006 3:04 PM MST",
-		"Jan 2, 2006 3:04:05 PM MST",
-		"Jan 2, 2006 3:04 PM MST",
-		time.RFC3339,
-		time.RFC1123,
-		time.RFC1123Z,
-	}
-	for _, layout := range layouts {
-		if parsed, err := time.Parse(layout, value); err == nil {
-			return parsed, true
-		}
-	}
-	return time.Time{}, false
 }
 
 func parseCodexStreamTerminalError(eventType string, eventData []byte) (statusErr, bool) {
@@ -392,13 +288,13 @@ func codexTerminalTopLevelErrorBody(eventData []byte) []byte {
 }
 
 func codexTerminalErrorIsContextLength(body []byte) bool {
-	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
-	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
-	return errorCode == "context_length_exceeded" ||
-		errorCode == "context_too_large" ||
-		strings.Contains(message, "context window") ||
-		strings.Contains(message, "context length") ||
-		strings.Contains(message, "too many tokens")
+	errorCode := strings.TrimSpace(codexStatusResultString(gjson.GetBytes(body, "error.code")))
+	message := strings.TrimSpace(codexStatusResultString(gjson.GetBytes(body, "error.message")))
+	return strings.EqualFold(errorCode, "context_length_exceeded") ||
+		strings.EqualFold(errorCode, "context_too_large") ||
+		asciifold.Contains(message, "context window") ||
+		asciifold.Contains(message, "context length") ||
+		asciifold.Contains(message, "too many tokens")
 }
 
 func normalizeCodexContextLengthErrorBody(body []byte) []byte {
@@ -414,6 +310,79 @@ func normalizeCodexContextLengthErrorBody(body []byte) []byte {
 		out, _ = sjson.SetBytes(out, "error.param", param)
 	}
 	return out
+}
+
+func codexStatusResultString(result gjson.Result) string {
+	if result.Type == gjson.String {
+		return result.Str
+	}
+	return result.String()
+}
+
+func codexErrorCodeFromResult(result gjson.Result) string {
+	code := strings.TrimSpace(codexStatusResultString(result))
+	if code == "" {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(code, "context_length_exceeded"):
+		return "context_length_exceeded"
+	case strings.EqualFold(code, "context_too_large"):
+		return "context_too_large"
+	case strings.EqualFold(code, "invalid_prompt"):
+		return "invalid_prompt"
+	case strings.EqualFold(code, "cyber_policy"):
+		return "cyber_policy"
+	case strings.EqualFold(code, "server_is_overloaded"):
+		return "server_is_overloaded"
+	case strings.EqualFold(code, "slow_down"):
+		return "slow_down"
+	default:
+		return strings.ToLower(code)
+	}
+}
+
+func codexStatusResultContainsAnyFold(result gjson.Result, substrs ...string) bool {
+	candidate := strings.TrimSpace(codexStatusResultString(result))
+	if candidate == "" {
+		return false
+	}
+	for _, substr := range substrs {
+		if asciifold.Contains(candidate, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexStatusResultContainsUsageLimit(result gjson.Result) bool {
+	candidate := strings.TrimSpace(codexStatusResultString(result))
+	if candidate == "" {
+		return false
+	}
+	return asciifold.Contains(candidate, "usage_limit_reached") ||
+		asciifold.Contains(candidate, "usage_not_included") ||
+		asciifold.Contains(candidate, "insufficient_quota") ||
+		asciifold.Contains(candidate, "rate_limit_exceeded") ||
+		asciifold.Contains(candidate, "usage limit has been reached") ||
+		asciifold.Contains(candidate, "you've hit your usage limit") ||
+		asciifold.Contains(candidate, "upgrade to plus") ||
+		asciifold.Contains(candidate, "continue using codex")
+}
+
+func codexStatusResultContainsUnauthorized(result gjson.Result) bool {
+	candidate := strings.TrimSpace(codexStatusResultString(result))
+	if candidate == "" {
+		return false
+	}
+	return asciifold.Contains(candidate, "authentication_error") ||
+		asciifold.Contains(candidate, "unauthorized") ||
+		asciifold.Contains(candidate, "invalid_api_key") ||
+		asciifold.Contains(candidate, "invalid bearer") ||
+		asciifold.Contains(candidate, "token has been invalidated") ||
+		(asciifold.Contains(candidate, "authentication token") && asciifold.Contains(candidate, "invalidated")) ||
+		asciifold.Contains(candidate, "please try signing in again") ||
+		asciifold.Contains(candidate, "sign in again")
 }
 
 func normalizeCodexResponseFailedErrorBody(eventData []byte) []byte {

@@ -17,6 +17,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -317,19 +318,19 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-	if strings.Contains(strings.ToLower(httpResp.Header.Get("Content-Type")), "text/event-stream") {
+	if asciifold.Contains(httpResp.Header.Get("Content-Type"), "text/event-stream") {
 		if err := validateClaudeAggregatedStream(data); err != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			return resp, err
 		}
 	}
 	if stream {
-		lines := bytes.Split(data, []byte("\n"))
-		for _, line := range lines {
+		forEachResponseLine(data, func(line []byte) bool {
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-		}
+			return true
+		})
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
@@ -773,14 +774,22 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 // thinking is enabled. Anthropic rejects temperatures other than 1 when
 // thinking.type is enabled/adaptive/auto.
 func normalizeClaudeTemperatureForThinking(body []byte) []byte {
-	if !gjson.GetBytes(body, "temperature").Exists() {
+	temp := gjson.GetBytes(body, "temperature")
+	if !temp.Exists() {
 		return body
 	}
 
-	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
-	switch thinkingType {
-	case "enabled", "adaptive", "auto":
-		if temp := gjson.GetBytes(body, "temperature"); temp.Exists() && temp.Type == gjson.Number && temp.Float() == 1 {
+	thinkingType := strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())
+	switch {
+	case strings.EqualFold(thinkingType, "enabled"):
+	case strings.EqualFold(thinkingType, "adaptive"):
+	case strings.EqualFold(thinkingType, "auto"):
+	default:
+		return body
+	}
+
+	{
+		if temp.Type == gjson.Number && temp.Float() == 1 {
 			return body
 		}
 		body, _ = sjson.SetBytes(body, "temperature", 1)
@@ -797,10 +806,11 @@ func validateClaudeAggregatedStream(data []byte) error {
 	seenMessageStart := false
 	seenMessageStop := false
 	seenCompletionDelta := false
-	for _, line := range bytes.Split(data, []byte("\n")) {
+	var streamErr error
+	forEachResponseLine(data, func(line []byte) bool {
 		payload := helps.JSONPayload(line)
 		if len(payload) == 0 || !gjson.ValidBytes(payload) {
-			continue
+			return true
 		}
 		seenEvent = true
 		root := gjson.ParseBytes(payload)
@@ -813,7 +823,8 @@ func validateClaudeAggregatedStream(data []byte) error {
 			if msg == "" {
 				msg = "upstream Claude stream error"
 			}
-			return statusErr{code: http.StatusBadGateway, msg: msg}
+			streamErr = statusErr{code: http.StatusBadGateway, msg: msg}
+			return false
 		case "message_start":
 			seenMessageStart = true
 		case "message_delta":
@@ -823,6 +834,10 @@ func validateClaudeAggregatedStream(data []byte) error {
 		case "message_stop":
 			seenMessageStop = true
 		}
+		return true
+	})
+	if streamErr != nil {
+		return streamErr
 	}
 
 	if !seenEvent {
@@ -936,13 +951,14 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 		}
 		return pb, nil
 	}
-	encodings := strings.Split(contentEncoding, ",")
-	for _, raw := range encodings {
-		encoding := strings.TrimSpace(strings.ToLower(raw))
-		switch encoding {
-		case "", "identity":
-			continue
-		case "gzip":
+	for remaining := contentEncoding; ; {
+		encodingPart, rest, found := strings.Cut(remaining, ",")
+		remaining = rest
+		encoding := strings.TrimSpace(encodingPart)
+		switch {
+		case encoding == "" || strings.EqualFold(encoding, "identity"):
+			// no-op
+		case strings.EqualFold(encoding, "gzip"):
 			gzipReader, err := gzip.NewReader(body)
 			if err != nil {
 				_ = body.Close()
@@ -955,7 +971,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 					func() error { return body.Close() },
 				},
 			}, nil
-		case "deflate":
+		case strings.EqualFold(encoding, "deflate"):
 			deflateReader := flate.NewReader(body)
 			return &compositeReadCloser{
 				Reader: deflateReader,
@@ -964,14 +980,14 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 					func() error { return body.Close() },
 				},
 			}, nil
-		case "br":
+		case strings.EqualFold(encoding, "br"):
 			return &compositeReadCloser{
 				Reader: brotli.NewReader(body),
 				closers: []func() error{
 					func() error { return body.Close() },
 				},
 			}, nil
-		case "zstd":
+		case strings.EqualFold(encoding, "zstd"):
 			decoder, err := zstd.NewReader(body)
 			if err != nil {
 				_ = body.Close()
@@ -985,7 +1001,11 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 				},
 			}, nil
 		default:
-			continue
+			// Ignore unsupported response encodings and keep looking for one
+			// we can decode, matching the previous behavior.
+		}
+		if !found {
+			break
 		}
 	}
 	return body, nil
@@ -1559,11 +1579,10 @@ func parseEntrypointFromUA(userAgent string) string {
 		return "cli"
 	}
 	inner := userAgent[start+1 : end]
-	// Split by comma, take the second part (entrypoint is at index 1, after USER_TYPE)
 	// Format: "(USER_TYPE, ENTRYPOINT[, extra...])"
-	parts := strings.Split(inner, ",")
-	if len(parts) >= 2 {
-		ep := strings.TrimSpace(parts[1])
+	if _, remaining, found := strings.Cut(inner, ","); found {
+		ep, _, _ := strings.Cut(remaining, ",")
+		ep = strings.TrimSpace(ep)
 		if ep != "" {
 			return ep
 		}
@@ -1591,7 +1610,7 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 		cloakMode = "auto"
 	}
 
-	strictMode := strings.ToLower(auth.Attributes["cloak_strict_mode"]) == "true"
+	strictMode := strings.EqualFold(auth.Attributes["cloak_strict_mode"], "true")
 
 	var sensitiveWords []string
 	if wordsStr := auth.Attributes["cloak_sensitive_words"]; wordsStr != "" {

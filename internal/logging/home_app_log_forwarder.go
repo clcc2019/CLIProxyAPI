@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	log "github.com/sirupsen/logrus"
 )
@@ -205,23 +206,20 @@ func isHomeAppLogUnsupported(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(strings.TrimSpace(err.Error()))
-	if msg == "" {
-		return false
-	}
 	for {
+		msg := strings.TrimSpace(err.Error())
 		switch {
-		case strings.Contains(msg, "unsupported key"):
+		case msg == "":
+		case asciifold.Contains(msg, "unsupported key"):
 			return true
-		case strings.Contains(msg, "unknown command"):
+		case asciifold.Contains(msg, "unknown command"):
 			return true
-		case strings.Contains(msg, "unsupported command"):
+		case asciifold.Contains(msg, "unsupported command"):
 			return true
 		}
 		err = errors.Unwrap(err)
 		if err == nil {
 			return false
 		}
-		msg = strings.ToLower(strings.TrimSpace(err.Error()))
 	}
 }

@@ -646,12 +646,18 @@ func payloadFromProtocolMatches(pattern, fromProtocol string) bool {
 }
 
 func normalizePayloadFromProtocol(protocol string) string {
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	switch protocol {
-	case "openai-response", "openai-responses", "response":
+	protocol = strings.TrimSpace(protocol)
+	switch {
+	case protocol == "":
+		return ""
+	case strings.EqualFold(protocol, "openai-response"):
+		return "responses"
+	case strings.EqualFold(protocol, "openai-responses"):
+		return "responses"
+	case strings.EqualFold(protocol, "response"):
 		return "responses"
 	default:
-		return protocol
+		return strings.ToLower(protocol)
 	}
 }
 

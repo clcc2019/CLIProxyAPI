@@ -159,23 +159,30 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
-	for _, line := range bytes.Split(data, []byte("\n")) {
+	completed := false
+	forEachResponseLine(data, func(line []byte) bool {
 		if !bytes.HasPrefix(line, xaiDataTag) {
-			continue
+			return true
 		}
 		eventData := bytes.TrimSpace(line[len(xaiDataTag):])
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed":
+			completed = true
 			if detail, ok := helps.ParseCodexUsage(eventData); ok {
 				reporter.Publish(ctx, detail)
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.from, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+			resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+			return false
 		}
+		return true
+	})
+	if completed {
+		return resp, nil
 	}
 
 	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed"}
@@ -872,20 +879,39 @@ func removeXAIEncryptedReasoningInclude(body []byte) []byte {
 }
 
 func xaiSupportsReasoningEffort(model string) bool {
-	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	name := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
 	if idx := strings.LastIndex(name, "/"); idx >= 0 {
 		name = name[idx+1:]
 	}
 	switch {
-	case strings.HasPrefix(name, "grok-3-mini"):
+	case xaiHasPrefixFold(name, "grok-3-mini"):
 		return true
-	case strings.HasPrefix(name, "grok-4.20-multi-agent"):
+	case xaiHasPrefixFold(name, "grok-4.20-multi-agent"):
 		return true
-	case strings.HasPrefix(name, "grok-4.3"):
+	case xaiHasPrefixFold(name, "grok-4.3"):
 		return true
 	default:
 		return false
 	}
+}
+
+func xaiHasPrefixFold(s, prefix string) bool {
+	if len(prefix) > len(s) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if xaiASCIILower(s[i]) != xaiASCIILower(prefix[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func xaiASCIILower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 func xaiCollectOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {

@@ -20,6 +20,26 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func TestCodexProxySettingIsDirectMatchesMixedCase(t *testing.T) {
+	if !codexProxySettingIsDirect(" DiReCt ") {
+		t.Fatal("codexProxySettingIsDirect should match mixed-case direct")
+	}
+	if !codexProxySettingIsDirect("NoNe") {
+		t.Fatal("codexProxySettingIsDirect should match mixed-case none")
+	}
+	if codexProxySettingIsDirect("http://proxy.example") {
+		t.Fatal("codexProxySettingIsDirect should reject proxy URL")
+	}
+}
+
+func BenchmarkCodexProxySettingIsDirectMixedCase(b *testing.B) {
+	for b.Loop() {
+		if !codexProxySettingIsDirect(" DiReCt ") {
+			b.Fatal("codexProxySettingIsDirect() = false")
+		}
+	}
+}
+
 func TestCodexLoginRequestUserAgentUsesNonWebUIHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()

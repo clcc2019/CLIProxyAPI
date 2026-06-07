@@ -19,6 +19,7 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -245,7 +246,7 @@ func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error)
 		if d.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+		if !util.HasJSONFileName(d.Name()) {
 			return nil
 		}
 		auth, err := s.readAuthFile(path, dir)
@@ -531,7 +532,7 @@ func (s *ObjectTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, err
 	if fileName == "" {
 		return "", fmt.Errorf("object store: auth %s missing filename", auth.ID)
 	}
-	if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
+	if !util.HasJSONFileName(fileName) {
 		fileName += ".json"
 	}
 	return filepath.Join(s.authDir, fileName), nil
@@ -553,7 +554,7 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 		return "", fmt.Errorf("object store: invalid auth identifier %s", id)
 	}
 	// Ensure .json suffix.
-	if !strings.HasSuffix(strings.ToLower(clean), ".json") {
+	if !util.HasJSONFileName(clean) {
 		clean += ".json"
 	}
 	return filepath.Join(s.authDir, clean), nil

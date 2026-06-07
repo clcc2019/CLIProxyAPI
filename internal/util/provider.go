@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
@@ -357,40 +358,11 @@ func mayContainSensitiveTextString(value string) bool {
 
 func mayContainSensitiveTextBytes(data []byte) bool {
 	for _, marker := range sensitiveTextMarkers {
-		if containsASCIIFold(data, marker) {
+		if asciifold.ContainsBytes(data, marker) {
 			return true
 		}
 	}
 	return false
-}
-
-func containsASCIIFold(data []byte, marker string) bool {
-	if len(marker) == 0 {
-		return true
-	}
-	if len(data) < len(marker) {
-		return false
-	}
-	for i := 0; i <= len(data)-len(marker); i++ {
-		matched := true
-		for j := 0; j < len(marker); j++ {
-			if lowerASCII(data[i+j]) != marker[j] {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return true
-		}
-	}
-	return false
-}
-
-func lowerASCII(b byte) byte {
-	if b >= 'A' && b <= 'Z' {
-		return b + ('a' - 'A')
-	}
-	return b
 }
 
 func shouldRedactJSONKey(key string) bool {
@@ -474,37 +446,55 @@ func MaskSensitiveQuery(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	parts := strings.Split(raw, "&")
+
+	var out strings.Builder
 	changed := false
-	for i, part := range parts {
+	copyFrom := 0
+	for partStart := 0; partStart <= len(raw); {
+		partEnd := len(raw)
+		if separator := strings.IndexByte(raw[partStart:], '&'); separator >= 0 {
+			partEnd = partStart + separator
+		}
+		part := raw[partStart:partEnd]
 		if part == "" {
+			if partEnd == len(raw) {
+				break
+			}
+			partStart = partEnd + 1
 			continue
 		}
-		keyPart := part
-		valuePart := ""
-		if idx := strings.Index(part, "="); idx >= 0 {
-			keyPart = part[:idx]
-			valuePart = part[idx+1:]
-		}
+
+		keyPart, valuePart, _ := strings.Cut(part, "=")
 		decodedKey, err := url.QueryUnescape(keyPart)
 		if err != nil {
 			decodedKey = keyPart
 		}
-		if !shouldMaskQueryParam(decodedKey) {
-			continue
+		if shouldMaskQueryParam(decodedKey) {
+			decodedValue, err := url.QueryUnescape(valuePart)
+			if err != nil {
+				decodedValue = valuePart
+			}
+			if !changed {
+				out.Grow(len(raw))
+				changed = true
+			}
+			out.WriteString(raw[copyFrom:partStart])
+			out.WriteString(keyPart)
+			out.WriteByte('=')
+			out.WriteString(url.QueryEscape(HideAPIKey(strings.TrimSpace(decodedValue))))
+			copyFrom = partEnd
 		}
-		decodedValue, err := url.QueryUnescape(valuePart)
-		if err != nil {
-			decodedValue = valuePart
+
+		if partEnd == len(raw) {
+			break
 		}
-		masked := HideAPIKey(strings.TrimSpace(decodedValue))
-		parts[i] = keyPart + "=" + url.QueryEscape(masked)
-		changed = true
+		partStart = partEnd + 1
 	}
 	if !changed {
 		return raw
 	}
-	return strings.Join(parts, "&")
+	out.WriteString(raw[copyFrom:])
+	return out.String()
 }
 
 func shouldMaskQueryParam(key string) bool {

@@ -1,9 +1,6 @@
 package handlers
 
-import (
-	"net/http"
-	"strings"
-)
+import "net/http"
 
 // gatewayHeaderPrefixes lists header name prefixes injected by known AI gateway
 // proxies. Claude Code's client-side telemetry detects these and reports the
@@ -42,58 +39,26 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 	if src == nil {
 		return nil
 	}
-	connectionScoped := connectionScopedHeaders(src)
-	dst := make(http.Header, len(src))
+	connectionValues := src.Values("Connection")
+	var dst http.Header
 	for key, values := range src {
-		canonicalKey := http.CanonicalHeaderKey(key)
-		if _, blocked := hopByHopHeaders[canonicalKey]; blocked {
+		if isBlockedUpstreamHeader(key) {
 			continue
 		}
-		if connectionScoped != nil {
-			if _, scoped := connectionScoped[canonicalKey]; scoped {
-				continue
-			}
+		if len(connectionValues) > 0 && isConnectionScopedHeader(key, connectionValues) {
+			continue
 		}
 		// Strip headers injected by known AI gateway proxies to avoid
 		// Claude Code client-side gateway detection.
-		lowerKey := strings.ToLower(key)
-		gatewayMatch := false
-		for _, prefix := range gatewayHeaderPrefixes {
-			if strings.HasPrefix(lowerKey, prefix) {
-				gatewayMatch = true
-				break
-			}
-		}
-		if gatewayMatch {
+		if isGatewayHeader(key) {
 			continue
+		}
+		if dst == nil {
+			dst = make(http.Header)
 		}
 		dst[key] = values
 	}
-	if len(dst) == 0 {
-		return nil
-	}
 	return dst
-}
-
-func connectionScopedHeaders(src http.Header) map[string]struct{} {
-	values := src.Values("Connection")
-	if len(values) == 0 {
-		return nil
-	}
-	var scoped map[string]struct{}
-	for _, rawValue := range values {
-		for _, token := range strings.Split(rawValue, ",") {
-			headerName := strings.TrimSpace(token)
-			if headerName == "" {
-				continue
-			}
-			if scoped == nil {
-				scoped = make(map[string]struct{})
-			}
-			scoped[http.CanonicalHeaderKey(headerName)] = struct{}{}
-		}
-	}
-	return scoped
 }
 
 // WriteUpstreamHeaders writes filtered upstream headers to the gin response writer.

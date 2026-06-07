@@ -196,6 +196,34 @@ func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestXAISupportsReasoningEffort(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{model: "GROK-4.3(low)", want: true},
+		{model: "xai/Grok-3-Mini-fast", want: true},
+		{model: "xai/grok-4.20-multi-agent", want: true},
+		{model: "grok-4", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := xaiSupportsReasoningEffort(tt.model); got != tt.want {
+				t.Fatalf("xaiSupportsReasoningEffort(%q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkXAISupportsReasoningEffort(b *testing.B) {
+	for b.Loop() {
+		if !xaiSupportsReasoningEffort("xai/Grok-4.3(low)") {
+			b.Fatal("expected reasoning effort support")
+		}
+	}
+}
+
 func TestXAIExecutorAppliesThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

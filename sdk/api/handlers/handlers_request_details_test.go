@@ -139,3 +139,31 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 		t.Fatalf("unexpected error message: %q", msg)
 	}
 }
+
+func TestIsOpenAIImageOnlyModel(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  bool
+	}{
+		{name: "bare image model", model: "gpt-image-1.5", want: true},
+		{name: "mixed case image model", model: " GPT-Image-1.5 ", want: true},
+		{name: "provider prefixed image model", model: "openai/gpt-image-1.5", want: false},
+		{name: "short model", model: "gpt", want: false},
+		{name: "non image model", model: "gpt-5", want: false},
+	}
+
+	for i := range tests {
+		if got := isOpenAIImageOnlyModel(tests[i].model); got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkIsOpenAIImageOnlyModel(b *testing.B) {
+	for b.Loop() {
+		if !isOpenAIImageOnlyModel(" GPT-Image-1.5 ") {
+			b.Fatal("expected image-only model")
+		}
+	}
+}

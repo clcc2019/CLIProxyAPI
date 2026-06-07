@@ -136,6 +136,46 @@ func TestRefreshClusterNodesDisabledSkipsRedisCommand(t *testing.T) {
 	}
 }
 
+func TestHandleSubscriptionPayloadMatchesChannelCaseInsensitive(t *testing.T) {
+	client := New(config.HomeConfig{
+		Enabled: true,
+		Host:    "seed.example.com",
+		Port:    8327,
+	})
+
+	var configPayload string
+	if err := client.handleSubscriptionPayload(" Config ", ` {"ok":true} `, func(raw []byte) error {
+		configPayload = string(raw)
+		return nil
+	}); err != nil {
+		t.Fatalf("handleSubscriptionPayload(config) error = %v", err)
+	}
+	if configPayload != `{"ok":true}` {
+		t.Fatalf("config payload = %q, want trimmed JSON", configPayload)
+	}
+
+	clusterPayload := `{"nodes":[{"ip":"node.example.com","port":8328,"client_count":2,"is_master":true}]}`
+	if err := client.handleSubscriptionPayload("\tCLUSTER\r\n", clusterPayload, nil); err != nil {
+		t.Fatalf("handleSubscriptionPayload(cluster) error = %v", err)
+	}
+
+	client.mu.Lock()
+	nodes := append([]clusterNode(nil), client.clusterNodes...)
+	client.mu.Unlock()
+	if len(nodes) != 1 || nodes[0].IP != "node.example.com" || nodes[0].Port != 8328 {
+		t.Fatalf("cluster nodes = %#v, want node.example.com:8328", nodes)
+	}
+}
+
+func BenchmarkHandleSubscriptionPayloadConfigChannel(b *testing.B) {
+	client := New(config.HomeConfig{Enabled: true})
+	for b.Loop() {
+		if err := client.handleSubscriptionPayload(" Config ", `{"ok":true}`, func([]byte) error { return nil }); err != nil {
+			b.Fatalf("handleSubscriptionPayload() error = %v", err)
+		}
+	}
+}
+
 func TestFailoverAfterReconnectFailureDisabledDoesNotSwitchToClusterNode(t *testing.T) {
 	client := New(config.HomeConfig{
 		Enabled:                 true,

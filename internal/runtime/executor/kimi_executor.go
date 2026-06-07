@@ -748,7 +748,7 @@ func kimiCreds(a *cliproxyauth.Auth) (token string) {
 // stripKimiPrefix removes the "kimi-" prefix from model names for the upstream API.
 func stripKimiPrefix(model string) string {
 	model = strings.TrimSpace(model)
-	if strings.HasPrefix(strings.ToLower(model), "kimi-") {
+	if len(model) >= len("kimi-") && strings.EqualFold(model[:len("kimi-")], "kimi-") {
 		return model[5:]
 	}
 	return model

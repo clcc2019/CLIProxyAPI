@@ -46,8 +46,13 @@ func effectiveRoutingStrategy(strategy string, sessionAffinity bool) string {
 }
 
 func isFillFirstStrategy(strategy string) bool {
-	switch strings.ToLower(strings.TrimSpace(strategy)) {
-	case "fill-first", "fillfirst", "ff":
+	strategy = strings.TrimSpace(strategy)
+	switch {
+	case strings.EqualFold(strategy, "fill-first"):
+		return true
+	case strings.EqualFold(strategy, "fillfirst"):
+		return true
+	case strings.EqualFold(strategy, "ff"):
 		return true
 	default:
 		return false

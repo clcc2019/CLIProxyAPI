@@ -143,7 +143,7 @@ func authDeleteNameVariants(name string) []string {
 	}
 	variants := []string{name}
 	if !filepath.IsAbs(name) && !strings.ContainsAny(name, "/\\") {
-		if strings.HasSuffix(strings.ToLower(name), ".json") {
+		if util.HasJSONFileName(name) {
 			variants = append(variants, name[:len(name)-len(filepath.Ext(name))])
 		} else {
 			variants = append(variants, name+".json")
@@ -214,6 +214,95 @@ func cleanAbsPathForCompare(path string) string {
 	return cleaned
 }
 
+// DeleteAuthFile deletes a single auth file, a batch of auth files, or all auth files.
+func (h *Handler) DeleteAuthFile(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	ctx := c.Request.Context()
+	if all := c.Query("all"); all == "true" || all == "1" || all == "*" {
+		entries, err := os.ReadDir(h.cfg.AuthDir)
+		if err != nil {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
+			return
+		}
+		deleted := 0
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !util.HasJSONFileName(name) {
+				continue
+			}
+			full := filepath.Join(h.cfg.AuthDir, name)
+			if !filepath.IsAbs(full) {
+				if abs, errAbs := filepath.Abs(full); errAbs == nil {
+					full = abs
+				}
+			}
+			removeID, restoreAuth := h.disableAuth(ctx, full)
+			if removeID == "" {
+				removeID = full
+			}
+			if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
+				h.restoreAuth(ctx, restoreAuth)
+				c.JSON(500, gin.H{"error": errDel.Error()})
+				return
+			}
+			if err = os.Remove(full); err != nil && !os.IsNotExist(err) {
+				h.restoreAuth(ctx, restoreAuth)
+				c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove file: %v", err)})
+				return
+			}
+			h.removeAuth(ctx, removeID)
+			deleted++
+		}
+		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
+		return
+	}
+
+	names, errNames := requestedAuthFileNamesForDelete(c)
+	if errNames != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errNames.Error()})
+		return
+	}
+	if len(names) == 0 {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
+	}
+	if len(names) == 1 {
+		if _, status, errDelete := h.deleteAuthFileByName(ctx, names[0]); errDelete != nil {
+			c.JSON(status, gin.H{"error": errDelete.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+
+	deletedFiles := make([]string, 0, len(names))
+	failed := make([]gin.H, 0)
+	for _, name := range names {
+		deletedName, _, errDelete := h.deleteAuthFileByName(ctx, name)
+		if errDelete != nil {
+			failed = append(failed, gin.H{"name": name, "error": errDelete.Error()})
+			continue
+		}
+		deletedFiles = append(deletedFiles, deletedName)
+	}
+	if len(failed) > 0 {
+		c.JSON(http.StatusMultiStatus, gin.H{
+			"status":  "partial",
+			"deleted": len(deletedFiles),
+			"files":   deletedFiles,
+			"failed":  failed,
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "deleted": len(deletedFiles), "files": deletedFiles})
+}
+
 func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string, int, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -236,7 +325,7 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 	}
 
 	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(resolvedName))
-	if !strings.HasSuffix(strings.ToLower(resolvedName), ".json") && !isUnsafeAuthFileName(resolvedName) {
+	if !util.HasJSONFileName(resolvedName) && !isUnsafeAuthFileName(resolvedName) {
 		jsonPath := filepath.Join(h.cfg.AuthDir, filepath.Base(resolvedName)+".json")
 		if _, errStat := os.Stat(jsonPath); errStat == nil {
 			targetPath = jsonPath

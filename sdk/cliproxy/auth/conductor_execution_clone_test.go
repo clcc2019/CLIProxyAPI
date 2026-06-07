@@ -17,7 +17,7 @@ func TestCloneAuthForExecution_CodexUsesShallowClone(t *testing.T) {
 		},
 	}
 
-	cloned := cloneAuthForExecution("codex", auth)
+	cloned := cloneAuthForExecution(" CoDeX ", auth)
 	if cloned == nil {
 		t.Fatal("cloneAuthForExecution returned nil")
 	}

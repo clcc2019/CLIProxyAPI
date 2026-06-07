@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"net/http"
 	"strings"
@@ -10,6 +11,28 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 )
+
+func TestDecompressResponseMatchesMixedCaseContentEncoding(t *testing.T) {
+	var compressed bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressed)
+	if _, err := gzipWriter.Write([]byte("hello")); err != nil {
+		t.Fatalf("gzip write error = %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("gzip close error = %v", err)
+	}
+
+	logger := NewFileRequestLogger(true, "", "", 10)
+	got, err := logger.decompressResponse(map[string][]string{
+		"cOnTeNt-EnCoDiNg": {" GZip "},
+	}, compressed.Bytes())
+	if err != nil {
+		t.Fatalf("decompressResponse error = %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("decompressed body = %q, want hello", got)
+	}
+}
 
 func TestFileRequestLoggerToggle(t *testing.T) {
 	logger := NewFileRequestLogger(false, "", "", 10)

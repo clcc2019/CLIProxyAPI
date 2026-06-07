@@ -68,7 +68,7 @@ func TestUsageQueuePluginNormalisesOpenAIReasoningAsOutputDetail(t *testing.T) {
 	withEnabledQueue(t, func() {
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(context.Background(), coreusage.Record{
-			Provider:    "openai",
+			Provider:    " OpenAI ",
 			Model:       "gpt-5.4",
 			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
 			Detail: coreusage.Detail{
@@ -81,6 +81,55 @@ func TestUsageQueuePluginNormalisesOpenAIReasoningAsOutputDetail(t *testing.T) {
 		payload := popSinglePayload(t)
 		requireTokenTotal(t, payload, 150)
 	})
+}
+
+func TestQueuedProviderReportsReasoningAsOutputDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{name: "openai", provider: " OpenAI ", want: true},
+		{name: "codex", provider: "\tCodex\r\n", want: true},
+		{name: "oauth", provider: "oauth", want: false},
+		{name: "empty", provider: " ", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := queuedProviderReportsReasoningAsOutputDetail(tt.provider); got != tt.want {
+				t.Fatalf("queuedProviderReportsReasoningAsOutputDetail(%q) = %t, want %t", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeQueuedTokenStatsMixedCaseProvider(t *testing.T) {
+	tokens := normalizeQueuedTokenStats(" Codex ", tokenStats{
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 15,
+	})
+	if tokens.TotalTokens != 150 {
+		t.Fatalf("Codex total tokens = %d, want 150", tokens.TotalTokens)
+	}
+
+	tokens = normalizeQueuedTokenStats(" OAuth ", tokenStats{
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 15,
+	})
+	if tokens.TotalTokens != 165 {
+		t.Fatalf("OAuth total tokens = %d, want 165", tokens.TotalTokens)
+	}
+}
+
+func BenchmarkQueuedProviderReportsReasoningAsOutputDetail(b *testing.B) {
+	for b.Loop() {
+		if !queuedProviderReportsReasoningAsOutputDetail(" OpenAI ") {
+			b.Fatal("expected OpenAI provider to report reasoning as output")
+		}
+	}
 }
 
 func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {

@@ -82,7 +82,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				// Pass through directly; ApplyThinking handles clamping to target model's levels.
 				effort := ""
 				if v := root.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
-					effort = strings.ToLower(strings.TrimSpace(v.String()))
+					effort = normalizeReasoningEffort(v.String())
 				}
 				if effort != "" {
 					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
@@ -331,6 +331,35 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+func normalizeReasoningEffort(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(value, "none"):
+		return "none"
+	case strings.EqualFold(value, "minimal"):
+		return "minimal"
+	case strings.EqualFold(value, "low"):
+		return "low"
+	case strings.EqualFold(value, "medium"):
+		return "medium"
+	case strings.EqualFold(value, "high"):
+		return "high"
+	case strings.EqualFold(value, "xhigh"):
+		return "xhigh"
+	case strings.EqualFold(value, "max"):
+		return "max"
+	case strings.EqualFold(value, "auto"):
+		return "auto"
+	case strings.EqualFold(value, "adaptive"):
+		return "adaptive"
+	default:
+		return strings.ToLower(value)
+	}
 }
 
 func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result) bool {

@@ -12,6 +12,75 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 )
 
+func TestFormatAuthInfoAuthTypeNormalization(t *testing.T) {
+	tests := []struct {
+		name string
+		info UpstreamRequestLog
+		want string
+	}{
+		{name: "api key mixed case", info: UpstreamRequestLog{AuthType: " API_Key "}, want: "type=api_key"},
+		{name: "oauth mixed case", info: UpstreamRequestLog{AuthType: "\tOAuth\r\n"}, want: "type=oauth"},
+		{name: "unknown lowercased", info: UpstreamRequestLog{AuthType: " Custom ", AuthValue: "value"}, want: "type=custom value=value"},
+		{name: "ordered fields", info: UpstreamRequestLog{Provider: " openai ", AuthID: " auth-1 ", AuthLabel: " primary ", AuthType: "oauth"}, want: "provider=openai, auth_id=auth-1, label=primary, type=oauth"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatAuthInfo(tt.info); got != tt.want {
+				t.Fatalf("formatAuthInfo() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWebsocketUpgradeRequestURLMatchesMixedCaseScheme(t *testing.T) {
+	got := WebsocketUpgradeRequestURL("WSS://chatgpt.com/backend-api/codex/responses")
+	if got != "https://chatgpt.com/backend-api/codex/responses" {
+		t.Fatalf("request URL = %q, want https://chatgpt.com/backend-api/codex/responses", got)
+	}
+}
+
+func BenchmarkFormatAuthInfoAPIKeyType(b *testing.B) {
+	info := UpstreamRequestLog{AuthType: " API_Key "}
+	for b.Loop() {
+		if got := formatAuthInfo(info); got != "type=api_key" {
+			b.Fatalf("formatAuthInfo() = %q", got)
+		}
+	}
+}
+
+func TestSummarizeErrorBodyMixedCaseHTMLContentType(t *testing.T) {
+	body := []byte("<html><head><title>Upstream Error</title></head><body>secret details</body></html>")
+	if got := SummarizeErrorBody("Text/HTML; charset=utf-8", body); got != "Upstream Error" {
+		t.Fatalf("SummarizeErrorBody() = %q, want title", got)
+	}
+}
+
+func TestSummarizeErrorBodySniffsMixedCaseHTMLBody(t *testing.T) {
+	body := []byte(" \n\t<HTML><HEAD><TITLE> Upstream &amp; Error </TITLE></HEAD><BODY>secret details</BODY></HTML>")
+	if got := SummarizeErrorBody("", body); got != "Upstream & Error" {
+		t.Fatalf("SummarizeErrorBody() = %q, want title", got)
+	}
+}
+
+func BenchmarkSummarizeErrorBodyHTMLContentType(b *testing.B) {
+	body := []byte("<html><head><title>Upstream Error</title></head><body>secret details</body></html>")
+	for b.Loop() {
+		if got := SummarizeErrorBody("Text/HTML; charset=utf-8", body); got != "Upstream Error" {
+			b.Fatalf("SummarizeErrorBody() = %q", got)
+		}
+	}
+}
+
+func BenchmarkSummarizeErrorBodyHTMLBodySniff(b *testing.B) {
+	body := []byte(" \n\t<HTML><HEAD><TITLE> Upstream &amp; Error </TITLE></HEAD><BODY>secret details</BODY></HTML>")
+	for b.Loop() {
+		if got := SummarizeErrorBody("", body); got != "Upstream & Error" {
+			b.Fatalf("SummarizeErrorBody() = %q", got)
+		}
+	}
+}
+
 func TestRecordAPIResponseMetadataStoresHeadersWhenRequestLogDisabled(t *testing.T) {
 	ctx := logging.WithResponseHeadersHolder(context.Background())
 	headers := http.Header{}

@@ -4,10 +4,18 @@ import "strings"
 
 // IsWebSearchTool checks if a tool name or type indicates web search capability.
 func IsWebSearchTool(name, toolType string) bool {
-	name = strings.ToLower(strings.TrimSpace(name))
-	toolType = strings.ToLower(strings.TrimSpace(toolType))
+	name = strings.TrimSpace(name)
+	if strings.EqualFold(name, "web_search") {
+		return true
+	}
 
-	return name == "web_search" ||
-		strings.HasPrefix(toolType, "web_search") ||
-		toolType == "web_search_20250305"
+	toolType = strings.TrimSpace(toolType)
+	return hasPrefixEqualFold(toolType, "web_search")
+}
+
+func hasPrefixEqualFold(value, prefix string) bool {
+	if len(value) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(value[:len(prefix)], prefix)
 }

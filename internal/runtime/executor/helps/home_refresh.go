@@ -127,10 +127,13 @@ func parseHomeRefreshAuth(raw []byte) (*cliproxyauth.Auth, string, error) {
 }
 
 func statusFromHomeErrorCode(code string) int {
-	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "authentication_error", "unauthorized":
+	code = strings.TrimSpace(code)
+	switch {
+	case strings.EqualFold(code, "authentication_error"):
 		return http.StatusUnauthorized
-	case "model_not_found":
+	case strings.EqualFold(code, "unauthorized"):
+		return http.StatusUnauthorized
+	case strings.EqualFold(code, "model_not_found"):
 		return http.StatusNotFound
 	default:
 		return http.StatusBadGateway

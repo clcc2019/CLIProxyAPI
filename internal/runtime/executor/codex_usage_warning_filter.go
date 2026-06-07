@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -11,10 +12,10 @@ import (
 const codexUsageWarningMinPayloadBytes = len(`{"type":"response.output_text.delta","delta":"heads up less than limit left /status"}`)
 
 var (
-	codexUsageWarningMarkerLessThan      = []byte("less than")
-	codexUsageWarningMarkerLimitLeft     = []byte("limit left")
-	codexUsageWarningMarkerStatus        = []byte("/status")
-	codexUsageWarningMarkerEscapedStatus = []byte(`\/status`)
+	codexUsageWarningMarkerLessThan      = "less than"
+	codexUsageWarningMarkerLimitLeft     = "limit left"
+	codexUsageWarningMarkerStatus        = "/status"
+	codexUsageWarningMarkerEscapedStatus = `\/status`
 )
 
 type codexUsageWarningStreamEvent struct {
@@ -223,14 +224,14 @@ func codexPayloadMayContainUsageLimitWarning(payload []byte) bool {
 	if len(payload) < codexUsageWarningMinPayloadBytes {
 		return false
 	}
-	if !bytes.Contains(payload, codexUsageWarningMarkerLimitLeft) {
+	if !asciifold.ContainsBytes(payload, codexUsageWarningMarkerLimitLeft) {
 		return false
 	}
-	if !bytes.Contains(payload, codexUsageWarningMarkerLessThan) {
+	if !asciifold.ContainsBytes(payload, codexUsageWarningMarkerLessThan) {
 		return false
 	}
-	return bytes.Contains(payload, codexUsageWarningMarkerStatus) ||
-		bytes.Contains(payload, codexUsageWarningMarkerEscapedStatus)
+	return asciifold.ContainsBytes(payload, codexUsageWarningMarkerStatus) ||
+		asciifold.ContainsBytes(payload, codexUsageWarningMarkerEscapedStatus)
 }
 
 func codexOutputItemIsUsageLimitWarning(item gjson.Result) bool {
@@ -286,43 +287,87 @@ func codexCompletedContainsUsageLimitWarning(payload []byte) bool {
 }
 
 func codexTextLooksLikeUsageLimitWarning(text string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(text))
-	if normalized == "" {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return false
 	}
-	return strings.Contains(normalized, "heads up") &&
-		strings.Contains(normalized, "less than") &&
-		strings.Contains(normalized, "limit left") &&
-		strings.Contains(normalized, "/status")
+	return asciifold.Contains(text, "heads up") &&
+		asciifold.Contains(text, "less than") &&
+		asciifold.Contains(text, "limit left") &&
+		asciifold.Contains(text, "/status")
 }
 
 func codexTextMayBeUsageLimitWarningPrefix(text string) bool {
-	normalized := codexUsageWarningPrefixText(text)
-	if normalized == "" {
+	const marker = "heads up you have less than"
+	text = strings.TrimSpace(text)
+	text = strings.TrimLeft(text, "⚠!,.:- \t\r\n")
+	if text == "" {
 		return false
 	}
-	const marker = "heads up you have less than"
-	return strings.HasPrefix(marker, normalized) || strings.HasPrefix(normalized, marker)
+
+	normalizedLen := 0
+	lastSpace := false
+	for _, r := range text {
+		c := byte(0)
+		switch {
+		case r >= 'A' && r <= 'Z':
+			c = byte(r + ('a' - 'A'))
+			lastSpace = false
+		case r >= 'a' && r <= 'z':
+			c = byte(r)
+			lastSpace = false
+		case r >= '0' && r <= '9':
+			c = byte(r)
+			lastSpace = false
+		case r == '/' || r == '%':
+			c = byte(r)
+			lastSpace = false
+		case r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == ',' || r == '.':
+			if lastSpace || normalizedLen == 0 {
+				continue
+			}
+			c = ' '
+			lastSpace = true
+		default:
+			continue
+		}
+
+		if normalizedLen >= len(marker) {
+			return true
+		}
+		if marker[normalizedLen] != c {
+			return false
+		}
+		normalizedLen++
+		if normalizedLen == len(marker) {
+			return true
+		}
+	}
+	return normalizedLen > 0
 }
 
 func codexUsageWarningPrefixText(text string) string {
-	normalized := strings.ToLower(strings.TrimSpace(text))
-	normalized = strings.TrimLeft(normalized, "⚠!,.:- \t\r\n")
-	if normalized == "" {
+	text = strings.TrimSpace(text)
+	text = strings.TrimLeft(text, "⚠!,.:- \t\r\n")
+	if text == "" {
 		return ""
 	}
 	var b strings.Builder
+	b.Grow(len(text))
 	lastSpace := false
-	for _, r := range normalized {
+	for _, r := range text {
 		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteByte(byte(r + ('a' - 'A')))
+			lastSpace = false
 		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
+			b.WriteByte(byte(r))
 			lastSpace = false
 		case r >= '0' && r <= '9':
-			b.WriteRune(r)
+			b.WriteByte(byte(r))
 			lastSpace = false
 		case r == '/' || r == '%':
-			b.WriteRune(r)
+			b.WriteByte(byte(r))
 			lastSpace = false
 		case r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == ',' || r == '.':
 			if !lastSpace && b.Len() > 0 {
@@ -331,5 +376,9 @@ func codexUsageWarningPrefixText(text string) string {
 			}
 		}
 	}
-	return strings.TrimSpace(b.String())
+	out := b.String()
+	if lastSpace && len(out) > 0 {
+		return out[:len(out)-1]
+	}
+	return out
 }

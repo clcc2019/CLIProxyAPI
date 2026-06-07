@@ -447,6 +447,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Name          *string                             `json:"name"`
 		Prefix        *string                             `json:"prefix"`
 		Disabled      *bool                               `json:"disabled"`
+		PoolMode      *bool                               `json:"pool-mode"`
 		BaseURL       *string                             `json:"base-url"`
 		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
@@ -491,6 +492,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Disabled != nil {
 		entry.Disabled = *body.Value.Disabled
+	}
+	if body.Value.PoolMode != nil {
+		entry.PoolMode = *body.Value.PoolMode
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -767,8 +771,11 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
 		APIKey         *string              `json:"api-key"`
+		Priority       *int                 `json:"priority"`
 		Prefix         *string              `json:"prefix"`
 		BaseURL        *string              `json:"base-url"`
+		Websockets     *bool                `json:"websockets"`
+		PoolMode       *bool                `json:"pool-mode"`
 		ProxyURL       *string              `json:"proxy-url"`
 		Models         *[]config.CodexModel `json:"models"`
 		Headers        *map[string]string   `json:"headers"`
@@ -808,6 +815,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -820,6 +830,12 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.Websockets != nil {
+		entry.Websockets = *body.Value.Websockets
+	}
+	if body.Value.PoolMode != nil {
+		entry.PoolMode = *body.Value.PoolMode
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)

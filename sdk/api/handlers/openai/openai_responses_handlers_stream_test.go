@@ -269,6 +269,77 @@ func TestForwardResponsesStreamRepairsMultilineCompletedOutputAsSSEDataLines(t *
 	}
 }
 
+func TestResponsesSSEDataPayloadHandlesSingleAndMultipleDataLines(t *testing.T) {
+	singleFrame := []byte("event: response.created\r\ndata: {\"type\":\"response.created\"}\r\n\r\n")
+	single, ok := responsesSSEDataPayload(singleFrame)
+	if !ok || string(single) != `{"type":"response.created"}` {
+		t.Fatalf("single payload = %q, %t", single, ok)
+	}
+
+	multiple, ok := responsesSSEDataPayload([]byte("data: {\"type\":\"response.completed\",\ndata: \"response\":{\"output\":[]}}\n\n"))
+	if !ok || string(multiple) != `{"type":"response.completed","response":{"output":[]}}` {
+		t.Fatalf("multiple payload = %q, %t", multiple, ok)
+	}
+
+	if payload, ok := responsesSSEDataPayload([]byte("event: response.created\n\n")); ok || payload != nil {
+		t.Fatalf("non-data payload = %q, %t; want nil, false", payload, ok)
+	}
+}
+
+func TestResponsesSSEFrameWithDataPayload(t *testing.T) {
+	tests := []struct {
+		name    string
+		frame   string
+		payload string
+		want    string
+	}{
+		{
+			name:    "replaces first data and removes remaining data",
+			frame:   "event: response.completed\ndata: old-1\nid: resp-1\ndata: old-2\n\n",
+			payload: "{\"type\":\"response.completed\"}",
+			want:    "event: response.completed\ndata: {\"type\":\"response.completed\"}\nid: resp-1\n\n",
+		},
+		{
+			name:    "appends data when absent",
+			frame:   "event: response.completed\r\nid: resp-1\r\n\r\n",
+			payload: "{\"type\":\"response.completed\"}",
+			want:    "event: response.completed\nid: resp-1\ndata: {\"type\":\"response.completed\"}\n\n",
+		},
+		{
+			name:    "writes multiline payload",
+			frame:   "event: response.completed\ndata: old\n\n",
+			payload: "{\n\"type\":\"response.completed\"\n}",
+			want:    "event: response.completed\ndata: {\ndata: \"type\":\"response.completed\"\ndata: }\n\n",
+		},
+		{
+			name:    "preserves trailing empty payload line",
+			frame:   "data: old\n\n",
+			payload: "first\n",
+			want:    "data: first\ndata: \n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := responsesSSEFrameWithDataPayload([]byte(tt.frame), []byte(tt.payload))
+			if string(got) != tt.want {
+				t.Fatalf("responsesSSEFrameWithDataPayload() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+var responsesSSEFrameWithDataPayloadBenchmarkSink []byte
+
+func BenchmarkResponsesSSEFrameWithDataPayload(b *testing.B) {
+	frame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n")
+	payload := []byte("{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"id\":\"msg-1\",\"type\":\"message\"}]}}")
+	b.ReportAllocs()
+	for b.Loop() {
+		responsesSSEFrameWithDataPayloadBenchmarkSink = responsesSSEFrameWithDataPayload(frame, payload)
+	}
+}
+
 func TestForwardResponsesStreamReassemblesSplitSSEEventChunks(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
@@ -384,6 +455,70 @@ func TestResponsesSSEFramerTrustedDataStillFiltersUsageWarnings(t *testing.T) {
 	}
 }
 
+func TestResponsesSSEFramerTrustedDataFiltersUsageWarningSplitInsidePayload(t *testing.T) {
+	const warning = "Heads up, you have less than 25% of your 5h limit left. Run /status for a breakdown."
+	baseFrame := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"delta\":\"" + warning + "\"}")
+
+	for _, suffix := range []string{"\n\n", ""} {
+		frame := append(append([]byte(nil), baseFrame...), suffix...)
+		warningStart := bytes.Index(frame, []byte(warning))
+		if warningStart < 0 {
+			t.Fatal("warning text missing from test frame")
+		}
+
+		for split := warningStart + 1; split < warningStart+len(warning); split++ {
+			var out bytes.Buffer
+			framer := &responsesSSEFramer{
+				noticeFilter: newResponsesNoticeFilter(),
+				trustedData:  true,
+			}
+			if framer.WriteChunk(&out, frame[:split]) {
+				t.Fatalf("suffix %q split %d wrote incomplete warning prefix: %q", suffix, split, out.String())
+			}
+			if framer.WriteChunk(&out, frame[split:]) {
+				t.Fatalf("suffix %q split %d wrote filtered warning frame: %q", suffix, split, out.String())
+			}
+			if framer.Flush(&out) {
+				t.Fatalf("suffix %q split %d wrote filtered warning on flush: %q", suffix, split, out.String())
+			}
+			if out.Len() != 0 {
+				t.Fatalf("suffix %q split %d leaked warning frame: %q", suffix, split, out.String())
+			}
+		}
+	}
+}
+
+func TestResponsesSSEFramerTrustedDataBuffersNormalFrameSplitInsidePayload(t *testing.T) {
+	const text = "normal output"
+	baseFrame := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"delta\":\"" + text + "\"}")
+
+	for _, suffix := range []string{"\n\n", ""} {
+		frame := append(append([]byte(nil), baseFrame...), suffix...)
+		want := append(append([]byte(nil), baseFrame...), '\n', '\n')
+		textStart := bytes.Index(frame, []byte(text))
+		if textStart < 0 {
+			t.Fatal("normal output missing from test frame")
+		}
+
+		for split := textStart + 1; split < textStart+len(text); split++ {
+			var out bytes.Buffer
+			framer := &responsesSSEFramer{
+				noticeFilter: newResponsesNoticeFilter(),
+				trustedData:  true,
+			}
+			if framer.WriteChunk(&out, frame[:split]) {
+				t.Fatalf("suffix %q split %d wrote incomplete normal frame: %q", suffix, split, out.String())
+			}
+			if !framer.WriteChunk(&out, frame[split:]) {
+				t.Fatalf("suffix %q split %d did not write completed normal frame", suffix, split)
+			}
+			if got := out.Bytes(); !bytes.Equal(got, want) {
+				t.Fatalf("suffix %q split %d changed normal frame.\nGot:  %q\nWant: %q", suffix, split, got, want)
+			}
+		}
+	}
+}
+
 func TestResponsesSSEFrameLenFindsLFAndCRLFDelimiters(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -464,6 +599,28 @@ func BenchmarkResponsesSSEFrameLen(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if responsesSSEFrameLen(chunk) != len(chunk) {
 			b.Fatal("unexpected frame len")
+		}
+	}
+}
+
+func BenchmarkResponsesSSEDataPayloadSingleLine(b *testing.B) {
+	frame := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+	b.ReportAllocs()
+	for b.Loop() {
+		payload, ok := responsesSSEDataPayload(frame)
+		if !ok || len(payload) == 0 {
+			b.Fatal("expected data payload")
+		}
+	}
+}
+
+func BenchmarkResponsesSSEDataPayloadMultipleLines(b *testing.B) {
+	frame := []byte("data: {\"type\":\"response.completed\",\ndata: \"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n")
+	b.ReportAllocs()
+	for b.Loop() {
+		payload, ok := responsesSSEDataPayload(frame)
+		if !ok || len(payload) == 0 {
+			b.Fatal("expected data payload")
 		}
 	}
 }

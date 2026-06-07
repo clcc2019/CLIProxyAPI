@@ -103,6 +103,28 @@ func TestNormalizeCodexFinalUpstreamBody_DefaultsNullResponsesInputToArray(t *te
 	}
 }
 
+func TestCodexMatchesAzureResponsesBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "openai azure", url: " https://Example.OpenAI.Azure.com/openai/responses ", want: true},
+		{name: "cognitive services", url: "https://example.CognitiveServices.Azure.com/openai/responses", want: true},
+		{name: "windows openai path", url: "https://example.Windows.net/OpenAI/responses", want: true},
+		{name: "non azure", url: "https://api.openai.com/v1/responses", want: false},
+		{name: "empty", url: "  ", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codexMatchesAzureResponsesBaseURL(tt.url); got != tt.want {
+				t.Fatalf("codexMatchesAzureResponsesBaseURL(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeCodexFinalUpstreamBody_RepairsPrunedMissingContext(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","previous_response_id":""}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,
@@ -161,7 +183,7 @@ func TestNormalizeCodexFinalUpstreamBody_DefaultsNullCompactInputToArray(t *test
 }
 
 func TestNormalizeCodexFinalUpstreamBody_ParsesParallelToolCallString(t *testing.T) {
-	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","parallel_tool_calls":"false"}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","parallel_tool_calls":" FALSE "}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,
 		streamMode:                  codexStreamFieldTrue,
 		store:                       false,
@@ -246,5 +268,83 @@ func TestNormalizeCodexFinalUpstreamBody_RemovesUnsupportedVerbosityButKeepsSche
 	}
 	if got := gjson.GetBytes(gotBody, "text.format.name").String(); got != codexDefaultOutputSchemaTextFormatName {
 		t.Fatalf("json schema format should be preserved and named, got %q; body=%s", got, gotBody)
+	}
+}
+
+func BenchmarkNormalizeCodexFinalUpstreamToolType(b *testing.B) {
+	b.Run("known", func(b *testing.B) {
+		toolTypes := []string{
+			" Function ",
+			"WEB_SEARCH_20250305",
+			"Image_Generation",
+			"Computer_Use",
+			"Apply_Patch",
+		}
+
+		for b.Loop() {
+			for _, toolType := range toolTypes {
+				if normalizeCodexFinalUpstreamToolType(toolType) == "" {
+					b.Fatal("unexpected empty tool type")
+				}
+			}
+		}
+	})
+
+	b.Run("unknown", func(b *testing.B) {
+		toolTypes := []string{
+			"Unknown_Custom_Type",
+		}
+
+		for b.Loop() {
+			for _, toolType := range toolTypes {
+				if normalizeCodexFinalUpstreamToolType(toolType) == "" {
+					b.Fatal("unexpected empty tool type")
+				}
+			}
+		}
+	})
+}
+
+func BenchmarkCodexMatchesAzureResponsesBaseURL(b *testing.B) {
+	url := " https://Example.OpenAI.Azure.com/openai/responses "
+	for b.Loop() {
+		if !codexMatchesAzureResponsesBaseURL(url) {
+			b.Fatal("expected azure responses base URL")
+		}
+	}
+}
+
+func BenchmarkNormalizeCodexFinalUpstreamToolChoice(b *testing.B) {
+	choices := []gjson.Result{
+		gjson.Parse(`" ANY "`),
+		gjson.Parse(`{"type":"Allowed_Tools","mode":"ANY","tools":[{"type":"Function","name":"Read"},{"type":"WEB_SEARCH_20250305"},{"type":"Image_Generation"},{"type":"Computer_Use"}]}`),
+		gjson.Parse(`{"type":"Custom","name":"apply_patch"}`),
+	}
+
+	for b.Loop() {
+		for _, choice := range choices {
+			if _, ok := normalizeCodexFinalUpstreamToolChoice(choice); !ok {
+				b.Fatal("unexpected dropped tool choice")
+			}
+		}
+	}
+}
+
+func BenchmarkNormalizeCodexFinalUpstreamToolTypeLegacyMixed(b *testing.B) {
+	toolTypes := []string{
+		" Function ",
+		"WEB_SEARCH_20250305",
+		"Image_Generation",
+		"Computer_Use",
+		"Apply_Patch",
+		"Unknown_Custom_Type",
+	}
+
+	for b.Loop() {
+		for _, toolType := range toolTypes {
+			if normalizeCodexFinalUpstreamToolType(toolType) == "" && toolType != "" {
+				b.Fatal("unexpected empty tool type")
+			}
+		}
 	}
 }

@@ -256,8 +256,11 @@ func normalizeUsageDetailTotalForProvider(provider string, detail usage.Detail) 
 }
 
 func usageProviderReportsReasoningAsOutputDetail(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "codex", "openai":
+	provider = strings.TrimSpace(provider)
+	switch {
+	case strings.EqualFold(provider, "codex"):
+		return true
+	case strings.EqualFold(provider, "openai"):
 		return true
 	default:
 		return false
@@ -415,7 +418,34 @@ func usageErrorStatusCode(err error) int {
 }
 
 func normalizeReasoningEffortValue(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(value, "minimal"):
+		return "minimal"
+	case strings.EqualFold(value, "low"):
+		return "low"
+	case strings.EqualFold(value, "medium"):
+		return "medium"
+	case strings.EqualFold(value, "high"):
+		return "high"
+	case strings.EqualFold(value, "xhigh"):
+		return "xhigh"
+	case strings.EqualFold(value, "auto"):
+		return "auto"
+	case strings.EqualFold(value, "adaptive"):
+		return "adaptive"
+	case strings.EqualFold(value, "enabled"):
+		return "enabled"
+	case strings.EqualFold(value, "disabled"):
+		return "disabled"
+	case strings.EqualFold(value, "none"):
+		return "none"
+	default:
+		return strings.ToLower(value)
+	}
 }
 
 func extractReasoningEffortFromPayload(payload []byte) string {
@@ -786,45 +816,80 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 		return payload
 	}
 
-	lines := bytes.Split(payload, []byte("\n"))
 	modified := false
 	foundData := false
-	for idx, line := range lines {
+	var output []byte
+	for offset := 0; offset < len(payload); {
+		lineStart := offset
+		lineEnd := len(payload)
+		hasNewline := false
+		if idx := bytes.IndexByte(payload[offset:], '\n'); idx >= 0 {
+			lineEnd = offset + idx
+			offset = lineEnd + 1
+			hasNewline = true
+		} else {
+			offset = len(payload)
+		}
+		line := payload[lineStart:lineEnd]
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 || !bytes.HasPrefix(trimmed, []byte("data:")) {
+			if modified {
+				output = appendSSELine(output, line, hasNewline)
+			}
 			continue
 		}
 		foundData = true
 		dataIdx := bytes.Index(line, []byte("data:"))
 		if dataIdx < 0 {
+			if modified {
+				output = appendSSELine(output, line, hasNewline)
+			}
 			continue
 		}
 		rawJSON := bytes.TrimSpace(line[dataIdx+5:])
 		traceID := gjson.GetBytes(rawJSON, "traceId").String()
 		if isStopChunkWithoutUsage(rawJSON) && traceID != "" {
 			rememberStopWithoutUsage(traceID)
+			if modified {
+				output = appendSSELine(output, line, hasNewline)
+			}
 			continue
 		}
 		if traceID != "" {
 			if _, ok := stopChunkWithoutUsage.Load(traceID); ok && hasUsageMetadata(rawJSON) {
 				stopChunkWithoutUsage.Delete(traceID)
+				if modified {
+					output = appendSSELine(output, line, hasNewline)
+				}
 				continue
 			}
 		}
 
 		cleaned, changed := StripUsageMetadataFromJSON(rawJSON)
 		if !changed {
+			if modified {
+				output = appendSSELine(output, line, hasNewline)
+			}
 			continue
 		}
-		var rebuilt []byte
-		rebuilt = append(rebuilt, line[:dataIdx]...)
-		rebuilt = append(rebuilt, []byte("data:")...)
-		if len(cleaned) > 0 {
-			rebuilt = append(rebuilt, ' ')
-			rebuilt = append(rebuilt, cleaned...)
+		if !modified {
+			outputCapacity := len(payload)
+			if growth := len(cleaned) - len(rawJSON); growth > 0 {
+				outputCapacity += growth
+			}
+			output = make([]byte, 0, outputCapacity)
+			output = append(output, payload[:lineStart]...)
+			modified = true
 		}
-		lines[idx] = rebuilt
-		modified = true
+		output = append(output, line[:dataIdx]...)
+		output = append(output, "data:"...)
+		if len(cleaned) > 0 {
+			output = append(output, ' ')
+			output = append(output, cleaned...)
+		}
+		if hasNewline {
+			output = append(output, '\n')
+		}
 	}
 	if !modified {
 		if !foundData {
@@ -838,7 +903,15 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 		}
 		return payload
 	}
-	return bytes.Join(lines, []byte("\n"))
+	return output
+}
+
+func appendSSELine(output, line []byte, hasNewline bool) []byte {
+	output = append(output, line...)
+	if hasNewline {
+		output = append(output, '\n')
+	}
+	return output
 }
 
 // StripUsageMetadataFromJSON drops usageMetadata unless finishReason is present (terminal).

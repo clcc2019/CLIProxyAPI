@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -174,6 +175,25 @@ func TestHomeAppLogForwarder_DisablesForwardingWhenHomeDoesNotSupportAppLog(t *t
 	}
 	if got := forwarder.Stats().PushErrors; got != 1 {
 		t.Fatalf("PushErrors = %d, want 1", got)
+	}
+}
+
+func TestIsHomeAppLogUnsupportedMatchesWrappedMixedCaseErrors(t *testing.T) {
+	err := fmt.Errorf("home push failed: %w", errors.New("ERR UNKNOWN COMMAND 'rpush_app_log'"))
+	if !isHomeAppLogUnsupported(err) {
+		t.Fatal("expected wrapped mixed-case unknown command error to match")
+	}
+	if isHomeAppLogUnsupported(errors.New("temporary network failure")) {
+		t.Fatal("did not expect unrelated error to match")
+	}
+}
+
+func BenchmarkIsHomeAppLogUnsupported(b *testing.B) {
+	err := fmt.Errorf("home push failed: %w", errors.New("ERR Unsupported Command 'rpush_app_log'"))
+	for b.Loop() {
+		if !isHomeAppLogUnsupported(err) {
+			b.Fatal("expected unsupported app-log error")
+		}
 	}
 }
 

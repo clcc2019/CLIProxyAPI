@@ -604,7 +604,7 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 	}
 
 	mediaType, params, errParse := mime.ParseMediaType(contentType)
-	if errParse != nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mediaType)), "multipart/") {
+	if errParse != nil || !openAICompatMediaTypeHasPrefix(mediaType, "multipart/") {
 		return payload, contentType, nil
 	}
 	boundary := strings.TrimSpace(params["boundary"])
@@ -612,6 +612,14 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 		return nil, "", fmt.Errorf("multipart boundary is missing")
 	}
 	return rewriteOpenAICompatImagesMultipartPayload(payload, model, boundary, stream)
+}
+
+func openAICompatMediaTypeHasPrefix(mediaType, prefix string) bool {
+	mediaType = strings.TrimSpace(mediaType)
+	if len(mediaType) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(mediaType[:len(prefix)], prefix)
 }
 
 func cloneOpenAICompatMIMEHeader(src textproto.MIMEHeader) textproto.MIMEHeader {

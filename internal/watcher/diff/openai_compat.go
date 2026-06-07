@@ -69,6 +69,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
 	}
+	if oldEntry.PoolMode != newEntry.PoolMode {
+		details = append(details, fmt.Sprintf("pool-mode %t -> %t", oldEntry.PoolMode, newEntry.PoolMode))
+	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}
@@ -144,6 +147,9 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	}
 	if v := strings.TrimSpace(entry.BaseURL); v != "" {
 		parts = append(parts, "base="+v)
+	}
+	if entry.PoolMode {
+		parts = append(parts, "pool-mode=true")
 	}
 
 	models := make([]string, 0, len(entry.Models))

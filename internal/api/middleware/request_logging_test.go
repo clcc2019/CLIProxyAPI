@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 )
@@ -136,6 +138,16 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name:          "mixed case multipart skipped in error-only mode",
+			loggerEnabled: false,
+			req: &http.Request{
+				Body:          io.NopCloser(strings.NewReader("x")),
+				ContentLength: 1,
+				Header:        http.Header{"Content-Type": []string{"Multipart/Form-Data; boundary=abc"}},
+			},
+			want: false,
+		},
 	}
 
 	for i := range tests {
@@ -144,6 +156,64 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
 		}
 	}
+}
+
+func TestDecodeCapturedRequestBody(t *testing.T) {
+	payload := []byte(`{"message":"hello"}`)
+	encoded := zstdCompressForRequestLoggingTest(t, payload)
+
+	tests := []struct {
+		name     string
+		body     []byte
+		encoding string
+		want     []byte
+		wantErr  string
+	}{
+		{
+			name:     "identity chain",
+			body:     payload,
+			encoding: "identity, Identity",
+			want:     payload,
+		},
+		{
+			name:     "mixed case zstd with identity",
+			body:     encoded,
+			encoding: "Identity, ZsTd",
+			want:     payload,
+		},
+		{
+			name:     "unsupported lowercases error token",
+			body:     payload,
+			encoding: "Identity, GZip",
+			wantErr:  "unsupported request content encoding: gzip",
+		},
+	}
+
+	for i := range tests {
+		got, err := decodeCapturedRequestBody(tests[i].body, tests[i].encoding)
+		if tests[i].wantErr != "" {
+			if err == nil || err.Error() != tests[i].wantErr {
+				t.Fatalf("%s: err = %v, want %q", tests[i].name, err, tests[i].wantErr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: decode error: %v", tests[i].name, err)
+		}
+		if !bytes.Equal(got, tests[i].want) {
+			t.Fatalf("%s: body = %q, want %q", tests[i].name, string(got), string(tests[i].want))
+		}
+	}
+}
+
+func zstdCompressForRequestLoggingTest(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	encoder, errNewWriter := zstd.NewWriter(nil)
+	if errNewWriter != nil {
+		t.Fatalf("NewWriter: %v", errNewWriter)
+	}
+	defer encoder.Close()
+	return encoder.EncodeAll(payload, nil)
 }
 
 func TestAttachWebsocketLogSourcesUsesLoggerLogsDir(t *testing.T) {
@@ -386,4 +456,31 @@ func (l *capturingRequestLogger) LogStreamingRequest(string, string, map[string]
 
 func (l *capturingRequestLogger) IsEnabled() bool {
 	return l.enabled
+}
+
+func BenchmarkShouldCaptureRequestBodyMultipart(b *testing.B) {
+	req := &http.Request{
+		Body:          io.NopCloser(strings.NewReader("x")),
+		ContentLength: 1,
+		Header:        http.Header{"Content-Type": []string{"Multipart/Form-Data; boundary=abc"}},
+	}
+	for b.Loop() {
+		if shouldCaptureRequestBody(false, req) {
+			b.Fatal("expected multipart request body capture to be skipped")
+		}
+	}
+}
+
+func BenchmarkDecodeCapturedRequestBodyIdentityChain(b *testing.B) {
+	body := []byte(`{"message":"hello"}`)
+	encoding := "identity, Identity, identity"
+	for b.Loop() {
+		got, err := decodeCapturedRequestBody(body, encoding)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(got) != len(body) {
+			b.Fatalf("decoded length = %d, want %d", len(got), len(body))
+		}
+	}
 }

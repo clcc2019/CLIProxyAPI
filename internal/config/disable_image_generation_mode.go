@@ -122,15 +122,15 @@ func parseDisableImageGenerationJSON(data []byte) (DisableImageGenerationMode, e
 }
 
 func parseDisableImageGenerationString(s string) (DisableImageGenerationMode, error) {
-	s = strings.TrimSpace(strings.ToLower(s))
-	switch s {
-	case "", "false", "0", "off", "no":
+	s = strings.TrimSpace(s)
+	switch {
+	case s == "", strings.EqualFold(s, "false"), s == "0", strings.EqualFold(s, "off"), strings.EqualFold(s, "no"):
 		return DisableImageGenerationOff, nil
-	case "true", "1", "on", "yes":
+	case strings.EqualFold(s, "true"), s == "1", strings.EqualFold(s, "on"), strings.EqualFold(s, "yes"):
 		return DisableImageGenerationAll, nil
-	case "chat":
+	case strings.EqualFold(s, "chat"):
 		return DisableImageGenerationChat, nil
 	default:
-		return DisableImageGenerationOff, fmt.Errorf("invalid disable-image-generation value %q (allowed: true, false, chat)", s)
+		return DisableImageGenerationOff, fmt.Errorf("invalid disable-image-generation value %q (allowed: true, false, chat)", strings.ToLower(s))
 	}
 }

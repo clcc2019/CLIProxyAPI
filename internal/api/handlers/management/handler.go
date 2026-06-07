@@ -218,9 +218,9 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		// Accept either Authorization: Bearer <key> or X-Management-Key
 		var provided string
 		if ah := c.GetHeader("Authorization"); ah != "" {
-			parts := strings.SplitN(ah, " ", 2)
-			if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-				provided = parts[1]
+			scheme, token, ok := strings.Cut(ah, " ")
+			if ok && strings.EqualFold(scheme, "bearer") {
+				provided = token
 			} else {
 				provided = ah
 			}
@@ -353,6 +353,9 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
+	}
+	if h.authManager != nil {
+		h.authManager.SetConfig(h.cfg)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true

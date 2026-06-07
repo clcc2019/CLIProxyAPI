@@ -23,6 +23,35 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestDefaultWebsocketOriginPort(t *testing.T) {
+	tests := []struct {
+		name   string
+		scheme string
+		want   string
+	}{
+		{name: "http", scheme: " HTTP ", want: "80"},
+		{name: "https", scheme: "\tHttps\r\n", want: "443"},
+		{name: "ws", scheme: "ws", want: ""},
+		{name: "empty", scheme: " ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := defaultWebsocketOriginPort(tt.scheme); got != tt.want {
+				t.Fatalf("defaultWebsocketOriginPort(%q) = %q, want %q", tt.scheme, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkDefaultWebsocketOriginPort(b *testing.B) {
+	for b.Loop() {
+		if got := defaultWebsocketOriginPort(" Https "); got != "443" {
+			b.Fatalf("defaultWebsocketOriginPort() = %q", got)
+		}
+	}
+}
+
 type websocketCaptureExecutor struct {
 	streamCalls int
 	payloads    [][]byte
@@ -1381,6 +1410,14 @@ func TestResponsesWebsocketOriginAllowed(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "same origin mixed case scheme",
+			host: "example.com:8443",
+			headers: http.Header{
+				"Origin": {"HtTpS://example.com:8443"},
+			},
+			want: true,
+		},
+		{
 			name: "spoofed forwarded host rejected",
 			host: "127.0.0.1:8080",
 			headers: http.Header{
@@ -1484,6 +1521,17 @@ func TestResponsesWebsocketOriginAllowed(t *testing.T) {
 				t.Fatalf("responsesWebsocketOriginAllowed() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func BenchmarkResponsesWebsocketOriginAllowed(b *testing.B) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	req.Host = "example.com:8443"
+	req.Header.Set("Origin", "HtTpS://example.com:8443")
+	for b.Loop() {
+		if !responsesWebsocketOriginAllowed(req) {
+			b.Fatal("expected same origin")
+		}
 	}
 }
 
@@ -2991,6 +3039,11 @@ func TestResponsesWebsocketPayloadShouldRetryFullTranscript(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "missing tool call mixed case",
+			payload: []byte(`{"type":"error","status":400,"error":{"message":"No Tool Call Found For Function Call Output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn.","param":"input","type":"invalid_request_error"}}`),
+			want:    true,
+		},
+		{
 			name:    "missing custom tool call",
 			payload: []byte(`{"type":"error","status":400,"error":{"message":"No tool call found for custom tool call output with call_id call_jzaeS5GDDushxTKTsXR9CTWL.","param":"input","type":"invalid_request_error"}}`),
 			want:    true,
@@ -3016,6 +3069,15 @@ func TestResponsesWebsocketPayloadShouldRetryFullTranscript(t *testing.T) {
 	}
 }
 
+func BenchmarkResponsesWebsocketPayloadShouldRetryFullTranscript(b *testing.B) {
+	payload := []byte(`{"type":"error","status":400,"error":{"message":"No Tool Call Found For Function Call Output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn.","param":"input","type":"invalid_request_error"}}`)
+	for b.Loop() {
+		if !responsesWebsocketPayloadShouldRetryFullTranscript(payload) {
+			b.Fatal("expected full transcript retry")
+		}
+	}
+}
+
 func TestResponsesWebsocketShouldRetryFullTranscriptPlainPreviousResponseError(t *testing.T) {
 	errMsg := &interfaces.ErrorMessage{
 		StatusCode: http.StatusBadRequest,
@@ -3023,6 +3085,28 @@ func TestResponsesWebsocketShouldRetryFullTranscriptPlainPreviousResponseError(t
 	}
 	if !responsesWebsocketShouldRetryFullTranscript(errMsg) {
 		t.Fatal("plain previous response not found error should retry full transcript")
+	}
+}
+
+func TestResponsesWebsocketShouldRetryFullTranscriptPlainMissingToolCallMixedCase(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New("HTTP 400: No Tool Call Found For Function Call Output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn."),
+	}
+	if !responsesWebsocketShouldRetryFullTranscript(errMsg) {
+		t.Fatal("plain missing tool-call error should retry full transcript")
+	}
+}
+
+func BenchmarkResponsesWebsocketShouldRetryFullTranscriptPlainMissingToolCall(b *testing.B) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New("HTTP 400: No Tool Call Found For Function Call Output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn."),
+	}
+	for b.Loop() {
+		if !responsesWebsocketShouldRetryFullTranscript(errMsg) {
+			b.Fatal("expected full transcript retry")
+		}
 	}
 }
 

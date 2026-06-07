@@ -1,12 +1,97 @@
 package management
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func codexUsageOptionsContext(target string) *gin.Context {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, target, nil)
+	return ctx
+}
+
+func TestParseCodexUsageRequestOptions(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		wantForce bool
+		wantTTL   time.Duration
+	}{
+		{name: "default", target: "/v0/management/auth-files/codex-usage", wantTTL: codexUsageCacheDefaultTTL},
+		{name: "force mixed case", target: "/v0/management/auth-files/codex-usage?force=YES", wantForce: true, wantTTL: codexUsageCacheDefaultTTL},
+		{name: "codex usage refresh mixed case", target: "/v0/management/auth-files/codex-usage?codexUsage=Fetch", wantForce: true, wantTTL: codexUsageCacheDefaultTTL},
+		{name: "zero ttl forces refresh", target: "/v0/management/auth-files/codex-usage?ttl=0", wantForce: true, wantTTL: codexUsageCacheDefaultTTL},
+		{name: "ttl capped", target: "/v0/management/auth-files/codex-usage?ttl=999", wantTTL: codexUsageCacheMaxTTL},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseCodexUsageRequestOptions(codexUsageOptionsContext(tt.target))
+			if got.force != tt.wantForce {
+				t.Fatalf("force = %t, want %t", got.force, tt.wantForce)
+			}
+			if got.ttl != tt.wantTTL {
+				t.Fatalf("ttl = %s, want %s", got.ttl, tt.wantTTL)
+			}
+		})
+	}
+}
+
+func TestCodexUsageQueryValueMatchers(t *testing.T) {
+	if !isTruthyQueryValue(" On ") {
+		t.Fatalf("isTruthyQueryValue(On) = false, want true")
+	}
+	if isTruthyQueryValue("off") {
+		t.Fatalf("isTruthyQueryValue(off) = true, want false")
+	}
+	if !isRefreshQueryValue("\tRefresh\r\n") {
+		t.Fatalf("isRefreshQueryValue(Refresh) = false, want true")
+	}
+	if isRefreshQueryValue("skip") {
+		t.Fatalf("isRefreshQueryValue(skip) = true, want false")
+	}
+	if !isSkipQueryValue(" NO ") {
+		t.Fatalf("isSkipQueryValue(NO) = false, want true")
+	}
+}
+
+func TestCodexSubscriptionListModeFromRequest(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		want   codexSubscriptionListMode
+	}{
+		{name: "default", target: "/v0/management/auth-files", want: codexSubscriptionListCache},
+		{name: "refresh mixed case", target: "/v0/management/auth-files?codex_subscription=Fetch", want: codexSubscriptionListRefresh},
+		{name: "skip mixed case", target: "/v0/management/auth-files?codexSubscription=OFF", want: codexSubscriptionListSkip},
+		{name: "unknown", target: "/v0/management/auth-files?codex_subscription=maybe", want: codexSubscriptionListCache},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := codexSubscriptionListModeFromRequest(codexUsageOptionsContext(tt.target))
+			if got != tt.want {
+				t.Fatalf("codexSubscriptionListModeFromRequest() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkRefreshQueryValue(b *testing.B) {
+	for b.Loop() {
+		if !isRefreshQueryValue(" Fetch ") {
+			b.Fatal("expected refresh query value")
+		}
+	}
+}
 
 func TestCodexUsageCacheLoadDoesNotMutateEntry(t *testing.T) {
 	now := time.Now()

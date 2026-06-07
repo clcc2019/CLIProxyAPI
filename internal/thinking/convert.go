@@ -6,21 +6,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
-// levelToBudgetMap defines the standard Level → Budget mapping.
-// All keys are lowercase; lookups should use strings.ToLower.
-var levelToBudgetMap = map[string]int{
-	"none":    0,
-	"auto":    -1,
-	"minimal": 512,
-	"low":     1024,
-	"medium":  8192,
-	"high":    24576,
-	"xhigh":   32768,
-	// "max" is used by Claude adaptive thinking effort. We map it to a large budget
-	// and rely on per-model clamping when converting to budget-only providers.
-	"max": 128000,
-}
-
 // ConvertLevelToBudget converts a thinking level to a budget value.
 //
 // This is a semantic conversion that maps discrete levels to numeric budgets.
@@ -40,8 +25,28 @@ var levelToBudgetMap = map[string]int{
 //   - budget: The converted budget value
 //   - ok: true if level is valid, false otherwise
 func ConvertLevelToBudget(level string) (int, bool) {
-	budget, ok := levelToBudgetMap[strings.ToLower(level)]
-	return budget, ok
+	switch {
+	case strings.EqualFold(level, "none"):
+		return 0, true
+	case strings.EqualFold(level, "auto"):
+		return -1, true
+	case strings.EqualFold(level, "minimal"):
+		return 512, true
+	case strings.EqualFold(level, "low"):
+		return 1024, true
+	case strings.EqualFold(level, "medium"):
+		return 8192, true
+	case strings.EqualFold(level, "high"):
+		return 24576, true
+	case strings.EqualFold(level, "xhigh"):
+		return 32768, true
+	case strings.EqualFold(level, "max"):
+		// "max" is used by Claude adaptive thinking effort. We map it to a large budget
+		// and rely on per-model clamping when converting to budget-only providers.
+		return 128000, true
+	default:
+		return 0, false
+	}
 }
 
 // BudgetThreshold constants define the upper bounds for each thinking level.
@@ -113,20 +118,24 @@ func HasLevel(levels []string, target string) bool {
 // supportsMax indicates whether the target model supports "max" effort.
 // Returns the mapped effort and true if the level is valid, or ("", false) otherwise.
 func MapToClaudeEffort(level string, supportsMax bool) (string, bool) {
-	level = strings.ToLower(strings.TrimSpace(level))
-	switch level {
-	case "":
+	level = strings.TrimSpace(level)
+	switch {
+	case level == "":
 		return "", false
-	case "minimal":
+	case strings.EqualFold(level, "minimal"):
 		return "low", true
-	case "low", "medium", "high":
-		return level, true
-	case "xhigh", "max":
+	case strings.EqualFold(level, "low"):
+		return "low", true
+	case strings.EqualFold(level, "medium"):
+		return "medium", true
+	case strings.EqualFold(level, "high"):
+		return "high", true
+	case strings.EqualFold(level, "xhigh") || strings.EqualFold(level, "max"):
 		if supportsMax {
 			return "max", true
 		}
 		return "high", true
-	case "auto":
+	case strings.EqualFold(level, "auto"):
 		return "high", true
 	default:
 		return "", false

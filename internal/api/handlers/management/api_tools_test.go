@@ -97,9 +97,25 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 			wantProxy: "http://claude-proxy.example.com:8080",
 		},
 		{
+			name: "claude mixed case",
+			auth: &coreauth.Auth{
+				Provider:   " Claude ",
+				Attributes: map[string]string{"api_key": "claude-key"},
+			},
+			wantProxy: "http://claude-proxy.example.com:8080",
+		},
+		{
 			name: "codex",
 			auth: &coreauth.Auth{
 				Provider:   "codex",
+				Attributes: map[string]string{"api_key": "codex-key"},
+			},
+			wantProxy: "http://codex-proxy.example.com:8080",
+		},
+		{
+			name: "codex mixed case",
+			auth: &coreauth.Auth{
+				Provider:   " CODEX ",
 				Attributes: map[string]string{"api_key": "codex-key"},
 			},
 			wantProxy: "http://codex-proxy.example.com:8080",
@@ -142,6 +158,25 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				t.Fatalf("proxy URL = %v, want %s", proxyURL, tc.wantProxy)
 			}
 		})
+	}
+}
+
+func BenchmarkProxyURLFromAPIKeyConfig(b *testing.B) {
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:   "claude-key",
+			ProxyURL: "http://claude-proxy.example.com:8080",
+		}},
+	}
+	auth := &coreauth.Auth{
+		Provider:   " Claude ",
+		Attributes: map[string]string{"api_key": "claude-key"},
+	}
+
+	for b.Loop() {
+		if got := proxyURLFromAPIKeyConfig(cfg, auth); got != "http://claude-proxy.example.com:8080" {
+			b.Fatalf("proxyURLFromAPIKeyConfig() = %q", got)
+		}
 	}
 }
 

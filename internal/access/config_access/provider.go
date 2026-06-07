@@ -121,14 +121,14 @@ func extractBearerToken(header string) string {
 	if header == "" {
 		return ""
 	}
-	parts := strings.SplitN(header, " ", 2)
-	if len(parts) != 2 {
+	scheme, token, ok := strings.Cut(header, " ")
+	if !ok {
 		return header
 	}
-	if strings.ToLower(parts[0]) != "bearer" {
+	if !strings.EqualFold(scheme, "bearer") {
 		return header
 	}
-	return strings.TrimSpace(parts[1])
+	return strings.TrimSpace(token)
 }
 
 func normalizeEntries(keys internalconfig.ClientAPIKeys) internalconfig.ClientAPIKeys {

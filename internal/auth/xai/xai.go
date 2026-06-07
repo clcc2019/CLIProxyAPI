@@ -289,8 +289,13 @@ func (e *tokenRequestError) IsPermanentAuthError() bool {
 	if e == nil {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(e.oauthError)) {
-	case "invalid_grant", "invalid_client", "unauthorized_client":
+	oauthError := strings.TrimSpace(e.oauthError)
+	switch {
+	case strings.EqualFold(oauthError, "invalid_grant"):
+		return true
+	case strings.EqualFold(oauthError, "invalid_client"):
+		return true
+	case strings.EqualFold(oauthError, "unauthorized_client"):
 		return true
 	}
 	return e.statusCode == http.StatusUnauthorized

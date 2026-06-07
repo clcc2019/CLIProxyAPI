@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -153,6 +154,17 @@ func TestImagesGenerationsUsesOpenAICompatibleImageModelNatively(t *testing.T) {
 	if isSupportedImagesModel("codex/grok-imagine-image") {
 		t.Fatal("expected codex/grok-imagine-image to be rejected")
 	}
+	if !isSupportedImagesModel(" XAI/Grok-Imagine-Image ") {
+		t.Fatal("expected mixed-case XAI image model to be supported")
+	}
+}
+
+func BenchmarkIsXAIImagesModel(b *testing.B) {
+	for b.Loop() {
+		if !isXAIImagesModel(" XAI/Grok-Imagine-Image ") {
+			b.Fatal("expected XAI image model")
+		}
+	}
 }
 
 func TestImagesModelValidationAllowsOpenAICompatImageModels(t *testing.T) {
@@ -196,6 +208,41 @@ func TestBuildXAIImagesGenerationsRequest(t *testing.T) {
 	}
 	if got := gjson.GetBytes(req, "n").Int(); got != 2 {
 		t.Fatalf("n = %d, want 2", got)
+	}
+}
+
+func TestXAIImagesOptionNormalizers(t *testing.T) {
+	if got := xaiImagesAspectRatio(" Landscape ", "fallback"); got != "16:9" {
+		t.Fatalf("xaiImagesAspectRatio() = %q, want 16:9", got)
+	}
+	if got := xaiImagesAspectRatio("3:4", "fallback"); got != "3:4" {
+		t.Fatalf("xaiImagesAspectRatio(3:4) = %q, want 3:4", got)
+	}
+	if got := xaiImagesAspectRatio("wide", "fallback"); got != "fallback" {
+		t.Fatalf("xaiImagesAspectRatio(wide) = %q, want fallback", got)
+	}
+	if got := xaiImagesAspectRatioFromSize(" 2048x2048 ", "fallback"); got != "1:1" {
+		t.Fatalf("xaiImagesAspectRatioFromSize(2048x2048) = %q, want 1:1", got)
+	}
+	if got := xaiImagesAspectRatioFromSize("1536x1024", "fallback"); got != "3:2" {
+		t.Fatalf("xaiImagesAspectRatioFromSize(1536x1024) = %q, want 3:2", got)
+	}
+	if got := xaiImagesResolution("\t2K\r\n", "1024x1024", "fallback"); got != "2k" {
+		t.Fatalf("xaiImagesResolution(2K) = %q, want 2k", got)
+	}
+	if got := xaiImagesResolution("", "2048x2048", "fallback"); got != "2k" {
+		t.Fatalf("xaiImagesResolution(2048 size) = %q, want 2k", got)
+	}
+	if got := xaiImagesResolution("4k", "1024x1024", "fallback"); got != "fallback" {
+		t.Fatalf("xaiImagesResolution(4k) = %q, want fallback", got)
+	}
+}
+
+func BenchmarkXAIImagesResolution(b *testing.B) {
+	for b.Loop() {
+		if got := xaiImagesResolution(" 2K ", "1024x1024", "fallback"); got != "2k" {
+			b.Fatalf("xaiImagesResolution() = %q", got)
+		}
 	}
 }
 
@@ -580,6 +627,174 @@ func TestImagesEndpointsReturnNotFoundWhenImageGenerationDisabled(t *testing.T) 
 		resp := performImagesEndpointRequest(t, tc.path, tc.contentType, strings.NewReader(tc.body), tc.handler)
 		if resp.Code != http.StatusNotFound {
 			t.Fatalf("%s: status = %d, body = %s", tc.name, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestImagesEndpointContentTypeRouting(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	handler := NewOpenAIAPIHandler(base)
+
+	resp := performImagesEndpointRequest(t, "/v1/images/edits", " Application/JSON; charset=utf-8 ", strings.NewReader(`{}`), handler.ImagesEdits)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("json status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "prompt is required") {
+		t.Fatalf("json body = %s, want JSON edit validation error", resp.Body.String())
+	}
+
+	resp = performImagesEndpointRequest(t, "/v1/images/edits", " Text/Plain ", strings.NewReader(`{}`), handler.ImagesEdits)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `unsupported Content-Type \"text/plain\"`) {
+		t.Fatalf("unsupported body = %s, want normalized content type", resp.Body.String())
+	}
+}
+
+func TestHasContentTypePrefix(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		prefix      string
+		want        bool
+	}{
+		{name: "exact", contentType: "application/json", prefix: "application/json", want: true},
+		{name: "mixed case with parameters", contentType: "Application/JSON; charset=utf-8", prefix: "application/json", want: true},
+		{name: "multipart mixed case", contentType: "Multipart/Form-Data; boundary=abc", prefix: "multipart/form-data", want: true},
+		{name: "short", contentType: "json", prefix: "application/json", want: false},
+		{name: "different prefix", contentType: "text/plain", prefix: "application/json", want: false},
+	}
+
+	for i := range tests {
+		if got := hasContentTypePrefix(tests[i].contentType, tests[i].prefix); got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func TestNormalizeImagesResponseFormat(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseFormat string
+		want           string
+	}{
+		{name: "empty defaults to b64", responseFormat: "", want: "b64_json"},
+		{name: "mixed case url", responseFormat: " URL ", want: "url"},
+		{name: "b64 stays default", responseFormat: "B64_JSON", want: "b64_json"},
+		{name: "unknown defaults to b64", responseFormat: "json", want: "b64_json"},
+	}
+
+	for i := range tests {
+		if got := normalizeImagesResponseFormat(tests[i].responseFormat); got != tests[i].want {
+			t.Fatalf("%s: got %q, want %q", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func TestParseBoolField(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fallback bool
+		want     bool
+	}{
+		{name: "empty fallback true", raw: "", fallback: true, want: true},
+		{name: "mixed true", raw: " TrUe ", fallback: false, want: true},
+		{name: "on", raw: "ON", fallback: false, want: true},
+		{name: "one", raw: "1", fallback: false, want: true},
+		{name: "mixed false", raw: "\tFaLsE\n", fallback: true, want: false},
+		{name: "off", raw: "OFF", fallback: true, want: false},
+		{name: "zero", raw: "0", fallback: true, want: false},
+		{name: "unknown fallback", raw: "maybe", fallback: true, want: true},
+	}
+
+	for i := range tests {
+		if got := parseBoolField(tests[i].raw, tests[i].fallback); got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func TestImagesEndpointAltMatchesMixedCasePath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/Images/Edits", nil)
+
+	if got := imagesEndpointAlt(ginCtx); got != "images/edits" {
+		t.Fatalf("imagesEndpointAlt() = %q, want images/edits", got)
+	}
+}
+
+func TestImagesEndpointPathContainsASCIIFold(t *testing.T) {
+	if !asciifold.Contains("/v1/Images/Variations", "/images/variations") {
+		t.Fatal("expected mixed-case path to match")
+	}
+	if asciifold.Contains("/v1/images", "/images/edits") {
+		t.Fatal("expected missing path segment not to match")
+	}
+}
+
+func TestMimeTypeFromOutputFormat(t *testing.T) {
+	tests := []struct {
+		name         string
+		outputFormat string
+		want         string
+	}{
+		{name: "empty defaults to png", outputFormat: "", want: "image/png"},
+		{name: "mixed case png", outputFormat: " PNG ", want: "image/png"},
+		{name: "jpg", outputFormat: "JPG", want: "image/jpeg"},
+		{name: "jpeg", outputFormat: "\tJpeg\r\n", want: "image/jpeg"},
+		{name: "webp", outputFormat: "WebP", want: "image/webp"},
+		{name: "mime pass through", outputFormat: "image/avif", want: "image/avif"},
+		{name: "unknown defaults to png", outputFormat: "bmp", want: "image/png"},
+	}
+
+	for i := range tests {
+		if got := mimeTypeFromOutputFormat(tests[i].outputFormat); got != tests[i].want {
+			t.Fatalf("%s: got %q, want %q", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkMimeTypeFromOutputFormat(b *testing.B) {
+	for b.Loop() {
+		if got := mimeTypeFromOutputFormat(" WebP "); got != "image/webp" {
+			b.Fatalf("mimeTypeFromOutputFormat() = %q", got)
+		}
+	}
+}
+
+func BenchmarkHasContentTypePrefix(b *testing.B) {
+	contentType := "Application/JSON; charset=utf-8"
+	for b.Loop() {
+		if !hasContentTypePrefix(contentType, "application/json") {
+			b.Fatal("expected JSON content type")
+		}
+	}
+}
+
+func BenchmarkNormalizeImagesResponseFormat(b *testing.B) {
+	for b.Loop() {
+		if got := normalizeImagesResponseFormat(" URL "); got != "url" {
+			b.Fatalf("normalizeImagesResponseFormat() = %q", got)
+		}
+	}
+}
+
+func BenchmarkParseBoolField(b *testing.B) {
+	for b.Loop() {
+		if !parseBoolField(" TrUe ", false) {
+			b.Fatal("expected true")
+		}
+	}
+}
+
+func BenchmarkContainsASCIIFold(b *testing.B) {
+	for b.Loop() {
+		if !asciifold.Contains("/v1/Images/Variations", "/images/variations") {
+			b.Fatal("expected path match")
 		}
 	}
 }

@@ -39,7 +39,7 @@ func maybeEnableCodexRequestCompressionWithConfigForURL(req *http.Request, auth 
 	if encoding := strings.TrimSpace(req.Header.Get("Content-Encoding")); encoding != "" {
 		return nil
 	}
-	if contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type"))); !strings.HasPrefix(contentType, "application/json") {
+	if !codexRequestContentTypeIsJSON(req.Header.Get("Content-Type")) {
 		return nil
 	}
 
@@ -71,6 +71,15 @@ func maybeEnableCodexRequestCompressionWithConfigForURL(req *http.Request, auth 
 	req.Header.Set("Content-Encoding", "zstd")
 	codexResetRequestBody(req, compressed)
 	return nil
+}
+
+func codexRequestContentTypeIsJSON(contentType string) bool {
+	const prefix = "application/json"
+	contentType = strings.TrimSpace(contentType)
+	if len(contentType) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(contentType[:len(prefix)], prefix)
 }
 
 func codexRequestCompressionSkipsTarget(req *http.Request, auth *cliproxyauth.Auth) bool {
@@ -112,11 +121,22 @@ func codexRequestCompressionEnabled(cfg *config.Config) bool {
 		return *cfg.EnableRequestCompression
 	}
 
-	value := strings.TrimSpace(os.Getenv(codexCompressionEnv))
-	switch strings.ToLower(value) {
-	case "", "1", "true", "yes", "on":
+	return codexRequestCompressionEnvEnabled(os.Getenv(codexCompressionEnv))
+}
+
+func codexRequestCompressionEnvEnabled(value string) bool {
+	value = strings.TrimSpace(value)
+	switch {
+	case value == "",
+		value == "1",
+		strings.EqualFold(value, "true"),
+		strings.EqualFold(value, "yes"),
+		strings.EqualFold(value, "on"):
 		return true
-	case "0", "false", "no", "off":
+	case value == "0",
+		strings.EqualFold(value, "false"),
+		strings.EqualFold(value, "no"),
+		strings.EqualFold(value, "off"):
 		return false
 	default:
 		return true

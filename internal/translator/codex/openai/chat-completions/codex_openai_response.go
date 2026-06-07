@@ -731,16 +731,17 @@ func mimeTypeFromCodexOutputFormat(outputFormat string) string {
 	if strings.Contains(outputFormat, "/") {
 		return outputFormat
 	}
-	switch strings.ToLower(outputFormat) {
-	case "png":
-		return "image/png"
-	case "jpg", "jpeg":
-		return "image/jpeg"
-	case "webp":
-		return "image/webp"
-	case "gif":
-		return "image/gif"
-	default:
+	if strings.EqualFold(outputFormat, "png") {
 		return "image/png"
 	}
+	if strings.EqualFold(outputFormat, "jpg") || strings.EqualFold(outputFormat, "jpeg") {
+		return "image/jpeg"
+	}
+	if strings.EqualFold(outputFormat, "webp") {
+		return "image/webp"
+	}
+	if strings.EqualFold(outputFormat, "gif") {
+		return "image/gif"
+	}
+	return "image/png"
 }

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -57,10 +58,11 @@ func codexWebsocketConnectionLimitReached(payload []byte) bool {
 	if len(payload) == 0 {
 		return false
 	}
-	for _, path := range []string{"error.code", "code"} {
-		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, path).String()), codexWebsocketConnectionLimitReachedCode) {
-			return true
-		}
+	if strings.EqualFold(strings.TrimSpace(codexStatusResultString(gjson.GetBytes(payload, "error.code"))), codexWebsocketConnectionLimitReachedCode) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(codexStatusResultString(gjson.GetBytes(payload, "code"))), codexWebsocketConnectionLimitReachedCode) {
+		return true
 	}
 	return false
 }
@@ -69,44 +71,59 @@ func codexWebsocketPreviousResponseNotFound(payload []byte) bool {
 	if len(payload) == 0 {
 		return false
 	}
-	for _, path := range []string{"error.code", "code"} {
-		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, path).String()), codexPreviousResponseNotFoundCode) {
-			return true
-		}
-	}
-	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "error.param").String()), "previous_response_id") {
+	if strings.EqualFold(strings.TrimSpace(codexStatusResultString(gjson.GetBytes(payload, "error.code"))), codexPreviousResponseNotFoundCode) {
 		return true
 	}
-	for _, path := range []string{"error.message", "message", "error"} {
-		if codexPreviousResponseNotFoundText(gjson.GetBytes(payload, path).String()) {
-			return true
-		}
+	if strings.EqualFold(strings.TrimSpace(codexStatusResultString(gjson.GetBytes(payload, "code"))), codexPreviousResponseNotFoundCode) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(codexStatusResultString(gjson.GetBytes(payload, "error.param"))), "previous_response_id") {
+		return true
+	}
+	if codexPreviousResponseNotFoundText(codexStatusResultString(gjson.GetBytes(payload, "error.message"))) {
+		return true
+	}
+	if codexPreviousResponseNotFoundText(codexStatusResultString(gjson.GetBytes(payload, "message"))) {
+		return true
+	}
+	if codexPreviousResponseNotFoundText(codexStatusResultString(gjson.GetBytes(payload, "error"))) {
+		return true
 	}
 	return false
 }
 
 func codexPreviousResponseNotFoundText(text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
-	if lower == "" || !strings.Contains(lower, "not found") {
+	text = strings.TrimSpace(text)
+	if text == "" || !asciifold.Contains(text, "not found") {
 		return false
 	}
-	if strings.Contains(lower, "previous_response_id") {
+	if asciifold.Contains(text, "previous_response_id") {
 		return true
 	}
-	return strings.Contains(lower, "previous response")
+	return asciifold.Contains(text, "previous response")
 }
 
 func codexWebsocketNoToolCallFoundForFunctionOutput(payload []byte) bool {
 	if len(payload) == 0 {
 		return false
 	}
-	for _, path := range []string{"error.message", "message", "error"} {
-		message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, path).String()))
-		if strings.Contains(message, codexNoToolCallFoundMessage) && strings.Contains(message, "call output") {
-			return true
-		}
+	if codexWebsocketNoToolCallFoundText(codexStatusResultString(gjson.GetBytes(payload, "error.message"))) {
+		return true
+	}
+	if codexWebsocketNoToolCallFoundText(codexStatusResultString(gjson.GetBytes(payload, "message"))) {
+		return true
+	}
+	if codexWebsocketNoToolCallFoundText(codexStatusResultString(gjson.GetBytes(payload, "error"))) {
+		return true
 	}
 	return false
+}
+
+func codexWebsocketNoToolCallFoundText(text string) bool {
+	text = strings.TrimSpace(text)
+	return text != "" &&
+		asciifold.Contains(text, codexNoToolCallFoundMessage) &&
+		asciifold.Contains(text, "call output")
 }
 
 // normalizeCodexWebsocketErrorBody canonicalises the heterogeneous shapes

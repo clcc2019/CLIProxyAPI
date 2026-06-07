@@ -38,6 +38,7 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 		"xai/grok-imagine-video",
 		"x-ai/grok-imagine-video",
 		"grok/grok-imagine-video",
+		" XAI/Grok-Imagine-Video ",
 		"grok-imagine-video-1.5-preview",
 		"xai/grok-imagine-video-1.5-preview",
 		"x-ai/grok-imagine-video-1.5-preview",
@@ -55,6 +56,14 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 	}
 	if isSupportedVideosModel("codex/grok-imagine-video-1.5-preview") {
 		t.Fatal("expected codex/grok-imagine-video-1.5-preview to be rejected")
+	}
+}
+
+func BenchmarkIsXAIVideosModel(b *testing.B) {
+	for b.Loop() {
+		if !isXAIVideosModel(" XAI/Grok-Imagine-Video ") {
+			b.Fatal("expected XAI video model")
+		}
 	}
 }
 
@@ -182,6 +191,44 @@ func TestBuildVideosRetrieveAPIResponseFromXAI(t *testing.T) {
 	}
 }
 
+func TestXAIVideosOptionNormalizers(t *testing.T) {
+	if got := xaiVideosAspectRatio(" Landscape ", "fallback"); got != "16:9" {
+		t.Fatalf("xaiVideosAspectRatio() = %q, want 16:9", got)
+	}
+	if got := xaiVideosAspectRatio("3:4", "fallback"); got != "3:4" {
+		t.Fatalf("xaiVideosAspectRatio(3:4) = %q, want 3:4", got)
+	}
+	if got := xaiVideosAspectRatio("wide", "fallback"); got != "fallback" {
+		t.Fatalf("xaiVideosAspectRatio(wide) = %q, want fallback", got)
+	}
+	if got := xaiVideosResolution("\t720P\r\n", "fallback"); got != "720p" {
+		t.Fatalf("xaiVideosResolution() = %q, want 720p", got)
+	}
+	if got := xaiVideosResolution("1080p", "fallback"); got != "fallback" {
+		t.Fatalf("xaiVideosResolution(1080p) = %q, want fallback", got)
+	}
+}
+
+func TestOpenAIVideoStatusAliases(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   string
+	}{
+		{name: "queued", status: " Pending ", want: "queued"},
+		{name: "in progress", status: "RUNNING", want: "in_progress"},
+		{name: "completed", status: "\tsucceeded\r\n", want: "completed"},
+		{name: "failed", status: "Cancelled", want: "failed"},
+		{name: "unknown", status: "waiting", want: ""},
+	}
+
+	for i := range tests {
+		if got := openAIVideoStatus(tests[i].status); got != tests[i].want {
+			t.Fatalf("%s: openAIVideoStatus(%q) = %q, want %q", tests[i].name, tests[i].status, got, tests[i].want)
+		}
+	}
+}
+
 func TestVideosCreateRejectsUnsupportedModel(t *testing.T) {
 	handler := &OpenAIAPIHandler{}
 	body := strings.NewReader(`{"model":"sora-2","prompt":"make a video"}`)
@@ -239,6 +286,36 @@ func TestVideosCreateFormRequest(t *testing.T) {
 	}
 }
 
+func TestReadVideosCreateRequestMixedCaseFormContentType(t *testing.T) {
+	rawJSON, err := readVideosCreateRequestFromContext("Application/X-WWW-Form-Urlencoded", "model=grok-imagine-video&prompt=make+a+video")
+	if err != nil {
+		t.Fatalf("readVideosCreateRequestFromContext() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(rawJSON, "prompt").String(); got != "make a video" {
+		t.Fatalf("prompt = %q", got)
+	}
+}
+
+func TestIsVideosCreateFormContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		want        bool
+	}{
+		{name: "multipart", contentType: "multipart/form-data", want: true},
+		{name: "mixed case urlencoded", contentType: "Application/X-WWW-Form-Urlencoded", want: true},
+		{name: "json", contentType: "application/json", want: false},
+		{name: "empty", contentType: "", want: false},
+	}
+
+	for i := range tests {
+		if got := isVideosCreateFormContentType(tests[i].contentType); got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
 func videosCreateRequestFromFormContext(body string) ([]byte, error) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -252,4 +329,35 @@ func videosCreateRequestFromFormContext(body string) ([]byte, error) {
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 	return rawJSON, err
+}
+
+func readVideosCreateRequestFromContext(contentType, body string) ([]byte, error) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	var rawJSON []byte
+	var err error
+	router.POST(videosPath, func(c *gin.Context) {
+		rawJSON, err = readVideosCreateRequest(c)
+	})
+	req := httptest.NewRequest(http.MethodPost, videosPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	return rawJSON, err
+}
+
+func BenchmarkIsVideosCreateFormContentType(b *testing.B) {
+	for b.Loop() {
+		if !isVideosCreateFormContentType("Application/X-WWW-Form-Urlencoded") {
+			b.Fatal("expected form content type")
+		}
+	}
+}
+
+func BenchmarkOpenAIVideoStatus(b *testing.B) {
+	for b.Loop() {
+		if got := openAIVideoStatus(" Succeeded "); got != "completed" {
+			b.Fatalf("openAIVideoStatus() = %q", got)
+		}
+	}
 }

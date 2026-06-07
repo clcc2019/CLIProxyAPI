@@ -487,12 +487,13 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 		return resolveOpenAICompatAPIKeyProxyURL(cfg, auth, strings.TrimSpace(authAccount), providerKey, compatName)
 	}
 
-	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
-	case "claude":
+	provider := strings.TrimSpace(auth.Provider)
+	switch {
+	case strings.EqualFold(provider, "claude"):
 		if entry := resolveAPIKeyConfig(cfg.ClaudeKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
-	case "codex":
+	case strings.EqualFold(provider, "codex"):
 		if entry := resolveAPIKeyConfig(cfg.CodexKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}

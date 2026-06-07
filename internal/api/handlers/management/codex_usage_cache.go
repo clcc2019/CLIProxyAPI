@@ -91,12 +91,10 @@ func parseCodexUsageRequestOptions(c *gin.Context) codexUsageRequestOptions {
 	if c == nil {
 		return opts
 	}
-	switch strings.ToLower(strings.TrimSpace(c.Query("force"))) {
-	case "1", "true", "yes", "on":
+	if isTruthyQueryValue(c.Query("force")) {
 		opts.force = true
 	}
-	switch strings.ToLower(strings.TrimSpace(firstNonEmptyQueryValue(c, "codex_usage", "codexUsage"))) {
-	case "refresh", "force", "fetch", "1", "true", "yes", "on":
+	if isRefreshQueryValue(firstNonEmptyQueryValue(c, "codex_usage", "codexUsage")) {
 		opts.force = true
 	}
 	if raw := strings.TrimSpace(c.Query("ttl")); raw != "" {

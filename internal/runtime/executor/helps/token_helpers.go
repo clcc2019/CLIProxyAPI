@@ -10,31 +10,38 @@ import (
 
 // TokenizerForModel returns a tokenizer codec suitable for an OpenAI-style model id.
 func TokenizerForModel(model string) (tokenizer.Codec, error) {
-	sanitized := strings.ToLower(strings.TrimSpace(model))
+	sanitized := strings.TrimSpace(model)
 	switch {
 	case sanitized == "":
 		return tokenizer.Get(tokenizer.Cl100kBase)
-	case strings.HasPrefix(sanitized, "gpt-5"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "gpt-5"):
 		return tokenizer.ForModel(tokenizer.GPT5)
-	case strings.HasPrefix(sanitized, "gpt-5.1"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "gpt-5.1"):
 		return tokenizer.ForModel(tokenizer.GPT5)
-	case strings.HasPrefix(sanitized, "gpt-4.1"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "gpt-4.1"):
 		return tokenizer.ForModel(tokenizer.GPT41)
-	case strings.HasPrefix(sanitized, "gpt-4o"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "gpt-4o"):
 		return tokenizer.ForModel(tokenizer.GPT4o)
-	case strings.HasPrefix(sanitized, "gpt-4"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "gpt-4"):
 		return tokenizer.ForModel(tokenizer.GPT4)
-	case strings.HasPrefix(sanitized, "gpt-3.5"), strings.HasPrefix(sanitized, "gpt-3"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "gpt-3.5"), hasOpenAITokenizerModelPrefix(sanitized, "gpt-3"):
 		return tokenizer.ForModel(tokenizer.GPT35Turbo)
-	case strings.HasPrefix(sanitized, "o1"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "o1"):
 		return tokenizer.ForModel(tokenizer.O1)
-	case strings.HasPrefix(sanitized, "o3"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "o3"):
 		return tokenizer.ForModel(tokenizer.O3)
-	case strings.HasPrefix(sanitized, "o4"):
+	case hasOpenAITokenizerModelPrefix(sanitized, "o4"):
 		return tokenizer.ForModel(tokenizer.O4Mini)
 	default:
 		return tokenizer.Get(tokenizer.O200kBase)
 	}
+}
+
+func hasOpenAITokenizerModelPrefix(model, prefix string) bool {
+	if len(model) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(model[:len(prefix)], prefix)
 }
 
 // CountOpenAIChatTokens approximates prompt tokens for OpenAI chat completions payloads.

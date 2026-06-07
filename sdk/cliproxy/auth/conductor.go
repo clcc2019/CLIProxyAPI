@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -251,6 +252,7 @@ const (
 	proxyPoolAssignedAttribute  = "proxy_pool_assigned"
 	proxyPoolAssignedValue      = "true"
 	defaultProxyFailureCooldown = 10 * time.Minute
+	apiKeyPoolModeRetryCount    = 3
 )
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -1067,6 +1069,59 @@ func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedMode
 	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
 }
 
+func (m *Manager) apiKeyPoolModeRetries(auth *Auth) int {
+	if m == nil || auth == nil {
+		return 0
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return 0
+	}
+
+	if isOpenAICompatAPIKeyAuth(auth) {
+		providerKey := ""
+		compatName := ""
+		if auth.Attributes != nil {
+			providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+			compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+		}
+		entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
+		if entry != nil && entry.PoolMode {
+			return apiKeyPoolModeRetryCount
+		}
+	}
+
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && isAPIKeyAuth(auth) {
+		entry := resolveCodexAPIKeyConfig(cfg, auth)
+		if entry != nil && entry.PoolMode {
+			return apiKeyPoolModeRetryCount
+		}
+	}
+
+	return 0
+}
+
+type poolModeRetryDecision uint8
+
+const (
+	poolModeRetryStop poolModeRetryDecision = iota
+	poolModeRetryRetry
+	poolModeRetryInvalidRequest
+)
+
+func poolModeRetryDecisionForError(err error, retryAttempt, poolModeRetries int) poolModeRetryDecision {
+	if err == nil {
+		return poolModeRetryStop
+	}
+	if isRequestInvalidError(err) {
+		return poolModeRetryInvalidRequest
+	}
+	if retryAttempt < poolModeRetries {
+		return poolModeRetryRetry
+	}
+	return poolModeRetryStop
+}
+
 func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
@@ -1165,12 +1220,10 @@ func cloneAuthForExecution(provider string, auth *Auth) *Auth {
 	if auth == nil {
 		return nil
 	}
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "codex":
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
 		return auth.CloneShallow()
-	default:
-		return auth.cloneForExecution()
 	}
+	return auth.cloneForExecution()
 }
 
 func (m *Manager) clonePickedAuthForExecution(provider string, selected *Auth) (auth *Auth, stale bool) {
@@ -1476,101 +1529,113 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	ctx = WithAuthUpdateCallback(ctx, m.handleExecutionAuthUpdate)
 	ctx = WithRefreshCoordinator(ctx, m.coordinatedRefreshForRequest)
 	var lastErr error
+	poolModeRetries := m.apiKeyPoolModeRetries(auth)
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
-		if errStream != nil {
-			if errCtx := ctx.Err(); errCtx != nil {
-				return nil, errCtx
-			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
-			applyResultError(&result, errStream)
-			result.RetryAfter = retryAfterFromError(errStream)
-			m.MarkResult(ctx, result)
-			clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errStream)
-			if isRequestInvalidError(errStream) {
-				return nil, errStream
-			}
-			if result.AuthScoped || isAuthWideResultError(result.Error) {
-				return nil, errStream
-			}
-			lastErr = errStream
-			continue
-		}
-		if streamResult == nil {
-			invalidErr := invalidStreamResultError("upstream executor returned nil stream result")
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: invalidErr}
-			m.MarkResult(ctx, result)
-			if idx < len(execModels)-1 {
-				lastErr = invalidErr
-				continue
-			}
-			return nil, newStreamBootstrapError(invalidErr, nil)
-		}
-		if streamResult.Chunks == nil {
-			invalidErr := invalidStreamResultError("upstream executor returned stream result without chunks")
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: invalidErr}
-			m.MarkResult(ctx, result)
-			if idx < len(execModels)-1 {
-				lastErr = invalidErr
-				continue
-			}
-			return nil, newStreamBootstrapError(invalidErr, streamResult.Headers)
-		}
-
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
-		if bootstrapErr != nil {
-			if errCtx := ctx.Err(); errCtx != nil {
-				discardStreamChunks(streamResult.Chunks)
-				return nil, errCtx
-			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
-			applyResultError(&result, bootstrapErr)
-			result.RetryAfter = retryAfterFromError(bootstrapErr)
-			if isRequestInvalidError(bootstrapErr) {
-				m.MarkResult(ctx, result)
-				discardStreamChunks(streamResult.Chunks)
-				return nil, bootstrapErr
-			}
-			if result.AuthScoped || isAuthWideResultError(result.Error) {
-				m.MarkResult(ctx, result)
-				discardStreamChunks(streamResult.Chunks)
-				if statusCodeFromResult(result.Error) == http.StatusBadRequest {
-					return nil, bootstrapErr
+		for retryAttempt := 0; ; retryAttempt++ {
+			streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+			if errStream != nil {
+				if errCtx := ctx.Err(); errCtx != nil {
+					return nil, errCtx
 				}
-				return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
+				applyResultError(&result, errStream)
+				result.RetryAfter = retryAfterFromError(errStream)
+				m.MarkResult(ctx, result)
+				clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errStream)
+				lastErr = errStream
+				switch poolModeRetryDecisionForError(errStream, retryAttempt, poolModeRetries) {
+				case poolModeRetryInvalidRequest:
+					return nil, errStream
+				case poolModeRetryRetry:
+					continue
+				}
+				if result.AuthScoped || isAuthWideResultError(result.Error) {
+					return nil, errStream
+				}
+				break
 			}
-			if idx < len(execModels)-1 {
+			if streamResult == nil {
+				invalidErr := invalidStreamResultError("upstream executor returned nil stream result")
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: invalidErr}
+				m.MarkResult(ctx, result)
+				lastErr = invalidErr
+				if poolModeRetryDecisionForError(invalidErr, retryAttempt, poolModeRetries) == poolModeRetryRetry {
+					continue
+				}
+				if idx < len(execModels)-1 {
+					break
+				}
+				return nil, newStreamBootstrapError(invalidErr, nil)
+			}
+			if streamResult.Chunks == nil {
+				invalidErr := invalidStreamResultError("upstream executor returned stream result without chunks")
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: invalidErr}
+				m.MarkResult(ctx, result)
+				lastErr = invalidErr
+				if poolModeRetryDecisionForError(invalidErr, retryAttempt, poolModeRetries) == poolModeRetryRetry {
+					continue
+				}
+				if idx < len(execModels)-1 {
+					break
+				}
+				return nil, newStreamBootstrapError(invalidErr, streamResult.Headers)
+			}
+
+			buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+			if bootstrapErr != nil {
+				if errCtx := ctx.Err(); errCtx != nil {
+					discardStreamChunks(streamResult.Chunks)
+					return nil, errCtx
+				}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
+				applyResultError(&result, bootstrapErr)
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
-				continue
+				switch poolModeRetryDecisionForError(bootstrapErr, retryAttempt, poolModeRetries) {
+				case poolModeRetryInvalidRequest:
+					return nil, bootstrapErr
+				case poolModeRetryRetry:
+					continue
+				}
+				if result.AuthScoped || isAuthWideResultError(result.Error) {
+					if statusCodeFromResult(result.Error) == http.StatusBadRequest {
+						return nil, bootstrapErr
+					}
+					return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+				}
+				if idx < len(execModels)-1 {
+					break
+				}
+				return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			}
-			m.MarkResult(ctx, result)
-			discardStreamChunks(streamResult.Chunks)
-			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
-		}
 
-		if closed && len(buffered) == 0 {
-			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true, HTTPStatus: http.StatusBadGateway}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
-			m.MarkResult(ctx, result)
-			if idx < len(execModels)-1 {
+			if closed && len(buffered) == 0 {
+				emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true, HTTPStatus: http.StatusBadGateway}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
+				m.MarkResult(ctx, result)
 				lastErr = emptyErr
-				continue
+				if poolModeRetryDecisionForError(emptyErr, retryAttempt, poolModeRetries) == poolModeRetryRetry {
+					continue
+				}
+				if idx < len(execModels)-1 {
+					break
+				}
+				return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
 			}
-			return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
-		}
 
-		remaining := streamResult.Chunks
-		if closed {
-			closedCh := make(chan cliproxyexecutor.StreamChunk)
-			close(closedCh)
-			remaining = closedCh
+			remaining := streamResult.Chunks
+			if closed {
+				closedCh := make(chan cliproxyexecutor.StreamChunk)
+				close(closedCh)
+				remaining = closedCh
+			}
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -2355,7 +2420,7 @@ func containsProxyPoolFailurePattern(code, message, pattern string, fold bool) b
 		if strings.Contains(code, pattern) || strings.Contains(message, pattern) {
 			return true
 		}
-	} else if containsASCIIFold(code, pattern) || containsASCIIFold(message, pattern) {
+	} else if asciifold.Contains(code, pattern) || asciifold.Contains(message, pattern) {
 		return true
 	}
 	if code == "" || message == "" || !strings.Contains(pattern, " ") {
@@ -2367,28 +2432,6 @@ func containsProxyPoolFailurePattern(code, message, pattern string, fold bool) b
 func hasUpperASCII(value string) bool {
 	for i := 0; i < len(value); i++ {
 		if value[i] >= 'A' && value[i] <= 'Z' {
-			return true
-		}
-	}
-	return false
-}
-
-func containsASCIIFold(value, needle string) bool {
-	if needle == "" {
-		return true
-	}
-	if len(needle) > len(value) {
-		return false
-	}
-	for start := 0; start <= len(value)-len(needle); start++ {
-		matched := true
-		for offset := 0; offset < len(needle); offset++ {
-			if lowerASCII(value[start+offset]) != needle[offset] {
-				matched = false
-				break
-			}
-		}
-		if matched {
 			return true
 		}
 	}
@@ -2419,13 +2462,7 @@ func hasSuffixASCIIFold(value, suffix string, fold bool) bool {
 	if len(suffix) > len(value) {
 		return false
 	}
-	start := len(value) - len(suffix)
-	for i := 0; i < len(suffix); i++ {
-		if lowerASCII(value[start+i]) != suffix[i] {
-			return false
-		}
-	}
-	return true
+	return asciifold.HasSuffix(value, suffix)
 }
 
 func hasPrefixASCIIFold(value, prefix string, fold bool) bool {
@@ -2435,19 +2472,7 @@ func hasPrefixASCIIFold(value, prefix string, fold bool) bool {
 	if len(prefix) > len(value) {
 		return false
 	}
-	for i := 0; i < len(prefix); i++ {
-		if lowerASCII(value[i]) != prefix[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func lowerASCII(value byte) byte {
-	if value >= 'A' && value <= 'Z' {
-		return value + ('a' - 'A')
-	}
-	return value
+	return asciifold.HasPrefix(value, prefix)
 }
 
 func proxyPoolCanAssign(cfg *internalconfig.Config, auth *Auth) bool {
@@ -2763,33 +2788,43 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		var authErr error
+		stopModelLoop := false
+		poolModeRetries := m.apiKeyPoolModeRetries(auth)
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
-			if errExec != nil {
-				if errCtx := execCtx.Err(); errCtx != nil {
-					return cliproxyexecutor.Response{}, errCtx
-				}
-				applyResultError(&result, errExec)
-				if ra := retryAfterFromError(errExec); ra != nil {
-					result.RetryAfter = ra
-				}
-				m.MarkResult(execCtx, result)
-				clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errExec)
-				if isRequestInvalidError(errExec) {
-					return cliproxyexecutor.Response{}, errExec
-				}
-				authErr = errExec
-				if result.AuthScoped || isAuthWideResultError(result.Error) {
+			for retryAttempt := 0; ; retryAttempt++ {
+				resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+				if errExec != nil {
+					if errCtx := execCtx.Err(); errCtx != nil {
+						return cliproxyexecutor.Response{}, errCtx
+					}
+					applyResultError(&result, errExec)
+					if ra := retryAfterFromError(errExec); ra != nil {
+						result.RetryAfter = ra
+					}
+					m.MarkResult(execCtx, result)
+					clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errExec)
+					authErr = errExec
+					switch poolModeRetryDecisionForError(errExec, retryAttempt, poolModeRetries) {
+					case poolModeRetryInvalidRequest:
+						return cliproxyexecutor.Response{}, errExec
+					case poolModeRetryRetry:
+						continue
+					}
+					if result.AuthScoped || isAuthWideResultError(result.Error) {
+						stopModelLoop = true
+					}
 					break
 				}
-				continue
+				m.MarkResult(execCtx, result)
+				return resp, nil
 			}
-			m.MarkResult(execCtx, result)
-			return resp, nil
+			if stopModelLoop {
+				break
+			}
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
@@ -2866,33 +2901,43 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			continue
 		}
 		var authErr error
+		stopModelLoop := false
+		poolModeRetries := m.apiKeyPoolModeRetries(auth)
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
-			if errExec != nil {
-				if errCtx := execCtx.Err(); errCtx != nil {
-					return cliproxyexecutor.Response{}, errCtx
-				}
-				applyResultError(&result, errExec)
-				if ra := retryAfterFromError(errExec); ra != nil {
-					result.RetryAfter = ra
-				}
-				m.MarkResult(execCtx, result)
-				clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errExec)
-				if isRequestInvalidError(errExec) {
-					return cliproxyexecutor.Response{}, errExec
-				}
-				authErr = errExec
-				if result.AuthScoped || isAuthWideResultError(result.Error) {
+			for retryAttempt := 0; ; retryAttempt++ {
+				resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+				if errExec != nil {
+					if errCtx := execCtx.Err(); errCtx != nil {
+						return cliproxyexecutor.Response{}, errCtx
+					}
+					applyResultError(&result, errExec)
+					if ra := retryAfterFromError(errExec); ra != nil {
+						result.RetryAfter = ra
+					}
+					m.MarkResult(execCtx, result)
+					clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errExec)
+					authErr = errExec
+					switch poolModeRetryDecisionForError(errExec, retryAttempt, poolModeRetries) {
+					case poolModeRetryInvalidRequest:
+						return cliproxyexecutor.Response{}, errExec
+					case poolModeRetryRetry:
+						continue
+					}
+					if result.AuthScoped || isAuthWideResultError(result.Error) {
+						stopModelLoop = true
+					}
 					break
 				}
-				continue
+				m.MarkResult(execCtx, result)
+				return resp, nil
 			}
-			m.MarkResult(execCtx, result)
-			return resp, nil
+			if stopModelLoop {
+				break
+			}
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
@@ -6008,10 +6053,10 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 			msg = "home returned error"
 		}
 		status := http.StatusBadGateway
-		switch strings.ToLower(code) {
-		case "model_not_found":
+		switch {
+		case strings.EqualFold(code, "model_not_found"):
 			status = http.StatusNotFound
-		case "authentication_error", "unauthorized":
+		case strings.EqualFold(code, "authentication_error"), strings.EqualFold(code, "unauthorized"):
 			status = http.StatusUnauthorized
 		}
 		return nil, nil, "", &Error{Code: code, Message: msg, HTTPStatus: status}

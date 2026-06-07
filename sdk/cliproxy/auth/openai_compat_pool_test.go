@@ -158,6 +158,52 @@ func (e *authScopedOpenAICompatPoolExecutor) ExecuteCalls() []string {
 	return out
 }
 
+type authFailingOpenAICompatPoolModeExecutor struct {
+	id         string
+	failAuthID string
+	err        error
+
+	mu           sync.Mutex
+	executeCalls []string
+}
+
+func (e *authFailingOpenAICompatPoolModeExecutor) Identifier() string { return e.id }
+
+func (e *authFailingOpenAICompatPoolModeExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	call := auth.ID + "|" + req.Model
+	e.mu.Lock()
+	e.executeCalls = append(e.executeCalls, call)
+	e.mu.Unlock()
+	if auth.ID == e.failAuthID {
+		return cliproxyexecutor.Response{}, e.err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(call)}, nil
+}
+
+func (e *authFailingOpenAICompatPoolModeExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "ExecuteStream not implemented"}
+}
+
+func (e *authFailingOpenAICompatPoolModeExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *authFailingOpenAICompatPoolModeExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "CountTokens not implemented"}
+}
+
+func (e *authFailingOpenAICompatPoolModeExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "HttpRequest not implemented"}
+}
+
+func (e *authFailingOpenAICompatPoolModeExecutor) ExecuteCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.executeCalls))
+	copy(out, e.executeCalls)
+	return out
+}
+
 func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []internalconfig.OpenAICompatibilityModel, executor *openAICompatPoolExecutor) *Manager {
 	t.Helper()
 	cfg := &internalconfig.Config{
@@ -210,6 +256,21 @@ func readOpenAICompatStreamPayload(t *testing.T, streamResult *cliproxyexecutor.
 	return string(payload)
 }
 
+func TestPoolModeRetryDecisionForErrorInvalidRequestWinsOverRetryBudget(t *testing.T) {
+	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}
+	if got := poolModeRetryDecisionForError(invalidErr, 0, apiKeyPoolModeRetryCount); got != poolModeRetryInvalidRequest {
+		t.Fatalf("invalid request decision = %v, want %v", got, poolModeRetryInvalidRequest)
+	}
+
+	retryableErr := &Error{HTTPStatus: http.StatusBadGateway, Message: "temporary upstream error", Retryable: true}
+	if got := poolModeRetryDecisionForError(retryableErr, 0, apiKeyPoolModeRetryCount); got != poolModeRetryRetry {
+		t.Fatalf("retryable decision = %v, want %v", got, poolModeRetryRetry)
+	}
+	if got := poolModeRetryDecisionForError(retryableErr, apiKeyPoolModeRetryCount, apiKeyPoolModeRetryCount); got != poolModeRetryStop {
+		t.Fatalf("exhausted decision = %v, want %v", got, poolModeRetryStop)
+	}
+}
+
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
 	alias := "claude-opus-4.66"
 	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}
@@ -231,6 +292,58 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testi
 		t.Fatalf("count calls = %v, want only first invalid model", got)
 	}
 }
+
+func TestManagerExecuteCount_OpenAICompatPoolModeDoesNotRetryInvalidRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}
+	executor := &openAICompatPoolExecutor{
+		id:          "pool",
+		countErrors: map[string]error{"deepseek-v3.1": invalidErr},
+	}
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:     "pool",
+			PoolMode: true,
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "deepseek-v3.1", Alias: alias},
+				{Name: "glm-5", Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "pool-mode-count-invalid-auth-" + t.Name(),
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	_, err := m.ExecuteCount(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil || err.Error() != invalidErr.Error() {
+		t.Fatalf("execute count error = %v, want %v", err, invalidErr)
+	}
+	got := executor.CountModels()
+	if len(got) != 1 || got[0] != "deepseek-v3.1" {
+		t.Fatalf("count calls = %v, want only first invalid model", got)
+	}
+}
+
 func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 	models := []modelAliasEntry{
 		internalconfig.OpenAICompatibilityModel{Name: "deepseek-v3.1", Alias: "claude-opus-4.66"},
@@ -408,6 +521,225 @@ func TestManagerExecute_OpenAICompatAliasPoolFallsBackWithinSameAuth(t *testing.
 	}
 }
 
+func TestManagerExecute_OpenAICompatPoolModeRetriesBeforeAuthFallback(t *testing.T) {
+	alias := "claude-opus-4.66"
+	upstreamModel := "deepseek-v3.1"
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:     "pool",
+			PoolMode: true,
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: upstreamModel, Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+
+	badAuthID := "aa-pool-mode-bad-auth"
+	goodAuthID := "bb-pool-mode-good-auth"
+	executor := &authFailingOpenAICompatPoolModeExecutor{
+		id:         "pool",
+		failAuthID: badAuthID,
+		err:        &Error{HTTPStatus: http.StatusBadGateway, Message: "transient upstream failure"},
+	}
+	m.RegisterExecutor(executor)
+
+	for _, auth := range []*Auth{
+		{
+			ID:       badAuthID,
+			Provider: "pool",
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				"api_key":      "bad-key",
+				"compat_name":  "pool",
+				"provider_key": "pool",
+			},
+		},
+		{
+			ID:       goodAuthID,
+			Provider: "pool",
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				"api_key":      "good-key",
+				"compat_name":  "pool",
+				"provider_key": "pool",
+			},
+		},
+	} {
+		if _, err := m.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, err)
+		}
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuthID, "pool", []*registry.ModelInfo{{ID: alias}})
+	reg.RegisterClient(goodAuthID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuthID)
+		reg.UnregisterClient(goodAuthID)
+	})
+
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v, want success via fallback auth", err)
+	}
+	if string(resp.Payload) != goodAuthID+"|"+upstreamModel {
+		t.Fatalf("payload = %q, want fallback auth payload", string(resp.Payload))
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{
+		badAuthID + "|" + upstreamModel,
+		badAuthID + "|" + upstreamModel,
+		badAuthID + "|" + upstreamModel,
+		badAuthID + "|" + upstreamModel,
+		goodAuthID + "|" + upstreamModel,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManagerExecute_OpenAICompatPoolModeDoesNotRetryInvalidRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}
+	executor := &openAICompatPoolExecutor{
+		id:            "pool",
+		executeErrors: map[string]error{"deepseek-v3.1": invalidErr},
+	}
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:     "pool",
+			PoolMode: true,
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "deepseek-v3.1", Alias: alias},
+				{Name: "glm-5", Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "pool-mode-invalid-auth-" + t.Name(),
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil || err.Error() != invalidErr.Error() {
+		t.Fatalf("execute error = %v, want %v", err, invalidErr)
+	}
+	got := executor.ExecuteModels()
+	if len(got) != 1 || got[0] != "deepseek-v3.1" {
+		t.Fatalf("execute calls = %v, want only first invalid model", got)
+	}
+}
+
+func TestManagerExecute_CodexPoolModeRetriesBeforeAuthFallback(t *testing.T) {
+	alias := "codex-latest"
+	upstreamModel := "gpt-5-codex"
+	cfg := &internalconfig.Config{
+		CodexKey: []internalconfig.CodexKey{{
+			APIKey:   "bad-key",
+			BaseURL:  "https://codex.example.invalid",
+			PoolMode: true,
+			Models: []internalconfig.CodexModel{
+				{Name: upstreamModel, Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+
+	badAuthID := "aa-codex-pool-mode-bad-auth"
+	goodAuthID := "bb-codex-pool-mode-good-auth"
+	executor := &authFailingOpenAICompatPoolModeExecutor{
+		id:         "codex",
+		failAuthID: badAuthID,
+		err:        &Error{HTTPStatus: http.StatusBadGateway, Message: "transient upstream failure"},
+	}
+	m.RegisterExecutor(executor)
+
+	for _, auth := range []*Auth{
+		{
+			ID:       badAuthID,
+			Provider: "codex",
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				"api_key":  "bad-key",
+				"base_url": "https://codex.example.invalid",
+			},
+		},
+		{
+			ID:       goodAuthID,
+			Provider: "codex",
+			Status:   StatusActive,
+			Metadata: map[string]any{
+				"email": "good@example.com",
+			},
+		},
+	} {
+		if _, err := m.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, err)
+		}
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuthID, "codex", []*registry.ModelInfo{{ID: alias}})
+	reg.RegisterClient(goodAuthID, "codex", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuthID)
+		reg.UnregisterClient(goodAuthID)
+	})
+
+	resp, err := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v, want success via fallback auth", err)
+	}
+	if string(resp.Payload) != goodAuthID+"|"+alias {
+		t.Fatalf("payload = %q, want fallback auth payload", string(resp.Payload))
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{
+		badAuthID + "|" + upstreamModel,
+		badAuthID + "|" + upstreamModel,
+		badAuthID + "|" + upstreamModel,
+		badAuthID + "|" + upstreamModel,
+		goodAuthID + "|" + alias,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestManagerExecuteStream_OpenAICompatAliasPoolRetriesOnEmptyBootstrap(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{
@@ -478,6 +810,119 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolFallsBackBeforeFirstByte(t *t
 	}
 	if gotHeader := streamResult.Headers.Get("X-Model"); gotHeader != "glm-5" {
 		t.Fatalf("header X-Model = %q, want %q", gotHeader, "glm-5")
+	}
+}
+
+func TestManagerExecuteStream_OpenAICompatPoolModeRetriesBeforeModelFallback(t *testing.T) {
+	alias := "claude-opus-4.66"
+	executor := &openAICompatPoolExecutor{
+		id:                "pool",
+		streamFirstErrors: map[string]error{"deepseek-v3.1": &Error{HTTPStatus: http.StatusBadGateway, Message: "transient upstream failure"}},
+	}
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:     "pool",
+			PoolMode: true,
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "deepseek-v3.1", Alias: alias},
+				{Name: "glm-5", Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "pool-mode-stream-auth",
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute stream: %v", err)
+	}
+	if payload := readOpenAICompatStreamPayload(t, streamResult); payload != "glm-5" {
+		t.Fatalf("payload = %q, want %q", payload, "glm-5")
+	}
+	got := executor.StreamModels()
+	want := []string{"deepseek-v3.1", "deepseek-v3.1", "deepseek-v3.1", "deepseek-v3.1", "glm-5"}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManagerExecuteStream_OpenAICompatPoolModeDoesNotRetryInvalidRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}
+	executor := &openAICompatPoolExecutor{
+		id:                "pool",
+		streamFirstErrors: map[string]error{"deepseek-v3.1": invalidErr},
+	}
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:     "pool",
+			PoolMode: true,
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "deepseek-v3.1", Alias: alias},
+				{Name: "glm-5", Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "pool-mode-stream-invalid-auth-" + t.Name(),
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil || err.Error() != invalidErr.Error() {
+		t.Fatalf("execute stream error = %v, want %v", err, invalidErr)
+	}
+	if streamResult != nil {
+		t.Fatalf("streamResult = %#v, want nil on invalid bootstrap", streamResult)
+	}
+	got := executor.StreamModels()
+	if len(got) != 1 || got[0] != "deepseek-v3.1" {
+		t.Fatalf("stream calls = %v, want only first invalid model", got)
 	}
 }
 

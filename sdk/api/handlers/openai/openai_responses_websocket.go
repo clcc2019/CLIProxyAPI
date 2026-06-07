@@ -127,8 +127,8 @@ func responsesWebsocketOriginAllowed(r *http.Request) bool {
 	if err != nil || parsedOrigin == nil {
 		return false
 	}
-	originScheme := strings.ToLower(parsedOrigin.Scheme)
-	if originScheme != "http" && originScheme != "https" {
+	originScheme := strings.TrimSpace(parsedOrigin.Scheme)
+	if !strings.EqualFold(originScheme, "http") && !strings.EqualFold(originScheme, "https") {
 		return false
 	}
 	if parsedOrigin.User != nil || parsedOrigin.Path != "" || parsedOrigin.RawQuery != "" || parsedOrigin.Fragment != "" || parsedOrigin.Opaque != "" {
@@ -208,10 +208,11 @@ func validWebsocketAuthorityPort(port string) bool {
 }
 
 func defaultWebsocketOriginPort(scheme string) string {
-	switch strings.ToLower(strings.TrimSpace(scheme)) {
-	case "http":
+	scheme = strings.TrimSpace(scheme)
+	switch {
+	case strings.EqualFold(scheme, "http"):
 		return "80"
-	case "https":
+	case strings.EqualFold(scheme, "https"):
 		return "443"
 	default:
 		return ""
@@ -1545,9 +1546,8 @@ func responsesWebsocketShouldRetryFullTranscript(errMsg *interfaces.ErrorMessage
 	if responsesWebsocketPreviousResponseNotFoundText(errText) {
 		return true
 	}
-	lower := strings.ToLower(errText)
-	return strings.Contains(lower, "no tool call found") &&
-		strings.Contains(lower, "call output")
+	return responsesContainsASCIIFold(errText, "no tool call found") &&
+		responsesContainsASCIIFold(errText, "call output")
 }
 
 func responsesWebsocketIsCredentialFailoverFailure(err error) bool {
@@ -1592,20 +1592,19 @@ func responsesWebsocketPayloadShouldRetryFullTranscript(payload []byte) bool {
 	if responsesWebsocketPreviousResponseNotFoundText(errText) {
 		return true
 	}
-	lower := strings.ToLower(errText)
-	return strings.Contains(lower, "no tool call found") &&
-		strings.Contains(lower, "call output")
+	return responsesContainsASCIIFold(errText, "no tool call found") &&
+		responsesContainsASCIIFold(errText, "call output")
 }
 
 func responsesWebsocketPreviousResponseNotFoundText(text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
-	if lower == "" || !strings.Contains(lower, "not found") {
+	text = strings.TrimSpace(text)
+	if text == "" || !responsesContainsASCIIFold(text, "not found") {
 		return false
 	}
-	if strings.Contains(lower, "previous_response_id") {
+	if responsesContainsASCIIFold(text, "previous_response_id") {
 		return true
 	}
-	return strings.Contains(lower, "previous response")
+	return responsesContainsASCIIFold(text, "previous response")
 }
 
 func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {

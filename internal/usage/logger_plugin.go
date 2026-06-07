@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -449,6 +450,114 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 // SnapshotSummary returns a copy of the aggregated metrics without per-request details.
 func (s *RequestStatistics) SnapshotSummary() StatisticsSnapshot {
 	return s.snapshotWithDetails(false)
+}
+
+type recentRequestDetail struct {
+	apiName   string
+	modelName string
+	detail    RequestDetail
+}
+
+// SnapshotRecentDetails returns a summary snapshot containing only the newest
+// request details across all APIs/models. Aggregate counters still represent the
+// full retained statistics, so callers can render recent event lists without
+// transferring every retained detail record.
+func (s *RequestStatistics) SnapshotRecentDetails(limit int) StatisticsSnapshot {
+	if limit <= 0 {
+		return s.Snapshot()
+	}
+
+	result := StatisticsSnapshot{}
+	if s == nil {
+		return result
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result = s.snapshotWithDetailsLocked(false)
+	candidates := make([]recentRequestDetail, 0, limit)
+	addCandidate := func(apiName, modelName string, detail RequestDetail) {
+		candidate := recentRequestDetail{
+			apiName:   apiName,
+			modelName: modelName,
+			detail:    detail,
+		}
+		insertIndex := len(candidates)
+		for idx, existing := range candidates {
+			if detail.Timestamp.After(existing.detail.Timestamp) {
+				insertIndex = idx
+				break
+			}
+		}
+		if insertIndex == len(candidates) {
+			if len(candidates) < limit {
+				candidates = append(candidates, candidate)
+			}
+			return
+		}
+		candidates = append(candidates, recentRequestDetail{})
+		copy(candidates[insertIndex+1:], candidates[insertIndex:])
+		candidates[insertIndex] = candidate
+		if len(candidates) > limit {
+			candidates = candidates[:limit]
+		}
+	}
+
+	for apiName, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			for _, detail := range modelStatsValue.Details {
+				addCandidate(apiName, modelName, detail)
+			}
+		}
+	}
+
+	for _, imported := range s.importedDetailedSources {
+		for apiName, apiSnapshot := range imported.APIs {
+			for modelName, modelSnapshot := range apiSnapshot.Models {
+				for _, detail := range modelSnapshot.Details {
+					addCandidate(apiName, modelName, detail)
+				}
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return result
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if left.apiName != right.apiName {
+			return left.apiName < right.apiName
+		}
+		if left.modelName != right.modelName {
+			return left.modelName < right.modelName
+		}
+		return left.detail.Timestamp.Before(right.detail.Timestamp)
+	})
+
+	if result.APIs == nil {
+		result.APIs = make(map[string]APISnapshot)
+	}
+	for _, candidate := range candidates {
+		apiSnapshot := result.APIs[candidate.apiName]
+		if apiSnapshot.Models == nil {
+			apiSnapshot.Models = make(map[string]ModelSnapshot)
+		}
+		modelSnapshot := apiSnapshot.Models[candidate.modelName]
+		modelSnapshot.Details = append(modelSnapshot.Details, candidate.detail)
+		apiSnapshot.Models[candidate.modelName] = modelSnapshot
+		result.APIs[candidate.apiName] = apiSnapshot
+	}
+
+	return result
 }
 
 func (s *RequestStatistics) snapshotWithDetails(includeDetails bool) StatisticsSnapshot {
@@ -933,8 +1042,11 @@ func normaliseDetail(provider string, detail coreusage.Detail) TokenStats {
 }
 
 func providerReportsReasoningAsOutputDetail(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "codex", "openai":
+	provider = strings.TrimSpace(provider)
+	switch {
+	case strings.EqualFold(provider, "codex"):
+		return true
+	case strings.EqualFold(provider, "openai"):
 		return true
 	default:
 		return false

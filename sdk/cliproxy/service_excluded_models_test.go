@@ -9,6 +9,32 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
+func TestMatchWildcard(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		value   string
+		want    bool
+	}{
+		{name: "exact", pattern: "claude-sonnet", value: "claude-sonnet", want: true},
+		{name: "prefix wildcard", pattern: "claude-*", value: "claude-sonnet-4-5", want: true},
+		{name: "suffix wildcard", pattern: "*-4-5", value: "claude-sonnet-4-5", want: true},
+		{name: "middle segments in order", pattern: "claude*sonnet*4-5", value: "claude-3-5-sonnet-4-5", want: true},
+		{name: "middle segments out of order", pattern: "claude*4-5*sonnet", value: "claude-3-5-sonnet-4-5", want: false},
+		{name: "consecutive wildcards", pattern: "gpt-**preview", value: "gpt-5-preview", want: true},
+		{name: "empty pattern", pattern: "", value: "gpt-5", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchWildcard(tt.pattern, tt.value)
+			if got != tt.want {
+				t.Fatalf("matchWildcard(%q, %q) = %t, want %t", tt.pattern, tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T) {
 	service := &Service{
 		cfg: &config.Config{
@@ -130,5 +156,13 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 	if chatModel.Thinking == nil {
 		t.Fatal("expected chat model to keep default thinking support")
+	}
+}
+
+func BenchmarkMatchWildcard(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if !matchWildcard("claude*sonnet*4-5", "claude-3-5-sonnet-4-5") {
+			b.Fatal("expected wildcard pattern to match")
+		}
 	}
 }

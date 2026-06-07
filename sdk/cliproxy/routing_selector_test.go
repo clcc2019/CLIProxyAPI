@@ -62,3 +62,37 @@ func TestEffectiveRoutingStrategySessionAffinityNormalizesToRoundRobin(t *testin
 		t.Fatalf("effectiveRoutingStrategy(fill-first, false) = %q, want fill-first", got)
 	}
 }
+
+func TestIsFillFirstStrategyAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		strategy string
+		want     bool
+	}{
+		{name: "canonical", strategy: "fill-first", want: true},
+		{name: "canonical mixed case", strategy: " Fill-First ", want: true},
+		{name: "compact", strategy: "fillfirst", want: true},
+		{name: "compact mixed case", strategy: "\tFillFirst\r\n", want: true},
+		{name: "short", strategy: "FF", want: true},
+		{name: "round robin", strategy: "round-robin", want: false},
+		{name: "empty", strategy: " ", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isFillFirstStrategy(tt.strategy); got != tt.want {
+				t.Fatalf("isFillFirstStrategy(%q) = %t, want %t", tt.strategy, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkIsFillFirstStrategy(b *testing.B) {
+	for b.Loop() {
+		if !isFillFirstStrategy(" Fill-First ") {
+			b.Fatal("expected fill-first strategy")
+		}
+	}
+}

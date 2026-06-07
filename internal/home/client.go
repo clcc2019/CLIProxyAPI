@@ -668,13 +668,14 @@ func (c *Client) handleSubscriptionPayload(channel string, payload string, onCon
 		return nil
 	}
 
-	switch strings.ToLower(strings.TrimSpace(channel)) {
-	case redisChannelConfig:
+	channel = strings.TrimSpace(channel)
+	switch {
+	case strings.EqualFold(channel, redisChannelConfig):
 		if onConfig == nil {
 			return nil
 		}
 		return onConfig([]byte(payload))
-	case redisChannelCluster:
+	case strings.EqualFold(channel, redisChannelCluster):
 		return c.updateClusterNodesFromPayload([]byte(payload))
 	default:
 		return nil

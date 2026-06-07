@@ -230,11 +230,21 @@ func sanitizeCodexClientReasoningMetadata(entry map[string]any) {
 }
 
 func normalizeCodexClientReasoningLevel(rawLevel string) string {
-	level := strings.ToLower(strings.TrimSpace(rawLevel))
-	if _, ok := codexClientAllowedReasoningLevels[level]; !ok {
+	level := strings.TrimSpace(rawLevel)
+	switch {
+	case strings.EqualFold(level, "none"):
+		return "none"
+	case strings.EqualFold(level, "low"):
+		return "low"
+	case strings.EqualFold(level, "medium"):
+		return "medium"
+	case strings.EqualFold(level, "high"):
+		return "high"
+	case strings.EqualFold(level, "xhigh"):
+		return "xhigh"
+	default:
 		return ""
 	}
-	return level
 }
 
 func codexClientReasoningDescription(level string) string {

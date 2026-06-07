@@ -125,6 +125,48 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsIncompatibleReasoningSignatu
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_NormalizesReasoningEffort(t *testing.T) {
+	raw := []byte(`{
+		"reasoning": {"effort": " MeDiuM "},
+		"input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want enabled. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "thinking.budget_tokens").Int(); got != 8192 {
+		t.Fatalf("thinking.budget_tokens = %d, want 8192. Output: %s", got, string(out))
+	}
+}
+
+func TestNormalizeReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: " ", want: ""},
+		{name: "known mixed case", value: "\tXHIGH\r\n", want: "xhigh"},
+		{name: "unknown lower fallback", value: "Custom-Effort", want: "custom-effort"},
+	}
+
+	for i := range tests {
+		if got := normalizeReasoningEffort(tests[i].value); got != tests[i].want {
+			t.Fatalf("%s: got %q, want %q", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkNormalizeReasoningEffort(b *testing.B) {
+	for b.Loop() {
+		if got := normalizeReasoningEffort(" XHIGH "); got != "xhigh" {
+			b.Fatalf("normalizeReasoningEffort() = %q", got)
+		}
+	}
+}
+
 func testClaudeResponsesThinkingSignature(t *testing.T) (string, string) {
 	t.Helper()
 	channelBlock := []byte{}

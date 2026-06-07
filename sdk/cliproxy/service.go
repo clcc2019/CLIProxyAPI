@@ -446,12 +446,12 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
 		return
 	}
-	switch strings.ToLower(a.Provider) {
-	case "claude":
+	switch {
+	case strings.EqualFold(a.Provider, "claude"):
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
-	case "kimi":
+	case strings.EqualFold(a.Provider, "kimi"):
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
-	case "xai":
+	case strings.EqualFold(a.Provider, "xai"):
 		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
@@ -1168,14 +1168,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		if a.Attributes != nil {
 			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
 		}
-		switch strings.ToLower(codexPlanType) {
-		case "pro":
+		switch {
+		case strings.EqualFold(codexPlanType, "pro"):
 			models = registry.GetCodexProModels()
-		case "plus":
+		case strings.EqualFold(codexPlanType, "plus"):
 			models = registry.GetCodexPlusModels()
-		case "team", "business", "go":
+		case strings.EqualFold(codexPlanType, "team"), strings.EqualFold(codexPlanType, "business"), strings.EqualFold(codexPlanType, "go"):
 			models = registry.GetCodexTeamModels()
-		case "free":
+		case strings.EqualFold(codexPlanType, "free"):
 			models = registry.GetCodexFreeModels()
 		default:
 			models = registry.GetCodexProModels()
@@ -1485,39 +1485,46 @@ func matchWildcard(pattern, value string) bool {
 		return false
 	}
 
-	// Fast path for exact match (no wildcard present).
-	if !strings.Contains(pattern, "*") {
+	firstStar := strings.IndexByte(pattern, '*')
+	if firstStar < 0 {
 		return pattern == value
 	}
 
-	parts := strings.Split(pattern, "*")
-	// Handle prefix.
-	if prefix := parts[0]; prefix != "" {
+	lastStar := strings.LastIndexByte(pattern, '*')
+	if prefix := pattern[:firstStar]; prefix != "" {
 		if !strings.HasPrefix(value, prefix) {
 			return false
 		}
 		value = value[len(prefix):]
 	}
 
-	// Handle suffix.
-	if suffix := parts[len(parts)-1]; suffix != "" {
+	if suffix := pattern[lastStar+1:]; suffix != "" {
 		if !strings.HasSuffix(value, suffix) {
 			return false
 		}
 		value = value[:len(value)-len(suffix)]
 	}
 
-	// Handle middle segments in order.
-	for i := 1; i < len(parts)-1; i++ {
-		segment := parts[i]
-		if segment == "" {
-			continue
+	if firstStar < lastStar {
+		middle := pattern[firstStar+1 : lastStar]
+		for middle != "" {
+			segment, rest, found := strings.Cut(middle, "*")
+			middle = rest
+			if segment == "" {
+				if !found {
+					break
+				}
+				continue
+			}
+			idx := strings.Index(value, segment)
+			if idx < 0 {
+				return false
+			}
+			value = value[idx+len(segment):]
+			if !found {
+				break
+			}
 		}
-		idx := strings.Index(value, segment)
-		if idx < 0 {
-			return false
-		}
-		value = value[idx+len(segment):]
 	}
 
 	return true

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -486,9 +488,9 @@ func codexReasoningReplayInvalidSignatureError(body []byte) bool {
 	if len(body) == 0 {
 		return false
 	}
-	lower := strings.ToLower(strings.TrimSpace(string(body)))
-	return strings.Contains(lower, "invalid signature in thinking block") ||
-		strings.Contains(lower, "invalid_encrypted_content")
+	body = bytes.TrimSpace(body)
+	return asciifold.ContainsBytes(body, "invalid signature in thinking block") ||
+		asciifold.ContainsBytes(body, "invalid_encrypted_content")
 }
 
 func headerValueCaseInsensitive(headers http.Header, key string) string {

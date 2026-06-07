@@ -376,6 +376,46 @@ func TestCodexEnsureCompactTurnMetadataHeaderPreservesClientCompactionMetadata(t
 	}
 }
 
+func TestCodexNormalizeCompactionMetadataValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "canonical", value: "responses_compact", want: "responses_compact"},
+		{name: "mixed separators", value: "  Standalone--Turn__Phase_ ", want: "standalone_turn_phase"},
+		{name: "unicode lowercase", value: "ÜBER Compact", want: "über_compact"},
+		{name: "only separators", value: "__--  __", want: ""},
+		{name: "interior tab preserved", value: "Phase\tName", want: "phase\tname"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codexNormalizeCompactionMetadataValue(tt.value); got != tt.want {
+				t.Fatalf("codexNormalizeCompactionMetadataValue(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkCodexNormalizeCompactionMetadataValueCanonical(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := codexNormalizeCompactionMetadataValue("responses_compact"); got != "responses_compact" {
+			b.Fatalf("normalized value = %q", got)
+		}
+	}
+}
+
+func BenchmarkCodexNormalizeCompactionMetadataValueMixed(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := codexNormalizeCompactionMetadataValue("  Standalone--Turn__Phase_ "); got != "standalone_turn_phase" {
+			b.Fatalf("normalized value = %q", got)
+		}
+	}
+}
+
 func BenchmarkCodexBuildTurnMetadataHeader(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

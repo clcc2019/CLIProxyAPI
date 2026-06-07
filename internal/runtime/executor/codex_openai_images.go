@@ -93,7 +93,7 @@ func (e *CodexExecutor) resolveGPTImage2BaseModel() string {
 	if model == "" {
 		return codexOpenAIImagesMainModel
 	}
-	if strings.HasPrefix(strings.ToLower(model), "gpt-") {
+	if len(model) >= len("gpt-") && strings.EqualFold(model[:len("gpt-")], "gpt-") {
 		return model
 	}
 	return codexOpenAIImagesMainModel
@@ -167,15 +167,17 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
-	for _, line := range bytes.Split(data, []byte("\n")) {
+	completed := false
+	forEachResponseLine(data, func(line []byte) bool {
 		if !bytes.HasPrefix(line, dataTag) {
-			continue
+			return true
 		}
 		eventData := bytes.TrimSpace(line[len(dataTag):])
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed":
+			completed = true
 			if detail, ok := helps.ParseCodexUsage(eventData); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -183,17 +185,25 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 			completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			results, createdAt, usageRaw, firstMeta, errExtract := codexExtractImagesFromResponsesCompleted(completedData)
 			if errExtract != nil {
-				return resp, errExtract
+				err = errExtract
+				return false
 			}
 			if len(results) == 0 {
-				return resp, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+				err = statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+				return false
 			}
 			out, errOutput := codexBuildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat)
 			if errOutput != nil {
-				return resp, errOutput
+				err = errOutput
+				return false
 			}
-			return cliproxyexecutor.Response{Payload: out, Headers: responseHeaders}, nil
+			resp = cliproxyexecutor.Response{Payload: out, Headers: responseHeaders}
+			return false
 		}
+		return true
+	})
+	if completed {
+		return resp, err
 	}
 
 	err = statusErr{code: http.StatusGatewayTimeout, msg: "stream error: stream disconnected before completion"}
@@ -439,7 +449,7 @@ func codexPrepareOpenAIImageRequest(req cliproxyexecutor.Request, opts cliproxye
 	contentType := codexImageContentType(opts.Headers)
 	mediaType, _, _ := mime.ParseMediaType(contentType)
 	if strings.HasSuffix(path, codexImagesVariationsPath) {
-		if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		if openAICompatMediaTypeHasPrefix(mediaType, "multipart/") {
 			return codexPrepareOpenAIImageMultipart(req.Payload, req.Model, contentType, codexOpenAIImageMultipartOptions{
 				defaultPrompt: codexOpenAIImageVariationPrompt,
 				streamPrefix:  "image_variation",
@@ -450,7 +460,7 @@ func codexPrepareOpenAIImageRequest(req cliproxyexecutor.Request, opts cliproxye
 	if !strings.HasSuffix(path, codexImagesEditsPath) {
 		return codexOpenAIImagePreparedRequest{}, fmt.Errorf("unsupported OpenAI image endpoint path %q", path)
 	}
-	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+	if openAICompatMediaTypeHasPrefix(mediaType, "multipart/") {
 		return codexPrepareOpenAIImageEditMultipart(req.Payload, req.Model, contentType)
 	}
 	return codexPrepareOpenAIImageEditJSON(req.Payload, req.Model)
@@ -812,10 +822,13 @@ func codexBuildSSEFrame(eventName string, data []byte) []byte {
 }
 
 func codexMimeTypeFromOutputFormat(outputFormat string) string {
-	switch strings.ToLower(strings.TrimSpace(outputFormat)) {
-	case "jpg", "jpeg":
+	outputFormat = strings.TrimSpace(outputFormat)
+	switch {
+	case strings.EqualFold(outputFormat, "jpg"):
 		return "image/jpeg"
-	case "webp":
+	case strings.EqualFold(outputFormat, "jpeg"):
+		return "image/jpeg"
+	case strings.EqualFold(outputFormat, "webp"):
 		return "image/webp"
 	default:
 		return "image/png"

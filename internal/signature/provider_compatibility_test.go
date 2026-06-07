@@ -71,6 +71,69 @@ func TestSplitSignatureProviderPrefix_UsesStrictProviderAliases(t *testing.T) {
 	}
 }
 
+func TestSignatureProviderFromModelName(t *testing.T) {
+	tests := []struct {
+		name      string
+		modelName string
+		want      SignatureProvider
+	}{
+		{name: "claude mixed case", modelName: " Claude-Sonnet-4-6 ", want: SignatureProviderClaude},
+		{name: "gpt contains", modelName: "my-GPT-router", want: SignatureProviderGPT},
+		{name: "openai contains", modelName: "custom-openAI-model", want: SignatureProviderGPT},
+		{name: "codex contains", modelName: "CODEX-mini", want: SignatureProviderGPT},
+		{name: "o prefix mixed case", modelName: " O4-mini ", want: SignatureProviderGPT},
+		{name: "unknown", modelName: "gemini-pro", want: SignatureProviderUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SignatureProviderFromModelName(tt.modelName); got != tt.want {
+				t.Fatalf("SignatureProviderFromModelName(%q) = %q, want %q", tt.modelName, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkSignatureProviderFromModelName(b *testing.B) {
+	for b.Loop() {
+		if got := SignatureProviderFromModelName(" OpenAI-GPT-5 "); got != SignatureProviderGPT {
+			b.Fatalf("SignatureProviderFromModelName() = %q", got)
+		}
+	}
+}
+
+func TestSignatureProviderFromCachePrefixAliases(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   SignatureProvider
+	}{
+		{name: "claude", prefix: " Claude ", want: SignatureProviderClaude},
+		{name: "anthropic", prefix: "\tAnthropic\r\n", want: SignatureProviderClaude},
+		{name: "openai", prefix: "OpenAI", want: SignatureProviderGPT},
+		{name: "gpt", prefix: "GPT", want: SignatureProviderGPT},
+		{name: "codex", prefix: "Codex", want: SignatureProviderGPT},
+		{name: "strict unknown", prefix: "claude-cache", want: SignatureProviderUnknown},
+		{name: "empty", prefix: " ", want: SignatureProviderUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SignatureProviderFromCachePrefix(tt.prefix); got != tt.want {
+				t.Fatalf("SignatureProviderFromCachePrefix(%q) = %q, want %q", tt.prefix, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkSignatureProviderFromCachePrefix(b *testing.B) {
+	for b.Loop() {
+		if got := SignatureProviderFromCachePrefix(" OpenAI "); got != SignatureProviderGPT {
+			b.Fatalf("SignatureProviderFromCachePrefix() = %q", got)
+		}
+	}
+}
+
 func TestSanitizeClaudeMessagesSignaturesForModel_NormalizesSameProviderClaude(t *testing.T) {
 	nativeSig := testClaudeThinkingSignature()
 	sig := "claude#" + nativeSig

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -35,7 +36,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			continue
 		}
 		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		if !util.HasJSONFileName(name) {
 			continue
 		}
 		full := filepath.Join(ctx.AuthDir, name)
@@ -90,13 +91,29 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	if a.Label == "" {
 		a.Label = a.Provider
 	}
-	switch strings.ToLower(strings.TrimSpace(a.Provider)) {
-	case "claude", "codex", "kimi", "xai", "openai-compatibility":
-	default:
+	if !isSupportedSynthesizedAuthProvider(a.Provider) {
 		return nil
 	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	return []*coreauth.Auth{a}
+}
+
+func isSupportedSynthesizedAuthProvider(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	switch {
+	case strings.EqualFold(provider, "claude"):
+		return true
+	case strings.EqualFold(provider, "codex"):
+		return true
+	case strings.EqualFold(provider, "kimi"):
+		return true
+	case strings.EqualFold(provider, "xai"):
+		return true
+	case strings.EqualFold(provider, "openai-compatibility"):
+		return true
+	default:
+		return false
+	}
 }
 
 // extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.

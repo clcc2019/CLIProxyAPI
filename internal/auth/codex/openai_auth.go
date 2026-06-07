@@ -408,9 +408,13 @@ func valueAsStringForRefreshError(value any) string {
 }
 
 func codexRefreshErrorIsPermanent(statusCode int, code string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(code))
-	switch normalized {
-	case "refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated", "invalid_grant", "invalid_client":
+	code = strings.TrimSpace(code)
+	switch {
+	case strings.EqualFold(code, "refresh_token_expired"),
+		strings.EqualFold(code, "refresh_token_reused"),
+		strings.EqualFold(code, "refresh_token_invalidated"),
+		strings.EqualFold(code, "invalid_grant"),
+		strings.EqualFold(code, "invalid_client"):
 		return true
 	}
 	return statusCode == http.StatusUnauthorized
@@ -469,12 +473,48 @@ func isNonRetryableRefreshErr(err error) bool {
 	if permanent, ok := err.(interface{ IsPermanentAuthError() bool }); ok && permanent.IsPermanentAuthError() {
 		return true
 	}
-	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused") ||
-		strings.Contains(raw, "refresh_token_expired") ||
-		strings.Contains(raw, "refresh_token_invalidated") ||
-		strings.Contains(raw, "invalid_grant") ||
-		strings.Contains(raw, "invalid_client")
+	raw := err.Error()
+	return codexAuthContainsASCIIFold(raw, "refresh_token_reused") ||
+		codexAuthContainsASCIIFold(raw, "refresh_token_expired") ||
+		codexAuthContainsASCIIFold(raw, "refresh_token_invalidated") ||
+		codexAuthContainsASCIIFold(raw, "invalid_grant") ||
+		codexAuthContainsASCIIFold(raw, "invalid_client")
+}
+
+func codexAuthContainsASCIIFold(s, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	if len(substr) > len(s) {
+		return false
+	}
+	first := codexAuthASCIILower(substr[0])
+	limit := len(s) - len(substr)
+	for i := 0; i <= limit; i++ {
+		if codexAuthASCIILower(s[i]) != first {
+			continue
+		}
+		if codexAuthEqualASCIIFoldAt(s[i:i+len(substr)], substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexAuthEqualASCIIFoldAt(s, substr string) bool {
+	for i := 0; i < len(substr); i++ {
+		if codexAuthASCIILower(s[i]) != codexAuthASCIILower(substr[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func codexAuthASCIILower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.

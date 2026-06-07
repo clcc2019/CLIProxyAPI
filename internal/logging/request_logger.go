@@ -1401,20 +1401,20 @@ func (l *FileRequestLogger) decompressResponse(responseHeaders map[string][]stri
 	// Check Content-Encoding header
 	var contentEncoding string
 	for key, values := range responseHeaders {
-		if strings.ToLower(key) == "content-encoding" && len(values) > 0 {
-			contentEncoding = strings.ToLower(values[0])
+		if strings.EqualFold(key, "content-encoding") && len(values) > 0 {
+			contentEncoding = strings.TrimSpace(values[0])
 			break
 		}
 	}
 
-	switch contentEncoding {
-	case "gzip":
+	switch {
+	case strings.EqualFold(contentEncoding, "gzip"):
 		return l.decompressGzip(response)
-	case "deflate":
+	case strings.EqualFold(contentEncoding, "deflate"):
 		return l.decompressDeflate(response)
-	case "br":
+	case strings.EqualFold(contentEncoding, "br"):
 		return l.decompressBrotli(response)
-	case "zstd":
+	case strings.EqualFold(contentEncoding, "zstd"):
 		return l.decompressZstd(response)
 	default:
 		// No compression or unsupported compression

@@ -411,7 +411,7 @@ func reasoningEffortFromConfig(config ThinkingConfig) string {
 	case ModeAuto:
 		return string(LevelAuto)
 	case ModeLevel:
-		return strings.ToLower(strings.TrimSpace(string(config.Level)))
+		return normalizeReasoningEffortValue(string(config.Level))
 	case ModeBudget:
 		level, ok := ConvertBudgetToLevel(config.Budget)
 		if !ok {
@@ -447,7 +447,7 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 		// We only treat it as a thinking config when effort is explicitly present;
 		// otherwise we passthrough and let upstream defaults apply.
 		if effort := results[1]; effort.Exists() && effort.Type == gjson.String {
-			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			value := normalizeReasoningEffortValue(effort.String())
 			if value == "" {
 				return ThinkingConfig{}
 			}
@@ -482,6 +482,35 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	}
 
 	return ThinkingConfig{}
+}
+
+func normalizeReasoningEffortValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(value, "none"):
+		return "none"
+	case strings.EqualFold(value, "minimal"):
+		return "minimal"
+	case strings.EqualFold(value, "low"):
+		return "low"
+	case strings.EqualFold(value, "medium"):
+		return "medium"
+	case strings.EqualFold(value, "high"):
+		return "high"
+	case strings.EqualFold(value, "xhigh"):
+		return "xhigh"
+	case strings.EqualFold(value, "max"):
+		return "max"
+	case strings.EqualFold(value, "auto"):
+		return "auto"
+	case strings.EqualFold(value, "adaptive"):
+		return "adaptive"
+	default:
+		return strings.ToLower(value)
+	}
 }
 
 // extractOpenAIConfig extracts thinking configuration from OpenAI format request body.

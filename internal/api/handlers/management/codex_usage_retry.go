@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -66,13 +65,49 @@ func codexUsageRetryableTransportError(ctx context.Context, err error) bool {
 		return true
 	}
 
-	lower := strings.ToLower(err.Error())
+	errText := err.Error()
 	for _, marker := range codexUsageRetryableTransportMarkers {
-		if strings.Contains(lower, marker) {
+		if codexUsageContainsASCIIFold(errText, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+func codexUsageContainsASCIIFold(s, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	if len(substr) > len(s) {
+		return false
+	}
+	first := codexUsageASCIILower(substr[0])
+	limit := len(s) - len(substr)
+	for i := 0; i <= limit; i++ {
+		if codexUsageASCIILower(s[i]) != first {
+			continue
+		}
+		if codexUsageEqualASCIIFoldAt(s[i:i+len(substr)], substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexUsageEqualASCIIFoldAt(s, substr string) bool {
+	for i := 0; i < len(substr); i++ {
+		if codexUsageASCIILower(s[i]) != codexUsageASCIILower(substr[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func codexUsageASCIILower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 func codexUsageSleepBeforeRetry(ctx context.Context, attempt int) error {

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf16"
 
 	"github.com/google/uuid"
@@ -500,13 +501,49 @@ func codexNormalizeCompactionMetadataValue(value string) string {
 	if value == "" {
 		return ""
 	}
-	value = strings.ToLower(value)
-	value = strings.ReplaceAll(value, "-", "_")
-	value = strings.ReplaceAll(value, " ", "_")
-	for strings.Contains(value, "__") {
-		value = strings.ReplaceAll(value, "__", "_")
+
+	needsNormalization := false
+	atStart := true
+	previousUnderscore := false
+	for _, r := range value {
+		if unicode.ToLower(r) != r || r == '-' || r == ' ' {
+			needsNormalization = true
+		}
+		if r == '_' {
+			if atStart || previousUnderscore {
+				needsNormalization = true
+			}
+			previousUnderscore = true
+		} else {
+			previousUnderscore = false
+		}
+		atStart = false
 	}
-	return strings.Trim(value, "_")
+	if previousUnderscore {
+		needsNormalization = true
+	}
+	if !needsNormalization {
+		return value
+	}
+
+	var normalized strings.Builder
+	normalized.Grow(len(value))
+	pendingUnderscore := false
+	for _, r := range value {
+		r = unicode.ToLower(r)
+		if r == '-' || r == ' ' || r == '_' {
+			if normalized.Len() > 0 {
+				pendingUnderscore = true
+			}
+			continue
+		}
+		if pendingUnderscore {
+			normalized.WriteByte('_')
+			pendingUnderscore = false
+		}
+		normalized.WriteRune(r)
+	}
+	return normalized.String()
 }
 
 func codexTurnMetadataSessionID(target http.Header, source http.Header) string {

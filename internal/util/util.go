@@ -117,6 +117,16 @@ func CountAuthFiles[T any](ctx context.Context, store interface {
 	return len(entries)
 }
 
+// HasJSONFileName reports whether name ends with ".json" without allocating
+// a lower-cased copy of the full path or filename.
+func HasJSONFileName(name string) bool {
+	const suffix = ".json"
+	if len(name) < len(suffix) {
+		return false
+	}
+	return strings.EqualFold(name[len(name)-len(suffix):], suffix)
+}
+
 // WritablePath returns the cleaned WRITABLE_PATH environment variable when it is set.
 // It accepts both uppercase and lowercase variants for compatibility with existing conventions.
 func WritablePath() string {

@@ -188,6 +188,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.Websockets != n.Websockets {
 				changes = append(changes, fmt.Sprintf("codex[%d].websockets: %t -> %t", i, o.Websockets, n.Websockets))
 			}
+			if o.PoolMode != n.PoolMode {
+				changes = append(changes, fmt.Sprintf("codex[%d].pool-mode: %t -> %t", i, o.PoolMode, n.PoolMode))
+			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("codex[%d].api-key: updated", i))
 			}

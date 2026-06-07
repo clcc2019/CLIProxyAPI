@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -49,11 +50,27 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for non-retryable refresh failure")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "refresh_token_reused") {
+	if !strings.Contains(err.Error(), "refresh_token_reused") {
 		t.Fatalf("expected refresh_token_reused in error, got: %v", err)
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected 1 refresh attempt, got %d", got)
+	}
+}
+
+func TestIsNonRetryableRefreshErrMatchesMixedCaseMarker(t *testing.T) {
+	err := fmt.Errorf("oauth refresh failed: INVALID_GRANT")
+	if !isNonRetryableRefreshErr(err) {
+		t.Fatal("mixed-case invalid_grant marker should be non-retryable")
+	}
+}
+
+func BenchmarkIsNonRetryableRefreshErrMarker(b *testing.B) {
+	err := fmt.Errorf("oauth refresh failed: INVALID_GRANT")
+	for b.Loop() {
+		if !isNonRetryableRefreshErr(err) {
+			b.Fatal("expected non-retryable refresh error")
+		}
 	}
 }
 
@@ -150,6 +167,34 @@ func TestRefreshTokensPermanentErrorsExposeStatusAndMarker(t *testing.T) {
 	permanent, ok := err.(interface{ IsPermanentAuthError() bool })
 	if !ok || !permanent.IsPermanentAuthError() {
 		t.Fatalf("error does not mark permanent auth failure: %T %v", err, err)
+	}
+}
+
+func TestCodexRefreshErrorIsPermanent(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		code       string
+		want       bool
+	}{
+		{name: "known permanent code", statusCode: http.StatusBadRequest, code: " Refresh_Token_Reused ", want: true},
+		{name: "invalid grant", statusCode: http.StatusBadRequest, code: "INVALID_GRANT", want: true},
+		{name: "unauthorized fallback", statusCode: http.StatusUnauthorized, code: "temporary", want: true},
+		{name: "retryable status and code", statusCode: http.StatusBadGateway, code: "temporary", want: false},
+	}
+
+	for i := range tests {
+		if got := codexRefreshErrorIsPermanent(tests[i].statusCode, tests[i].code); got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkCodexRefreshErrorIsPermanent(b *testing.B) {
+	for b.Loop() {
+		if !codexRefreshErrorIsPermanent(http.StatusBadRequest, " Refresh_Token_Reused ") {
+			b.Fatal("expected permanent refresh error")
+		}
 	}
 }
 

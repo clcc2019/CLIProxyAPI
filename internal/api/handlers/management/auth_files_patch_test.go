@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,6 +225,82 @@ func TestListAuthFiles_PaginatedManagerSubscriptionExpirySortIsGlobal(t *testing
 		if got := body.Files[i]["name"]; got != name {
 			t.Fatalf("files[%d].name = %#v, want %s; files=%#v", i, got, name, body.Files)
 		}
+	}
+}
+
+func TestSortAuthFileEntriesForListUsesPrecomputedKeys(t *testing.T) {
+	files := []gin.H{
+		{"name": "Zulu.json", "type": "Codex", "priority": 5},
+		{"name": "bravo.json", "type": "Claude", "priority": 10},
+		{"name": "Alpha.json", "type": "Claude", "priority": 10},
+		{"name": "aardvark.json", "type": "Codex", "priority": 100, "disabled": true},
+	}
+
+	sortAuthFileEntriesForList(files, "priority")
+
+	want := []string{"Alpha.json", "bravo.json", "Zulu.json", "aardvark.json"}
+	for i, name := range want {
+		if got := files[i]["name"]; got != name {
+			t.Fatalf("priority files[%d].name = %#v, want %q; files=%#v", i, got, name, files)
+		}
+	}
+
+	sortAuthFileEntriesForList(files, "default")
+	want = []string{"Alpha.json", "bravo.json", "Zulu.json", "aardvark.json"}
+	for i, name := range want {
+		if got := files[i]["name"]; got != name {
+			t.Fatalf("default files[%d].name = %#v, want %q; files=%#v", i, got, name, files)
+		}
+	}
+}
+
+func TestAuthFilesListQueryNormalizesSearchOnce(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?q=%20AlPhA*JsOn%20", nil)
+
+	q := authFilesListQueryFromRequest(c)
+
+	if q.Search != "alpha*json" {
+		t.Fatalf("search = %q, want alpha*json", q.Search)
+	}
+	if len(q.SearchParts) != 2 || q.SearchParts[0] != "alpha" || q.SearchParts[1] != "json" {
+		t.Fatalf("search parts = %#v, want [alpha json]", q.SearchParts)
+	}
+	if !authFileMatchesNormalizedSearch(q.Search, q.SearchParts, "alpha-file.json", "codex") {
+		t.Fatal("normalized wildcard search should match")
+	}
+}
+
+func BenchmarkAuthFileMatchesNormalizedWildcardSearch(b *testing.B) {
+	search := "alpha*json"
+	parts := strings.Split(search, "*")
+	b.ReportAllocs()
+	for b.Loop() {
+		if !authFileMatchesNormalizedSearch(search, parts, "alpha-file.json", "codex") {
+			b.Fatal("normalized wildcard search should match")
+		}
+	}
+}
+
+func BenchmarkSortAuthFileEntriesForListSubscription(b *testing.B) {
+	seed := make([]gin.H, 256)
+	for i := range seed {
+		seed[i] = gin.H{
+			"name":                    "Auth-" + strconv.Itoa(255-i) + ".json",
+			"type":                    []string{"Codex", "Claude", "OpenAI"}[i%3],
+			"priority":                i % 11,
+			"plan_type":               []string{"Plus", "Free", "Team"}[i%3],
+			"subscription_expires_at": int64(1_800_000_000_000 + i*60_000),
+			"disabled":                i%29 == 0,
+		}
+	}
+	files := make([]gin.H, len(seed))
+
+	b.ReportAllocs()
+	for b.Loop() {
+		copy(files, seed)
+		sortAuthFileEntriesForList(files, "subscription_expiry")
 	}
 }
 

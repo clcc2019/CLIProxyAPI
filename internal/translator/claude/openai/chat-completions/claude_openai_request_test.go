@@ -243,3 +243,46 @@ func TestConvertOpenAIRequestToClaude_SystemOnlyInputKeepsFallbackUserMessage(t 
 		t.Fatalf("Expected fallback text %q, got %q", "", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_NormalizesReasoningEffort(t *testing.T) {
+	inputJSON := `{
+		"reasoning_effort": " MeDiuM ",
+		"messages": [{"role": "user", "content": "Hello"}]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-test", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("thinking.type").String(); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want enabled. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("thinking.budget_tokens").Int(); got != 8192 {
+		t.Fatalf("thinking.budget_tokens = %d, want 8192. Output: %s", got, string(result))
+	}
+}
+
+func TestNormalizeReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: " ", want: ""},
+		{name: "known mixed case", value: "\tXHIGH\r\n", want: "xhigh"},
+		{name: "unknown lower fallback", value: "Custom-Effort", want: "custom-effort"},
+	}
+
+	for i := range tests {
+		if got := normalizeReasoningEffort(tests[i].value); got != tests[i].want {
+			t.Fatalf("%s: got %q, want %q", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkNormalizeReasoningEffort(b *testing.B) {
+	for b.Loop() {
+		if got := normalizeReasoningEffort(" XHIGH "); got != "xhigh" {
+			b.Fatalf("normalizeReasoningEffort() = %q", got)
+		}
+	}
+}

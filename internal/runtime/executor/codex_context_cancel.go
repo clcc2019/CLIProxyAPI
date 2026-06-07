@@ -3,9 +3,9 @@ package executor
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 )
@@ -69,8 +69,8 @@ func errorsIsContextDone(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "context canceled") || strings.Contains(lower, "context deadline exceeded")
+	errText := err.Error()
+	return asciifold.Contains(errText, "context canceled") || asciifold.Contains(errText, "context deadline exceeded")
 }
 
 func codexRecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {

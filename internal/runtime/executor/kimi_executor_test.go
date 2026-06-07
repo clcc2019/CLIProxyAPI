@@ -6,6 +6,34 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestStripKimiPrefixEqualFold(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "lowercase", model: "kimi-k2", want: "k2"},
+		{name: "mixed case", model: " KiMi-K2-Instruct ", want: "K2-Instruct"},
+		{name: "no prefix", model: "moonshot-v1", want: "moonshot-v1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripKimiPrefix(tt.model); got != tt.want {
+				t.Fatalf("stripKimiPrefix() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkStripKimiPrefixMixedCase(b *testing.B) {
+	for b.Loop() {
+		if got := stripKimiPrefix(" KiMi-K2-Instruct "); got != "K2-Instruct" {
+			b.Fatalf("stripKimiPrefix() = %q", got)
+		}
+	}
+}
+
 func TestNormalizeKimiToolMessageLinks_UsesCallIDFallback(t *testing.T) {
 	body := []byte(`{
 		"messages":[

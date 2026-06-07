@@ -46,6 +46,38 @@ func TestFileSynthesizer_Synthesize_EmptyAuthDir(t *testing.T) {
 	}
 }
 
+func TestSupportedSynthesizedAuthProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{name: "claude", provider: " Claude ", want: true},
+		{name: "codex", provider: "\tCodex\r\n", want: true},
+		{name: "kimi", provider: "Kimi", want: true},
+		{name: "xai", provider: "XAI", want: true},
+		{name: "openai compatibility", provider: "OpenAI-Compatibility", want: true},
+		{name: "unsupported", provider: "anthropic", want: false},
+		{name: "empty", provider: " ", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSupportedSynthesizedAuthProvider(tt.provider); got != tt.want {
+				t.Fatalf("isSupportedSynthesizedAuthProvider(%q) = %t, want %t", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkSupportedSynthesizedAuthProvider(b *testing.B) {
+	for b.Loop() {
+		if !isSupportedSynthesizedAuthProvider(" OpenAI-Compatibility ") {
+			b.Fatal("expected supported provider")
+		}
+	}
+}
+
 func TestFileSynthesizer_Synthesize_NonExistentDir(t *testing.T) {
 	synth := NewFileSynthesizer()
 	ctx := &SynthesisContext{

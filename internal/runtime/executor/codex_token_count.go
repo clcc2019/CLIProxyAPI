@@ -67,23 +67,30 @@ func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {
 }
 
 func codexTokenizerKey(model string) string {
-	sanitized := strings.ToLower(strings.TrimSpace(model))
+	sanitized := strings.TrimSpace(model)
 	switch {
 	case sanitized == "":
 		return "cl100k_base"
-	case strings.HasPrefix(sanitized, "gpt-5"):
+	case hasCodexTokenizerModelPrefix(sanitized, "gpt-5"):
 		return "gpt-5"
-	case strings.HasPrefix(sanitized, "gpt-4.1"):
+	case hasCodexTokenizerModelPrefix(sanitized, "gpt-4.1"):
 		return "gpt-4.1"
-	case strings.HasPrefix(sanitized, "gpt-4o"):
+	case hasCodexTokenizerModelPrefix(sanitized, "gpt-4o"):
 		return "gpt-4o"
-	case strings.HasPrefix(sanitized, "gpt-4"):
+	case hasCodexTokenizerModelPrefix(sanitized, "gpt-4"):
 		return "gpt-4"
-	case strings.HasPrefix(sanitized, "gpt-3.5"), strings.HasPrefix(sanitized, "gpt-3"):
+	case hasCodexTokenizerModelPrefix(sanitized, "gpt-3.5"), hasCodexTokenizerModelPrefix(sanitized, "gpt-3"):
 		return "gpt-3.5"
 	default:
 		return "cl100k_base"
 	}
+}
+
+func hasCodexTokenizerModelPrefix(model, prefix string) bool {
+	if len(model) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(model[:len(prefix)], prefix)
 }
 
 func loadCodexTokenizer(key string) (tokenizer.Codec, error) {

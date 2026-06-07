@@ -234,7 +234,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			// Pass through directly; ApplyThinking handles clamping to target model's levels.
 			effort := ""
 			if v := rootResult.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
-				effort = strings.ToLower(strings.TrimSpace(v.String()))
+				effort = normalizeReasoningEffort(v.String())
 			}
 			if effort != "" {
 				reasoningEffort = effort
@@ -254,6 +254,35 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
 
 	return template
+}
+
+func normalizeReasoningEffort(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(value, "none"):
+		return "none"
+	case strings.EqualFold(value, "minimal"):
+		return "minimal"
+	case strings.EqualFold(value, "low"):
+		return "low"
+	case strings.EqualFold(value, "medium"):
+		return "medium"
+	case strings.EqualFold(value, "high"):
+		return "high"
+	case strings.EqualFold(value, "xhigh"):
+		return "xhigh"
+	case strings.EqualFold(value, "max"):
+		return "max"
+	case strings.EqualFold(value, "auto"):
+		return "auto"
+	case strings.EqualFold(value, "adaptive"):
+		return "adaptive"
+	default:
+		return strings.ToLower(value)
+	}
 }
 
 type codexClaudeToolCallKind struct {

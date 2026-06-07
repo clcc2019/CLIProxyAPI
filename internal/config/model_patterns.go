@@ -55,32 +55,43 @@ func MatchModelPattern(pattern, value string) bool {
 	if pattern == "" || value == "" {
 		return false
 	}
-	if !strings.Contains(pattern, "*") {
+	firstStar := strings.IndexByte(pattern, '*')
+	if firstStar < 0 {
 		return pattern == value
 	}
-	parts := strings.Split(pattern, "*")
-	if prefix := parts[0]; prefix != "" {
+	lastStar := strings.LastIndexByte(pattern, '*')
+	if prefix := pattern[:firstStar]; prefix != "" {
 		if !strings.HasPrefix(value, prefix) {
 			return false
 		}
 		value = value[len(prefix):]
 	}
-	if suffix := parts[len(parts)-1]; suffix != "" {
+	if suffix := pattern[lastStar+1:]; suffix != "" {
 		if !strings.HasSuffix(value, suffix) {
 			return false
 		}
 		value = value[:len(value)-len(suffix)]
 	}
-	for i := 1; i < len(parts)-1; i++ {
-		segment := parts[i]
-		if segment == "" {
-			continue
+	if firstStar < lastStar {
+		middle := pattern[firstStar+1 : lastStar]
+		for middle != "" {
+			segment, rest, found := strings.Cut(middle, "*")
+			middle = rest
+			if segment == "" {
+				if !found {
+					break
+				}
+				continue
+			}
+			idx := strings.Index(value, segment)
+			if idx < 0 {
+				return false
+			}
+			value = value[idx+len(segment):]
+			if !found {
+				break
+			}
 		}
-		idx := strings.Index(value, segment)
-		if idx < 0 {
-			return false
-		}
-		value = value[idx+len(segment):]
 	}
 	return true
 }

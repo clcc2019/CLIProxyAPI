@@ -118,6 +118,52 @@ func TestRedactSensitiveJSONBytesKeepsTokenUsageFields(t *testing.T) {
 	}
 }
 
+func TestMaskSensitiveQuery(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "", want: ""},
+		{name: "unchanged", raw: "model=gpt-5&stream=true", want: "model=gpt-5&stream=true"},
+		{name: "preserves empty and encoded segments", raw: "page=1&&filter=a%20b&", want: "page=1&&filter=a%20b&"},
+		{name: "masks token", raw: "auth_token=abcdefghij&safe=a%2Fb", want: "auth_token=abcd...ghij&safe=a%2Fb"},
+		{name: "matches encoded uppercase key", raw: "safe=1&API%5FKEY=abcdef&next=2", want: "safe=1&API%5FKEY=ab...ef&next=2"},
+		{name: "sensitive key without equals", raw: "safe=1&token&next=2", want: "safe=1&token=&next=2"},
+		{name: "masks multiple values", raw: "token=abcdefghij&&client_secret=uvwxyz&safe=1", want: "token=abcd...ghij&&client_secret=uv...yz&safe=1"},
+		{name: "malformed encoded value", raw: "token=%zz&safe=1", want: "token=%25...z&safe=1"},
+		{name: "malformed encoded key", raw: "auth%zz_token=abcdefghij", want: "auth%zz_token=abcd...ghij"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MaskSensitiveQuery(tt.raw); got != tt.want {
+				t.Fatalf("MaskSensitiveQuery(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+var maskSensitiveQueryBenchmarkSink string
+
+func BenchmarkMaskSensitiveQuery(b *testing.B) {
+	b.Run("passthrough", func(b *testing.B) {
+		raw := "model=gpt-5&stream=true&include=usage&request_id=req-123"
+		b.ReportAllocs()
+		for b.Loop() {
+			maskSensitiveQueryBenchmarkSink = MaskSensitiveQuery(raw)
+		}
+	})
+
+	b.Run("masked", func(b *testing.B) {
+		raw := "model=gpt-5&auth_token=abcdefghijklmnopqrstuvwxyz&stream=true"
+		b.ReportAllocs()
+		for b.Loop() {
+			maskSensitiveQueryBenchmarkSink = MaskSensitiveQuery(raw)
+		}
+	})
+}
+
 func containsAll(value string, needles ...string) bool {
 	for _, needle := range needles {
 		if !strings.Contains(value, needle) {

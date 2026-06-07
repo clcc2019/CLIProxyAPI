@@ -3,7 +3,9 @@ package helps
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
@@ -13,9 +15,19 @@ import (
 // zeroWidthSpace is the Unicode zero-width space character used for obfuscation.
 const zeroWidthSpace = "\u200B"
 
+const sensitiveWordMatcherCacheMaxEntries = 64
+
 // SensitiveWordMatcher holds the compiled regex for matching sensitive words.
 type SensitiveWordMatcher struct {
 	regex *regexp.Regexp
+}
+
+var sensitiveWordMatcherCache = struct {
+	sync.Mutex
+	entries map[string]*SensitiveWordMatcher
+	order   []string
+}{
+	entries: make(map[string]*SensitiveWordMatcher),
 }
 
 // BuildSensitiveWordMatcher compiles a regex from the word list.
@@ -24,6 +36,17 @@ func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 	if len(words) == 0 {
 		return nil
 	}
+
+	cacheKey, ok := sensitiveWordMatcherCacheKey(words)
+	if !ok {
+		return nil
+	}
+	sensitiveWordMatcherCache.Lock()
+	if matcher := sensitiveWordMatcherCache.entries[cacheKey]; matcher != nil {
+		sensitiveWordMatcherCache.Unlock()
+		return matcher
+	}
+	sensitiveWordMatcherCache.Unlock()
 
 	// Filter and normalize words
 	var validWords []string
@@ -55,7 +78,39 @@ func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 		return nil
 	}
 
-	return &SensitiveWordMatcher{regex: re}
+	matcher := &SensitiveWordMatcher{regex: re}
+	sensitiveWordMatcherCache.Lock()
+	if existing := sensitiveWordMatcherCache.entries[cacheKey]; existing != nil {
+		sensitiveWordMatcherCache.Unlock()
+		return existing
+	}
+	if len(sensitiveWordMatcherCache.order) >= sensitiveWordMatcherCacheMaxEntries {
+		oldest := sensitiveWordMatcherCache.order[0]
+		delete(sensitiveWordMatcherCache.entries, oldest)
+		copy(sensitiveWordMatcherCache.order, sensitiveWordMatcherCache.order[1:])
+		sensitiveWordMatcherCache.order = sensitiveWordMatcherCache.order[:len(sensitiveWordMatcherCache.order)-1]
+	}
+	sensitiveWordMatcherCache.entries[cacheKey] = matcher
+	sensitiveWordMatcherCache.order = append(sensitiveWordMatcherCache.order, cacheKey)
+	sensitiveWordMatcherCache.Unlock()
+	return matcher
+}
+
+func sensitiveWordMatcherCacheKey(words []string) (string, bool) {
+	var builder strings.Builder
+	for _, w := range words {
+		w = strings.TrimSpace(w)
+		if utf8.RuneCountInString(w) < 2 || strings.Contains(w, zeroWidthSpace) {
+			continue
+		}
+		builder.WriteString(strconv.Itoa(len(w)))
+		builder.WriteByte(':')
+		builder.WriteString(w)
+	}
+	if builder.Len() == 0 {
+		return "", false
+	}
+	return builder.String(), true
 }
 
 // obfuscateWord inserts a zero-width space after the first grapheme.

@@ -79,3 +79,32 @@ func TestApplyPayloadConfigWithRoot_DefaultRawUsesPresenceSnapshot(t *testing.T)
 		t.Fatalf("metadata.source = %q, want %q", got, "proxy")
 	}
 }
+
+func TestNormalizePayloadFromProtocol(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: " OpenAI-Response ", want: "responses"},
+		{input: "OPENAI-RESPONSES", want: "responses"},
+		{input: " Response ", want: "responses"},
+		{input: "Custom-Protocol", want: "custom-protocol"},
+		{input: " ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := normalizePayloadFromProtocol(tt.input); got != tt.want {
+				t.Fatalf("normalizePayloadFromProtocol(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkNormalizePayloadFromProtocol(b *testing.B) {
+	for b.Loop() {
+		if got := normalizePayloadFromProtocol(" OpenAI-Responses "); got != "responses" {
+			b.Fatalf("normalizePayloadFromProtocol() = %q", got)
+		}
+	}
+}

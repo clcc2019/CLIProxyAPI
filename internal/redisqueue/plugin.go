@@ -161,8 +161,11 @@ func normalizeQueuedTokenStats(provider string, tokens tokenStats) tokenStats {
 }
 
 func queuedProviderReportsReasoningAsOutputDetail(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "codex", "openai":
+	provider = strings.TrimSpace(provider)
+	switch {
+	case strings.EqualFold(provider, "codex"):
+		return true
+	case strings.EqualFold(provider, "openai"):
 		return true
 	default:
 		return false

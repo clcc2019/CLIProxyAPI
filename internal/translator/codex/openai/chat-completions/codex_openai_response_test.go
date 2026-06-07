@@ -7,6 +7,23 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestMimeTypeFromCodexOutputFormatMatchesMixedCase(t *testing.T) {
+	if got := mimeTypeFromCodexOutputFormat("JpEg"); got != "image/jpeg" {
+		t.Fatalf("mimeTypeFromCodexOutputFormat() = %q, want image/jpeg", got)
+	}
+	if got := mimeTypeFromCodexOutputFormat(" JpEg "); got != "image/png" {
+		t.Fatalf("mimeTypeFromCodexOutputFormat() = %q, want default image/png for whitespace", got)
+	}
+}
+
+func BenchmarkMimeTypeFromCodexOutputFormatMixedCase(b *testing.B) {
+	for b.Loop() {
+		if got := mimeTypeFromCodexOutputFormat("JpEg"); got != "image/jpeg" {
+			b.Fatalf("mimeTypeFromCodexOutputFormat() = %q", got)
+		}
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *testing.T) {
 	ctx := context.Background()
 	var param any

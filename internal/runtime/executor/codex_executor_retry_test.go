@@ -63,7 +63,7 @@ func TestParseCodexRetryAfter(t *testing.T) {
 	t.Run("usage limit message try again at", func(t *testing.T) {
 		loc := time.FixedZone("UTC+8", 8*60*60)
 		now := time.Date(2026, time.May, 1, 19, 0, 0, 0, loc)
-		body := []byte(`{"error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at May 1st, 2026 7:42 PM."}}`)
+		body := []byte(`{"error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or TRY AGAIN AT May 1st, 2026 7:42 PM."}}`)
 		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
 		if retryAfter == nil {
 			t.Fatalf("expected retryAfter, got nil")
@@ -72,6 +72,19 @@ func TestParseCodexRetryAfter(t *testing.T) {
 			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 42*time.Minute)
 		}
 	})
+}
+
+func BenchmarkParseCodexRetryAfterMessageTryAgainAt(b *testing.B) {
+	loc := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, time.May, 1, 19, 0, 0, 0, loc)
+	body := []byte(`{"error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or TRY AGAIN AT May 1st, 2026 7:42 PM."}}`)
+
+	for b.Loop() {
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil || *retryAfter != 42*time.Minute {
+			b.Fatalf("retryAfter = %v, want 42m", retryAfter)
+		}
+	}
 }
 
 func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {

@@ -524,6 +524,45 @@ func TestConvertClaudeRequestToCodex_IgnoresNonCodexThinkingSignatures(t *testin
 	}
 }
 
+func TestConvertClaudeRequestToCodex_NormalizesAdaptiveEffort(t *testing.T) {
+	inputJSON := `{
+		"thinking": {"type":"adaptive"},
+		"output_config": {"effort":" XHIGH "},
+		"messages": [{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	if got := gjson.GetBytes(result, "reasoning.effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning.effort = %q, want xhigh. Output: %s", got, string(result))
+	}
+}
+
+func TestNormalizeReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: " ", want: ""},
+		{name: "known mixed case", value: "\tAdaptive\r\n", want: "adaptive"},
+		{name: "unknown lower fallback", value: "Custom-Effort", want: "custom-effort"},
+	}
+
+	for i := range tests {
+		if got := normalizeReasoningEffort(tests[i].value); got != tests[i].want {
+			t.Fatalf("%s: got %q, want %q", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkNormalizeReasoningEffort(b *testing.B) {
+	for b.Loop() {
+		if got := normalizeReasoningEffort(" XHIGH "); got != "xhigh" {
+			b.Fatalf("normalizeReasoningEffort() = %q", got)
+		}
+	}
+}
+
 func countRequestInputItemsByType(result []byte, itemType string) int {
 	count := 0
 	gjson.GetBytes(result, "input").ForEach(func(_, item gjson.Result) bool {

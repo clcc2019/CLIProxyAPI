@@ -4,15 +4,12 @@
 package middleware
 
 import (
-	"bytes"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpbody"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
@@ -124,8 +121,8 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 	if req == nil || req.Body == nil {
 		return false
 	}
-	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
-	if strings.HasPrefix(contentType, "multipart/form-data") {
+	contentType := strings.TrimSpace(req.Header.Get("Content-Type"))
+	if hasCaseInsensitivePrefix(contentType, "multipart/form-data") {
 		return false
 	}
 	if req.ContentLength <= 0 {
@@ -192,43 +189,14 @@ func decodeCapturedRequestBodyForLog(raw []byte, encoding string) []byte {
 }
 
 func decodeCapturedRequestBody(raw []byte, encoding string) ([]byte, error) {
-	encoding = strings.TrimSpace(encoding)
-	if encoding == "" || strings.EqualFold(encoding, "identity") {
-		return raw, nil
-	}
-
-	parts := strings.Split(encoding, ",")
-	body := raw
-	for i := len(parts) - 1; i >= 0; i-- {
-		enc := strings.ToLower(strings.TrimSpace(parts[i]))
-		switch enc {
-		case "", "identity":
-			continue
-		case "zstd":
-			decoded, errDecode := decodeCapturedZstdRequestBody(body)
-			if errDecode != nil {
-				return nil, errDecode
-			}
-			body = decoded
-		default:
-			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
-		}
-	}
-	return body, nil
+	return httpbody.DecodeContentEncodedRequestBody(raw, encoding)
 }
 
-func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
-	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
-	if errNewReader != nil {
-		return nil, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
+func hasCaseInsensitivePrefix(value, prefix string) bool {
+	if len(value) < len(prefix) {
+		return false
 	}
-	defer decoder.Close()
-
-	decoded, errRead := io.ReadAll(decoder)
-	if errRead != nil {
-		return nil, fmt.Errorf("failed to decode zstd request body: %w", errRead)
-	}
-	return decoded, nil
+	return strings.EqualFold(value[:len(prefix)], prefix)
 }
 
 // shouldLogRequest determines whether the request should be logged.

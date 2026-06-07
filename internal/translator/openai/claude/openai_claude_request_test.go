@@ -777,3 +777,42 @@ func TestConvertClaudeRequestToOpenAI_StripsClaudeCodeAttribution(t *testing.T) 
 		t.Fatalf("Unexpected system content: %q", got)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_NormalizesAdaptiveEffort(t *testing.T) {
+	inputJSON := []byte(`{
+		"thinking": {"type":"adaptive"},
+		"output_config": {"effort":" XHIGH "},
+		"messages": [{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	output := ConvertClaudeRequestToOpenAI("gpt-5", inputJSON, false)
+	if got := gjson.GetBytes(output, "reasoning_effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning_effort = %q, want xhigh. Output: %s", got, string(output))
+	}
+}
+
+func TestNormalizeReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: " ", want: ""},
+		{name: "known mixed case", value: "\tAdaptive\r\n", want: "adaptive"},
+		{name: "unknown lower fallback", value: "Custom-Effort", want: "custom-effort"},
+	}
+
+	for i := range tests {
+		if got := normalizeReasoningEffort(tests[i].value); got != tests[i].want {
+			t.Fatalf("%s: got %q, want %q", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func BenchmarkNormalizeReasoningEffort(b *testing.B) {
+	for b.Loop() {
+		if got := normalizeReasoningEffort(" XHIGH "); got != "xhigh" {
+			b.Fatalf("normalizeReasoningEffort() = %q", got)
+		}
+	}
+}

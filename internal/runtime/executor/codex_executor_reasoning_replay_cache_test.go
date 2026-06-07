@@ -623,6 +623,27 @@ func TestCodexExecutorReasoningReplayCacheClearsOnStreamResponseFailedInvalidSig
 	}
 }
 
+func TestCodexReasoningReplayInvalidSignatureErrorCaseInsensitive(t *testing.T) {
+	if !codexReasoningReplayInvalidSignatureError([]byte(`{"error":{"message":"Invalid Signature In Thinking Block"}}`)) {
+		t.Fatal("expected mixed-case invalid signature message to match")
+	}
+	if !codexReasoningReplayInvalidSignatureError([]byte(`{"error":{"code":"INVALID_ENCRYPTED_CONTENT"}}`)) {
+		t.Fatal("expected mixed-case invalid encrypted content code to match")
+	}
+	if codexReasoningReplayInvalidSignatureError([]byte(`{"error":{"message":"unrelated"}}`)) {
+		t.Fatal("did not expect unrelated error to match")
+	}
+}
+
+func BenchmarkCodexReasoningReplayInvalidSignatureError(b *testing.B) {
+	body := []byte(`{"type":"response.failed","response":{"error":{"message":"Invalid Signature In Thinking Block","code":"invalid_request_error"}}}`)
+	for b.Loop() {
+		if !codexReasoningReplayInvalidSignatureError(body) {
+			b.Fatal("expected invalid signature")
+		}
+	}
+}
+
 func TestCodexExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t *testing.T) {
 	internalcache.ClearCodexReasoningReplayCache()
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)

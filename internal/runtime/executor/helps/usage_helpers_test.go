@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -452,6 +453,136 @@ func TestNewExecutorUsageReporterIncludesExecutorType(t *testing.T) {
 	}
 	if record.ExecutorType != "TestUsageExecutor" {
 		t.Fatalf("executor type = %q, want %q", record.ExecutorType, "TestUsageExecutor")
+	}
+}
+
+func TestUsageProviderReportsReasoningAsOutputDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{name: "openai", provider: " OpenAI ", want: true},
+		{name: "codex", provider: "\tCodex\r\n", want: true},
+		{name: "oauth", provider: "oauth", want: false},
+		{name: "empty", provider: " ", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := usageProviderReportsReasoningAsOutputDetail(tt.provider); got != tt.want {
+				t.Fatalf("usageProviderReportsReasoningAsOutputDetail(%q) = %t, want %t", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeReasoningEffortValue(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: " Medium ", want: "medium"},
+		{input: "XHIGH", want: "xhigh"},
+		{input: " Adaptive ", want: "adaptive"},
+		{input: "DISABLED", want: "disabled"},
+		{input: "Custom-Level", want: "custom-level"},
+		{input: " ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := normalizeReasoningEffortValue(tt.input); got != tt.want {
+				t.Fatalf("normalizeReasoningEffortValue(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeUsageDetailTotalForProviderMixedCaseProvider(t *testing.T) {
+	detail := normalizeUsageDetailTotalForProvider(" OpenAI ", usage.Detail{
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 15,
+	})
+	if detail.TotalTokens != 150 {
+		t.Fatalf("OpenAI total tokens = %d, want 150", detail.TotalTokens)
+	}
+
+	detail = normalizeUsageDetailTotalForProvider(" OAuth ", usage.Detail{
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 15,
+	})
+	if detail.TotalTokens != 165 {
+		t.Fatalf("OAuth total tokens = %d, want 165", detail.TotalTokens)
+	}
+}
+
+func BenchmarkUsageProviderReportsReasoningAsOutputDetail(b *testing.B) {
+	for b.Loop() {
+		if !usageProviderReportsReasoningAsOutputDetail(" OpenAI ") {
+			b.Fatal("expected OpenAI provider to report reasoning as output")
+		}
+	}
+}
+
+func BenchmarkNormalizeReasoningEffortValue(b *testing.B) {
+	for b.Loop() {
+		if got := normalizeReasoningEffortValue(" Medium "); got != "medium" {
+			b.Fatalf("normalizeReasoningEffortValue() = %q", got)
+		}
+	}
+}
+
+func TestFilterSSEUsageMetadataPreservesUnchangedAndTerminalPayloads(t *testing.T) {
+	unchanged := []byte("event: message\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n")
+	if got := FilterSSEUsageMetadata(unchanged); !bytes.Equal(got, unchanged) {
+		t.Fatalf("unchanged payload changed:\n got %q\nwant %q", got, unchanged)
+	}
+
+	terminal := []byte("data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1}}\n\n")
+	if got := FilterSSEUsageMetadata(terminal); !bytes.Equal(got, terminal) {
+		t.Fatalf("terminal payload changed:\n got %q\nwant %q", got, terminal)
+	}
+}
+
+func TestFilterSSEUsageMetadataRebuildsOnlyModifiedDataLines(t *testing.T) {
+	payload := []byte("event: message\r\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}],\"usageMetadata\":{\"promptTokenCount\":1}}\r\n: keep\n\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2}}\n\n")
+
+	got := FilterSSEUsageMetadata(payload)
+
+	if bytes.Contains(got, []byte(`"usageMetadata":{"promptTokenCount":1}`)) {
+		t.Fatalf("non-terminal usage metadata was not removed: %s", got)
+	}
+	if !bytes.Contains(got, []byte(`"cpaUsageMetadata":{"promptTokenCount":1}`)) {
+		t.Fatalf("renamed usage metadata missing: %s", got)
+	}
+	if !bytes.Contains(got, []byte(`"usageMetadata":{"promptTokenCount":2}`)) {
+		t.Fatalf("terminal usage metadata should remain: %s", got)
+	}
+	if !bytes.Contains(got, []byte("event: message\r\n")) || !bytes.Contains(got, []byte(": keep\n")) {
+		t.Fatalf("non-data lines changed: %q", got)
+	}
+}
+
+func BenchmarkFilterSSEUsageMetadataPassthrough(b *testing.B) {
+	payload := []byte("event: message\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n")
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := FilterSSEUsageMetadata(payload); len(got) != len(payload) {
+			b.Fatalf("payload length = %d, want %d", len(got), len(payload))
+		}
+	}
+}
+
+func BenchmarkFilterSSEUsageMetadataModified(b *testing.B) {
+	payload := []byte("event: message\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}],\"usageMetadata\":{\"promptTokenCount\":1}}\n\n")
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := FilterSSEUsageMetadata(payload); bytes.Contains(got, []byte(`"usageMetadata"`)) {
+			b.Fatal("usage metadata was not filtered")
+		}
 	}
 }
 

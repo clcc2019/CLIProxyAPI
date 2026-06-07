@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	codexcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/common"
@@ -80,23 +81,16 @@ func codexShouldStoreResponses(auth *cliproxyauth.Auth, upstreamURL string) bool
 }
 
 func codexMatchesAzureResponsesBaseURL(rawURL string) bool {
-	lower := strings.ToLower(strings.TrimSpace(rawURL))
-	if lower == "" {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
 		return false
 	}
-	for _, marker := range []string{
-		"openai.azure.",
-		"cognitiveservices.azure.",
-		"aoai.azure.",
-		"azure-api.",
-		"azurefd.",
-		"windows.net/openai",
-	} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+	return asciifold.Contains(rawURL, "openai.azure.") ||
+		asciifold.Contains(rawURL, "cognitiveservices.azure.") ||
+		asciifold.Contains(rawURL, "aoai.azure.") ||
+		asciifold.Contains(rawURL, "azure-api.") ||
+		asciifold.Contains(rawURL, "azurefd.") ||
+		asciifold.Contains(rawURL, "windows.net/openai")
 }
 
 var codexAllowedResponsesFinalUpstreamFields = map[string]struct{}{
@@ -155,11 +149,12 @@ func codexEnsureFinalUpstreamBodyDefaults(body []byte, baseModel string, opts co
 		case gjson.True, gjson.False:
 			return
 		case gjson.String:
-			switch strings.ToLower(strings.TrimSpace(current.String())) {
-			case "true":
+			currentValue := strings.TrimSpace(current.String())
+			switch {
+			case strings.EqualFold(currentValue, "true"):
 				edits = append(edits, helps.SetRawJSONEdit(field, []byte("true")))
 				return
-			case "false":
+			case strings.EqualFold(currentValue, "false"):
 				edits = append(edits, helps.SetRawJSONEdit(field, []byte("false")))
 				return
 			}
@@ -960,14 +955,17 @@ func normalizeCodexFinalUpstreamWebSearchTool(tool gjson.Result) []byte {
 
 func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, bool) {
 	if toolChoice.Type == gjson.String {
-		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
-		case "auto", "":
+		choice := strings.TrimSpace(toolChoice.String())
+		switch {
+		case choice == "" || strings.EqualFold(choice, "auto"):
 			return []byte(`"auto"`), true
-		case "none":
+		case strings.EqualFold(choice, "none"):
 			return []byte(`"none"`), true
-		case "required", "any":
+		case strings.EqualFold(choice, "required"):
 			return []byte(`"required"`), true
-		case "null":
+		case strings.EqualFold(choice, "any"):
+			return []byte(`"required"`), true
+		case strings.EqualFold(choice, "null"):
 			return []byte(`"auto"`), true
 		}
 		return []byte(`"auto"`), true
@@ -976,15 +974,17 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 		return nil, false
 	}
 
-	choiceType := strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String()))
-	switch choiceType {
-	case "", "null", "auto":
+	choiceType := strings.TrimSpace(toolChoice.Get("type").String())
+	switch {
+	case choiceType == "" || strings.EqualFold(choiceType, "null") || strings.EqualFold(choiceType, "auto"):
 		return []byte(`"auto"`), true
-	case "none":
+	case strings.EqualFold(choiceType, "none"):
 		return []byte(`"none"`), true
-	case "any", "required":
+	case strings.EqualFold(choiceType, "any"):
 		return []byte(`"required"`), true
-	case "tool", "function":
+	case strings.EqualFold(choiceType, "required"):
+		return []byte(`"required"`), true
+	case strings.EqualFold(choiceType, "tool") || strings.EqualFold(choiceType, "function"):
 		name := strings.TrimSpace(toolChoice.Get("name").String())
 		if name == "" {
 			name = strings.TrimSpace(toolChoice.Get("function.name").String())
@@ -995,11 +995,11 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 		raw := []byte(`{"type":"function"}`)
 		raw, _ = helps.SetJSONBytes(raw, "name", name)
 		return raw, true
-	case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_20250305", "web_search_20260209":
+	case codexIsFinalUpstreamWebSearchToolType(choiceType):
 		return []byte(`{"type":"web_search"}`), true
-	case "image_generation":
+	case strings.EqualFold(choiceType, "image_generation"):
 		return []byte(`{"type":"image_generation"}`), true
-	case "custom":
+	case strings.EqualFold(choiceType, "custom"):
 		name := strings.TrimSpace(toolChoice.Get("name").String())
 		if name == "" {
 			name = strings.TrimSpace(toolChoice.Get("custom.name").String())
@@ -1010,7 +1010,7 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 		raw := []byte(`{"type":"custom"}`)
 		raw, _ = helps.SetJSONBytes(raw, "name", name)
 		return raw, true
-	case "allowed_tools":
+	case strings.EqualFold(choiceType, "allowed_tools"):
 		return normalizeCodexFinalUpstreamAllowedToolsChoice(toolChoice), true
 	default:
 		return []byte(`"auto"`), true
@@ -1018,12 +1018,13 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 }
 
 func normalizeCodexFinalUpstreamAllowedToolsChoice(toolChoice gjson.Result) []byte {
-	mode := strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String()))
-	switch mode {
-	case "required", "any":
+	modeValue := strings.TrimSpace(toolChoice.Get("mode").String())
+	mode := "auto"
+	switch {
+	case strings.EqualFold(modeValue, "required"):
 		mode = "required"
-	default:
-		mode = "auto"
+	case strings.EqualFold(modeValue, "any"):
+		mode = "required"
 	}
 
 	rawTools := []byte("[]")
@@ -1120,15 +1121,59 @@ func normalizeCodexFinalUpstreamAllowedToolRef(tool gjson.Result) ([]byte, bool)
 }
 
 func normalizeCodexFinalUpstreamToolType(toolType string) string {
-	switch strings.ToLower(strings.TrimSpace(toolType)) {
-	case "", "none", "null":
+	toolType = strings.TrimSpace(toolType)
+	switch {
+	case toolType == "" || strings.EqualFold(toolType, "none") || strings.EqualFold(toolType, "null"):
 		return ""
-	case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_20250305", "web_search_20260209":
+	case codexIsFinalUpstreamWebSearchToolType(toolType):
 		return "web_search"
-	case "namespace", "tool_search", "custom", "image_generation", "function":
-		return strings.ToLower(strings.TrimSpace(toolType))
+	case strings.EqualFold(toolType, "namespace"):
+		return "namespace"
+	case strings.EqualFold(toolType, "tool_search"):
+		return "tool_search"
+	case strings.EqualFold(toolType, "custom"):
+		return "custom"
+	case strings.EqualFold(toolType, "image_generation"):
+		return "image_generation"
+	case strings.EqualFold(toolType, "function"):
+		return "function"
+	case strings.EqualFold(toolType, "tool"):
+		return "tool"
+	case strings.EqualFold(toolType, "mcp"):
+		return "mcp"
+	case strings.EqualFold(toolType, "file_search"):
+		return "file_search"
+	case strings.EqualFold(toolType, "computer"):
+		return "computer"
+	case strings.EqualFold(toolType, "computer_use"):
+		return "computer_use"
+	case strings.EqualFold(toolType, "computer_use_preview"):
+		return "computer_use_preview"
+	case strings.EqualFold(toolType, "code_interpreter"):
+		return "code_interpreter"
+	case strings.EqualFold(toolType, "shell"):
+		return "shell"
+	case strings.EqualFold(toolType, "apply_patch"):
+		return "apply_patch"
 	default:
-		return strings.ToLower(strings.TrimSpace(toolType))
+		return strings.ToLower(toolType)
+	}
+}
+
+func codexIsFinalUpstreamWebSearchToolType(toolType string) bool {
+	switch {
+	case strings.EqualFold(toolType, "web_search"):
+		return true
+	case strings.EqualFold(toolType, "web_search_preview"):
+		return true
+	case strings.EqualFold(toolType, "web_search_preview_2025_03_11"):
+		return true
+	case strings.EqualFold(toolType, "web_search_20250305"):
+		return true
+	case strings.EqualFold(toolType, "web_search_20260209"):
+		return true
+	default:
+		return false
 	}
 }
 

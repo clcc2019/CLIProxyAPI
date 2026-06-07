@@ -1,6 +1,10 @@
 package signature
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
+)
 
 type SignatureProvider string
 
@@ -41,16 +45,16 @@ type SignatureCompatibilityDecision struct {
 // SignatureProviderFromModelName maps common model names to the provider family
 // whose signed history can be safely replayed for that model.
 func SignatureProviderFromModelName(modelName string) SignatureProvider {
-	lower := strings.ToLower(strings.TrimSpace(modelName))
+	modelName = strings.TrimSpace(modelName)
 	switch {
-	case strings.Contains(lower, "claude"):
+	case asciifold.Contains(modelName, "claude"):
 		return SignatureProviderClaude
-	case strings.Contains(lower, "gpt"),
-		strings.Contains(lower, "openai"),
-		strings.Contains(lower, "codex"),
-		strings.HasPrefix(lower, "o1"),
-		strings.HasPrefix(lower, "o3"),
-		strings.HasPrefix(lower, "o4"):
+	case asciifold.Contains(modelName, "gpt"),
+		asciifold.Contains(modelName, "openai"),
+		asciifold.Contains(modelName, "codex"),
+		asciifold.HasPrefix(modelName, "o1"),
+		asciifold.HasPrefix(modelName, "o3"),
+		asciifold.HasPrefix(modelName, "o4"):
 		return SignatureProviderGPT
 	default:
 		return SignatureProviderUnknown
@@ -157,10 +161,17 @@ func SplitSignatureProviderPrefix(rawSignature string) (SignatureProvider, strin
 // SignatureProviderFromModelName so arbitrary model names such as
 // "claude-cache#..." cannot be mistaken for trusted provider provenance.
 func SignatureProviderFromCachePrefix(prefix string) SignatureProvider {
-	switch strings.ToLower(strings.TrimSpace(prefix)) {
-	case "claude", "anthropic":
+	prefix = strings.TrimSpace(prefix)
+	switch {
+	case strings.EqualFold(prefix, "claude"):
 		return SignatureProviderClaude
-	case "openai", "gpt", "codex":
+	case strings.EqualFold(prefix, "anthropic"):
+		return SignatureProviderClaude
+	case strings.EqualFold(prefix, "openai"):
+		return SignatureProviderGPT
+	case strings.EqualFold(prefix, "gpt"):
+		return SignatureProviderGPT
+	case strings.EqualFold(prefix, "codex"):
 		return SignatureProviderGPT
 	default:
 		return SignatureProviderUnknown

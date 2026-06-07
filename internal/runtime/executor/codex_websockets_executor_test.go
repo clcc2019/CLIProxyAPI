@@ -45,6 +45,16 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestBuildCodexResponsesWebsocketURLMatchesMixedCaseScheme(t *testing.T) {
+	got, err := buildCodexResponsesWebsocketURL("HTTP://chatgpt.com/backend-api/codex/responses")
+	if err != nil {
+		t.Fatalf("buildCodexResponsesWebsocketURL error = %v", err)
+	}
+	if got != "ws://chatgpt.com/backend-api/codex/responses" {
+		t.Fatalf("websocket URL = %q, want ws://chatgpt.com/backend-api/codex/responses", got)
+	}
+}
+
 func TestNormalizeCodexWebsocketCompletionReturnsEventType(t *testing.T) {
 	textPayload := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
 	normalized, eventType := normalizeCodexWebsocketCompletion(textPayload)
@@ -1606,6 +1616,18 @@ func TestCodexWebsocketResponseProcessedFeatureMatching(t *testing.T) {
 
 	if !codexWebsocketResponseProcessedEnabled(headers) {
 		t.Fatal("expected response.processed feature to match case-insensitively")
+	}
+}
+
+func BenchmarkCodexWebsocketResponseProcessedFeatureMatching(b *testing.B) {
+	headers := http.Header{}
+	headers.Add("X-Codex-Beta-Features", " other-feature , RESPONSES_WEBSOCKET_RESPONSE_PROCESSED ")
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if !codexWebsocketResponseProcessedEnabled(headers) {
+			b.Fatal("expected response.processed feature to match")
+		}
 	}
 }
 

@@ -233,12 +233,21 @@ func ValidateOAuthState(state string) error {
 }
 
 func NormalizeOAuthProvider(provider string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "anthropic", "claude":
+	provider = strings.TrimSpace(provider)
+	switch {
+	case strings.EqualFold(provider, "anthropic"):
 		return "anthropic", nil
-	case "codex", "openai":
+	case strings.EqualFold(provider, "claude"):
+		return "anthropic", nil
+	case strings.EqualFold(provider, "codex"):
 		return "codex", nil
-	case "xai", "x-ai", "grok":
+	case strings.EqualFold(provider, "openai"):
+		return "codex", nil
+	case strings.EqualFold(provider, "xai"):
+		return "xai", nil
+	case strings.EqualFold(provider, "x-ai"):
+		return "xai", nil
+	case strings.EqualFold(provider, "grok"):
 		return "xai", nil
 	default:
 		return "", errUnsupportedOAuthFlow

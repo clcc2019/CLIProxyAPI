@@ -291,6 +291,89 @@ func TestGetDetailedUsageStatisticsReturnsDetails(t *testing.T) {
 	}
 }
 
+func TestGetDetailedUsageStatisticsRecentReturnsGlobalRecentDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stats := usage.NewRequestStatistics()
+	start := time.Date(2026, 4, 10, 13, 0, 0, 0, time.UTC)
+	records := []struct {
+		apiKey string
+		model  string
+		offset time.Duration
+	}{
+		{apiKey: "detail-api-a", model: "gpt-5.4", offset: 0},
+		{apiKey: "detail-api-b", model: "gpt-5.5", offset: time.Minute},
+		{apiKey: "detail-api-a", model: "gpt-5.4", offset: 2 * time.Minute},
+		{apiKey: "detail-api-c", model: "gpt-5.6", offset: 3 * time.Minute},
+	}
+	for _, record := range records {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      record.apiKey,
+			Model:       record.model,
+			RequestedAt: start.Add(record.offset),
+			Detail: coreusage.Detail{
+				InputTokens:  1,
+				OutputTokens: 1,
+				TotalTokens:  2,
+			},
+		})
+	}
+
+	handler := &Handler{usageStats: stats}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/details?recent=2", nil)
+
+	handler.GetDetailedUsageStatistics(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Usage usage.StatisticsSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := payload.Usage.TotalRequests; got != int64(len(records)) {
+		t.Fatalf("total_requests = %d, want %d", got, len(records))
+	}
+
+	var retained []time.Time
+	for _, apiSnapshot := range payload.Usage.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			for _, detail := range modelSnapshot.Details {
+				retained = append(retained, detail.Timestamp)
+			}
+		}
+	}
+	if got := len(retained); got != 2 {
+		t.Fatalf("retained details len = %d, want 2", got)
+	}
+
+	for _, timestamp := range retained {
+		if !timestamp.Equal(start.Add(2*time.Minute)) && !timestamp.Equal(start.Add(3*time.Minute)) {
+			t.Fatalf("retained timestamp %s is not one of the two newest", timestamp)
+		}
+	}
+}
+
+func TestGetDetailedUsageStatisticsRejectsInvalidRecentLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := &Handler{usageStats: usage.NewRequestStatistics()}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/details?recent=0", nil)
+
+	handler.GetDetailedUsageStatistics(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
 func TestGetAggregatedUsageStatisticsReturnsWindowedPayload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

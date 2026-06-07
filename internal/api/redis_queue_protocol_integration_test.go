@@ -221,6 +221,80 @@ func readTestRESPPubSubMessage(r *bufio.Reader) (string, []byte, error) {
 	return string(items[1]), items[2], nil
 }
 
+func TestRedisQueueChannel(t *testing.T) {
+	tests := []struct {
+		name    string
+		channel string
+		want    string
+	}{
+		{name: "usage", channel: "usage", want: redisUsageChannel},
+		{name: "usage mixed case", channel: " UsAgE ", want: redisUsageChannel},
+		{name: "errors", channel: "errors", want: redisErrorsChannel},
+		{name: "errors mixed case", channel: "\tERRORS\r\n", want: redisErrorsChannel},
+		{name: "unsupported", channel: "error", want: ""},
+		{name: "empty", channel: " ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redisQueueChannel(tt.channel); got != tt.want {
+				t.Fatalf("redisQueueChannel(%q) = %q, want %q", tt.channel, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSubscribeRedisChannelMatchesTrimmedCaseInsensitiveChannel(t *testing.T) {
+	messages, unsubscribe, ok := subscribeRedisChannel(" UsAgE ")
+	if !ok {
+		t.Fatalf("subscribeRedisChannel() ok = false, want true")
+	}
+	t.Cleanup(unsubscribe)
+
+	select {
+	case msg := <-messages:
+		if string(msg) != `{"support_refresh":true}` {
+			t.Fatalf("subscribeRedisChannel() initial message = %q", string(msg))
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for initial usage subscription message")
+	}
+
+	_, unsubscribeErrors, ok := subscribeRedisChannel("\tERRORS\r\n")
+	if !ok {
+		t.Fatalf("subscribeRedisChannel(errors) ok = false, want true")
+	}
+	t.Cleanup(unsubscribeErrors)
+}
+
+func TestPopRedisQueueItemsMatchesTrimmedCaseInsensitiveChannel(t *testing.T) {
+	redisqueue.SetEnabled(false)
+	redisqueue.SetEnabled(true)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+
+	redisqueue.Enqueue([]byte("mixed"))
+
+	items, ok := popRedisQueueItems(" UsAgE ", 1)
+	if !ok {
+		t.Fatalf("popRedisQueueItems() ok = false, want true")
+	}
+	if len(items) != 1 || string(items[0]) != "mixed" {
+		t.Fatalf("popRedisQueueItems() = %#v, want one mixed item", items)
+	}
+
+	if items, ok := popRedisQueueItems("\tERRORS\r\n", 1); ok || items != nil {
+		t.Fatalf("popRedisQueueItems(errors) = %#v, %t; want nil, false", items, ok)
+	}
+}
+
+func BenchmarkRedisQueueChannel(b *testing.B) {
+	for b.Loop() {
+		if got := redisQueueChannel(" UsAgE "); got != redisUsageChannel {
+			b.Fatalf("redisQueueChannel() = %q", got)
+		}
+	}
+}
+
 func TestRedisProtocol_ManagementDisabled_RejectsConnection(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	redisqueue.SetEnabled(false)

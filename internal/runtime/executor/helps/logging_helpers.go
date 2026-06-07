@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -364,10 +365,9 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 	if err != nil {
 		return trimmedURL
 	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "ws":
+	if strings.EqualFold(parsed.Scheme, "ws") {
 		parsed.Scheme = "http"
-	case "wss":
+	} else if strings.EqualFold(parsed.Scheme, "wss") {
 		parsed.Scheme = "https"
 	}
 	return parsed.String()
@@ -708,46 +708,57 @@ func appendAttemptResponseHeaders(ginCtx *gin.Context, attempt *upstreamAttempt,
 }
 
 func formatAuthInfo(info UpstreamRequestLog) string {
-	var parts []string
+	var text string
 	if trimmed := strings.TrimSpace(info.Provider); trimmed != "" {
-		parts = append(parts, fmt.Sprintf("provider=%s", trimmed))
+		text = appendAuthInfoPart(text, "provider="+trimmed)
 	}
 	if trimmed := strings.TrimSpace(info.AuthID); trimmed != "" {
-		parts = append(parts, fmt.Sprintf("auth_id=%s", trimmed))
+		text = appendAuthInfoPart(text, "auth_id="+trimmed)
 	}
 	if trimmed := strings.TrimSpace(info.AuthLabel); trimmed != "" {
-		parts = append(parts, fmt.Sprintf("label=%s", trimmed))
+		text = appendAuthInfoPart(text, "label="+trimmed)
 	}
 
-	authType := strings.ToLower(strings.TrimSpace(info.AuthType))
+	authType := strings.TrimSpace(info.AuthType)
 	authValue := strings.TrimSpace(info.AuthValue)
-	switch authType {
-	case "api_key":
+	switch {
+	case strings.EqualFold(authType, "api_key"):
 		if authValue != "" {
-			parts = append(parts, fmt.Sprintf("type=api_key value=%s", util.HideAPIKey(authValue)))
+			text = appendAuthInfoPart(text, "type=api_key value="+util.HideAPIKey(authValue))
 		} else {
-			parts = append(parts, "type=api_key")
+			text = appendAuthInfoPart(text, "type=api_key")
 		}
-	case "oauth":
-		parts = append(parts, "type=oauth")
+	case strings.EqualFold(authType, "oauth"):
+		text = appendAuthInfoPart(text, "type=oauth")
 	default:
 		if authType != "" {
+			authType = strings.ToLower(authType)
 			if authValue != "" {
-				parts = append(parts, fmt.Sprintf("type=%s value=%s", authType, authValue))
+				text = appendAuthInfoPart(text, "type="+authType+" value="+authValue)
 			} else {
-				parts = append(parts, fmt.Sprintf("type=%s", authType))
+				text = appendAuthInfoPart(text, "type="+authType)
 			}
 		}
 	}
 
-	return strings.Join(parts, ", ")
+	return text
+}
+
+func appendAuthInfoPart(text, part string) string {
+	if part == "" {
+		return text
+	}
+	if text == "" {
+		return part
+	}
+	return text + ", " + part
 }
 
 func SummarizeErrorBody(contentType string, body []byte) string {
-	isHTML := strings.Contains(strings.ToLower(contentType), "text/html")
+	isHTML := asciifold.Contains(contentType, "text/html")
 	if !isHTML {
-		trimmed := bytes.TrimSpace(bytes.ToLower(body))
-		if bytes.HasPrefix(trimmed, []byte("<!doctype html")) || bytes.HasPrefix(trimmed, []byte("<html")) {
+		trimmed := bytes.TrimSpace(body)
+		if asciifold.HasPrefixBytes(trimmed, "<!doctype html") || asciifold.HasPrefixBytes(trimmed, "<html") {
 			isHTML = true
 		}
 	}
@@ -767,17 +778,16 @@ func SummarizeErrorBody(contentType string, body []byte) string {
 }
 
 func extractHTMLTitle(body []byte) string {
-	lower := bytes.ToLower(body)
-	start := bytes.Index(lower, []byte("<title"))
+	start := asciifold.IndexBytes(body, "<title")
 	if start == -1 {
 		return ""
 	}
-	gt := bytes.IndexByte(lower[start:], '>')
+	gt := bytes.IndexByte(body[start:], '>')
 	if gt == -1 {
 		return ""
 	}
 	start += gt + 1
-	end := bytes.Index(lower[start:], []byte("</title>"))
+	end := asciifold.IndexBytes(body[start:], "</title>")
 	if end == -1 {
 		return ""
 	}

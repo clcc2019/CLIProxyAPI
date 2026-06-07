@@ -269,6 +269,53 @@ func TestOpenAICompatExecutorNativeImagesVariationsMultipart(t *testing.T) {
 	}
 }
 
+func TestPrepareOpenAICompatImagesPayloadMixedCaseMultipart(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("model", "client-image-model"); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if err := writer.WriteField("prompt", "edit image"); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	contentType := strings.Replace(writer.FormDataContentType(), "multipart/form-data", "Multipart/Form-Data", 1)
+	rewritten, rewrittenContentType, err := prepareOpenAICompatImagesPayload(body.Bytes(), "upstream-image-model", contentType, false)
+	if err != nil {
+		t.Fatalf("prepareOpenAICompatImagesPayload() error = %v", err)
+	}
+	if !strings.HasPrefix(rewrittenContentType, "multipart/form-data; boundary=") {
+		t.Fatalf("content type = %q, want rewritten multipart form-data", rewrittenContentType)
+	}
+	rewrittenText := string(rewritten)
+	if !strings.Contains(rewrittenText, "upstream-image-model") {
+		t.Fatalf("rewritten body did not contain upstream model: %s", rewrittenText)
+	}
+}
+
+func TestOpenAICompatMediaTypeHasPrefix(t *testing.T) {
+	tests := []struct {
+		name      string
+		mediaType string
+		prefix    string
+		want      bool
+	}{
+		{name: "mixed case multipart", mediaType: " Multipart/Form-Data ", prefix: "multipart/", want: true},
+		{name: "multipart mixed", mediaType: "multipart/mixed", prefix: "multipart/", want: true},
+		{name: "short", mediaType: "multi", prefix: "multipart/", want: false},
+		{name: "application json", mediaType: "application/json", prefix: "multipart/", want: false},
+	}
+
+	for i := range tests {
+		if got := openAICompatMediaTypeHasPrefix(tests[i].mediaType, tests[i].prefix); got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
 func TestOpenAICompatExecutorNativeImagesGenerationsStream(t *testing.T) {
 	captured := make(chan nativeImagesRequestCapture, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -332,5 +379,13 @@ func TestOpenAICompatExecutorNativeImagesGenerationsStream(t *testing.T) {
 	}
 	if format := gjson.GetBytes(got.body, "response_format").String(); format != "b64_json" {
 		t.Fatalf("response_format = %q, want b64_json; body=%s", format, string(got.body))
+	}
+}
+
+func BenchmarkOpenAICompatMediaTypeHasPrefix(b *testing.B) {
+	for b.Loop() {
+		if !openAICompatMediaTypeHasPrefix(" Multipart/Form-Data ", "multipart/") {
+			b.Fatal("expected multipart media type")
+		}
 	}
 }

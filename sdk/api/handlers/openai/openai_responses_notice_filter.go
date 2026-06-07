@@ -13,12 +13,14 @@ type responsesNoticeFilter struct {
 	suppressedItemIDs map[string]struct{}
 }
 
-var responsesNoticeFilterMarkers = [][]byte{
-	[]byte("weekly"),
-	[]byte("Weekly"),
-	[]byte("/status"),
-	[]byte("/STATUS"),
+type responsesNoticeFilteredLine struct {
+	line    []byte
+	payload []byte
+	keep    bool
+	rewrite bool
 }
+
+const responsesNoticeFilterMarker = "heads up"
 
 func newResponsesNoticeFilter() *responsesNoticeFilter {
 	return &responsesNoticeFilter{
@@ -108,35 +110,102 @@ func (f *responsesNoticeFilter) FilterSSEFrame(frame []byte) []byte {
 		return nil
 	}
 
-	lines := bytes.Split(trimmed, []byte("\n"))
-	out := make([][]byte, 0, len(lines))
+	canonical := len(frame) == len(trimmed)+2 &&
+		frame[len(trimmed)] == '\n' &&
+		frame[len(trimmed)+1] == '\n'
+	var lineBuffer [8]responsesNoticeFilteredLine
+	lines := lineBuffer[:0]
 	dataLines := 0
-	for i := range lines {
-		line := bytes.TrimRight(lines[i], "\r")
+	for offset := 0; ; {
+		lineEnd := len(trimmed)
+		if newline := bytes.IndexByte(trimmed[offset:], '\n'); newline >= 0 {
+			lineEnd = offset + newline
+		}
+		rawLine := trimmed[offset:lineEnd]
+		line := bytes.TrimRight(rawLine, "\r")
+		entry := responsesNoticeFilteredLine{line: line, keep: true}
+		if len(line) != len(rawLine) {
+			canonical = false
+		}
+
 		trimmedLine := bytes.TrimSpace(line)
 		if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
-			out = append(out, line)
-			continue
+			lines = append(lines, entry)
+		} else {
+			data := bytes.TrimSpace(trimmedLine[len("data:"):])
+			if len(data) == 0 || bytes.Equal(data, []byte(wsDoneMarker)) || !json.Valid(data) {
+				dataLines++
+			} else {
+				filtered := f.FilterPayload(data)
+				if len(filtered) == 0 {
+					entry.keep = false
+					canonical = false
+				} else {
+					dataLines++
+					if !responsesNoticeDataLineMatches(line, filtered) {
+						entry.payload = filtered
+						entry.rewrite = true
+						canonical = false
+					}
+				}
+			}
+			lines = append(lines, entry)
 		}
 
-		data := bytes.TrimSpace(trimmedLine[len("data:"):])
-		if len(data) == 0 || bytes.Equal(data, []byte(wsDoneMarker)) || !json.Valid(data) {
-			out = append(out, line)
-			dataLines++
-			continue
+		if lineEnd == len(trimmed) {
+			break
 		}
-
-		filtered := f.FilterPayload(data)
-		if len(filtered) == 0 {
-			continue
-		}
-		out = append(out, append([]byte("data: "), filtered...))
-		dataLines++
+		offset = lineEnd + 1
 	}
 	if dataLines == 0 {
 		return nil
 	}
-	return append(bytes.Join(out, []byte("\n")), []byte("\n\n")...)
+	if canonical {
+		return frame
+	}
+
+	outputLen := 2
+	keptLines := 0
+	for i := range lines {
+		if !lines[i].keep {
+			continue
+		}
+		if keptLines > 0 {
+			outputLen++
+		}
+		if lines[i].rewrite {
+			outputLen += len("data: ") + len(lines[i].payload)
+		} else {
+			outputLen += len(lines[i].line)
+		}
+		keptLines++
+	}
+
+	out := make([]byte, 0, outputLen)
+	writtenLines := 0
+	for i := range lines {
+		if !lines[i].keep {
+			continue
+		}
+		if writtenLines > 0 {
+			out = append(out, '\n')
+		}
+		if lines[i].rewrite {
+			out = append(out, "data: "...)
+			out = append(out, lines[i].payload...)
+		} else {
+			out = append(out, lines[i].line...)
+		}
+		writtenLines++
+	}
+	return append(out, '\n', '\n')
+}
+
+func responsesNoticeDataLineMatches(line, payload []byte) bool {
+	const prefix = "data: "
+	return len(line) == len(prefix)+len(payload) &&
+		bytes.Equal(line[:len(prefix)], []byte(prefix)) &&
+		bytes.Equal(line[len(prefix):], payload)
 }
 
 func (f *responsesNoticeFilter) CanBypassSSEChunk(chunk []byte) bool {
@@ -223,17 +292,17 @@ func responsesUsageWarningPart(part gjson.Result) bool {
 }
 
 func responsesUsageWarningText(text string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(text))
-	if normalized == "" {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return false
 	}
-	if !strings.Contains(normalized, "heads up, you have less than") {
+	if !responsesContainsASCIIFold(text, "heads up, you have less than") {
 		return false
 	}
-	if !strings.Contains(normalized, " limit left") {
+	if !responsesContainsASCIIFold(text, " limit left") {
 		return false
 	}
-	if !strings.Contains(normalized, "run /status for a breakdown") {
+	if !responsesContainsASCIIFold(text, "run /status for a breakdown") {
 		return false
 	}
 	return true
@@ -243,10 +312,70 @@ func responsesNoticeMayNeedFiltering(chunk []byte) bool {
 	if len(chunk) == 0 {
 		return false
 	}
-	for _, marker := range responsesNoticeFilterMarkers {
-		if bytes.Contains(chunk, marker) {
+	return responsesContainsASCIIBytesFold(chunk, responsesNoticeFilterMarker)
+}
+
+func responsesContainsASCIIFold(s, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	if len(substr) > len(s) {
+		return false
+	}
+	first := responsesASCIILower(substr[0])
+	limit := len(s) - len(substr)
+	for i := 0; i <= limit; i++ {
+		if responsesASCIILower(s[i]) != first {
+			continue
+		}
+		if responsesASCIIEqualFoldAt(s[i:i+len(substr)], substr) {
 			return true
 		}
 	}
 	return false
+}
+
+func responsesContainsASCIIBytesFold(s []byte, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	if len(substr) > len(s) {
+		return false
+	}
+	first := responsesASCIILower(substr[0])
+	limit := len(s) - len(substr)
+	for i := 0; i <= limit; i++ {
+		if responsesASCIILower(s[i]) != first {
+			continue
+		}
+		if responsesASCIIBytesEqualFoldAt(s[i:i+len(substr)], substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesASCIIEqualFoldAt(s, substr string) bool {
+	for i := 0; i < len(substr); i++ {
+		if responsesASCIILower(s[i]) != responsesASCIILower(substr[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func responsesASCIIBytesEqualFoldAt(s []byte, substr string) bool {
+	for i := 0; i < len(substr); i++ {
+		if responsesASCIILower(s[i]) != responsesASCIILower(substr[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func responsesASCIILower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }

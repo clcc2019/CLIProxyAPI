@@ -268,7 +268,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {
-		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
+		effort := normalizeReasoningEffort(reasoningEffort.String())
 		if effort != "" {
 			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 		}
@@ -280,4 +280,33 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func normalizeReasoningEffort(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(value, "none"):
+		return "none"
+	case strings.EqualFold(value, "minimal"):
+		return "minimal"
+	case strings.EqualFold(value, "low"):
+		return "low"
+	case strings.EqualFold(value, "medium"):
+		return "medium"
+	case strings.EqualFold(value, "high"):
+		return "high"
+	case strings.EqualFold(value, "xhigh"):
+		return "xhigh"
+	case strings.EqualFold(value, "max"):
+		return "max"
+	case strings.EqualFold(value, "auto"):
+		return "auto"
+	case strings.EqualFold(value, "adaptive"):
+		return "adaptive"
+	default:
+		return strings.ToLower(value)
+	}
 }

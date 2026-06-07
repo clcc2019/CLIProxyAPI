@@ -230,7 +230,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 }
 
 func subscribeRedisChannel(channel string) (<-chan []byte, func(), bool) {
-	switch strings.ToLower(strings.TrimSpace(channel)) {
+	switch redisQueueChannel(channel) {
 	case redisUsageChannel:
 		messages, unsubscribe := redisqueue.SubscribeUsage()
 		return messages, unsubscribe, true
@@ -243,11 +243,23 @@ func subscribeRedisChannel(channel string) (<-chan []byte, func(), bool) {
 }
 
 func popRedisQueueItems(channel string, count int) ([][]byte, bool) {
-	switch strings.ToLower(strings.TrimSpace(channel)) {
+	switch redisQueueChannel(channel) {
 	case redisUsageChannel:
 		return redisqueue.PopOldest(count), true
 	default:
 		return nil, false
+	}
+}
+
+func redisQueueChannel(channel string) string {
+	channel = strings.TrimSpace(channel)
+	switch {
+	case strings.EqualFold(channel, redisUsageChannel):
+		return redisUsageChannel
+	case strings.EqualFold(channel, redisErrorsChannel):
+		return redisErrorsChannel
+	default:
+		return ""
 	}
 }
 

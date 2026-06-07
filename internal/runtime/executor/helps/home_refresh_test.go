@@ -11,12 +11,33 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-func TestStatusFromHomeErrorCodeMapsAuthenticationErrorToUnauthorized(t *testing.T) {
-	if got := statusFromHomeErrorCode("authentication_error"); got != http.StatusUnauthorized {
-		t.Fatalf("statusFromHomeErrorCode(authentication_error) = %d, want %d", got, http.StatusUnauthorized)
+func TestStatusFromHomeErrorCode(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want int
+	}{
+		{name: "authentication error", code: " authentication_error ", want: http.StatusUnauthorized},
+		{name: "unauthorized", code: "\tUnauthorized\r\n", want: http.StatusUnauthorized},
+		{name: "model not found", code: "MODEL_NOT_FOUND", want: http.StatusNotFound},
+		{name: "unknown", code: "rate_limited", want: http.StatusBadGateway},
+		{name: "empty", code: "", want: http.StatusBadGateway},
 	}
-	if got := statusFromHomeErrorCode("unauthorized"); got != http.StatusUnauthorized {
-		t.Fatalf("statusFromHomeErrorCode(unauthorized) = %d, want %d", got, http.StatusUnauthorized)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := statusFromHomeErrorCode(tt.code); got != tt.want {
+				t.Fatalf("statusFromHomeErrorCode(%q) = %d, want %d", tt.code, got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkStatusFromHomeErrorCode(b *testing.B) {
+	for b.Loop() {
+		if got := statusFromHomeErrorCode(" Authentication_Error "); got != http.StatusUnauthorized {
+			b.Fatalf("statusFromHomeErrorCode() = %d", got)
+		}
 	}
 }
 

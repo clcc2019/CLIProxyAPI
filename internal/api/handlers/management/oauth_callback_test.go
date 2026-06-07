@@ -80,3 +80,48 @@ func TestWriteOAuthCallbackFileForPendingSessionCreatesMissingAuthDirForCallback
 		})
 	}
 }
+
+func TestNormalizeOAuthProviderAliases(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: " Anthropic ", want: "anthropic"},
+		{input: "CLAUDE", want: "anthropic"},
+		{input: " Codex ", want: "codex"},
+		{input: "OPENAI", want: "codex"},
+		{input: " XAI ", want: "xai"},
+		{input: "x-AI", want: "xai"},
+		{input: "GROK", want: "xai"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := NormalizeOAuthProvider(tt.input)
+			if err != nil {
+				t.Fatalf("NormalizeOAuthProvider(%q) error = %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("NormalizeOAuthProvider(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeOAuthProviderRejectsUnsupported(t *testing.T) {
+	if got, err := NormalizeOAuthProvider(" unknown "); err == nil || got != "" {
+		t.Fatalf("NormalizeOAuthProvider(unsupported) = %q, %v; want unsupported error", got, err)
+	}
+}
+
+func BenchmarkNormalizeOAuthProvider(b *testing.B) {
+	for b.Loop() {
+		got, err := NormalizeOAuthProvider(" Anthropic ")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if got != "anthropic" {
+			b.Fatalf("got %q", got)
+		}
+	}
+}

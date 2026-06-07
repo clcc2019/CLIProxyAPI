@@ -238,16 +238,16 @@ func TestNormalizeCodexFinalUpstreamBodyNormalizesAllowedToolsChoiceRefs(t *test
 		"instructions":"Be helpful.",
 		"input":"hello",
 		"tool_choice":{
-			"type":"allowed_tools",
-			"mode":"any",
+			"type":"Allowed_Tools",
+			"mode":"ANY",
 			"cache_control":{"type":"ephemeral"},
 			"tools":[
-				{"type":"function","name":"Read","description":"Read files","strict":false,"parameters":{"type":"object"},"cache_control":{"type":"ephemeral"}},
-				{"type":"mcp","server_label":"codex_apps","name":"calendar.create_event","authorization":"secret"},
-				{"type":"web_search_20250305","name":"web_search","filters":{"allowed_domains":["example.com"]}},
-				{"type":"image_generation","output_format":"png"},
-				{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},
-				{"type":"computer_use","display_width":1024}
+				{"type":"Function","name":"Read","description":"Read files","strict":false,"parameters":{"type":"object"},"cache_control":{"type":"ephemeral"}},
+				{"type":"MCP","server_label":"codex_apps","name":"calendar.create_event","authorization":"secret"},
+				{"type":"WEB_SEARCH_20250305","name":"web_search","filters":{"allowed_domains":["example.com"]}},
+				{"type":"Image_Generation","output_format":"png"},
+				{"type":"Custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},
+				{"type":"Computer_Use","display_width":1024}
 			]
 		}
 	}`)
@@ -718,6 +718,7 @@ func TestCodexTokenizerKeyNormalizesModelFamilies(t *testing.T) {
 		{model: "", want: "cl100k_base"},
 		{model: "gpt-5.4-mini", want: "gpt-5"},
 		{model: "GPT-5.3-CODEX", want: "gpt-5"},
+		{model: " GPT-4.1-MINI ", want: "gpt-4.1"},
 		{model: "gpt-4.1-mini", want: "gpt-4.1"},
 		{model: "gpt-4o-mini", want: "gpt-4o"},
 		{model: "gpt-4-turbo", want: "gpt-4"},
@@ -731,5 +732,13 @@ func TestCodexTokenizerKeyNormalizesModelFamilies(t *testing.T) {
 				t.Fatalf("codexTokenizerKey(%q) = %q, want %q", tt.model, got, tt.want)
 			}
 		})
+	}
+}
+
+func BenchmarkCodexTokenizerKey(b *testing.B) {
+	for b.Loop() {
+		if got := codexTokenizerKey(" GPT-4.1-MINI "); got != "gpt-4.1" {
+			b.Fatalf("codexTokenizerKey() = %q", got)
+		}
 	}
 }

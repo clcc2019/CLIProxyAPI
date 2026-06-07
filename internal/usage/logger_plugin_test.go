@@ -47,7 +47,7 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 func TestRequestStatisticsNormalisesOpenAIReasoningAsOutputDetail(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(context.Background(), coreusage.Record{
-		Provider:    "openai",
+		Provider:    " OpenAI ",
 		APIKey:      "test-key",
 		Model:       "gpt-5.4",
 		RequestedAt: time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
@@ -64,6 +64,55 @@ func TestRequestStatisticsNormalisesOpenAIReasoningAsOutputDetail(t *testing.T) 
 	}
 	if model.TokenBreakdown.ReasoningTokens != 15 {
 		t.Fatalf("reasoning tokens = %d, want 15", model.TokenBreakdown.ReasoningTokens)
+	}
+}
+
+func TestProviderReportsReasoningAsOutputDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{name: "openai", provider: " OpenAI ", want: true},
+		{name: "codex", provider: "\tCodex\r\n", want: true},
+		{name: "kimi", provider: "kimi", want: false},
+		{name: "empty", provider: " ", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := providerReportsReasoningAsOutputDetail(tt.provider); got != tt.want {
+				t.Fatalf("providerReportsReasoningAsOutputDetail(%q) = %t, want %t", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTokenStatsFromDetailMixedCaseProvider(t *testing.T) {
+	tokens := normaliseDetail(" Codex ", coreusage.Detail{
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 15,
+	})
+	if tokens.TotalTokens != 150 {
+		t.Fatalf("Codex total tokens = %d, want 150", tokens.TotalTokens)
+	}
+
+	tokens = normaliseDetail(" Kimi ", coreusage.Detail{
+		InputTokens:     100,
+		OutputTokens:    50,
+		ReasoningTokens: 15,
+	})
+	if tokens.TotalTokens != 165 {
+		t.Fatalf("Kimi total tokens = %d, want 165", tokens.TotalTokens)
+	}
+}
+
+func BenchmarkProviderReportsReasoningAsOutputDetail(b *testing.B) {
+	for b.Loop() {
+		if !providerReportsReasoningAsOutputDetail(" OpenAI ") {
+			b.Fatal("expected OpenAI provider to report reasoning as output")
+		}
 	}
 }
 
@@ -405,6 +454,59 @@ func TestRequestStatisticsApplyDetailRetentionLimitTrimsImportedDetailedSources(
 	}
 	if snapshot.TotalRequests != 4 {
 		t.Fatalf("total requests = %d, want 4", snapshot.TotalRequests)
+	}
+}
+
+func TestRequestStatisticsSnapshotRecentDetailsReturnsGlobalNewestDetails(t *testing.T) {
+	stats := NewRequestStatistics()
+	start := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+	records := []struct {
+		apiKey string
+		model  string
+		offset time.Duration
+	}{
+		{apiKey: "api-a", model: "gpt-5.4", offset: 0},
+		{apiKey: "api-b", model: "gpt-5.5", offset: time.Second},
+		{apiKey: "api-a", model: "gpt-5.4", offset: 2 * time.Second},
+		{apiKey: "api-c", model: "gpt-5.6", offset: 3 * time.Second},
+	}
+	for _, record := range records {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      record.apiKey,
+			Model:       record.model,
+			RequestedAt: start.Add(record.offset),
+			Detail: coreusage.Detail{
+				InputTokens:  1,
+				OutputTokens: 1,
+				TotalTokens:  2,
+			},
+		})
+	}
+
+	snapshot := stats.SnapshotRecentDetails(2)
+	if snapshot.TotalRequests != int64(len(records)) {
+		t.Fatalf("total requests = %d, want %d", snapshot.TotalRequests, len(records))
+	}
+
+	var retained []time.Time
+	for _, apiSnapshot := range snapshot.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			for _, detail := range modelSnapshot.Details {
+				retained = append(retained, detail.Timestamp)
+			}
+		}
+	}
+	if len(retained) != 2 {
+		t.Fatalf("details len = %d, want 2", len(retained))
+	}
+	want := map[time.Time]bool{
+		start.Add(2 * time.Second): true,
+		start.Add(3 * time.Second): true,
+	}
+	for _, timestamp := range retained {
+		if !want[timestamp] {
+			t.Fatalf("retained timestamp %s is not one of the two newest", timestamp)
+		}
 	}
 }
 

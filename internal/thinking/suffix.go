@@ -96,14 +96,13 @@ func ParseSpecialSuffix(rawSuffix string) (mode ThinkingMode, ok bool) {
 	}
 
 	// Case-insensitive matching
-	switch strings.ToLower(rawSuffix) {
-	case "none":
+	if strings.EqualFold(rawSuffix, "none") {
 		return ModeNone, true
-	case "auto", "-1":
-		return ModeAuto, true
-	default:
-		return ModeBudget, false
 	}
+	if strings.EqualFold(rawSuffix, "auto") || rawSuffix == "-1" {
+		return ModeAuto, true
+	}
+	return ModeBudget, false
 }
 
 // ParseLevelSuffix attempts to parse a raw suffix as a discrete thinking level.
@@ -129,20 +128,23 @@ func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 	}
 
 	// Case-insensitive matching
-	switch strings.ToLower(rawSuffix) {
-	case "minimal":
+	if strings.EqualFold(rawSuffix, "minimal") {
 		return LevelMinimal, true
-	case "low":
-		return LevelLow, true
-	case "medium":
-		return LevelMedium, true
-	case "high":
-		return LevelHigh, true
-	case "xhigh":
-		return LevelXHigh, true
-	case "max":
-		return LevelMax, true
-	default:
-		return "", false
 	}
+	if strings.EqualFold(rawSuffix, "low") {
+		return LevelLow, true
+	}
+	if strings.EqualFold(rawSuffix, "medium") {
+		return LevelMedium, true
+	}
+	if strings.EqualFold(rawSuffix, "high") {
+		return LevelHigh, true
+	}
+	if strings.EqualFold(rawSuffix, "xhigh") {
+		return LevelXHigh, true
+	}
+	if strings.EqualFold(rawSuffix, "max") {
+		return LevelMax, true
+	}
+	return "", false
 }
