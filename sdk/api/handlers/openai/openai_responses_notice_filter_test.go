@@ -29,6 +29,87 @@ func TestResponsesNoticeFilterDropsUsageWarnings(t *testing.T) {
 	}
 }
 
+func TestResponsesNoticeFilterDropsSplitUsageWarning(t *testing.T) {
+	filter := newResponsesNoticeFilter()
+	parts := [][]byte{
+		[]byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"Heads up, you have "}`),
+		[]byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"less than 10% of your "}`),
+		[]byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"5h limit left. Run /status for a breakdown."}`),
+	}
+
+	for _, part := range parts {
+		if got := filter.FilterPayloads(part); len(got) != 0 {
+			t.Fatalf("split warning payload should be held or dropped, got %q", got)
+		}
+	}
+
+	normal := []byte(`{"type":"response.output_text.delta","item_id":"msg-2","delta":"real output"}`)
+	got := filter.FilterPayloads(normal)
+	if len(got) != 1 || !bytes.Equal(got[0], normal) {
+		t.Fatalf("normal payload = %q, want %q", got, normal)
+	}
+}
+
+func TestResponsesNoticeFilterFlushesHeldNonWarningText(t *testing.T) {
+	filter := newResponsesNoticeFilter()
+	first := []byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"Heads up, you have "}`)
+	second := []byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"a review waiting."}`)
+
+	if got := filter.FilterPayloads(first); len(got) != 0 {
+		t.Fatalf("prefix payload should be held, got %q", got)
+	}
+	got := filter.FilterPayloads(second)
+	if len(got) != 2 || !bytes.Equal(got[0], first) || !bytes.Equal(got[1], second) {
+		t.Fatalf("held non-warning payloads = %q", got)
+	}
+}
+
+func TestResponsesNoticeFilterSSEFrameFlushesHeldNonWarningText(t *testing.T) {
+	filter := newResponsesNoticeFilter()
+
+	first := filter.FilterSSEFrame([]byte("data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"delta\":\"Heads up, you have \"}\n\n"))
+	if len(first) != 0 {
+		t.Fatalf("prefix frame should be held, got %q", first)
+	}
+	second := filter.FilterSSEFrame([]byte("data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"delta\":\"a review waiting.\"}\n\n"))
+	if !bytes.Contains(second, []byte("Heads up, you have ")) || !bytes.Contains(second, []byte("a review waiting.")) {
+		t.Fatalf("held non-warning SSE payloads were not flushed: %q", second)
+	}
+}
+
+func BenchmarkResponsesNoticeFilterPayloadFastPath(b *testing.B) {
+	payload := []byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"real output"}`)
+	filter := newResponsesNoticeFilter()
+	var buf [4][]byte
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		out := filter.FilterPayloadsInto(payload, buf[:0])
+		if len(out) != 1 {
+			b.Fatal("unexpected filtered payload count")
+		}
+	}
+}
+
+func BenchmarkResponsesNoticeFilterPayloadSplitWarning(b *testing.B) {
+	parts := [][]byte{
+		[]byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"Heads up, you have "}`),
+		[]byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"less than 10% of your "}`),
+		[]byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"5h limit left. Run /status for a breakdown."}`),
+	}
+	var buf [4][]byte
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		filter := newResponsesNoticeFilter()
+		for _, part := range parts {
+			if out := filter.FilterPayloadsInto(part, buf[:0]); len(out) != 0 {
+				b.Fatal("unexpected filtered payload")
+			}
+		}
+	}
+}
+
 func TestResponsesNoticeFilterSanitizesCompletedOutput(t *testing.T) {
 	filter := newResponsesNoticeFilter()
 

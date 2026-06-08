@@ -648,6 +648,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 	streamState := newCodexStreamCompletionState()
+	usageWarningFilter := newCodexUsageWarningStreamFilter()
 	previousResponseRetryUsed := false
 	readRetryUsed := false
 	for {
@@ -746,45 +747,51 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 
 		payload, eventType := normalizeCodexWebsocketCompletion(payload)
-		if codexShouldSuppressUsageWarningEvent(eventType, payload) {
+		events := usageWarningFilter.Filter(eventType, payload)
+		if len(events) == 0 {
 			continue
 		}
-		if eventType == "response.incomplete" {
-			terminalErr := codexResponseIncompleteEventErr(payload)
-			if sess != nil {
-				sess.clearIncrementalState()
-				e.invalidateUpstreamConn(sess, conn, "upstream_incomplete", terminalErr)
+
+		for _, event := range events {
+			payload := event.payload
+			eventType := event.eventType
+			if eventType == "response.incomplete" {
+				terminalErr := codexResponseIncompleteEventErr(payload)
+				if sess != nil {
+					sess.clearIncrementalState()
+					e.invalidateUpstreamConn(sess, conn, "upstream_incomplete", terminalErr)
+				}
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_incomplete", terminalErr)
+				return resp, terminalErr
 			}
-			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_incomplete", terminalErr)
-			return resp, terminalErr
-		}
-		if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
-			if sess != nil {
-				sess.clearIncrementalState()
-				e.invalidateUpstreamConn(sess, conn, "upstream_terminal", terminalErr)
+			if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
+				if sess != nil {
+					sess.clearIncrementalState()
+					e.invalidateUpstreamConn(sess, conn, "upstream_terminal", terminalErr)
+				}
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_terminal", terminalErr)
+				return resp, terminalErr
 			}
-			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_terminal", terminalErr)
-			return resp, terminalErr
-		}
-		if completed, ok := streamState.processEventDataWithType(eventType, payload, true); ok {
-			payload = completed.data
-			eventType = codexEventCompleted
-		}
-		if eventType == codexEventCompleted {
-			if detail, ok := helps.ParseCodexUsage(payload); ok {
-				reporter.Publish(ctx, detail)
+			if completed, ok := streamState.processEventDataWithType(eventType, payload, true); ok {
+				payload = completed.data
+				eventType = codexEventCompleted
 			}
-			if sess != nil {
-				sess.rememberLogicalRequest(body)
-				sess.rememberCompletedResponse(payload)
+			if eventType == codexEventCompleted {
+				if detail, ok := helps.ParseCodexUsage(payload); ok {
+					reporter.Publish(ctx, detail)
+				}
+				if sess != nil {
+					sess.rememberLogicalRequest(body)
+					sess.rememberCompletedResponse(payload)
+				}
+				var param any
+				out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
+				resp = cliproxyexecutor.Response{Payload: out}
+				if codexWebsocketShouldSendResponseProcessed(wsHeaders, wsReqBody) {
+					e.sendCodexWebsocketResponseProcessed(ctx, sess, conn, gjson.GetBytes(payload, "response.id").String())
+				}
+				return resp, nil
 			}
-			var param any
-			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
-			resp = cliproxyexecutor.Response{Payload: out}
-			if codexWebsocketShouldSendResponseProcessed(wsHeaders, wsReqBody) {
-				e.sendCodexWebsocketResponseProcessed(ctx, sess, conn, gjson.GetBytes(payload, "response.id").String())
-			}
-			return resp, nil
 		}
 	}
 }

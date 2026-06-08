@@ -114,12 +114,24 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
+
+	nativeJSON := rawJSON
+	if !responseFormatProvided {
+		nativeJSON, _ = sjson.SetBytes(nativeJSON, "response_format", responseFormat)
+	}
+	if isDefaultImagesToolModel(imageModel) {
+		imageReq := buildOpenAICompatImagesJSONRequest(nativeJSON, imageModel, stream)
+		h.handleRoutedImages(c, imageReq, imageModel, stream)
+		return
+	}
+	if isXAIImagesModel(imageModel) {
+		xaiReq := buildXAIImagesGenerationsRequest(rawJSON, imageModel, responseFormat)
+		h.handleXAIImages(c, xaiReq, responseFormat, "image_generation", stream)
+		return
+	}
 	if openAICompatibleImageModel(imageModel) {
-		nativeJSON := rawJSON
-		if !responseFormatProvided {
-			nativeJSON, _ = sjson.SetBytes(nativeJSON, "response_format", responseFormat)
-		}
-		h.dispatchImagesNative(c, nativeJSON, imageModel, stream, "images/generations")
+		compatReq := buildOpenAICompatImagesJSONRequest(nativeJSON, imageModel, stream)
+		h.handleOpenAICompatImages(c, compatReq, imageModel, responseFormat, "image_generation", stream)
 		return
 	}
 
@@ -782,7 +794,7 @@ func (h *OpenAIAPIHandler) collectImagesFromNative(c *gin.Context, rawPayload []
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	out, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, "openai", modelName, rawPayload, alt)
+	out, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(cliCtx, "openai", modelName, rawPayload, alt)
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -845,7 +857,7 @@ func (h *OpenAIAPIHandler) streamImagesFromNative(c *gin.Context, rawPayload []b
 		timing.MarkWrite()
 	}
 	execution, canceled := waitImagesStreamExecution(c, timing, writeKeepAlive, func() imagesStreamExecutionResult {
-		data, headers, errs := h.ExecuteStreamWithAuthManager(cliCtx, "openai", modelName, rawPayload, alt)
+		data, headers, errs := h.ExecuteImageStreamWithAuthManager(cliCtx, "openai", modelName, rawPayload, alt)
 		return imagesStreamExecutionResult{Data: data, UpstreamHeaders: headers, Errs: errs}
 	})
 	if canceled {

@@ -19,6 +19,18 @@ func TestCodexStatusClassificationCaseInsensitive(t *testing.T) {
 	if !codexTerminalErrorIsContextLength([]byte(`{"error":{"message":"Too Many Tokens in the Context Window"}}`)) {
 		t.Fatal("expected mixed-case context length message to match")
 	}
+	if !codexTerminalErrorIsContextLength([]byte(`{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}`)) {
+		t.Fatal("expected top-level context length error to match")
+	}
+	if !codexTerminalErrorIsContextLength([]byte(`Your input exceeds the context window of this model. Please adjust your input and try again.`)) {
+		t.Fatal("expected plain text context length message to match")
+	}
+	if !codexTerminalErrorIsContextLength([]byte(`{"error":{"message":"Input exceeds the maximum context supported by this model"}}`)) {
+		t.Fatal("expected maximum context message to match")
+	}
+	if !codexTerminalErrorIsContextLength([]byte(`{"error":{"message":"Input exceeds the max context supported by this model"}}`)) {
+		t.Fatal("expected max context message to match")
+	}
 	if codexTerminalErrorIsContextLength([]byte(`{"error":{"message":"unrelated failure"}}`)) {
 		t.Fatal("did not expect unrelated message to match context length")
 	}

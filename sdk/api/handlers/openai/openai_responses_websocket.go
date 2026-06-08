@@ -1441,23 +1441,57 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			var forwardErr error
 			stopForward := false
 			websocketJSONPayloadsFromChunkEach(chunk, func(payload []byte) bool {
-				filteredPayload := payload
+				var payloadBuffer [4][]byte
+				filteredPayloads := payloadBuffer[:0]
 				if noticeFilter != nil {
-					filteredPayload = noticeFilter.FilterPayload(filteredPayload)
+					filteredPayloads = noticeFilter.FilterPayloadsInto(payload, filteredPayloads)
+				} else {
+					filteredPayloads = append(filteredPayloads, payload)
 				}
-				if len(filteredPayload) == 0 {
-					return true
-				}
-				eventType := websocketPayloadEventTypeValue(filteredPayload)
-				now := time.Now()
-				if eventType == wsEventTypeError {
-					if !emittedPayload && responsesWebsocketPayloadShouldRetryFullTranscript(filteredPayload) {
-						cancel(errResponsesWebsocketRetryFullTranscript)
-						forwardErr = errResponsesWebsocketRetryFullTranscript
+				for _, filteredPayload := range filteredPayloads {
+					if len(filteredPayload) == 0 {
+						continue
+					}
+					eventType := websocketPayloadEventTypeValue(filteredPayload)
+					now := time.Now()
+					if eventType == wsEventTypeError {
+						if !emittedPayload && responsesWebsocketPayloadShouldRetryFullTranscript(filteredPayload) {
+							cancel(errResponsesWebsocketRetryFullTranscript)
+							forwardErr = errResponsesWebsocketRetryFullTranscript
+							stopForward = true
+							return false
+						}
+						markAPIResponseTimestampAt(c, now)
+						if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, now, eventType); errWrite != nil {
+							log.Warnf(
+								"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+								sessionID,
+								websocketPayloadEventTypeName(eventType),
+								errWrite,
+							)
+							cancel(errWrite)
+							forwardErr = errWrite
+							stopForward = true
+							return false
+						}
+						cancel(nil)
 						stopForward = true
 						return false
 					}
+					recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(toolCallCache, downstreamSessionKey, eventType, filteredPayload)
+					if eventType == wsEventTypeCompleted {
+						completed = true
+						completedOutput = responseCompletedOutputFromPayload(filteredPayload)
+						completedResponseID = responseCompletedIDFromPayload(filteredPayload)
+					}
 					markAPIResponseTimestampAt(c, now)
+					// log.Infof(
+					// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+					// 	sessionID,
+					// 	websocket.TextMessage,
+					// 	websocketPayloadEventType(payloads[i]),
+					// 	websocketPayloadPreview(payloads[i]),
+					// )
 					if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, now, eventType); errWrite != nil {
 						log.Warnf(
 							"responses websocket: downstream_out write failed id=%s event=%s error=%v",
@@ -1470,37 +1504,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						stopForward = true
 						return false
 					}
-					cancel(nil)
-					stopForward = true
-					return false
+					emittedPayload = true
 				}
-				recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(toolCallCache, downstreamSessionKey, eventType, filteredPayload)
-				if eventType == wsEventTypeCompleted {
-					completed = true
-					completedOutput = responseCompletedOutputFromPayload(filteredPayload)
-					completedResponseID = responseCompletedIDFromPayload(filteredPayload)
-				}
-				markAPIResponseTimestampAt(c, now)
-				// log.Infof(
-				// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
-				// 	sessionID,
-				// 	websocket.TextMessage,
-				// 	websocketPayloadEventType(payloads[i]),
-				// 	websocketPayloadPreview(payloads[i]),
-				// )
-				if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, now, eventType); errWrite != nil {
-					log.Warnf(
-						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-						sessionID,
-						websocketPayloadEventTypeName(eventType),
-						errWrite,
-					)
-					cancel(errWrite)
-					forwardErr = errWrite
-					stopForward = true
-					return false
-				}
-				emittedPayload = true
 				return true
 			})
 			if stopForward {

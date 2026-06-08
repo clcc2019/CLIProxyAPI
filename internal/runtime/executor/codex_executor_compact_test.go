@@ -152,6 +152,113 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorCompactPrunesOldContextAfterContextLengthError(t *testing.T) {
+	var gotBodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBodies = append(gotBodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if len(gotBodies) <= 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`Your input exceeds the context window of this model. Please adjust your input and try again.`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"input":[
+				{"type":"message","role":"user","content":[{"type":"input_text","text":"old-1"}]},
+				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"old-2"}]},
+				{"type":"message","role":"user","content":[{"type":"input_text","text":"old-3"}]},
+				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"old-4"}]},
+				{"type":"message","role":"user","content":[{"type":"input_text","text":"middle-5"}]},
+				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"middle-6"}]},
+				{"type":"message","role":"user","content":[{"type":"input_text","text":"latest-7"}]},
+				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"latest-8"}]}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if len(gotBodies) != 3 {
+		t.Fatalf("request count = %d, want 3", len(gotBodies))
+	}
+	if got := gjson.GetBytes(gotBodies[0], "input.#").Int(); got != 8 {
+		t.Fatalf("first request input length = %d, want 8; body=%s", got, gotBodies[0])
+	}
+	if got := gjson.GetBytes(gotBodies[1], "input.#").Int(); got != 4 {
+		t.Fatalf("second request input length = %d, want 4; body=%s", got, gotBodies[1])
+	}
+	if got := gjson.GetBytes(gotBodies[2], "input.#").Int(); got != 2 {
+		t.Fatalf("third request input length = %d, want 2; body=%s", got, gotBodies[2])
+	}
+	if got := gjson.GetBytes(gotBodies[2], "input.0.content.0.text").String(); got != "latest-7" {
+		t.Fatalf("third request first kept text = %q, want latest-7; body=%s", got, gotBodies[2])
+	}
+	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestCodexExecutorCompactPrunesSingleMessageTextAfterContextLengthError(t *testing.T) {
+	var gotBodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBodies = append(gotBodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if len(gotBodies) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction"}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"oldernewer"}]}]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if len(gotBodies) != 2 {
+		t.Fatalf("request count = %d, want 2", len(gotBodies))
+	}
+	if got := gjson.GetBytes(gotBodies[1], "input.0.content.0.text").String(); got != "newer" {
+		t.Fatalf("second request text = %q, want newer; body=%s", got, gotBodies[1])
+	}
+}
+
 func TestCodexExecutorCompactPreservesServiceTierForOptedInChatGPTAuth(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

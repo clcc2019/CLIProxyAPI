@@ -220,34 +220,65 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	preparedBody := body
-	call, err := e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, false)
-	if err != nil {
-		return resp, err
-	}
-	body = call.prepared.body
-	helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-	result, usageOwner, err := e.fetchCodexNonStreamResponse(ctx, auth, call.url, call.prepared, needResponseHeaders)
-	if err != nil {
-		return resp, err
-	}
-	if result.statusCode == http.StatusUnauthorized {
-		refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
-		if refreshErr != nil {
-			return resp, refreshErr
+	compactContextPruneAttempts := 0
+	var call codexPreparedHTTPCall
+	var result codexNonStreamHTTPResult
+	var usageOwner bool
+	for {
+		call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, false)
+		if err != nil {
+			return resp, err
 		}
-		if retried {
-			auth = refreshedAuth
-			apiKey, _ = codexCreds(auth)
-			call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, false)
-			if err != nil {
-				return resp, err
+		body = call.prepared.body
+		helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
+		result, usageOwner, err = e.fetchCodexNonStreamResponse(ctx, auth, call.url, call.prepared, needResponseHeaders)
+		if err != nil {
+			return resp, err
+		}
+		if result.statusCode == http.StatusUnauthorized {
+			refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			if refreshErr != nil {
+				return resp, refreshErr
 			}
-			helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-			result, usageOwner, err = e.fetchCodexNonStreamResponse(ctx, auth, call.url, call.prepared, needResponseHeaders)
-			if err != nil {
-				return resp, err
+			if retried {
+				auth = refreshedAuth
+				apiKey, _ = codexCreds(auth)
+				call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, false)
+				if err != nil {
+					return resp, err
+				}
+				body = call.prepared.body
+				helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
+				result, usageOwner, err = e.fetchCodexNonStreamResponse(ctx, auth, call.url, call.prepared, needResponseHeaders)
+				if err != nil {
+					return resp, err
+				}
 			}
 		}
+		if codexShouldPruneCompactContext(result.statusCode, result.body, compactContextPruneAttempts) {
+			pruneResult, ok := codexPruneOldestInputContext(body)
+			if ok {
+				compactContextPruneAttempts++
+				helps.LogWithRequestID(ctx).Warnf(
+					"codex executor: responses/compact context too large; retrying with pruned input context (attempt=%d/%d, prune=%s, input_items=%d->%d, input_bytes=%d->%d)",
+					compactContextPruneAttempts,
+					codexCompactContextPruneMaxAttempts,
+					pruneResult.Kind,
+					pruneResult.OldItems,
+					pruneResult.NewItems,
+					pruneResult.OldBytes,
+					pruneResult.NewBytes,
+				)
+				preparedBody = pruneResult.Body
+				continue
+			}
+			helps.LogWithRequestID(ctx).Warnf(
+				"codex executor: responses/compact context too large but input context could not be pruned (attempt=%d/%d)",
+				compactContextPruneAttempts+1,
+				codexCompactContextPruneMaxAttempts,
+			)
+		}
+		break
 	}
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body)
@@ -461,6 +492,7 @@ codexStreamResponseOK:
 			streamBody := idleReader
 			var param any
 			streamState := newCodexStreamCompletionState()
+			usageWarningFilter := newCodexUsageWarningStreamFilter()
 			terminalFailure := false
 			var terminalFailureErr error
 			emittedPayload := false
@@ -476,12 +508,37 @@ codexStreamResponseOK:
 					return err
 				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				stopAfterForward := false
-				if eventData, ok := codexEventData(line); ok {
-					eventType := codexEventType(eventData)
-					if codexShouldSuppressUsageWarningEvent(eventType, eventData) {
-						return nil
+				forwardLine := func(line []byte) {
+					if downstreamClosed {
+						return
 					}
+					chunks := sdktranslator.TranslateStream(upstreamCtx, to, from, req.Model, originalPayload, body, line, &param)
+					for i := range chunks {
+						if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+							break
+						}
+						if len(chunks[i]) > 0 {
+							emittedPayload = true
+						}
+					}
+				}
+				eventData, ok := codexEventData(line)
+				if !ok {
+					if len(usageWarningFilter.pending) == 0 {
+						forwardLine(line)
+					}
+					return nil
+				}
+				eventType := codexEventType(eventData)
+				events := usageWarningFilter.Filter(eventType, eventData)
+				if len(events) == 0 {
+					return nil
+				}
+				for _, event := range events {
+					eventData := event.payload
+					eventType := event.eventType
+					line := codexSSEDataLine(eventData)
+					stopAfterForward := false
 					if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
 						log.Warnf("codex stream terminated with %s: %s", eventType, terminalErr.Error())
 						if eventType == "response.failed" {
@@ -532,21 +589,11 @@ codexStreamResponseOK:
 							line = codexSSEDataLine(completed.data)
 						}
 					}
-				}
 
-				if !downstreamClosed {
-					chunks := sdktranslator.TranslateStream(upstreamCtx, to, from, req.Model, originalPayload, body, line, &param)
-					for i := range chunks {
-						if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-							break
-						}
-						if len(chunks[i]) > 0 {
-							emittedPayload = true
-						}
+					forwardLine(line)
+					if stopAfterForward {
+						return errCodexStopStream
 					}
-				}
-				if stopAfterForward {
-					return errCodexStopStream
 				}
 				return nil
 			})

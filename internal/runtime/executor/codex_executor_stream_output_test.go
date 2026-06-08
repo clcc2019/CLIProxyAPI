@@ -375,6 +375,54 @@ func TestCodexExecutorExecuteStreamSuppressesUsageWarningBeforeForwarding(t *tes
 	}
 }
 
+func TestCodexExecutorExecuteStreamSuppressesSplitUsageWarningBeforeForwarding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, delta := range []string{
+			`\u26a0 Heads up, you have `,
+			`less than 10% of your `,
+			`5h limit left. Run /status for a breakdown.`,
+		} {
+			_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-warning\",\"delta\":\"%s\"}\n\n", delta)
+		}
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1775555723,"status":"completed","model":"gpt-5.4-mini-2026-03-17","output":[],"usage":{"input_tokens":8,"output_tokens":28,"total_tokens":36}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var received bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		_, _ = received.Write(chunk.Payload)
+	}
+
+	if strings.Contains(received.String(), "Heads up") || strings.Contains(received.String(), "5h limit left") {
+		t.Fatalf("split usage warning leaked to downstream stream: %s", received.String())
+	}
+	if !strings.Contains(received.String(), "ok") {
+		t.Fatalf("normal assistant output missing from downstream stream: %s", received.String())
+	}
+}
+
 func TestCodexExecutorExecuteStream_IgnoresUnexpectedEOFAfterCompleted(t *testing.T) {
 	executor := NewCodexExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{

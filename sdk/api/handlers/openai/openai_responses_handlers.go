@@ -126,7 +126,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, executionSessionID)
 	}
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), requestDetails.Model, rawJSON, "responses/compact")
+	resp, upstreamHeaders, errMsg := h.executeCompactWithPruneFallback(cliCtx, requestDetails.Model, rawJSON)
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)

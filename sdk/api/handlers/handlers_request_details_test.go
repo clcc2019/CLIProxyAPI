@@ -140,6 +140,37 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	}
 }
 
+func TestGetRequestDetails_ImageModelAllowedForImageEndpoint(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-request-details-image-model-allowed"
+	provider := "test-image-provider"
+	modelRegistry.RegisterClient(clientID, provider, []*registry.ModelInfo{
+		{ID: "gpt-image-2", Created: time.Now().Unix()},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	providers, model, errMsg := handler.getRequestDetailsWithOptions("gpt-image-2", true)
+	if errMsg != nil {
+		t.Fatalf("getRequestDetailsWithOptions() error = %v", errMsg.Error)
+	}
+	if model != "gpt-image-2" {
+		t.Fatalf("model = %q, want gpt-image-2", model)
+	}
+	foundProvider := false
+	for _, got := range providers {
+		if got == provider {
+			foundProvider = true
+			break
+		}
+	}
+	if !foundProvider {
+		t.Fatalf("providers = %v, want to include %q", providers, provider)
+	}
+}
+
 func TestIsOpenAIImageOnlyModel(t *testing.T) {
 	tests := []struct {
 		name  string

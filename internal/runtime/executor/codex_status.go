@@ -288,12 +288,30 @@ func codexTerminalTopLevelErrorBody(eventData []byte) []byte {
 }
 
 func codexTerminalErrorIsContextLength(body []byte) bool {
-	errorCode := strings.TrimSpace(codexStatusResultString(gjson.GetBytes(body, "error.code")))
-	message := strings.TrimSpace(codexStatusResultString(gjson.GetBytes(body, "error.message")))
-	return strings.EqualFold(errorCode, "context_length_exceeded") ||
-		strings.EqualFold(errorCode, "context_too_large") ||
-		asciifold.Contains(message, "context window") ||
+	switch codexErrorCode(body) {
+	case "context_length_exceeded", "context_too_large":
+		return true
+	}
+	for _, message := range []string{
+		strings.TrimSpace(codexStatusResultString(gjson.GetBytes(body, "error.message"))),
+		strings.TrimSpace(codexStatusResultString(gjson.GetBytes(body, "message"))),
+	} {
+		if codexErrorMessageMentionsContextLength(message) {
+			return true
+		}
+	}
+	return asciifold.ContainsBytes(body, "context window") ||
+		asciifold.ContainsBytes(body, "context length") ||
+		asciifold.ContainsBytes(body, "maximum context") ||
+		asciifold.ContainsBytes(body, "max context") ||
+		asciifold.ContainsBytes(body, "too many tokens")
+}
+
+func codexErrorMessageMentionsContextLength(message string) bool {
+	return asciifold.Contains(message, "context window") ||
 		asciifold.Contains(message, "context length") ||
+		asciifold.Contains(message, "maximum context") ||
+		asciifold.Contains(message, "max context") ||
 		asciifold.Contains(message, "too many tokens")
 }
 

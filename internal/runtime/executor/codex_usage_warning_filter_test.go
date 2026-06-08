@@ -21,9 +21,56 @@ func TestCodexShouldSuppressUsageWarningEvent(t *testing.T) {
 		t.Fatal("expected Codex usage warning text delta with escaped /status to be suppressed")
 	}
 
+	textDone := []byte(`{"type":"response.output_text.done","item_id":"msg-warning","text":"` + codexUsageLimitHeadsUpText + `"}`)
+	if !codexShouldSuppressUsageWarningEvent(codexEventOutputTextDone, textDone) {
+		t.Fatal("expected Codex usage warning output text done event to be suppressed")
+	}
+
+	itemAdded := []byte(`{"type":"response.output_item.added","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + codexUsageLimitHeadsUpText + `"}]},"output_index":1}`)
+	if !codexShouldSuppressUsageWarningEvent(codexEventOutputItemAdded, itemAdded) {
+		t.Fatal("expected Codex usage warning output item added event to be suppressed")
+	}
+
+	contentPart := []byte(`{"type":"response.content_part.done","item_id":"msg-warning","part":{"type":"output_text","text":"` + codexUsageLimitHeadsUpText + `"}}`)
+	if !codexShouldSuppressUsageWarningEvent(codexEventContentPartDone, contentPart) {
+		t.Fatal("expected Codex usage warning content part event to be suppressed")
+	}
+
 	normal := []byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"normal answer"}]},"output_index":1}`)
 	if codexShouldSuppressUsageWarningEvent(codexEventOutputItemDone, normal) {
 		t.Fatal("normal assistant output should not be suppressed")
+	}
+}
+
+func TestCodexUsageWarningStreamFilterDropsSplitUsageWarning(t *testing.T) {
+	filter := newCodexUsageWarningStreamFilter()
+	parts := []string{
+		"⚠ Heads up, you have ",
+		"less than 10% of your ",
+		"5h limit left. Run /status for a breakdown.",
+	}
+	for _, part := range parts {
+		payload := []byte(`{"type":"response.output_text.delta","item_id":"msg-warning","delta":"` + part + `"}`)
+		if got := filter.Filter(codexEventOutputTextDelta, payload); len(got) != 0 {
+			t.Fatalf("split usage warning event was forwarded: %#v", got)
+		}
+	}
+}
+
+func TestCodexUsageWarningStreamFilterFlushesNonWarningPrefix(t *testing.T) {
+	filter := newCodexUsageWarningStreamFilter()
+	first := []byte(`{"type":"response.output_text.delta","item_id":"msg-real","delta":"Heads up, you have "}`)
+	if got := filter.Filter(codexEventOutputTextDelta, first); len(got) != 0 {
+		t.Fatalf("first prefix event should be held, got %#v", got)
+	}
+
+	second := []byte(`{"type":"response.output_text.delta","item_id":"msg-real","delta":"a review waiting."}`)
+	got := filter.Filter(codexEventOutputTextDelta, second)
+	if len(got) != 2 {
+		t.Fatalf("non-warning prefix should flush held event and current event, got %d", len(got))
+	}
+	if string(got[0].payload) != string(first) || string(got[1].payload) != string(second) {
+		t.Fatalf("flushed events out of order: %#v", got)
 	}
 }
 

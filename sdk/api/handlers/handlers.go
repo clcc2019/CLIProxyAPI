@@ -1106,7 +1106,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if isOpenAIImageOnlyModel(baseModel) {
+	if isOpenAIImageOnlyModel(baseModel) && !allowImageModel {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations, /v1/images/edits, and /v1/images/variations", baseModel),

@@ -20,10 +20,13 @@ import (
 )
 
 type compactCaptureExecutor struct {
-	alt          string
-	sourceFormat string
-	calls        int
-	resetIDs     []string
+	alt                    string
+	sourceFormat           string
+	calls                  int
+	contextLengthFailures  int
+	wrappedContextFailures int
+	payloads               [][]byte
+	resetIDs               []string
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -32,8 +35,25 @@ func (e *compactCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Aut
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
+	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	if e.contextLengthFailures > 0 {
+		e.contextLengthFailures--
+		return coreexecutor.Response{}, compactContextLengthError{}
+	}
+	if e.wrappedContextFailures > 0 {
+		e.wrappedContextFailures--
+		return coreexecutor.Response{}, errors.New("HTTP 400: Your input exceeds the context window of this model. Please adjust your input and try again.")
+	}
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
+
+type compactContextLengthError struct{}
+
+func (compactContextLengthError) Error() string {
+	return "HTTP 400: Your input exceeds the context window of this model. Please adjust your input and try again."
+}
+
+func (compactContextLengthError) StatusCode() int { return http.StatusBadRequest }
 
 func (e *compactCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	return nil, errors.New("not implemented")
@@ -127,6 +147,169 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if len(executor.resetIDs) != 0 {
 		t.Fatalf("unexpected reset IDs: %#v", executor.resetIDs)
+	}
+}
+
+func TestOpenAIResponsesCompactPrunesContextAfterWrappedContextLengthError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{contextLengthFailures: 2}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-compact-prune", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	reqBody := `{
+		"model":"test-model",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"old-1"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"old-2"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"latest-3"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"latest-4"}]}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.calls != 3 {
+		t.Fatalf("executor calls = %d, want 3", executor.calls)
+	}
+	if got := gjson.GetBytes(executor.payloads[0], "input.#").Int(); got != 4 {
+		t.Fatalf("first input len = %d, want 4; body=%s", got, executor.payloads[0])
+	}
+	if got := gjson.GetBytes(executor.payloads[1], "input.#").Int(); got != 2 {
+		t.Fatalf("second input len = %d, want 2; body=%s", got, executor.payloads[1])
+	}
+	if got := gjson.GetBytes(executor.payloads[2], "input.#").Int(); got != 1 {
+		t.Fatalf("third input len = %d, want 1; body=%s", got, executor.payloads[2])
+	}
+	if got := gjson.GetBytes(executor.payloads[2], "input.0.content.0.text").String(); got != "latest-4" {
+		t.Fatalf("third kept text = %q, want latest-4; body=%s", got, executor.payloads[2])
+	}
+}
+
+func TestOpenAIResponsesCompactPrunesSingleInputStringAfterWrappedContextLengthError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{contextLengthFailures: 1}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-compact-string-prune", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"oldernewer"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.calls != 2 {
+		t.Fatalf("executor calls = %d, want 2", executor.calls)
+	}
+	if got := gjson.GetBytes(executor.payloads[1], "input").String(); got != "newer" {
+		t.Fatalf("second input = %q, want newer; body=%s", got, executor.payloads[1])
+	}
+}
+
+func TestOpenAIResponsesCompactPrunesPlainWrappedHTTP400ContextLengthError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{wrappedContextFailures: 1}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-compact-plain-wrapped-prune", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"oldernewer"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.calls != 2 {
+		t.Fatalf("executor calls = %d, want 2", executor.calls)
+	}
+	if got := gjson.GetBytes(executor.payloads[1], "input").String(); got != "newer" {
+		t.Fatalf("second input = %q, want newer; body=%s", got, executor.payloads[1])
+	}
+}
+
+func TestOpenAIResponsesCompactPrunesSingleMessageTextAfterWrappedContextLengthError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{contextLengthFailures: 1}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-compact-single-item-prune", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	reqBody := `{"model":"test-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"oldernewer"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.calls != 2 {
+		t.Fatalf("executor calls = %d, want 2", executor.calls)
+	}
+	if got := gjson.GetBytes(executor.payloads[1], "input.0.content.0.text").String(); got != "newer" {
+		t.Fatalf("second text = %q, want newer; body=%s", got, executor.payloads[1])
 	}
 }
 

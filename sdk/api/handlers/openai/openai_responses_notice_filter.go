@@ -11,13 +11,22 @@ import (
 
 type responsesNoticeFilter struct {
 	suppressedItemIDs map[string]struct{}
+	pending           []responsesNoticePendingPayload
+	pendingText       string
+	pendingItemID     string
 }
 
 type responsesNoticeFilteredLine struct {
-	line    []byte
+	line     []byte
+	payload  []byte
+	payloads [][]byte
+	keep     bool
+	rewrite  bool
+}
+
+type responsesNoticePendingPayload struct {
 	payload []byte
-	keep    bool
-	rewrite bool
+	itemID  string
 }
 
 const responsesNoticeFilterMarker = "heads up"
@@ -29,17 +38,29 @@ func newResponsesNoticeFilter() *responsesNoticeFilter {
 }
 
 func (f *responsesNoticeFilter) FilterPayload(payload []byte) []byte {
+	payloads := f.FilterPayloads(payload)
+	if len(payloads) == 0 {
+		return nil
+	}
+	return payloads[len(payloads)-1]
+}
+
+func (f *responsesNoticeFilter) FilterPayloads(payload []byte) [][]byte {
+	return f.FilterPayloadsInto(payload, nil)
+}
+
+func (f *responsesNoticeFilter) FilterPayloadsInto(payload []byte, out [][]byte) [][]byte {
 	if len(payload) == 0 {
-		return payload
+		return append(out, payload)
 	}
 	if f == nil {
-		return payload
+		return append(out, payload)
 	}
-	if len(f.suppressedItemIDs) == 0 && !responsesNoticeMayNeedFiltering(payload) {
-		return payload
+	if len(f.pending) == 0 && len(f.suppressedItemIDs) == 0 && !responsesNoticeMayNeedFiltering(payload) {
+		return append(out, payload)
 	}
 	if !json.Valid(payload) {
-		return payload
+		return append(f.flushPendingInto(out), payload)
 	}
 
 	itemID := strings.TrimSpace(gjson.GetBytes(payload, "item_id").String())
@@ -61,8 +82,26 @@ func (f *responsesNoticeFilter) FilterPayload(payload []byte) []byte {
 
 	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
 	case "response.output_text.delta":
-		if responsesUsageWarningText(gjson.GetBytes(payload, "delta").String()) {
+		text := gjson.GetBytes(payload, "delta").String()
+		if f.pendingMatches(itemID) {
+			combined := f.pendingText + text
+			if responsesUsageWarningText(combined) {
+				f.markSuppressedItem(itemID)
+				f.clearPending()
+				return nil
+			}
+			if responsesUsageWarningTextPrefix(combined) {
+				f.holdPending(payload, itemID, text)
+				return nil
+			}
+			return append(f.flushPendingInto(out), payload)
+		}
+		if responsesUsageWarningText(text) {
 			f.markSuppressedItem(itemID)
+			return nil
+		}
+		if responsesUsageWarningTextPrefix(text) {
+			f.holdPending(payload, itemID, text)
 			return nil
 		}
 	case "response.output_text.done":
@@ -81,10 +120,11 @@ func (f *responsesNoticeFilter) FilterPayload(payload []byte) []byte {
 			return nil
 		}
 	case "response.completed":
-		return f.filterOutputPayload(payload, "response.output")
+		filtered := f.filterOutputPayload(payload, "response.output")
+		return append(f.flushPendingInto(out), filtered)
 	}
 
-	return payload
+	return append(f.flushPendingInto(out), payload)
 }
 
 func (f *responsesNoticeFilter) FilterResponseObject(payload []byte) []byte {
@@ -133,17 +173,31 @@ func (f *responsesNoticeFilter) FilterSSEFrame(frame []byte) []byte {
 			lines = append(lines, entry)
 		} else {
 			data := bytes.TrimSpace(trimmedLine[len("data:"):])
-			if len(data) == 0 || bytes.Equal(data, []byte(wsDoneMarker)) || !json.Valid(data) {
+			if len(data) == 0 || bytes.Equal(data, []byte(wsDoneMarker)) {
+				dataLines++
+			} else if len(f.pending) == 0 && len(f.suppressedItemIDs) == 0 && !responsesNoticeMayNeedFiltering(data) {
+				dataLines++
+				if !responsesNoticeDataLineMatches(line, data) {
+					entry.payload = data
+					entry.rewrite = true
+					canonical = false
+				}
+			} else if !json.Valid(data) {
 				dataLines++
 			} else {
-				filtered := f.FilterPayload(data)
-				if len(filtered) == 0 {
+				var payloadBuffer [4][]byte
+				filteredPayloads := f.FilterPayloadsInto(data, payloadBuffer[:0])
+				if len(filteredPayloads) == 0 {
 					entry.keep = false
 					canonical = false
 				} else {
-					dataLines++
-					if !responsesNoticeDataLineMatches(line, filtered) {
-						entry.payload = filtered
+					dataLines += len(filteredPayloads)
+					if len(filteredPayloads) != 1 || !responsesNoticeDataLineMatches(line, filteredPayloads[0]) {
+						if len(filteredPayloads) == 1 {
+							entry.payload = filteredPayloads[0]
+						} else {
+							entry.payloads = filteredPayloads
+						}
 						entry.rewrite = true
 						canonical = false
 					}
@@ -174,7 +228,16 @@ func (f *responsesNoticeFilter) FilterSSEFrame(frame []byte) []byte {
 			outputLen++
 		}
 		if lines[i].rewrite {
-			outputLen += len("data: ") + len(lines[i].payload)
+			if len(lines[i].payloads) == 0 {
+				outputLen += len("data: ") + len(lines[i].payload)
+			} else {
+				for j := range lines[i].payloads {
+					if j > 0 {
+						outputLen++
+					}
+					outputLen += len("data: ") + len(lines[i].payloads[j])
+				}
+			}
 		} else {
 			outputLen += len(lines[i].line)
 		}
@@ -191,8 +254,18 @@ func (f *responsesNoticeFilter) FilterSSEFrame(frame []byte) []byte {
 			out = append(out, '\n')
 		}
 		if lines[i].rewrite {
-			out = append(out, "data: "...)
-			out = append(out, lines[i].payload...)
+			if len(lines[i].payloads) == 0 {
+				out = append(out, "data: "...)
+				out = append(out, lines[i].payload...)
+			} else {
+				for j := range lines[i].payloads {
+					if j > 0 {
+						out = append(out, '\n')
+					}
+					out = append(out, "data: "...)
+					out = append(out, lines[i].payloads[j]...)
+				}
+			}
 		} else {
 			out = append(out, lines[i].line...)
 		}
@@ -212,6 +285,9 @@ func (f *responsesNoticeFilter) CanBypassSSEChunk(chunk []byte) bool {
 	if f == nil {
 		return true
 	}
+	if len(f.pending) != 0 {
+		return false
+	}
 	if len(f.suppressedItemIDs) != 0 {
 		return false
 	}
@@ -227,6 +303,55 @@ func (f *responsesNoticeFilter) markSuppressedItem(itemID string) {
 		return
 	}
 	f.suppressedItemIDs[itemID] = struct{}{}
+}
+
+func (f *responsesNoticeFilter) holdPending(payload []byte, itemID, text string) {
+	if f == nil {
+		return
+	}
+	f.pending = append(f.pending, responsesNoticePendingPayload{
+		payload: append([]byte(nil), payload...),
+		itemID:  strings.TrimSpace(itemID),
+	})
+	f.pendingText += text
+	if f.pendingItemID == "" {
+		f.pendingItemID = strings.TrimSpace(itemID)
+	}
+}
+
+func (f *responsesNoticeFilter) pendingMatches(itemID string) bool {
+	if f == nil || len(f.pending) == 0 {
+		return false
+	}
+	itemID = strings.TrimSpace(itemID)
+	if f.pendingItemID == "" || itemID == "" {
+		return true
+	}
+	return f.pendingItemID == itemID
+}
+
+func (f *responsesNoticeFilter) flushPending() [][]byte {
+	return f.flushPendingInto(nil)
+}
+
+func (f *responsesNoticeFilter) flushPendingInto(out [][]byte) [][]byte {
+	if f == nil || len(f.pending) == 0 {
+		return out
+	}
+	for i := range f.pending {
+		out = append(out, f.pending[i].payload)
+	}
+	f.clearPending()
+	return out
+}
+
+func (f *responsesNoticeFilter) clearPending() {
+	if f == nil {
+		return
+	}
+	f.pending = nil
+	f.pendingText = ""
+	f.pendingItemID = ""
 }
 
 func (f *responsesNoticeFilter) filterOutputPayload(payload []byte, path string) []byte {
@@ -306,6 +431,30 @@ func responsesUsageWarningText(text string) bool {
 		return false
 	}
 	return true
+}
+
+func responsesUsageWarningTextPrefix(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" || responsesUsageWarningText(text) {
+		return false
+	}
+	text = strings.ToLower(text)
+	const headsUp = "heads up, you have"
+	idx := strings.Index(text, headsUp)
+	if idx < 0 {
+		return false
+	}
+	tail := strings.TrimSpace(text[idx+len(headsUp):])
+	if tail == "" {
+		return true
+	}
+	if !strings.HasPrefix(tail, "less than") {
+		return strings.HasPrefix("less than", tail)
+	}
+	if !strings.Contains(tail, " limit left") {
+		return true
+	}
+	return !strings.Contains(tail, "run /status for a breakdown")
 }
 
 func responsesNoticeMayNeedFiltering(chunk []byte) bool {

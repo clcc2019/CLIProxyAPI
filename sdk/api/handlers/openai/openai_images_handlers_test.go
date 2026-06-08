@@ -159,6 +159,52 @@ func TestImagesGenerationsUsesOpenAICompatibleImageModelNatively(t *testing.T) {
 	}
 }
 
+func TestImagesGenerationsUsesDefaultImageModelNatively(t *testing.T) {
+	executor := &imageNativeCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "test-default-native-images-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{
+		ID: "gpt-image-2",
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"gpt-image-2","prompt":"draw a fox"}`)
+
+	resp := performImagesEndpointRequest(t, "/v1/images/generations", "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+	if executor.alt != "images/generations" {
+		t.Fatalf("alt = %q, want images/generations", executor.alt)
+	}
+	if executor.sourceFormat != "openai" {
+		t.Fatalf("source format = %q, want openai", executor.sourceFormat)
+	}
+	if executor.model != "gpt-image-2" {
+		t.Fatalf("model = %q, want gpt-image-2", executor.model)
+	}
+	if gjson.GetBytes(executor.payload, "response_format").String() != "b64_json" {
+		t.Fatalf("expected default response_format in native payload, got %s", string(executor.payload))
+	}
+	if strings.TrimSpace(resp.Body.String()) != `{"created":123,"data":[{"b64_json":"native-image"}]}` {
+		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
 func BenchmarkIsXAIImagesModel(b *testing.B) {
 	for b.Loop() {
 		if !isXAIImagesModel(" XAI/Grok-Imagine-Image ") {
@@ -435,6 +481,56 @@ func TestImagesGenerationsStreamUsesOpenAICompatibleImageModelNatively(t *testin
 	}
 	if executor.streamModel != "test-native/gpt-image-2" {
 		t.Fatalf("stream model = %q, want test-native/gpt-image-2", executor.streamModel)
+	}
+	if executor.streamFormat != "openai" {
+		t.Fatalf("stream source format = %q, want openai", executor.streamFormat)
+	}
+	if executor.streamAlt != "images/generations" {
+		t.Fatalf("stream alt = %q, want images/generations", executor.streamAlt)
+	}
+	if !strings.Contains(resp.Body.String(), "event: image_generation.completed") {
+		t.Fatalf("missing completed image event: %s", resp.Body.String())
+	}
+}
+
+func TestImagesGenerationsStreamUsesDefaultImageModelNatively(t *testing.T) {
+	executor := &imageNativeCaptureExecutor{
+		streamChunks: [][]byte{
+			[]byte(`{"type":"image_generation.completed","b64_json":"stream-image"}`),
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "test-default-stream-images-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: "gpt-image-2"},
+	})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"gpt-image-2","prompt":"draw a fox","stream":true}`)
+
+	resp := performImagesEndpointRequest(t, "/v1/images/generations", "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if executor.calls != 0 {
+		t.Fatalf("native non-stream calls = %d, want 0", executor.calls)
+	}
+	if executor.streamCalls != 1 {
+		t.Fatalf("stream calls = %d, want 1", executor.streamCalls)
+	}
+	if executor.streamModel != "gpt-image-2" {
+		t.Fatalf("stream model = %q, want gpt-image-2", executor.streamModel)
 	}
 	if executor.streamFormat != "openai" {
 		t.Fatalf("stream source format = %q, want openai", executor.streamFormat)

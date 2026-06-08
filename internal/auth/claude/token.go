@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	authfile "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 )
 
@@ -40,6 +41,11 @@ type ClaudeTokenStorage struct {
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
 	Metadata map[string]any `json:"-"`
+}
+
+// CredentialFileName returns the filename used to persist Claude credentials.
+func CredentialFileName(email string) string {
+	return authfile.CredentialFileName(email)
 }
 
 // SetMetadata allows external callers to inject metadata into the storage before saving.

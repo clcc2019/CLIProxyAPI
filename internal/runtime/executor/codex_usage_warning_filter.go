@@ -9,7 +9,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const codexUsageWarningMinPayloadBytes = len(`{"type":"response.output_text.delta","delta":"heads up less than limit left /status"}`)
+const (
+	codexUsageWarningMinPayloadBytes = len(`{"type":"response.output_text.delta","delta":"heads up less than limit left /status"}`)
+
+	codexEventContentPartAdded = "response.content_part.added"
+	codexEventContentPartDone  = "response.content_part.done"
+)
 
 var (
 	codexUsageWarningMarkerLessThan      = "less than"
@@ -68,8 +73,13 @@ func (f *codexUsageWarningStreamFilter) Filter(eventType string, payload []byte)
 				f.clear()
 				return nil
 			}
-		case codexEventOutputItemDone:
+		case codexEventOutputItemAdded, codexEventOutputItemDone:
 			if codexOutputItemIsUsageLimitWarning(gjson.GetBytes(payload, "item")) {
+				f.clear()
+				return nil
+			}
+		case codexEventContentPartAdded, codexEventContentPartDone:
+			if codexContentPartIsUsageLimitWarning(gjson.GetBytes(payload, "part")) {
 				f.clear()
 				return nil
 			}
@@ -141,11 +151,11 @@ func (f *codexUsageWarningStreamFilter) pendingMatches(eventType string, payload
 
 func codexUsageWarningEventKey(eventType string, payload []byte) string {
 	switch strings.TrimSpace(eventType) {
-	case codexEventOutputTextDelta, codexEventOutputTextDone:
+	case codexEventOutputTextDelta, codexEventOutputTextDone, codexEventContentPartAdded, codexEventContentPartDone:
 		if itemID := strings.TrimSpace(gjson.GetBytes(payload, "item_id").String()); itemID != "" {
 			return "item:" + itemID
 		}
-	case codexEventOutputItemDone:
+	case codexEventOutputItemAdded, codexEventOutputItemDone:
 		if itemID := strings.TrimSpace(gjson.GetBytes(payload, "item.id").String()); itemID != "" {
 			return "item:" + itemID
 		}
@@ -157,32 +167,29 @@ func codexUsageWarningEventKey(eventType string, payload []byte) string {
 }
 
 func codexShouldSuppressUsageWarningEvent(eventType string, payload []byte) bool {
-	switch eventType {
+	switch strings.TrimSpace(eventType) {
 	case codexEventOutputTextDelta:
 		if !codexPayloadMayContainUsageLimitWarning(payload) {
 			return false
 		}
 		return codexTextLooksLikeUsageLimitWarning(gjson.GetBytes(payload, "delta").String())
-	case codexEventOutputItemDone:
+	case codexEventOutputTextDone:
+		if !codexPayloadMayContainUsageLimitWarning(payload) {
+			return false
+		}
+		return codexTextLooksLikeUsageLimitWarning(gjson.GetBytes(payload, "text").String())
+	case codexEventOutputItemAdded, codexEventOutputItemDone:
 		if !codexPayloadMayContainUsageLimitWarning(payload) {
 			return false
 		}
 		return codexOutputItemIsUsageLimitWarning(gjson.GetBytes(payload, "item"))
-	default:
-		switch strings.TrimSpace(eventType) {
-		case codexEventOutputTextDelta:
-			if !codexPayloadMayContainUsageLimitWarning(payload) {
-				return false
-			}
-			return codexTextLooksLikeUsageLimitWarning(gjson.GetBytes(payload, "delta").String())
-		case codexEventOutputItemDone:
-			if !codexPayloadMayContainUsageLimitWarning(payload) {
-				return false
-			}
-			return codexOutputItemIsUsageLimitWarning(gjson.GetBytes(payload, "item"))
-		default:
+	case codexEventContentPartAdded, codexEventContentPartDone:
+		if !codexPayloadMayContainUsageLimitWarning(payload) {
 			return false
 		}
+		return codexContentPartIsUsageLimitWarning(gjson.GetBytes(payload, "part"))
+	default:
+		return false
 	}
 }
 
@@ -265,6 +272,19 @@ func codexOutputItemIsUsageLimitWarning(item gjson.Result) bool {
 		return codexTextLooksLikeUsageLimitWarning(content.String())
 	}
 	return false
+}
+
+func codexContentPartIsUsageLimitWarning(part gjson.Result) bool {
+	if !part.Exists() {
+		return false
+	}
+	if part.Type == gjson.String {
+		return codexTextLooksLikeUsageLimitWarning(part.String())
+	}
+	if !part.IsObject() {
+		return false
+	}
+	return codexTextLooksLikeUsageLimitWarning(part.Get("text").String())
 }
 
 func codexCompletedContainsUsageLimitWarning(payload []byte) bool {
