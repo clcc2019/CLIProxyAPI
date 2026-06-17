@@ -153,6 +153,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
+		codexPublishRateLimitsFromErrorBody(ctx, auth, result.body)
 		err = newCodexStatusErr(result.statusCode, result.body)
 		return resp, err
 	}
@@ -175,6 +176,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	if len(result.errorBody) > 0 {
 		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.errorStatus, result.errorBody)
+		codexPublishRateLimitsFromErrorBody(ctx, auth, result.errorBody)
 		err = newCodexStatusErr(result.errorStatus, result.errorBody)
 		return resp, err
 	}
@@ -283,6 +285,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
+		codexPublishRateLimitsFromErrorBody(ctx, auth, result.body)
 		err = newCodexStatusErr(result.statusCode, result.body)
 		return resp, err
 	}
@@ -422,6 +425,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		clearCodexReasoningReplayOnInvalidSignature(replayScope, httpResp.StatusCode, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		codexPublishRateLimitsFromErrorBody(ctx, auth, data)
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
 	}
@@ -479,6 +483,7 @@ codexStreamResponseOK:
 					}
 					helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 					clearCodexReasoningReplayOnInvalidSignature(replayScope, httpResp.StatusCode, data)
+					codexPublishRateLimitsFromErrorBody(ctx, auth, data)
 					statusErr := newCodexStatusErr(httpResp.StatusCode, data)
 					codexRecordAPIResponseError(ctx, e.cfg, statusErr)
 					reporter.PublishFailureWithError(upstreamCtx, statusErr)
@@ -530,6 +535,10 @@ codexStreamResponseOK:
 					return nil
 				}
 				eventType := codexEventType(eventData)
+				if eventType == "codex.rate_limits" {
+					codexPublishRateLimitsFromEvent(upstreamCtx, auth, eventData)
+					return nil
+				}
 				events := usageWarningFilter.Filter(eventType, eventData)
 				if len(events) == 0 {
 					return nil
@@ -541,6 +550,7 @@ codexStreamResponseOK:
 					stopAfterForward := false
 					if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
 						log.Warnf("codex stream terminated with %s: %s", eventType, terminalErr.Error())
+						codexPublishRateLimitsFromErrorBody(upstreamCtx, auth, eventData)
 						if eventType == "response.failed" {
 							clearCodexReasoningReplayOnInvalidSignature(replayScope, terminalErr.StatusCode(), normalizeCodexResponseFailedErrorBody(eventData))
 						}
@@ -559,6 +569,7 @@ codexStreamResponseOK:
 						// of waiting for the upstream connection to close.
 						reason := codexResponseIncompleteReason(eventData)
 						log.Warnf("codex stream terminated with response.incomplete: reason=%s", reason)
+						codexPublishRateLimitsFromErrorBody(upstreamCtx, auth, eventData)
 						terminalFailure = true
 						terminalFailureErr = codexResponseIncompleteEventErr(eventData)
 						pendingTerminalErr = terminalFailureErr

@@ -177,16 +177,41 @@ func TestCodexExecutorReasoningReplaySessionKeyCanonicalizesSessionHeaderAliases
 	legacy := http.Header{"Session_id": []string{"session-alias"}}
 	lowercase := http.Header{"session_id": []string{"session-alias"}}
 	canonical := http.Header{"Session-Id": []string{"session-alias"}}
+	dash := http.Header{"session-id": []string{"session-alias"}}
+	xSession := http.Header{"X-Session-ID": []string{"session-alias"}}
 
 	gotLegacy := codexReasoningReplaySessionKeyFromHeaders(legacy)
 	gotLowercase := codexReasoningReplaySessionKeyFromHeaders(lowercase)
 	gotCanonical := codexReasoningReplaySessionKeyFromHeaders(canonical)
+	gotDash := codexReasoningReplaySessionKeyFromHeaders(dash)
+	gotXSession := codexReasoningReplaySessionKeyFromHeaders(xSession)
 
-	if gotLegacy != gotLowercase || gotLowercase != gotCanonical {
-		t.Fatalf("session header aliases produced different keys: legacy=%q lowercase=%q canonical=%q", gotLegacy, gotLowercase, gotCanonical)
+	if gotLegacy != gotLowercase || gotLowercase != gotCanonical || gotCanonical != gotDash || gotDash != gotXSession {
+		t.Fatalf("session header aliases produced different keys: legacy=%q lowercase=%q canonical=%q dash=%q x=%q", gotLegacy, gotLowercase, gotCanonical, gotDash, gotXSession)
 	}
 	if gotCanonical != "session-id:session-alias" {
 		t.Fatalf("canonical session key = %q, want session-id:session-alias", gotCanonical)
+	}
+}
+
+func TestCodexExecutorReasoningReplaySessionKeyCanonicalizesConversationHeaderAliases(t *testing.T) {
+	legacy := http.Header{"Conversation_id": []string{"conversation-alias"}}
+	lowercase := http.Header{"conversation_id": []string{"conversation-alias"}}
+	canonical := http.Header{"Conversation-Id": []string{"conversation-alias"}}
+	dash := http.Header{"conversation-id": []string{"conversation-alias"}}
+	xConversation := http.Header{"X-Conversation-ID": []string{"conversation-alias"}}
+
+	gotLegacy := codexReasoningReplaySessionKeyFromHeaders(legacy)
+	gotLowercase := codexReasoningReplaySessionKeyFromHeaders(lowercase)
+	gotCanonical := codexReasoningReplaySessionKeyFromHeaders(canonical)
+	gotDash := codexReasoningReplaySessionKeyFromHeaders(dash)
+	gotXConversation := codexReasoningReplaySessionKeyFromHeaders(xConversation)
+
+	if gotLegacy != gotLowercase || gotLowercase != gotCanonical || gotCanonical != gotDash || gotDash != gotXConversation {
+		t.Fatalf("conversation header aliases produced different keys: legacy=%q lowercase=%q canonical=%q dash=%q x=%q", gotLegacy, gotLowercase, gotCanonical, gotDash, gotXConversation)
+	}
+	if gotCanonical != "conversation_id:conversation-alias" {
+		t.Fatalf("canonical conversation key = %q, want conversation_id:conversation-alias", gotCanonical)
 	}
 }
 

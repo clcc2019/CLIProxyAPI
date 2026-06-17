@@ -7,15 +7,21 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+var responseExecutionThreadHeaderKeys = []string{"Thread_id", "thread_id", "Thread-Id", "thread-id", "X-Thread-ID"}
+var responseExecutionConversationHeaderKeys = []string{"Conversation_id", "conversation_id", "Conversation-Id", "conversation-id", "X-Conversation-ID"}
+var responseExecutionSessionHeaderKeys = []string{"Session_id", "session_id", "Session-Id", "session-id", "X-Session-ID"}
+
 func responsesExplicitExecutionSessionID(req *http.Request, rawJSON []byte) string {
 	if req != nil {
-		for _, key := range []string{"Thread_id", "thread-id", "X-Thread-ID"} {
+		for _, key := range responseExecutionThreadHeaderKeys {
 			if threadID := strings.TrimSpace(req.Header.Get(key)); threadID != "" {
 				return threadID
 			}
 		}
-		if conversationID := strings.TrimSpace(req.Header.Get("Conversation_id")); conversationID != "" {
-			return conversationID
+		for _, key := range responseExecutionConversationHeaderKeys {
+			if conversationID := strings.TrimSpace(req.Header.Get(key)); conversationID != "" {
+				return conversationID
+			}
 		}
 		if raw := strings.TrimSpace(req.Header.Get("X-Codex-Turn-Metadata")); raw != "" {
 			if threadID := strings.TrimSpace(gjson.Get(raw, "thread_id").String()); threadID != "" {
@@ -25,7 +31,7 @@ func responsesExplicitExecutionSessionID(req *http.Request, rawJSON []byte) stri
 				return sessionID
 			}
 		}
-		for _, key := range []string{"Session_id", "session-id", "X-Session-ID"} {
+		for _, key := range responseExecutionSessionHeaderKeys {
 			if sessionID := strings.TrimSpace(req.Header.Get(key)); sessionID != "" {
 				return sessionID
 			}

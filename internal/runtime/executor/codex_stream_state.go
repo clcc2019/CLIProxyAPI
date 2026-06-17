@@ -26,6 +26,9 @@ var (
 	codexJSONKeyOutputIndex = []byte("output_index")
 	codexJSONKeyPreviousID  = []byte("previous_response_id")
 
+	codexJSONKeyMetadataSession   = []byte(codexClientMetadataSessionID)
+	codexJSONKeyMetadataThread    = []byte(codexClientMetadataThreadID)
+	codexJSONKeyMetadataTurnID    = []byte(codexClientMetadataTurnID)
 	codexJSONKeyMetadataTurn      = []byte(codexClientMetadataTurnMetadata)
 	codexJSONKeyMetadataTrace     = []byte(codexWSClientMetadataTraceparent)
 	codexJSONKeyMetadataTraceStat = []byte(codexWSClientMetadataTracestate)

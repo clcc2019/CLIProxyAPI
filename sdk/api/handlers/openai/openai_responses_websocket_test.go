@@ -4214,7 +4214,6 @@ func TestResponsesWebsocketRetriesPinnedIncrementalUsageLimitWithFallbackAuth(t 
 	selector := &orderedWebsocketSelector{order: []string{"auth-ws", "auth-fallback"}}
 	executor := &websocketPinnedAuthUsageLimitExecutor{}
 	manager := coreauth.NewManager(nil, selector, nil)
-	manager.SetRetryConfig(0, 0, 1)
 	manager.RegisterExecutor(executor)
 
 	authWS := &coreauth.Auth{
@@ -4950,6 +4949,20 @@ func TestResponsesExplicitExecutionSessionIDUsesOfficialHeaders(t *testing.T) {
 			name: "payload prompt cache fallback",
 			body: []byte(`{"prompt_cache_key":"body-cache"}`),
 			want: "body-cache",
+		},
+		{
+			name: "conversation dash header",
+			headers: map[string]string{
+				"conversation-id": "conv-dash",
+			},
+			want: "conv-dash",
+		},
+		{
+			name: "conversation x header",
+			headers: map[string]string{
+				"X-Conversation-ID": "conv-x",
+			},
+			want: "conv-x",
 		},
 	}
 

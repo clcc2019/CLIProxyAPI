@@ -253,6 +253,8 @@ func TestCodexExecutorCacheHelper_ConversationHeadersBecomePromptCacheKey(t *tes
 		value  string
 	}{
 		{name: "conversation", header: "Conversation_id", value: "conv-header"},
+		{name: "conversation-dash", header: "Conversation-Id", value: "conv-dash-header"},
+		{name: "conversation-x", header: "X-Conversation-ID", value: "conv-x-header"},
 		{name: "thread", header: codexHeaderThreadID, value: "thread-header"},
 		{name: "official-thread", header: codexHeaderOfficialThreadID, value: "official-thread-header"},
 		{name: "session", header: "Session_id", value: "session-header"},

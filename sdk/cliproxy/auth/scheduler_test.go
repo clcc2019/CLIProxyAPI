@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +57,45 @@ func (e *schedulerCaptureExecutor) Execute(ctx context.Context, auth *Auth, req 
 		}
 	}
 	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+type schedulerBlockingStreamExecutor struct {
+	schedulerTestExecutor
+	id        string
+	closeGate chan struct{}
+	mu        sync.Mutex
+	calls     []string
+}
+
+func (e *schedulerBlockingStreamExecutor) Identifier() string { return e.id }
+
+func (e *schedulerBlockingStreamExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.mu.Lock()
+	if auth != nil {
+		e.calls = append(e.calls, auth.ID)
+	}
+	e.mu.Unlock()
+
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	if auth != nil {
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte(auth.ID)}
+	}
+	gate := e.closeGate
+	if gate == nil {
+		close(ch)
+		return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+	}
+	go func() {
+		<-gate
+		close(ch)
+	}()
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *schedulerBlockingStreamExecutor) Calls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.calls...)
 }
 
 type trackingSelector struct {
@@ -116,6 +156,62 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 		if got.ID != wantID {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
 		}
+	}
+}
+
+func TestSchedulerPick_RoundRobinPrefersLeastInFlightWithinPriority(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "busy", Provider: "codex"},
+		&Auth{ID: "idle", Provider: "codex"},
+	)
+	scheduler.authLoad = func(authID string) int64 {
+		if authID == "busy" {
+			return 3
+		}
+		return 0
+	}
+
+	for index := 0; index < 3; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != "idle" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "idle")
+		}
+	}
+}
+
+func TestSchedulerPick_RoundRobinKeepsHigherPriorityAheadOfIdleLowerPriority(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "busy-high", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "idle-low", Provider: "codex"},
+	)
+	scheduler.authLoad = func(authID string) int64 {
+		if authID == "busy-high" {
+			return 7
+		}
+		return 0
+	}
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+	if got.ID != "busy-high" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "busy-high")
 	}
 }
 
@@ -201,6 +297,99 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
+func TestSchedulerPick_CodexPrefersUpstreamWebsocketForSSE(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex"},
+		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+	)
+
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
+func TestSchedulerPick_MixedProvidersPrefersWebsocketAuthWithinCodexProvider(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"priority": "10", "websockets": "true"}},
+		&Auth{ID: "claude-low", Provider: "claude", Attributes: map[string]string{"priority": "0"}},
+	)
+
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	want := []string{"codex-ws", "codex-ws"}
+	for index, wantID := range want {
+		got, provider, errPick := scheduler.pickMixed(ctx, []string{"codex", "claude"}, "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickMixed() #%d auth = nil", index)
+		}
+		if provider != "codex" {
+			t.Fatalf("pickMixed() #%d provider = %q, want %q", index, provider, "codex")
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
+func TestSchedulerPick_MixedStablePrefersWebsocketAuthWithinCodexProvider(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"priority": "10", "websockets": "true"}},
+		&Auth{ID: "claude-low", Provider: "claude", Attributes: map[string]string{"priority": "0"}},
+	)
+
+	affinityKey := ""
+	for i := 0; i < 10000; i++ {
+		candidateKey := "affinity-" + strconv.Itoa(i)
+		if stableAffinityScore(candidateKey, "codex-http") > stableAffinityScore(candidateKey, "codex-ws") {
+			affinityKey = candidateKey
+			break
+		}
+	}
+	if affinityKey == "" {
+		t.Fatal("failed to find affinity key that prefers codex-http over codex-ws without websocket preference")
+	}
+
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	got, provider, errPick := scheduler.pickMixedStable(ctx, []string{"codex", "claude"}, "", cliproxyexecutor.Options{}, nil, affinityKey)
+	if errPick != nil {
+		t.Fatalf("pickMixedStable() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickMixedStable() auth = nil")
+	}
+	if provider != "codex" {
+		t.Fatalf("pickMixedStable() provider = %q, want %q", provider, "codex")
+	}
+	if got.ID != "codex-ws" {
+		t.Fatalf("pickMixedStable() auth.ID = %q, want %q", got.ID, "codex-ws")
+	}
+}
+
 func TestSchedulerPick_PinnedAuthDiagnosticWhenNoPinnedCandidateAvailable(t *testing.T) {
 	t.Parallel()
 
@@ -279,6 +468,37 @@ func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandid
 	}
 }
 
+func TestSchedulerPick_MixedProvidersPrefersLowerInFlightProvider(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "busy-a", Provider: "provider-a"},
+		&Auth{ID: "busy-b", Provider: "provider-a"},
+		&Auth{ID: "idle-a", Provider: "provider-b"},
+	)
+	scheduler.authLoad = func(authID string) int64 {
+		if strings.HasPrefix(authID, "busy-") {
+			return 4
+		}
+		return 0
+	}
+
+	got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"provider-a", "provider-b"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickMixed() auth = nil")
+	}
+	if provider != "provider-b" {
+		t.Fatalf("pickMixed() provider = %q, want %q", provider, "provider-b")
+	}
+	if got.ID != "idle-a" {
+		t.Fatalf("pickMixed() auth.ID = %q, want %q", got.ID, "idle-a")
+	}
+}
+
 func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	t.Parallel()
 
@@ -346,6 +566,62 @@ func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotat
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
 		}
+	}
+}
+
+func TestManagerExecuteStreamKeepsAuthInFlightUntilStreamDrained(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &schedulerBlockingStreamExecutor{id: "codex", closeGate: make(chan struct{})}
+	closeGate := func() {
+		select {
+		case <-executor.closeGate:
+		default:
+			close(executor.closeGate)
+		}
+	}
+	t.Cleanup(closeGate)
+	manager.RegisterExecutor(executor)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+
+	streamResult, errStream := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	if streamResult == nil || streamResult.Chunks == nil {
+		t.Fatalf("ExecuteStream() stream = %#v, want chunks", streamResult)
+	}
+	if calls := executor.Calls(); len(calls) != 1 || calls[0] != "auth-a" {
+		t.Fatalf("stream calls = %#v, want [auth-a]", calls)
+	}
+	if got := manager.authInFlightCount("auth-a"); got != 1 {
+		t.Fatalf("auth-a in-flight = %d, want 1", got)
+	}
+
+	first, _, errPick := manager.pickNext(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("first pickNext() error = %v", errPick)
+	}
+	if first == nil || first.ID != "auth-b" {
+		t.Fatalf("first pickNext() auth = %v, want auth-b", first)
+	}
+	second, _, errPick := manager.pickNext(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("second pickNext() error = %v", errPick)
+	}
+	if second == nil || second.ID != "auth-b" {
+		t.Fatalf("second pickNext() auth = %v, want auth-b while auth-a is in-flight", second)
+	}
+
+	closeGate()
+	for range streamResult.Chunks {
+	}
+	if got := manager.authInFlightCount("auth-a"); got != 0 {
+		t.Fatalf("auth-a in-flight after drain = %d, want 0", got)
 	}
 }
 

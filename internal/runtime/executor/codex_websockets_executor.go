@@ -582,6 +582,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
+			codexPublishRateLimitsFromHeaders(ctx, auth, respHS.Header)
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header, bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
@@ -600,6 +601,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			}
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
+			codexPublishRateLimitsFromErrorBody(ctx, auth, bodyErr)
 			return resp, statusErrWithHeaders{
 				statusErr: newCodexStatusErr(respHS.StatusCode, bodyErr),
 				headers:   respHS.Header.Clone(),
@@ -609,6 +611,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+	if respHS != nil {
+		codexPublishRateLimitsFromHeaders(ctx, auth, respHS.Header)
+	}
 	if sess != nil && respHS != nil {
 		sess.rememberTurnStateHeader(respHS.Header)
 	}
@@ -695,8 +700,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			continue
 		}
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
+		if codexPublishRateLimitsFromEvent(ctx, auth, payload) {
+			continue
+		}
 
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
+			codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
 			if sess != nil && codexWebsocketConnectionLimitReached(payload) {
 				connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "connection_limit", wsErr)
 				if errRetry != nil {
@@ -757,6 +766,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			eventType := event.eventType
 			if eventType == "response.incomplete" {
 				terminalErr := codexResponseIncompleteEventErr(payload)
+				codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
 				if sess != nil {
 					sess.clearIncrementalState()
 					e.invalidateUpstreamConn(sess, conn, "upstream_incomplete", terminalErr)
@@ -765,6 +775,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				return resp, terminalErr
 			}
 			if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
+				codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
 				if sess != nil {
 					sess.clearIncrementalState()
 					e.invalidateUpstreamConn(sess, conn, "upstream_terminal", terminalErr)
@@ -867,6 +878,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var upstreamHeaders http.Header
 	if respHS != nil {
 		upstreamHeaders = respHS.Header.Clone()
+		codexPublishRateLimitsFromHeaders(ctx, auth, respHS.Header)
 	}
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
@@ -891,6 +903,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			prepared.unlockSession()
+			codexPublishRateLimitsFromErrorBody(ctx, auth, bodyErr)
 			return nil, statusErrWithHeaders{
 				statusErr: newCodexStatusErr(respHS.StatusCode, bodyErr),
 				headers:   respHS.Header.Clone(),
@@ -1037,8 +1050,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				continue
 			}
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
+			if codexPublishRateLimitsFromEvent(ctx, auth, payload) {
+				continue
+			}
 
 			if wsErr, ok := parseCodexWebsocketError(payload); ok {
+				codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
 				if sess != nil && !emittedPayload && codexWebsocketConnectionLimitReached(payload) {
 					connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "connection_limit", wsErr)
 					if errRetry == nil {
@@ -1111,6 +1128,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				eventType := event.eventType
 				if eventType == "response.incomplete" {
 					terminalErr := codexResponseIncompleteEventErr(payload)
+					codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
 					if sess != nil {
 						sess.clearIncrementalState()
 						e.invalidateUpstreamConn(sess, conn, "upstream_incomplete", terminalErr)
@@ -1122,6 +1140,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
 					return
 				} else if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
+					codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
 					if sess != nil {
 						sess.clearIncrementalState()
 						e.invalidateUpstreamConn(sess, conn, "upstream_terminal", terminalErr)
@@ -1364,11 +1383,15 @@ func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequestWithReason(
 	// Retry once with a fresh websocket connection. This mainly handles upstream
 	// closing the socket between sequential requests within the same execution session.
 	connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	if respHSRetry != nil {
+		codexPublishRateLimitsFromHeaders(ctx, auth, respHSRetry.Header)
+	}
 	if errDialRetry != nil || connRetry == nil {
 		retryErr := errDialRetry
 		if respHSRetry != nil && respHSRetry.StatusCode > 0 {
 			bodyErr := websocketHandshakeBody(respHSRetry)
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHSRetry.StatusCode, respHSRetry.Header, bodyErr)
+			codexPublishRateLimitsFromErrorBody(ctx, auth, bodyErr)
 			retryErr = statusErrWithHeaders{
 				statusErr: newCodexStatusErr(respHSRetry.StatusCode, bodyErr),
 				headers:   respHSRetry.Header.Clone(),
@@ -2145,7 +2168,10 @@ func codexComparableClientMetadataRaw(raw []byte) ([]byte, bool, bool) {
 }
 
 func codexComparableSkipClientMetadataKey(key []byte) bool {
-	return bytes.Equal(key, codexJSONKeyMetadataTurn) ||
+	return bytes.Equal(key, codexJSONKeyMetadataSession) ||
+		bytes.Equal(key, codexJSONKeyMetadataThread) ||
+		bytes.Equal(key, codexJSONKeyMetadataTurnID) ||
+		bytes.Equal(key, codexJSONKeyMetadataTurn) ||
 		bytes.Equal(key, codexJSONKeyMetadataTrace) ||
 		bytes.Equal(key, codexJSONKeyMetadataTraceStat) ||
 		bytes.Equal(key, codexJSONKeyMetadataStartMS)

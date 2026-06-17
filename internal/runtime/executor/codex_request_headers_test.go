@@ -249,3 +249,117 @@ func TestApplyCodexHeadersPinsFirstClientProfileToAuth(t *testing.T) {
 		t.Fatalf("second request Tracestate = %q, want state-first", got)
 	}
 }
+
+func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-ua-update",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "oauth-token",
+		},
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+
+	firstCtx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "codex_vscode/9.1.0 (darwin; arm64)",
+		"Originator": "codex_vscode",
+		"Version":    "9.1.0",
+	})
+	firstReq, err := http.NewRequestWithContext(firstCtx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("first NewRequestWithContext() error = %v", err)
+	}
+	applyCodexHeaders(firstReq, auth, "oauth-token", true, nil)
+
+	var published *cliproxyauth.Auth
+	upgradeCtx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "codex_vscode/9.2.0 (darwin; arm64)",
+		"Originator": "codex_vscode",
+		"Version":    "9.2.0",
+	})
+	upgradeCtx = cliproxyauth.WithAuthUpdateCallback(upgradeCtx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	upgradeReq, err := http.NewRequestWithContext(upgradeCtx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("upgrade NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(upgradeReq, auth, "oauth-token", true, nil)
+
+	if published == nil {
+		t.Fatal("expected pinned client version upgrade to publish auth update")
+	}
+	if got := upgradeReq.Header.Get("User-Agent"); got != "codex_vscode/9.2.0 (darwin; arm64)" {
+		t.Fatalf("upgrade User-Agent = %q, want upgraded client UA", got)
+	}
+	if got := upgradeReq.Header.Get("Version"); got != "9.2.0" {
+		t.Fatalf("upgrade Version = %q, want upgraded client version", got)
+	}
+	if got := auth.Metadata["user_agent"]; got != "codex_vscode/9.2.0 (darwin; arm64)" {
+		t.Fatalf("auth user_agent = %v, want upgraded UA", got)
+	}
+	headers, ok := auth.Metadata["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth metadata headers = %T, want map[string]any", auth.Metadata["headers"])
+	}
+	if got := headers["User-Agent"]; got != "codex_vscode/9.2.0 (darwin; arm64)" {
+		t.Fatalf("metadata headers User-Agent = %v, want upgraded UA", got)
+	}
+	if got := headers["Version"]; got != "9.2.0" {
+		t.Fatalf("metadata headers Version = %v, want upgraded version", got)
+	}
+
+	published = nil
+	downgradeCtx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "codex_vscode/9.1.5 (darwin; arm64)",
+		"Originator": "codex_vscode",
+		"Version":    "9.1.5",
+	})
+	downgradeCtx = cliproxyauth.WithAuthUpdateCallback(downgradeCtx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	downgradeReq, err := http.NewRequestWithContext(downgradeCtx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("downgrade NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(downgradeReq, auth, "oauth-token", true, nil)
+
+	if published != nil {
+		t.Fatalf("downgrade should not publish auth update: %#v", published.Metadata)
+	}
+	if got := downgradeReq.Header.Get("User-Agent"); got != "codex_vscode/9.2.0 (darwin; arm64)" {
+		t.Fatalf("downgrade request User-Agent = %q, want pinned upgraded UA", got)
+	}
+	if got := downgradeReq.Header.Get("Version"); got != "9.2.0" {
+		t.Fatalf("downgrade request Version = %q, want pinned upgraded version", got)
+	}
+
+	published = nil
+	differentCtx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "codex_desktop/2.0.0 (darwin; arm64)",
+		"Originator": "codex_desktop",
+		"Version":    "10.0.0",
+	})
+	differentCtx = cliproxyauth.WithAuthUpdateCallback(differentCtx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	differentReq, err := http.NewRequestWithContext(differentCtx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("different NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(differentReq, auth, "oauth-token", true, nil)
+
+	if published != nil {
+		t.Fatalf("different product should not publish auth update: %#v", published.Metadata)
+	}
+	if got := differentReq.Header.Get("User-Agent"); got != "codex_vscode/9.2.0 (darwin; arm64)" {
+		t.Fatalf("different product User-Agent = %q, want pinned upgraded UA", got)
+	}
+	if got := differentReq.Header.Get("Version"); got != "9.2.0" {
+		t.Fatalf("different product Version = %q, want pinned upgraded version", got)
+	}
+}

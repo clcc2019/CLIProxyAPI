@@ -175,17 +175,18 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store             Store
-	runtimeStateStore RuntimeStateStore
-	proxyLeaseStore   ProxyLeaseStore
-	executors         map[string]ProviderExecutor
-	selector          Selector
-	hook              Hook
-	mu                sync.RWMutex
-	auths             map[string]*Auth
-	removedAuths      map[string]authRemovalTombstone
-	runtimeStates     map[string]AuthRuntimeState
-	scheduler         *authScheduler
+	store              Store
+	runtimeStateStore  RuntimeStateStore
+	proxyLeaseStore    ProxyLeaseStore
+	executors          map[string]ProviderExecutor
+	selector           Selector
+	hook               Hook
+	mu                 sync.RWMutex
+	auths              map[string]*Auth
+	removedAuths       map[string]authRemovalTombstone
+	runtimeStates      map[string]AuthRuntimeState
+	scheduler          *authScheduler
+	authInFlightCounts sync.Map
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
 	homeRuntimeAuths map[string]map[string]*Auth
@@ -280,7 +281,89 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.persistEnabled.Store(store != nil)
 	manager.scheduler = newAuthScheduler(selector)
+	manager.scheduler.authLoad = manager.authInFlightCount
 	return manager
+}
+
+type authInFlightLease struct {
+	counter *atomic.Int64
+	state   atomic.Int32
+}
+
+func (m *Manager) beginAuthInFlight(authID string) *authInFlightLease {
+	if m == nil {
+		return nil
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	value, _ := m.authInFlightCounts.LoadOrStore(authID, &atomic.Int64{})
+	counter, ok := value.(*atomic.Int64)
+	if !ok || counter == nil {
+		return nil
+	}
+	counter.Add(1)
+	return &authInFlightLease{counter: counter}
+}
+
+func (m *Manager) authInFlightCount(authID string) int64 {
+	if m == nil {
+		return 0
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return 0
+	}
+	value, ok := m.authInFlightCounts.Load(authID)
+	if !ok {
+		return 0
+	}
+	counter, ok := value.(*atomic.Int64)
+	if !ok || counter == nil {
+		return 0
+	}
+	if count := counter.Load(); count > 0 {
+		return count
+	}
+	return 0
+}
+
+func (l *authInFlightLease) Close() {
+	if l == nil || l.counter == nil {
+		return
+	}
+	if !l.state.CompareAndSwap(0, 2) {
+		return
+	}
+	l.counter.Add(-1)
+}
+
+func (l *authInFlightLease) HandOff() {
+	if l == nil {
+		return
+	}
+	l.state.CompareAndSwap(0, 1)
+}
+
+func (l *authInFlightLease) Finish() {
+	if l == nil || l.counter == nil {
+		return
+	}
+	for {
+		state := l.state.Load()
+		switch state {
+		case 2:
+			return
+		case 0, 1:
+			if l.state.CompareAndSwap(state, 2) {
+				l.counter.Add(-1)
+				return
+			}
+		default:
+			return
+		}
+	}
 }
 
 func isBuiltInSelector(selector Selector) bool {
@@ -1477,10 +1560,15 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
-	out := make(chan cliproxyexecutor.StreamChunk)
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, release func()) *cliproxyexecutor.StreamResult {
+	out := make(chan cliproxyexecutor.StreamChunk, cliproxyexecutor.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
 		var failed bool
 		forward := true
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
@@ -1527,6 +1615,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
 	ctx = WithRefreshUpdateCallback(ctx, m.handleExecutionRefreshUpdate)
 	ctx = WithAuthUpdateCallback(ctx, m.handleExecutionAuthUpdate)
+	ctx = WithRateLimitUpdateCallback(ctx, m.handleExecutionRateLimitUpdate)
 	ctx = WithRefreshCoordinator(ctx, m.coordinatedRefreshForRequest)
 	var lastErr error
 	poolModeRetries := m.apiKeyPoolModeRetries(auth)
@@ -1535,8 +1624,18 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq := req
 		execReq.Model = execModel
 		for retryAttempt := 0; ; retryAttempt++ {
-			streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+			lease := m.beginAuthInFlight(auth.ID)
+			streamResult, errStream := func() (*cliproxyexecutor.StreamResult, error) {
+				defer func() {
+					if r := recover(); r != nil {
+						lease.Close()
+						panic(r)
+					}
+				}()
+				return executor.ExecuteStream(ctx, auth, execReq, opts)
+			}()
 			if errStream != nil {
+				lease.Close()
 				if errCtx := ctx.Err(); errCtx != nil {
 					return nil, errCtx
 				}
@@ -1558,6 +1657,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				break
 			}
 			if streamResult == nil {
+				lease.Close()
 				invalidErr := invalidStreamResultError("upstream executor returned nil stream result")
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: invalidErr}
 				m.MarkResult(ctx, result)
@@ -1571,6 +1671,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, newStreamBootstrapError(invalidErr, nil)
 			}
 			if streamResult.Chunks == nil {
+				lease.Close()
 				invalidErr := invalidStreamResultError("upstream executor returned stream result without chunks")
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: invalidErr}
 				m.MarkResult(ctx, result)
@@ -1586,6 +1687,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 
 			buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 			if bootstrapErr != nil {
+				lease.Close()
 				if errCtx := ctx.Err(); errCtx != nil {
 					discardStreamChunks(streamResult.Chunks)
 					return nil, errCtx
@@ -1634,7 +1736,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				close(closedCh)
 				remaining = closedCh
 			}
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+			lease.HandOff()
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, lease.Finish), nil
 		}
 	}
 	if lastErr == nil {
@@ -2630,6 +2733,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	ensureOptionsMetadata(&opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
+	maxRetryCredentials = maxRetryCredentialsFromMetadata(opts.Metadata, maxRetryCredentials)
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -2662,6 +2766,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	ensureOptionsMetadata(&opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
+	maxRetryCredentials = maxRetryCredentialsFromMetadata(opts.Metadata, maxRetryCredentials)
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -2698,6 +2803,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	ensureOptionsMetadata(&opts)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
+	maxRetryCredentials = maxRetryCredentialsFromMetadata(opts.Metadata, maxRetryCredentials)
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -2768,6 +2874,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = WithRefreshUpdateCallback(execCtx, m.handleExecutionRefreshUpdate)
 		execCtx = WithAuthUpdateCallback(execCtx, m.handleExecutionAuthUpdate)
+		execCtx = WithRateLimitUpdateCallback(execCtx, m.handleExecutionRateLimitUpdate)
 		execCtx = WithRefreshCoordinator(execCtx, m.coordinatedRefreshForRequest)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
@@ -2795,7 +2902,17 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq := req
 			execReq.Model = upstreamModel
 			for retryAttempt := 0; ; retryAttempt++ {
-				resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+				lease := m.beginAuthInFlight(auth.ID)
+				resp, errExec := func() (cliproxyexecutor.Response, error) {
+					defer func() {
+						if r := recover(); r != nil {
+							lease.Close()
+							panic(r)
+						}
+					}()
+					return executor.Execute(execCtx, auth, execReq, opts)
+				}()
+				lease.Close()
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 				if errExec != nil {
 					if errCtx := execCtx.Err(); errCtx != nil {
@@ -2908,7 +3025,17 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq := req
 			execReq.Model = upstreamModel
 			for retryAttempt := 0; ; retryAttempt++ {
-				resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+				lease := m.beginAuthInFlight(auth.ID)
+				resp, errExec := func() (cliproxyexecutor.Response, error) {
+					defer func() {
+						if r := recover(); r != nil {
+							lease.Close()
+							panic(r)
+						}
+					}()
+					return executor.CountTokens(execCtx, auth, execReq, opts)
+				}()
+				lease.Close()
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 				if errExec != nil {
 					if errCtx := execCtx.Err(); errCtx != nil {
@@ -4493,6 +4620,45 @@ func retryAfterFromError(err error) *time.Duration {
 	}
 	value := *retryAfter
 	return &value
+}
+
+func maxRetryCredentialsFromMetadata(meta map[string]any, fallback int) int {
+	if len(meta) == 0 {
+		return fallback
+	}
+	raw, ok := meta[cliproxyexecutor.MaxRetryCredentialsMetadataKey]
+	if !ok || raw == nil {
+		return fallback
+	}
+	switch value := raw.(type) {
+	case int:
+		if value >= 0 {
+			return value
+		}
+	case int32:
+		if value >= 0 {
+			return int(value)
+		}
+	case int64:
+		if value >= 0 {
+			return int(value)
+		}
+	case float64:
+		if value >= 0 {
+			return int(value)
+		}
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil && parsed >= 0 {
+			return parsed
+		}
+	case []byte:
+		parsed, err := strconv.Atoi(strings.TrimSpace(string(value)))
+		if err == nil && parsed >= 0 {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -6188,6 +6354,121 @@ func (m *Manager) handleExecutionAuthUpdate(ctx context.Context, updated *Auth) 
 	}
 }
 
+func (m *Manager) handleExecutionRateLimitUpdate(ctx context.Context, authID string, snapshots []RateLimitSnapshot) {
+	if m == nil {
+		return
+	}
+	m.UpdateRateLimits(ctx, authID, snapshots)
+}
+
+func (m *Manager) UpdateRateLimits(ctx context.Context, authID string, snapshots []RateLimitSnapshot) {
+	if m == nil || strings.TrimSpace(authID) == "" || len(snapshots) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	persistAuthID := ""
+	var schedulerSnapshot *Auth
+
+	m.mu.Lock()
+	if auth, ok := m.auths[authID]; ok && auth != nil {
+		changed := mergeRateLimitSnapshots(auth, snapshots, now)
+		if changed {
+			auth.UpdatedAt = now
+			persistAuthID = auth.ID
+			schedulerSnapshot = auth.CloneForScheduler()
+		}
+	}
+	m.mu.Unlock()
+
+	if persistAuthID != "" {
+		m.enqueuePersistAuthID(ctx, persistAuthID)
+	}
+	if m.scheduler != nil && schedulerSnapshot != nil {
+		m.scheduler.upsertAuth(schedulerSnapshot)
+	}
+}
+
+func mergeRateLimitSnapshots(auth *Auth, snapshots []RateLimitSnapshot, now time.Time) bool {
+	if auth == nil || len(snapshots) == 0 {
+		return false
+	}
+	changed := false
+	for _, snapshot := range snapshots {
+		if !rateLimitSnapshotHasData(snapshot) {
+			continue
+		}
+		key := normalizeRateLimitID(snapshot.LimitID)
+		if key == "" {
+			key = "codex"
+		}
+		snapshot.LimitID = key
+		if snapshot.UpdatedAt.IsZero() {
+			snapshot.UpdatedAt = now
+		}
+		snapshot = cloneRateLimitSnapshot(snapshot)
+		if auth.RateLimits == nil {
+			auth.RateLimits = make(map[string]RateLimitSnapshot, len(snapshots))
+		}
+		current, exists := auth.RateLimits[key]
+		if exists && rateLimitSnapshotsEqual(current, snapshot) {
+			continue
+		}
+		auth.RateLimits[key] = snapshot
+		changed = true
+	}
+	return changed
+}
+
+func normalizeRateLimitID(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	return value
+}
+
+func rateLimitSnapshotHasData(snapshot RateLimitSnapshot) bool {
+	return snapshot.Primary != nil ||
+		snapshot.Secondary != nil ||
+		snapshot.Credits != nil ||
+		strings.TrimSpace(snapshot.LimitName) != "" ||
+		strings.TrimSpace(snapshot.PlanType) != "" ||
+		strings.TrimSpace(snapshot.RateLimitReachedType) != ""
+}
+
+func rateLimitSnapshotsEqual(a, b RateLimitSnapshot) bool {
+	a.UpdatedAt = time.Time{}
+	b.UpdatedAt = time.Time{}
+	return a.LimitID == b.LimitID &&
+		a.LimitName == b.LimitName &&
+		a.PlanType == b.PlanType &&
+		a.RateLimitReachedType == b.RateLimitReachedType &&
+		rateLimitWindowsEqual(a.Primary, b.Primary) &&
+		rateLimitWindowsEqual(a.Secondary, b.Secondary) &&
+		rateLimitCreditsEqual(a.Credits, b.Credits)
+}
+
+func rateLimitWindowsEqual(a, b *RateLimitWindow) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.UsedPercent == b.UsedPercent &&
+		int64PtrEqual(a.WindowMinutes, b.WindowMinutes) &&
+		int64PtrEqual(a.ResetsAt, b.ResetsAt)
+}
+
+func rateLimitCreditsEqual(a, b *CreditsSnapshot) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.HasCredits == b.HasCredits && a.Unlimited == b.Unlimited && a.Balance == b.Balance
+}
+
+func int64PtrEqual(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 func (m *Manager) persistRuntimeState(ctx context.Context, auth *Auth) error {
 	if m == nil || m.runtimeStateStore == nil || auth == nil || auth.ID == "" {
 		return nil
@@ -7557,6 +7838,7 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	}
 	execCtx = WithRefreshUpdateCallback(execCtx, m.handleExecutionRefreshUpdate)
 	execCtx = WithAuthUpdateCallback(execCtx, m.handleExecutionAuthUpdate)
+	execCtx = WithRateLimitUpdateCallback(execCtx, m.handleExecutionRateLimitUpdate)
 	execCtx = WithRefreshCoordinator(execCtx, m.coordinatedRefreshForRequest)
 	return exec.HttpRequest(execCtx, auth, req)
 }

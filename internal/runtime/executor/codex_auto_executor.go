@@ -13,7 +13,7 @@ import (
 )
 
 // CodexAutoExecutor routes Codex requests to the websocket transport when the
-// selected auth enables websockets and the downstream transport is websocket.
+// selected auth enables websockets and the request prefers websocket upstream.
 // Other requests use the legacy HTTP implementation.
 //
 // The dispatcher intentionally owns both transports as dependencies rather
@@ -106,15 +106,16 @@ func (e *CodexAutoExecutor) ResetExecutionSession(sessionID string) {
 	}
 }
 
-// codexUseWebsocketTransport returns true when the downstream request context
-// advertises the websocket transport AND the resolved auth has websockets
-// enabled. Both gates must hold — websocket upstream only makes sense when
-// the downstream is a websocket too, because the executor mirrors frames.
+// codexUseWebsocketTransport returns true when the request context prefers
+// websocket upstream AND the resolved auth has websockets enabled. Both gates
+// must hold; downstream websocket requests imply the upstream preference, while
+// SSE clients can opt into websocket upstream without changing downstream
+// websocket semantics.
 func codexUseWebsocketTransport(ctx context.Context, auth *cliproxyauth.Auth) bool {
 	if !codexWebsocketsEnabled(auth) {
 		return false
 	}
-	return cliproxyexecutor.DownstreamWebsocket(ctx)
+	return cliproxyexecutor.PreferUpstreamWebsocket(ctx)
 }
 
 // codexWebsocketsEnabled reads the "websockets" (or legacy "websocket") flag

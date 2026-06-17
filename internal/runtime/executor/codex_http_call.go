@@ -46,7 +46,11 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, err
 	}
 	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	resp, err := httpClient.Do(httpReq)
+	if resp != nil {
+		codexPublishRateLimitsFromHeaders(ctx, auth, resp.Header)
+	}
+	return resp, err
 }
 
 type codexPreparedHTTPCall struct {
@@ -125,9 +129,6 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	codexPinClientProfileFromFirstRequest(ctx, auth, nil, ginHeaders, e.cfg)
 	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
 	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
-	if requestKind != codexFinalUpstreamCompact {
-		body = codexApplyHTTPClientMetadataWithSource(body, nil, profileHeaders, auth, e.cfg)
-	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	prepared, err := e.prepareCodexRequestWithKind(ctx, from, executionSessionID, url, requestKind, req, body)
 	if err != nil {
@@ -136,6 +137,8 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	applyCodexHeadersForRequestKind(prepared.httpReq, auth, token, stream, e.cfg, requestKind)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)
 	if requestKind != codexFinalUpstreamCompact {
+		prepared.body = codexApplyHTTPClientMetadataWithSource(prepared.body, prepared.httpReq.Header, profileHeaders, auth, e.cfg)
+		codexResetRequestBody(prepared.httpReq, prepared.body)
 		e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
 	}
 	if requestKind == codexFinalUpstreamCompact {

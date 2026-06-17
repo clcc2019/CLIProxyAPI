@@ -161,6 +161,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 			}
 		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		codexPublishRateLimitsFromErrorBody(ctx, auth, data)
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return resp, err
 	}
@@ -281,11 +282,12 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			}
 		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", response.StatusCode, helps.SummarizeErrorBody(response.Header.Get("Content-Type"), data))
+		codexPublishRateLimitsFromErrorBody(ctx, auth, data)
 		err = newCodexStatusErr(response.StatusCode, data)
 		return nil, err
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, cliproxyexecutor.StreamChunkBufferSize)
 	releaseUpstreamCtxOnReturn = false
 	go func() {
 		defer releaseUpstreamCtx()

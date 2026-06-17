@@ -143,6 +143,7 @@ func NewAuthFromAuthFileMetadata(metadata map[string]any, opts AuthFileProjectio
 	}
 
 	ApplyAuthFileOptionsFromMetadata(auth)
+	ApplyAuthFileWebsocketDefault(auth)
 	ApplyCodexMetadataFromMetadata(auth)
 	ApplyCustomHeadersFromMetadata(auth)
 	return auth

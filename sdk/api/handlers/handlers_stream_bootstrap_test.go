@@ -222,6 +222,13 @@ type authAwareStreamExecutor struct {
 	authIDs []string
 }
 
+type transportContextCaptureStreamExecutor struct {
+	mu             sync.Mutex
+	calls          int
+	preferUpstream bool
+	downstreamWS   bool
+}
+
 type invalidJSONStreamExecutor struct{}
 
 type splitResponsesEventStreamExecutor struct{}
@@ -474,6 +481,57 @@ func (e *authAwareStreamExecutor) AuthIDs() []string {
 	return out
 }
 
+func (e *transportContextCaptureStreamExecutor) Identifier() string { return "codex" }
+
+func (e *transportContextCaptureStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *transportContextCaptureStreamExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	_ = auth
+	_ = req
+	_ = opts
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{Payload: []byte("ok")}
+	close(ch)
+
+	e.mu.Lock()
+	e.calls++
+	e.preferUpstream = coreexecutor.PreferUpstreamWebsocket(ctx)
+	e.downstreamWS = coreexecutor.DownstreamWebsocket(ctx)
+	e.mu.Unlock()
+
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *transportContextCaptureStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *transportContextCaptureStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *transportContextCaptureStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *transportContextCaptureStreamExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func (e *transportContextCaptureStreamExecutor) Capture() (bool, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.preferUpstream, e.downstreamWS
+}
+
 func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
 	executor := &failOnceStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -537,6 +595,59 @@ func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
 	upstreamAttemptHeader := upstreamHeaders.Get("X-Upstream-Attempt")
 	if upstreamAttemptHeader != "2" {
 		t.Fatalf("expected upstream header from retry attempt, got %q", upstreamAttemptHeader)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_PrefersUpstreamWebsocketForSSE(t *testing.T) {
+	executor := &transportContextCaptureStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-ws",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"websockets": "true",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+
+	if string(got) != "ok" {
+		t.Fatalf("expected payload ok, got %q", string(got))
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("expected 1 upstream call, got %d", executor.Calls())
+	}
+	preferUpstream, downstreamWS := executor.Capture()
+	if !preferUpstream {
+		t.Fatal("expected upstream websocket preference to be set")
+	}
+	if downstreamWS {
+		t.Fatal("expected downstream websocket flag to remain false")
 	}
 }
 

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"strings"
 	"testing"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -58,7 +59,13 @@ func TestForcedUpstreamSessionOverridesCallerOwnedCodexSession(t *testing.T) {
 	if gjson.GetBytes(body, "previous_response_id").Exists() {
 		t.Fatalf("previous_response_id should be removed during forced upstream session failover: %s", body)
 	}
-	if gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").Exists() {
+	bodyTurnMetadata := gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").String()
+	if bodyTurnMetadata == "" {
+		t.Fatalf("client_metadata.x-codex-turn-metadata should be regenerated during forced upstream session failover: %s", body)
+	}
+	if strings.Contains(bodyTurnMetadata, "old-body-session") || strings.Contains(bodyTurnMetadata, "old-body-thread") {
 		t.Fatalf("old body turn metadata should be removed during forced upstream session failover: %s", body)
 	}
+	assertCodexTurnMetadataString(t, bodyTurnMetadata, "session_id", "new-upstream-session")
+	assertCodexTurnMetadataString(t, bodyTurnMetadata, "thread_id", "new-upstream-session")
 }

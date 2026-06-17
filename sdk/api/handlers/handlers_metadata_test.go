@@ -33,6 +33,7 @@ func TestRequestExecutionMetadataIncludesExecutionHints(t *testing.T) {
 	base := context.Background()
 	base = WithPinnedAuthID(base, "auth-1")
 	base = WithExecutionSessionID(base, "session-1")
+	base = WithMaxRetryCredentials(base, 1)
 
 	callbackCalled := false
 	base = WithSelectedAuthIDCallback(base, func(authID string) {
@@ -48,6 +49,9 @@ func TestRequestExecutionMetadataIncludesExecutionHints(t *testing.T) {
 	}
 	if got := meta[coreexecutor.ExecutionSessionMetadataKey]; got != "session-1" {
 		t.Fatalf("execution session = %v, want session-1", got)
+	}
+	if got := meta[coreexecutor.MaxRetryCredentialsMetadataKey]; got != 1 {
+		t.Fatalf("max retry credentials = %v, want 1", got)
 	}
 	callback, ok := meta[coreexecutor.SelectedAuthCallbackMetadataKey].(func(string))
 	if !ok || callback == nil {

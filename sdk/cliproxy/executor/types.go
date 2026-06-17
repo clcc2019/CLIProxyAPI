@@ -28,6 +28,11 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 const ServiceTierMetadataKey = "service_tier"
 
 const (
+	// StreamChunkBufferSize is the default buffer depth for proxy-internal
+	// streaming hops. It absorbs short producer/consumer scheduling gaps without
+	// allowing a slow downstream client to accumulate unbounded data.
+	StreamChunkBufferSize = 32
+
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
 	// ClientPrincipalMetadataKey stores a stable, non-secret client principal identifier for affinity.
@@ -44,6 +49,8 @@ const (
 	// used after auth failover so the next credential does not inherit stale
 	// provider-scoped conversation state.
 	ForcedUpstreamSessionMetadataKey = "forced_upstream_session_id"
+	// MaxRetryCredentialsMetadataKey overrides the per-request credential failover limit.
+	MaxRetryCredentialsMetadataKey = "max_retry_credentials"
 	// NeedResponseHeadersMetadataKey requests that executors retain upstream response headers.
 	NeedResponseHeadersMetadataKey = "need_response_headers"
 )

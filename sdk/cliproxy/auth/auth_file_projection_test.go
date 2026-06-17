@@ -86,6 +86,31 @@ func TestNewAuthFromAuthFileMetadataAppliesCodexClientProfileFields(t *testing.T
 	}
 }
 
+func TestNewAuthFromAuthFileMetadataDefaultsCodexWebsocketsEnabled(t *testing.T) {
+	auth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":  "codex",
+		"email": "codex@example.com",
+	}, AuthFileProjectionOptions{ID: "codex.json"})
+
+	if got := auth.Attributes["websockets"]; got != "true" {
+		t.Fatalf("websockets attr = %q, want true; attrs=%#v", got, auth.Attributes)
+	}
+	if _, ok := auth.Metadata["websockets"]; ok {
+		t.Fatalf("default websockets should not be written into metadata: %#v", auth.Metadata)
+	}
+}
+
+func TestNewAuthFromAuthFileMetadataDoesNotDefaultNonCodexWebsockets(t *testing.T) {
+	auth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":  "claude",
+		"email": "claude@example.com",
+	}, AuthFileProjectionOptions{ID: "claude.json"})
+
+	if _, ok := auth.Attributes["websockets"]; ok {
+		t.Fatalf("non-codex auth should not default websockets: %#v", auth.Attributes)
+	}
+}
+
 func TestNewAuthFromAuthFileMetadataClearsCodexClientProfileHeaderAliases(t *testing.T) {
 	auth := &Auth{
 		Attributes: map[string]string{

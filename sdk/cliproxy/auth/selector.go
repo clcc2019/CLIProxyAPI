@@ -194,28 +194,8 @@ func authWebsocketsEnabled(auth *Auth) bool {
 	return false
 }
 
-func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
-	if len(available) == 0 {
-		return available
-	}
-	if !cliproxyexecutor.DownstreamWebsocket(ctx) {
-		return available
-	}
-	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
-		return available
-	}
-
-	wsEnabled := make([]*Auth, 0, len(available))
-	for i := 0; i < len(available); i++ {
-		candidate := available[i]
-		if authWebsocketsEnabled(candidate) {
-			wsEnabled = append(wsEnabled, candidate)
-		}
-	}
-	if len(wsEnabled) > 0 {
-		return wsEnabled
-	}
-	return available
+func preferCodexWebsocketProvider(ctx context.Context, provider string) bool {
+	return cliproxyexecutor.PreferUpstreamWebsocket(ctx) && strings.EqualFold(strings.TrimSpace(provider), "codex")
 }
 
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
@@ -238,7 +218,15 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 	return available, cooldownCount, earliest
 }
 
-func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+func getAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	return getAvailableAuthsWithWebsocketPreference(preferCodexWebsocketProvider(ctx, provider), auths, provider, model, now)
+}
+
+func getAvailableAuthsWithoutWebsocketPreference(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	return getAvailableAuthsWithWebsocketPreference(false, auths, provider, model, now)
+}
+
+func getAvailableAuthsWithWebsocketPreference(preferWebsocket bool, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -257,6 +245,20 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 			return nil, newModelCooldownError(model, providerForError, resetIn)
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+
+	if preferWebsocket {
+		wsByPriority := make(map[int][]*Auth, len(availableByPriority))
+		for priority, candidates := range availableByPriority {
+			for _, candidate := range candidates {
+				if authWebsocketsEnabled(candidate) {
+					wsByPriority[priority] = append(wsByPriority[priority], candidate)
+				}
+			}
+		}
+		if len(wsByPriority) > 0 {
+			availableByPriority = wsByPriority
+		}
 	}
 
 	bestPriority := 0
@@ -279,11 +281,10 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuths(ctx, auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model)
 
 	index := s.nextCursor(key, 0)
@@ -347,11 +348,10 @@ func (s *RoundRobinSelector) loadCursors() *sync.Map {
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuths(ctx, auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
 }
 
@@ -529,7 +529,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// would serialize every request and defeat the purpose of sharding work
 	// across sessions.
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuthsWithoutWebsocketPreference(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}

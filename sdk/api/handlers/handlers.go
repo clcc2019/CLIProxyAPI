@@ -67,6 +67,7 @@ type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
+type maxRetryCredentialsContextKey struct{}
 
 var (
 	backgroundContext = context.Background()
@@ -94,6 +95,17 @@ func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) cont
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
+}
+
+// WithMaxRetryCredentials returns a child context that limits credential failover for one request.
+func WithMaxRetryCredentials(ctx context.Context, maxRetryCredentials int) context.Context {
+	if maxRetryCredentials < 0 {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, maxRetryCredentialsContextKey{}, maxRetryCredentials)
 }
 
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
@@ -256,6 +268,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		appendMeta(coreexecutor.ExecutionSessionMetadataKey, executionSessionID)
 	}
+	if maxRetryCredentials, ok := maxRetryCredentialsFromContext(ctx); ok {
+		appendMeta(coreexecutor.MaxRetryCredentialsMetadataKey, maxRetryCredentials)
+	}
 	if disallowFreeAuthFromContext(ctx) {
 		appendMeta(coreexecutor.DisallowFreeAuthMetadataKey, true)
 	}
@@ -357,6 +372,14 @@ func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
 		return callback
 	}
 	return nil
+}
+
+func maxRetryCredentialsFromContext(ctx context.Context) (int, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	value, ok := ctx.Value(maxRetryCredentialsContextKey{}).(int)
+	return value, ok && value >= 0
 }
 
 func executionSessionIDFromContext(ctx context.Context) string {
@@ -832,6 +855,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !allowImageModel && strings.TrimSpace(alt) != "responses/compact" {
+		ctx = coreexecutor.WithPreferUpstreamWebsocket(ctx)
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -897,7 +923,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		}
 	}
 	chunks := streamResult.Chunks
-	dataChan := make(chan []byte)
+	dataChan := make(chan []byte, coreexecutor.StreamChunkBufferSize)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
 		defer close(dataChan)

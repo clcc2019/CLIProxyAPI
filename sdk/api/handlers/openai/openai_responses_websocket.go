@@ -564,6 +564,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if pinnedAuthID != "" {
 			requestSelectedIncrementalAuth = h.responsesWebsocketPinnedAuthReusable(pinnedAuthID)
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
+			if requestSelectedIncrementalAuth &&
+				strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String()) != "" {
+				cliCtx = handlers.WithMaxRetryCredentials(cliCtx, 1)
+			}
 		} else {
 			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
 				requestSelectedIncrementalAuth = false

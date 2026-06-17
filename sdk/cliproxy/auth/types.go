@@ -78,6 +78,8 @@ type Auth struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 	// Quota captures recent quota information for load balancers.
 	Quota QuotaState `json:"quota"`
+	// RateLimits stores the latest upstream-reported Codex rate limit snapshots.
+	RateLimits map[string]RateLimitSnapshot `json:"rate_limits,omitempty"`
 	// LastError stores the last failure encountered while executing or refreshing.
 	LastError *Error `json:"last_error,omitempty"`
 	// CreatedAt is the creation timestamp in UTC.
@@ -132,19 +134,20 @@ type RecentRequestState struct {
 }
 
 type AuthRuntimeState struct {
-	Version        int                    `json:"version"`
-	SavedAt        time.Time              `json:"saved_at"`
-	Success        int64                  `json:"success"`
-	Failed         int64                  `json:"failed"`
-	RecentRequests []RecentRequestState   `json:"recent_requests,omitempty"`
-	Status         Status                 `json:"status,omitempty"`
-	StatusMessage  string                 `json:"status_message,omitempty"`
-	Unavailable    bool                   `json:"unavailable,omitempty"`
-	Quota          QuotaState             `json:"quota"`
-	LastError      *Error                 `json:"last_error,omitempty"`
-	NextRetryAfter time.Time              `json:"next_retry_after,omitempty"`
-	ModelStates    map[string]*ModelState `json:"model_states,omitempty"`
-	UpdatedAt      time.Time              `json:"updated_at,omitempty"`
+	Version        int                          `json:"version"`
+	SavedAt        time.Time                    `json:"saved_at"`
+	Success        int64                        `json:"success"`
+	Failed         int64                        `json:"failed"`
+	RecentRequests []RecentRequestState         `json:"recent_requests,omitempty"`
+	Status         Status                       `json:"status,omitempty"`
+	StatusMessage  string                       `json:"status_message,omitempty"`
+	Unavailable    bool                         `json:"unavailable,omitempty"`
+	Quota          QuotaState                   `json:"quota"`
+	RateLimits     map[string]RateLimitSnapshot `json:"rate_limits,omitempty"`
+	LastError      *Error                       `json:"last_error,omitempty"`
+	NextRetryAfter time.Time                    `json:"next_retry_after,omitempty"`
+	ModelStates    map[string]*ModelState       `json:"model_states,omitempty"`
+	UpdatedAt      time.Time                    `json:"updated_at,omitempty"`
 }
 
 const runtimeStateMetadataKey = "cliproxy_runtime_state"
@@ -167,6 +170,32 @@ type QuotaState struct {
 	// so session affinity can move to the next auth instead of scattering
 	// across the depleted one by model.
 	AuthScope bool `json:"auth_scope,omitempty"`
+}
+
+// RateLimitSnapshot mirrors the Codex client's account rate-limit update shape.
+// It is informational runtime state; quota cooldowns are still driven only by
+// explicit provider failures such as 429/usage_limit_reached.
+type RateLimitSnapshot struct {
+	LimitID              string           `json:"limit_id,omitempty"`
+	LimitName            string           `json:"limit_name,omitempty"`
+	Primary              *RateLimitWindow `json:"primary,omitempty"`
+	Secondary            *RateLimitWindow `json:"secondary,omitempty"`
+	Credits              *CreditsSnapshot `json:"credits,omitempty"`
+	PlanType             string           `json:"plan_type,omitempty"`
+	RateLimitReachedType string           `json:"rate_limit_reached_type,omitempty"`
+	UpdatedAt            time.Time        `json:"updated_at,omitempty"`
+}
+
+type RateLimitWindow struct {
+	UsedPercent   float64 `json:"used_percent"`
+	WindowMinutes *int64  `json:"window_minutes,omitempty"`
+	ResetsAt      *int64  `json:"resets_at,omitempty"`
+}
+
+type CreditsSnapshot struct {
+	HasCredits bool   `json:"has_credits"`
+	Unlimited  bool   `json:"unlimited"`
+	Balance    string `json:"balance,omitempty"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
@@ -300,6 +329,7 @@ func (a *Auth) RuntimeStateSnapshot() AuthRuntimeState {
 		StatusMessage:  a.StatusMessage,
 		Unavailable:    a.Unavailable,
 		Quota:          a.Quota,
+		RateLimits:     cloneRateLimitSnapshots(a.RateLimits),
 		LastError:      cloneError(a.LastError),
 		NextRetryAfter: a.NextRetryAfter,
 		ModelStates:    cloneModelStates(a.ModelStates),
@@ -375,6 +405,9 @@ func runtimeStateHasPersistentContent(state AuthRuntimeState) bool {
 	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
 		return true
 	}
+	if len(state.RateLimits) > 0 {
+		return true
+	}
 	return len(state.ModelStates) > 0
 }
 
@@ -398,6 +431,7 @@ func (a *Auth) ApplyRuntimeState(state AuthRuntimeState) {
 	a.StatusMessage = state.StatusMessage
 	a.Unavailable = state.Unavailable
 	a.Quota = state.Quota
+	a.RateLimits = cloneRateLimitSnapshots(state.RateLimits)
 	a.LastError = cloneError(state.LastError)
 	a.NextRetryAfter = state.NextRetryAfter
 	if state.Version > 0 {
@@ -546,6 +580,7 @@ func (a *Auth) cloneSnapshotBase() Auth {
 		Unavailable:      a.Unavailable,
 		ProxyURL:         a.ProxyURL,
 		Quota:            a.Quota,
+		RateLimits:       cloneRateLimitSnapshots(a.RateLimits),
 		CreatedAt:        a.CreatedAt,
 		UpdatedAt:        a.UpdatedAt,
 		LastRefreshedAt:  a.LastRefreshedAt,
@@ -632,6 +667,49 @@ func cloneModelStatesForScheduler(src map[string]*ModelState) map[string]*ModelS
 		dst[key] = state.CloneForScheduler()
 	}
 	return dst
+}
+
+func cloneRateLimitSnapshots(src map[string]RateLimitSnapshot) map[string]RateLimitSnapshot {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]RateLimitSnapshot, len(src))
+	for key, snapshot := range src {
+		dst[key] = cloneRateLimitSnapshot(snapshot)
+	}
+	return dst
+}
+
+func cloneRateLimitSnapshot(snapshot RateLimitSnapshot) RateLimitSnapshot {
+	if snapshot.Primary != nil {
+		primary := *snapshot.Primary
+		if snapshot.Primary.WindowMinutes != nil {
+			value := *snapshot.Primary.WindowMinutes
+			primary.WindowMinutes = &value
+		}
+		if snapshot.Primary.ResetsAt != nil {
+			value := *snapshot.Primary.ResetsAt
+			primary.ResetsAt = &value
+		}
+		snapshot.Primary = &primary
+	}
+	if snapshot.Secondary != nil {
+		secondary := *snapshot.Secondary
+		if snapshot.Secondary.WindowMinutes != nil {
+			value := *snapshot.Secondary.WindowMinutes
+			secondary.WindowMinutes = &value
+		}
+		if snapshot.Secondary.ResetsAt != nil {
+			value := *snapshot.Secondary.ResetsAt
+			secondary.ResetsAt = &value
+		}
+		snapshot.Secondary = &secondary
+	}
+	if snapshot.Credits != nil {
+		credits := *snapshot.Credits
+		snapshot.Credits = &credits
+	}
+	return snapshot
 }
 
 func cloneAuthAttributesForScheduler(src map[string]string) map[string]string {

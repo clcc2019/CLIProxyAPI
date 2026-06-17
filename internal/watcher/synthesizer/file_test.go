@@ -197,6 +197,42 @@ func TestFileSynthesizer_Synthesize_CodexAuthFileUserAgentOverride(t *testing.T)
 	}
 }
 
+func TestFileSynthesizer_Synthesize_CodexAuthFileDefaultsWebsocketsEnabled(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":         "codex",
+		"email":        "codex@example.com",
+		"access_token": "oauth-token",
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["websockets"]; got != "true" {
+		t.Fatalf("websockets attr = %q, want true; attrs=%#v", got, auths[0].Attributes)
+	}
+	if _, ok := auths[0].Metadata["websockets"]; ok {
+		t.Fatalf("default websockets should not be persisted into metadata: %#v", auths[0].Metadata)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_CodexMinimalMetadataWithoutIDToken(t *testing.T) {
 	tempDir := t.TempDir()
 

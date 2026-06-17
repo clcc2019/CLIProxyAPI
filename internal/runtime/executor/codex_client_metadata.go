@@ -26,6 +26,9 @@ const (
 	codexWireHeaderMemgenRequest = "X-Openai-Memgen-Request"
 
 	codexClientMetadataInstallationID = "x-codex-installation-id"
+	codexClientMetadataSessionID      = "session_id"
+	codexClientMetadataThreadID       = "thread_id"
+	codexClientMetadataTurnID         = "turn_id"
 	codexClientMetadataWindowID       = "x-codex-window-id"
 	codexClientMetadataParentThreadID = "x-codex-parent-thread-id"
 	codexClientMetadataSubagent       = "x-openai-subagent"
@@ -97,10 +100,7 @@ func codexApplyHTTPClientMetadataWithSource(body []byte, target http.Header, sou
 	}
 	return codexSetClientMetadata(
 		body,
-		[]codexClientMetadataEntry{{
-			key:   codexClientMetadataInstallationID,
-			value: codexResolvedInstallationID(target, source, auth, cfg),
-		}},
+		codexResponsesClientMetadataEntries(target, source, auth, cfg, false, ""),
 		true,
 	)
 }
@@ -115,16 +115,7 @@ func codexApplyWebsocketClientMetadataWithStreamStartMS(ctx context.Context, bod
 	}
 
 	source := codexGinHeadersFromContext(ctx)
-	body = codexSetClientMetadata(body, []codexClientMetadataEntry{
-		{key: codexClientMetadataInstallationID, value: codexResolvedInstallationID(headers, source, auth, cfg)},
-		{key: codexClientMetadataWindowID, value: firstNonEmptyHeaderValue(headers, source, codexHeaderWindowID)},
-		{key: codexClientMetadataSubagent, value: firstNonEmptyHeaderValue(headers, source, codexWireHeaderOpenAISubagent)},
-		{key: codexClientMetadataParentThreadID, value: firstNonEmptyHeaderValue(headers, source, codexHeaderParentThreadID)},
-		{key: codexClientMetadataTurnMetadata, value: firstNonEmptyHeaderValue(headers, source, codexHeaderTurnMetadata)},
-		{key: codexWSClientMetadataTraceparent, value: firstNonEmptyHeaderValue(headers, source, "Traceparent")},
-		{key: codexWSClientMetadataTracestate, value: firstNonEmptyHeaderValue(headers, source, "Tracestate")},
-		{key: codexClientMetadataWSStreamRequestStartMS, value: streamStartMS},
-	}, true)
+	body = codexSetClientMetadata(body, codexResponsesClientMetadataEntries(headers, source, auth, cfg, true, streamStartMS), true)
 
 	// codex-rs carries websocket trace context through client_metadata, not a
 	// top-level trace field.
@@ -134,6 +125,65 @@ func codexApplyWebsocketClientMetadataWithStreamStartMS(ctx context.Context, bod
 		}
 	}
 	return body
+}
+
+func codexResponsesClientMetadataEntries(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config, websocket bool, streamStartMS string) []codexClientMetadataEntry {
+	turnMetadata := firstNonEmptyHeaderValue(target, source, codexHeaderTurnMetadata)
+	entries := []codexClientMetadataEntry{
+		{key: codexClientMetadataInstallationID, value: codexResolvedInstallationID(target, source, auth, cfg)},
+		{key: codexClientMetadataSessionID, value: codexClientMetadataSessionIDValue(target, source, turnMetadata)},
+		{key: codexClientMetadataThreadID, value: codexClientMetadataThreadIDValue(target, source, turnMetadata)},
+		{key: codexClientMetadataTurnID, value: codexClientMetadataTurnIDValue(turnMetadata)},
+		{key: codexClientMetadataWindowID, value: codexClientMetadataWindowIDValue(target, source, turnMetadata)},
+		{key: codexClientMetadataSubagent, value: firstNonEmptyHeaderValue(target, source, codexWireHeaderOpenAISubagent)},
+		{key: codexClientMetadataParentThreadID, value: firstNonEmptyHeaderValue(target, source, codexHeaderParentThreadID)},
+		{key: codexClientMetadataTurnMetadata, value: turnMetadata},
+	}
+	if websocket {
+		entries = append(entries,
+			codexClientMetadataEntry{key: codexWSClientMetadataTraceparent, value: firstNonEmptyHeaderValue(target, source, "Traceparent")},
+			codexClientMetadataEntry{key: codexWSClientMetadataTracestate, value: firstNonEmptyHeaderValue(target, source, "Tracestate")},
+			codexClientMetadataEntry{key: codexClientMetadataWSStreamRequestStartMS, value: streamStartMS},
+		)
+	}
+	return entries
+}
+
+func codexClientMetadataSessionIDValue(target http.Header, source http.Header, turnMetadata string) string {
+	if value := firstNonEmptyHeaderValue(target, source, codexHeaderSessionID); value != "" {
+		return value
+	}
+	if value := firstNonEmptyHeaderValue(target, source, codexHeaderOfficialSessionID); value != "" {
+		return value
+	}
+	if value := firstNonEmptyHeaderValue(target, source, "X-Session-ID"); value != "" {
+		return value
+	}
+	return strings.TrimSpace(gjson.Get(turnMetadata, "session_id").String())
+}
+
+func codexClientMetadataThreadIDValue(target http.Header, source http.Header, turnMetadata string) string {
+	if value := firstNonEmptyHeaderValue(target, source, codexHeaderThreadID); value != "" {
+		return value
+	}
+	if value := firstNonEmptyHeaderValue(target, source, codexHeaderOfficialThreadID); value != "" {
+		return value
+	}
+	if value := firstNonEmptyHeaderValue(target, source, "X-Thread-ID"); value != "" {
+		return value
+	}
+	return strings.TrimSpace(gjson.Get(turnMetadata, "thread_id").String())
+}
+
+func codexClientMetadataTurnIDValue(turnMetadata string) string {
+	return strings.TrimSpace(gjson.Get(turnMetadata, "turn_id").String())
+}
+
+func codexClientMetadataWindowIDValue(target http.Header, source http.Header, turnMetadata string) string {
+	if value := firstNonEmptyHeaderValue(target, source, codexHeaderWindowID); value != "" {
+		return value
+	}
+	return strings.TrimSpace(gjson.Get(turnMetadata, codexWindowIDMetadataPath).String())
 }
 
 func codexEnsureResponsesIdentityHeaders(target http.Header, source http.Header) {

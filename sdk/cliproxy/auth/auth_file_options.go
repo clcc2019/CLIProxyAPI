@@ -132,6 +132,32 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 	}
 }
 
+// ApplyAuthFileWebsocketDefault enables Codex auth-file websocket transport by
+// default while preserving explicit websockets/websocket values.
+func ApplyAuthFileWebsocketDefault(auth *Auth) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	if len(auth.Metadata) > 0 {
+		for _, key := range []string{"websockets", "websocket"} {
+			if _, ok := auth.Metadata[key]; ok {
+				return
+			}
+		}
+	}
+	if len(auth.Attributes) > 0 {
+		for _, key := range []string{"websockets", "websocket"} {
+			if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
+				return
+			}
+		}
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["websockets"] = "true"
+}
+
 func authFileSetOriginatorAttribute(auth *Auth, originator string) {
 	if auth == nil {
 		return

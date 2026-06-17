@@ -499,7 +499,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, cliproxyexecutor.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
 		defer func() {

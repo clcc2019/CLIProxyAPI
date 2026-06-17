@@ -3,10 +3,13 @@ package executor
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -101,6 +104,78 @@ func TestCodexApplyHTTPClientMetadataOverwritesReservedInstallationID(t *testing
 	}
 }
 
+func TestCodexApplyHTTPClientMetadataIncludesOfficialIdentityProjection(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[],"client_metadata":{"session_id":"stale-session","thread_id":"stale-thread","turn_id":"stale-turn","x-codex-window-id":"stale-window","keep":"value"}}`)
+	headers := http.Header{}
+	headers.Set(codexHeaderInstallationID, "current-install")
+	headers.Set(codexHeaderSessionID, "session-1")
+	headers.Set(codexHeaderThreadID, "thread-1")
+	headers.Set(codexHeaderWindowID, "thread-1:0")
+	headers.Set(codexHeaderTurnMetadata, `{"session_id":"session-1","thread_id":"thread-1","turn_id":"turn-1","window_id":"thread-1:0"}`)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+
+	got := codexApplyHTTPClientMetadataWithSource(body, headers, nil, auth, nil)
+
+	assertMetadata := func(path string, want string) {
+		t.Helper()
+		if gotValue := gjson.GetBytes(got, "client_metadata."+path).String(); gotValue != want {
+			t.Fatalf("client_metadata.%s = %q, want %q; body=%s", path, gotValue, want, got)
+		}
+	}
+	assertMetadata("x-codex-installation-id", "current-install")
+	assertMetadata("session_id", "session-1")
+	assertMetadata("thread_id", "thread-1")
+	assertMetadata("turn_id", "turn-1")
+	assertMetadata("x-codex-window-id", "thread-1:0")
+	assertMetadata("x-codex-turn-metadata", `{"session_id":"session-1","thread_id":"thread-1","turn_id":"turn-1","window_id":"thread-1:0"}`)
+	assertMetadata("keep", "value")
+}
+
+func TestPrepareCodexHTTPCallProjectsGeneratedIdentityIntoClientMetadata(t *testing.T) {
+	resetCodexWindowStateStore()
+	executor := NewCodexExecutor(nil)
+	payload := []byte(`{"model":"gpt-5-codex","input":[],"client_metadata":{"fiber_run_id":"fiber-1"}}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: payload}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+	ctx := contextWithGinHeaders(map[string]string{
+		codexHeaderSessionID: "session-1",
+		codexHeaderThreadID:  "thread-1",
+	})
+
+	call, err := executor.prepareCodexHTTPCall(ctx, auth, sdktranslator.FromString("codex"), "", "https://example.com/responses", req, payload, "sk-test", true)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall error: %v", err)
+	}
+	body := call.prepared.body
+	headers := call.prepared.httpReq.Header
+
+	assertMetadata := func(path string, want string) {
+		t.Helper()
+		if gotValue := gjson.GetBytes(body, "client_metadata."+path).String(); gotValue != want {
+			t.Fatalf("client_metadata.%s = %q, want %q; body=%s", path, gotValue, want, body)
+		}
+	}
+	assertMetadata("session_id", "session-1")
+	assertMetadata("thread_id", "thread-1")
+	assertMetadata("x-codex-window-id", headers.Get(codexHeaderWindowID))
+	assertMetadata("x-codex-turn-metadata", headers.Get(codexHeaderTurnMetadata))
+	assertMetadata("fiber_run_id", "fiber-1")
+	if turnID := gjson.GetBytes(body, "client_metadata.turn_id").String(); turnID == "" {
+		t.Fatalf("client_metadata.turn_id should be generated; body=%s", body)
+	}
+	bodyReader, err := call.prepared.httpReq.GetBody()
+	if err != nil {
+		t.Fatalf("GetBody error: %v", err)
+	}
+	gotBody, err := io.ReadAll(bodyReader)
+	if err != nil {
+		t.Fatalf("ReadAll request body error: %v", err)
+	}
+	if !bytes.Equal(gotBody, body) {
+		t.Fatalf("request body was not reset after client_metadata projection: req=%s prepared=%s", gotBody, body)
+	}
+}
+
 func TestCodexApplyHTTPClientMetadataUsesPinnedAuthInstallationID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
 	auth := &cliproxyauth.Auth{
@@ -176,6 +251,8 @@ func TestCodexApplyWebsocketClientMetadataOverwritesReservedFields(t *testing.T)
 	body := []byte(`{"model":"gpt-5-codex","input":[],"client_metadata":{"x-codex-installation-id":"stale-install","x-codex-window-id":"stale-window","x-openai-subagent":"stale-subagent","x-codex-parent-thread-id":"stale-parent","x-codex-turn-metadata":"stale-turn","ws_request_header_traceparent":"stale-traceparent","ws_request_header_tracestate":"stale-tracestate","keep":"value"}}`)
 	headers := http.Header{}
 	headers.Set(codexHeaderInstallationID, "current-install")
+	headers.Set(codexHeaderSessionID, "session-1")
+	headers.Set(codexHeaderThreadID, "thread-1")
 	headers.Set(codexHeaderWindowID, "current-window")
 	headers.Set("X-OpenAI-Subagent", "review")
 	headers.Set(codexHeaderParentThreadID, "parent-1")
@@ -193,6 +270,9 @@ func TestCodexApplyWebsocketClientMetadataOverwritesReservedFields(t *testing.T)
 		}
 	}
 	assertMetadata("x-codex-installation-id", "current-install")
+	assertMetadata("session_id", "session-1")
+	assertMetadata("thread_id", "thread-1")
+	assertMetadata("turn_id", "turn-1")
 	assertMetadata("x-codex-window-id", "current-window")
 	assertMetadata("x-openai-subagent", "review")
 	assertMetadata("x-codex-parent-thread-id", "parent-1")
