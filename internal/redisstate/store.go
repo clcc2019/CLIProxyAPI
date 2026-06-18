@@ -469,6 +469,59 @@ func (s *Store) DeleteCache(ctx context.Context, namespace, cacheKey string) err
 	return s.client.Del(ctx, key).Err()
 }
 
+func (s *Store) GetPreviousResponseAuth(ctx context.Context, responseID string, ttl time.Duration) (string, bool, error) {
+	if s == nil || s.client == nil {
+		return "", false, nil
+	}
+	key := s.previousResponseAuthKey(responseID)
+	if key == "" {
+		return "", false, nil
+	}
+	var (
+		authID string
+		err    error
+	)
+	if ttl > 0 {
+		authID, err = s.client.GetEx(ctx, key, ttl).Result()
+	} else {
+		authID, err = s.client.Get(ctx, key).Result()
+	}
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	authID = strings.TrimSpace(authID)
+	return authID, authID != "", nil
+}
+
+func (s *Store) SetPreviousResponseAuth(ctx context.Context, responseID, authID string, ttl time.Duration) error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	key := s.previousResponseAuthKey(responseID)
+	authID = strings.TrimSpace(authID)
+	if key == "" || authID == "" {
+		return nil
+	}
+	if ttl <= 0 {
+		ttl = 2 * time.Hour
+	}
+	return s.client.Set(ctx, key, authID, ttl).Err()
+}
+
+func (s *Store) DeletePreviousResponseAuth(ctx context.Context, responseID string) error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	key := s.previousResponseAuthKey(responseID)
+	if key == "" {
+		return nil
+	}
+	return s.client.Del(ctx, key).Err()
+}
+
 func (s *Store) LoadClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, now time.Time) (internalusage.ClientAPIKeyQuotaUsage, bool, error) {
 	if s == nil || s.client == nil {
 		return internalusage.ClientAPIKeyQuotaUsage{}, false, nil
@@ -851,6 +904,15 @@ func (s *Store) cacheKey(namespace, cacheKey string) string {
 		return ""
 	}
 	return s.key("cache", namespace, cacheKey)
+}
+
+func (s *Store) previousResponseAuthKey(responseID string) string {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(responseID))
+	return s.key("affinity", "previous-response", hex.EncodeToString(sum[:]))
 }
 
 func (s *Store) clientAPIKeyQuotaKey(apiKeyHash, scope, bucket string) string {

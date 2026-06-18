@@ -23,6 +23,14 @@ type RuntimeStateStore interface {
 	Delete(ctx context.Context, authID string) error
 }
 
+// PreviousResponseStore persists response-to-auth bindings so
+// previous_response_id continuations remain sticky across proxy instances.
+type PreviousResponseStore interface {
+	GetPreviousResponseAuth(ctx context.Context, responseID string, ttl time.Duration) (authID string, ok bool, err error)
+	SetPreviousResponseAuth(ctx context.Context, responseID, authID string, ttl time.Duration) error
+	DeletePreviousResponseAuth(ctx context.Context, responseID string) error
+}
+
 // ProxyLease records a stable proxy assignment for an auth file.
 type ProxyLease struct {
 	AuthID     string

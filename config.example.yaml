@@ -189,6 +189,10 @@ routing:
   session-affinity: true # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # How long previous_response_id-to-auth bindings are retained. Default: 2h
+  previous-response-affinity-ttl: "2h"
+  # Maximum number of previous_response_id bindings kept in process memory.
+  previous-response-affinity-max-entries: 65536
 
 # Codex provider behavior.
 codex:

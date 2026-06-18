@@ -377,6 +377,7 @@ func (s *Service) configureRedisState(ctx context.Context) error {
 	if s.coreManager != nil {
 		s.coreManager.SetRuntimeStateStore(store)
 		s.coreManager.SetProxyLeaseStore(store)
+		s.coreManager.SetPreviousResponseStore(store)
 		if errLoad := s.coreManager.LoadRuntimeStates(ctx); errLoad != nil {
 			_ = store.Close()
 			s.redisState = nil

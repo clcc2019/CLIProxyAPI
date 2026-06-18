@@ -66,3 +66,77 @@ func TestMergeRateLimitSnapshotsIgnoresTimestampOnlyChanges(t *testing.T) {
 		t.Fatal("timestamp-only merge changed = true, want false")
 	}
 }
+
+func TestManagerClearAuthQuotaCooldownClearsAuthAndModelQuota(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID:             "codex-auth",
+		Provider:       "codex",
+		Status:         StatusError,
+		StatusMessage:  "quota exhausted",
+		Unavailable:    true,
+		NextRetryAfter: time.Now().Add(time.Hour),
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: time.Now().Add(time.Hour),
+			AuthScope:     true,
+		},
+		LastError: &Error{Code: "rate_limited"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5-codex": {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted",
+				Unavailable:    true,
+				NextRetryAfter: time.Now().Add(time.Hour),
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: time.Now().Add(time.Hour)},
+				LastError:      &Error{Code: "rate_limited"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	if !manager.ClearAuthQuotaCooldown(context.Background(), "codex-auth") {
+		t.Fatal("ClearAuthQuotaCooldown() = false, want true")
+	}
+	updated, ok := manager.GetByID("codex-auth")
+	if !ok || updated == nil {
+		t.Fatal("auth not found after clear")
+	}
+	if updated.Unavailable || updated.Status != StatusActive || updated.Quota.Exceeded || !updated.NextRetryAfter.IsZero() || updated.LastError != nil {
+		t.Fatalf("auth quota cooldown not cleared: %#v", updated)
+	}
+	state := updated.ModelStates["gpt-5-codex"]
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.Unavailable || state.Status != StatusActive || state.Quota.Exceeded || !state.NextRetryAfter.IsZero() || state.LastError != nil {
+		t.Fatalf("model quota cooldown not cleared: %#v", state)
+	}
+}
+
+func TestManagerClearAuthQuotaCooldownKeepsDisabledAuthDisabled(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID:            "codex-disabled",
+		Provider:      "codex",
+		Status:        StatusDisabled,
+		StatusMessage: "manually disabled",
+		Unavailable:   true,
+		Quota:         QuotaState{Exceeded: true, Reason: "quota", AuthScope: true},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	if manager.ClearAuthQuotaCooldown(context.Background(), "codex-disabled") {
+		t.Fatal("ClearAuthQuotaCooldown() = true, want false for disabled auth")
+	}
+	updated, ok := manager.GetByID("codex-disabled")
+	if !ok || updated == nil {
+		t.Fatal("auth not found after clear")
+	}
+	if updated.Status != StatusDisabled || !updated.Quota.Exceeded || !updated.Unavailable {
+		t.Fatalf("disabled auth should remain unchanged: %#v", updated)
+	}
+}

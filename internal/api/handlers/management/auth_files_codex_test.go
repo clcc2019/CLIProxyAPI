@@ -885,6 +885,259 @@ func TestGetCodexUsageMarksAuthScopedQuotaCooldown(t *testing.T) {
 	}
 }
 
+func TestGetCodexRateLimitResetCreditsUsesUsagePayload(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer usage-access-token" {
+			t.Fatalf("Authorization = %q, want bearer access token", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-ID"); got != "acct_123" {
+			t.Fatalf("ChatGPT-Account-ID = %q, want acct_123", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "codex-profile/1.0" {
+			t.Fatalf("User-Agent = %q, want %q", got, "codex-profile/1.0")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":3},"rate_limit":null}`))
+	}))
+	t.Cleanup(server.Close)
+	originalURL := codexUsageURL
+	codexUsageURL = server.URL
+	t.Cleanup(func() { codexUsageURL = originalURL })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+			"user_agent":   "codex-profile/1.0",
+		},
+		Attributes: map[string]string{"path": "/tmp/codex.json"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-rate-limit-reset-credits?name=codex.json", nil)
+
+	h.GetCodexRateLimitResetCredits(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !sawRequest {
+		t.Fatal("usage endpoint was not called")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got := payload["available_count"]; got != float64(3) {
+		t.Fatalf("available_count = %#v, want 3", got)
+	}
+	credits, ok := payload["rate_limit_reset_credits"].(map[string]any)
+	if !ok {
+		t.Fatalf("rate_limit_reset_credits missing: %#v", payload)
+	}
+	if got := credits["available_count"]; got != float64(3) {
+		t.Fatalf("credits.available_count = %#v, want 3", got)
+	}
+	if _, ok := payload["auth_file"].(map[string]any); !ok {
+		t.Fatalf("auth_file missing: %#v", payload)
+	}
+}
+
+func TestConsumeCodexRateLimitResetCreditUsesOfficialBodyAndClearsCooldown(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var sawConsume bool
+	var sawUsageRefresh bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/consume", func(w http.ResponseWriter, r *http.Request) {
+		sawConsume = true
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer usage-access-token" {
+			t.Fatalf("Authorization = %q, want bearer access token", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-ID"); got != "acct_123" {
+			t.Fatalf("ChatGPT-Account-ID = %q, want acct_123", got)
+		}
+		if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+			t.Fatalf("Content-Type = %q, want application/json", got)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode consume body: %v", err)
+		}
+		if got := body["redeem_request_id"]; got != "redeem-123" {
+			t.Fatalf("redeem_request_id = %q, want redeem-123", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":2}`))
+	})
+	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
+		sawUsageRefresh = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":2},"rate_limit":null}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	originalUsageURL := codexUsageURL
+	originalConsumeURL := codexRateLimitResetCreditsConsumeURL
+	codexUsageURL = server.URL + "/usage"
+	codexRateLimitResetCreditsConsumeURL = server.URL + "/consume"
+	t.Cleanup(func() {
+		codexUsageURL = originalUsageURL
+		codexRateLimitResetCreditsConsumeURL = originalConsumeURL
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+		Attributes: map[string]string{"path": "/tmp/codex.json"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	manager.MarkAuthQuotaCooldown(context.Background(), "codex.json", time.Now().Add(time.Hour))
+	limited, _ := manager.GetByID("codex.json")
+	if limited == nil || !limited.Quota.Exceeded || !limited.Unavailable {
+		t.Fatalf("auth was not marked quota-limited: %#v", limited)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/codex-rate-limit-reset-credits/consume?name=codex.json", strings.NewReader(`{"redeem_request_id":"redeem-123"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.ConsumeCodexRateLimitResetCredit(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !sawConsume {
+		t.Fatal("consume endpoint was not called")
+	}
+	if !sawUsageRefresh {
+		t.Fatal("usage endpoint was not refreshed after consume")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got := payload["code"]; got != "reset" {
+		t.Fatalf("code = %#v, want reset", got)
+	}
+	if got := payload["windows_reset"]; got != float64(2) {
+		t.Fatalf("windows_reset = %#v, want 2", got)
+	}
+	if got := payload["available_count"]; got != float64(2) {
+		t.Fatalf("available_count = %#v, want 2", got)
+	}
+	if got := payload["local_quota_cooldown_cleared"]; got != true {
+		t.Fatalf("local_quota_cooldown_cleared = %#v, want true", got)
+	}
+	updated, ok := manager.GetByID("codex.json")
+	if !ok || updated == nil {
+		t.Fatal("updated auth not found")
+	}
+	if updated.Quota.Exceeded || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("auth quota cooldown was not cleared: quota=%#v unavailable=%v next=%v", updated.Quota, updated.Unavailable, updated.NextRetryAfter)
+	}
+}
+
+func TestConsumeCodexRateLimitResetCreditNoCreditDoesNotClearCooldown(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/consume", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"no_credit","windows_reset":0}`))
+	})
+	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":0},"rate_limit":null}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	originalUsageURL := codexUsageURL
+	originalConsumeURL := codexRateLimitResetCreditsConsumeURL
+	codexUsageURL = server.URL + "/usage"
+	codexRateLimitResetCreditsConsumeURL = server.URL + "/consume"
+	t.Cleanup(func() {
+		codexUsageURL = originalUsageURL
+		codexRateLimitResetCreditsConsumeURL = originalConsumeURL
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	manager.MarkAuthQuotaCooldown(context.Background(), "codex.json", time.Now().Add(time.Hour))
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/codex-rate-limit-reset-credits/consume?name=codex.json", strings.NewReader(`{"idempotency_key":"redeem-456"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.ConsumeCodexRateLimitResetCredit(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got := payload["code"]; got != "no_credit" {
+		t.Fatalf("code = %#v, want no_credit", got)
+	}
+	if _, ok := payload["local_quota_cooldown_cleared"]; ok {
+		t.Fatalf("local_quota_cooldown_cleared should be omitted for no_credit: %#v", payload)
+	}
+	updated, ok := manager.GetByID("codex.json")
+	if !ok || updated == nil {
+		t.Fatal("updated auth not found")
+	}
+	if !updated.Quota.Exceeded || !updated.Unavailable {
+		t.Fatalf("auth quota cooldown should remain: quota=%#v unavailable=%v", updated.Quota, updated.Unavailable)
+	}
+}
+
 func TestGetCodexUsageRetriesTransient502(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

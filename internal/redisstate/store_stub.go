@@ -57,6 +57,13 @@ func (s *Store) Load(_ context.Context) (map[string]coreauth.AuthRuntimeState, e
 }
 func (s *Store) Save(_ context.Context, _ string, _ coreauth.AuthRuntimeState) error { return nil }
 func (s *Store) Delete(_ context.Context, _ string) error                            { return nil }
+func (s *Store) GetPreviousResponseAuth(_ context.Context, _ string, _ time.Duration) (string, bool, error) {
+	return "", false, nil
+}
+func (s *Store) SetPreviousResponseAuth(_ context.Context, _, _ string, _ time.Duration) error {
+	return nil
+}
+func (s *Store) DeletePreviousResponseAuth(_ context.Context, _ string) error { return nil }
 func (s *Store) AcquireProxyLease(_ context.Context, _ string, _ []string) (coreauth.ProxyLease, bool, error) {
 	return coreauth.ProxyLease{}, false, nil
 }

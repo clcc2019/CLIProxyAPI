@@ -175,21 +175,26 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store              Store
-	runtimeStateStore  RuntimeStateStore
-	proxyLeaseStore    ProxyLeaseStore
-	executors          map[string]ProviderExecutor
-	selector           Selector
-	hook               Hook
-	mu                 sync.RWMutex
-	auths              map[string]*Auth
-	removedAuths       map[string]authRemovalTombstone
-	runtimeStates      map[string]AuthRuntimeState
-	scheduler          *authScheduler
-	authInFlightCounts sync.Map
+	store                 Store
+	runtimeStateStore     RuntimeStateStore
+	proxyLeaseStore       ProxyLeaseStore
+	previousResponseStore PreviousResponseStore
+	executors             map[string]ProviderExecutor
+	selector              Selector
+	hook                  Hook
+	mu                    sync.RWMutex
+	auths                 map[string]*Auth
+	removedAuths          map[string]authRemovalTombstone
+	runtimeStates         map[string]AuthRuntimeState
+	scheduler             *authScheduler
+	authInFlightCounts    sync.Map
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
 	homeRuntimeAuths map[string]map[string]*Auth
+	// previousResponseAuths keeps OpenAI/Codex response IDs sticky to the auth
+	// that created them, preventing previous_response_id continuations from
+	// being routed to a different credential.
+	previousResponseAuths *previousResponseAuthCache
 	// routeAwareSingleCache stores provider/model pairs proven safe for scheduler single-provider fast path.
 	routeAwareSingleCache sync.Map
 	// routeAwareMixedCache stores provider/model combinations proven safe for scheduler mixed fast path.
@@ -265,16 +270,17 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		removedAuths:     make(map[string]authRemovalTombstone),
-		homeRuntimeAuths: make(map[string]map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
-		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
+		store:                 store,
+		executors:             make(map[string]ProviderExecutor),
+		selector:              selector,
+		hook:                  hook,
+		auths:                 make(map[string]*Auth),
+		removedAuths:          make(map[string]authRemovalTombstone),
+		homeRuntimeAuths:      make(map[string]map[string]*Auth),
+		previousResponseAuths: newPreviousResponseAuthCache(previousResponseAuthTTL, previousResponseAuthMaxEntries),
+		providerOffsets:       make(map[string]int),
+		modelPoolOffsets:      make(map[string]int),
+		refreshSemaphore:      make(chan struct{}, refreshMaxConcurrency),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -576,6 +582,17 @@ func (m *Manager) SetRuntimeStateStore(store RuntimeStateStore) {
 		m.runtimeStates = nil
 	}
 	m.persistEnabled.Store(m.store != nil || m.runtimeStateStore != nil)
+}
+
+// SetPreviousResponseStore swaps the optional persistence store used for
+// response-to-auth bindings across proxy instances.
+func (m *Manager) SetPreviousResponseStore(store PreviousResponseStore) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.previousResponseStore = store
+	m.mu.Unlock()
 }
 
 // SetProxyLeaseStore swaps the optional persistence store for proxy-pool leases.
@@ -939,6 +956,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	m.configurePreviousResponseAffinity(cfg)
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()
 	}
@@ -1570,8 +1588,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}()
 		var failed bool
+		responseID := ""
 		forward := true
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if len(chunk.Payload) > 0 {
+				if id := responseIDFromProviderPayload(chunk.Payload); id != "" {
+					responseID = id
+				}
+			}
 			if chunk.Err != nil && !failed {
 				failed = true
 				streamResult := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
@@ -1603,6 +1627,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		if !failed {
 			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+			m.bindPreviousResponseID(ctx, responseID, auth.ID)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -2852,7 +2877,21 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if homeMode {
 			pickOpts = withHomeAuthCount(opts, homeAuthCount)
 		}
+		previousResponseID, previousResponseAuthID := m.previousResponsePinnedAuthID(ctx, req, pickOpts)
+		if previousResponseAuthID != "" {
+			pickOpts = withPinnedAuthMetadata(pickOpts, previousResponseAuthID)
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		if errPick != nil {
+			if previousResponseAuthID != "" && isRecoverableAffinityPickError(errPick) {
+				m.invalidatePreviousResponseID(ctx, previousResponseID)
+				fallbackPickOpts := opts
+				if homeMode {
+					fallbackPickOpts = withHomeAuthCount(opts, homeAuthCount)
+				}
+				auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, fallbackPickOpts, tried)
+			}
+		}
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
@@ -2937,6 +2976,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					break
 				}
 				m.MarkResult(execCtx, result)
+				m.bindPreviousResponseFromPayload(execCtx, auth.ID, resp.Payload)
 				return resp, nil
 			}
 			if stopModelLoop {
@@ -3102,7 +3142,21 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if homeMode {
 			pickOpts = withHomeAuthCount(opts, homeAuthCount)
 		}
+		previousResponseID, previousResponseAuthID := m.previousResponsePinnedAuthID(ctx, req, pickOpts)
+		if previousResponseAuthID != "" {
+			pickOpts = withPinnedAuthMetadata(pickOpts, previousResponseAuthID)
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		if errPick != nil {
+			if previousResponseAuthID != "" && isRecoverableAffinityPickError(errPick) {
+				m.invalidatePreviousResponseID(ctx, previousResponseID)
+				fallbackPickOpts := opts
+				if homeMode {
+					fallbackPickOpts = withHomeAuthCount(opts, homeAuthCount)
+				}
+				auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, fallbackPickOpts, tried)
+			}
+		}
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return nil, lastErr
@@ -4237,9 +4291,114 @@ func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, reco
 	}
 }
 
+// ClearAuthQuotaCooldown clears local quota cooldown state after an upstream
+// rate-limit reset credit has been redeemed successfully.
+func (m *Manager) ClearAuthQuotaCooldown(ctx context.Context, authID string) bool {
+	if m == nil {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+
+	now := time.Now()
+	persistAuthID := ""
+	var schedulerSnapshot *Auth
+	invalidateAuthAffinity := false
+	clearedModels := make([]string, 0, 4)
+
+	m.mu.Lock()
+	if auth, ok := m.auths[authID]; ok && auth != nil && auth.Status != StatusDisabled {
+		wasUnavailable := auth.Unavailable
+		changed := false
+		authCleared := false
+		if authHasQuotaCooldown(auth) {
+			clearAuthStateOnSuccess(auth, now)
+			changed = true
+			authCleared = true
+		}
+		for model, state := range auth.ModelStates {
+			if model == "" || state == nil || state.Status == StatusDisabled {
+				continue
+			}
+			if modelStateHasQuotaCooldown(state) {
+				resetModelState(state, now)
+				clearedModels = append(clearedModels, model)
+				changed = true
+			}
+		}
+		if changed {
+			updateAggregatedAvailability(auth, now)
+			if authCleared {
+				auth.Status = StatusActive
+				auth.StatusMessage = ""
+				auth.LastError = nil
+			}
+			auth.UpdatedAt = now
+			persistAuthID = auth.ID
+			schedulerSnapshot = auth.CloneForScheduler()
+			invalidateAuthAffinity = wasUnavailable
+		}
+	}
+	m.mu.Unlock()
+
+	if persistAuthID == "" {
+		return false
+	}
+	m.enqueuePersistAuthID(ctx, persistAuthID)
+	if m.scheduler != nil && schedulerSnapshot != nil {
+		m.scheduler.upsertAuth(schedulerSnapshot)
+	}
+	if invalidateAuthAffinity {
+		m.invalidateSessionAffinityForAuth(persistAuthID)
+	}
+	for _, model := range clearedModels {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(persistAuthID, model)
+	}
+	return true
+}
+
+func authHasQuotaCooldown(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Quota.Exceeded || auth.Quota.AuthScope || strings.EqualFold(auth.Quota.Reason, "quota") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(auth.StatusMessage), "quota") {
+		return true
+	}
+	if auth.LastError != nil {
+		code := strings.ToLower(strings.TrimSpace(auth.LastError.Code))
+		return code == "rate_limited" || code == "usage_limit_reached" || code == "quota_exceeded"
+	}
+	return false
+}
+
+func modelStateHasQuotaCooldown(state *ModelState) bool {
+	if state == nil {
+		return false
+	}
+	if state.Quota.Exceeded || state.Quota.AuthScope || strings.EqualFold(state.Quota.Reason, "quota") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(state.StatusMessage), "quota") {
+		return true
+	}
+	if state.LastError != nil {
+		code := strings.ToLower(strings.TrimSpace(state.LastError.Code))
+		return code == "rate_limited" || code == "usage_limit_reached" || code == "quota_exceeded"
+	}
+	return false
+}
+
 func (m *Manager) invalidateSessionAffinityForAuth(authID string) {
 	if m == nil || strings.TrimSpace(authID) == "" {
 		return
+	}
+	if m.previousResponseAuths != nil {
+		m.previousResponseAuths.InvalidateAuth(authID)
 	}
 	seen := make(map[*SessionAffinitySelector]struct{}, 2)
 	invalidate := func(selector Selector) {

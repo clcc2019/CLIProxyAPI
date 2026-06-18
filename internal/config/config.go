@@ -301,6 +301,14 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// PreviousResponseAffinityTTL specifies how long response-to-auth bindings are retained.
+	// Default: 2h. Accepts duration strings like "30m", "1h", "2h30m".
+	PreviousResponseAffinityTTL string `yaml:"previous-response-affinity-ttl,omitempty" json:"previous-response-affinity-ttl,omitempty"`
+
+	// PreviousResponseAffinityMaxEntries bounds the in-memory response-to-auth cache.
+	// Default: 65536.
+	PreviousResponseAffinityMaxEntries int `yaml:"previous-response-affinity-max-entries,omitempty" json:"previous-response-affinity-max-entries,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
