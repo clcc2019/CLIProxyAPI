@@ -417,7 +417,8 @@ func normalizeCodexFinalUpstreamInputItems(body []byte, opts codexFinalUpstreamB
 
 func normalizeCodexFinalUpstreamModelControls(body []byte, baseModel string) []byte {
 	capabilities, _ := registry.CodexClientModelCapabilitiesForModel(baseModel)
-	return normalizeCodexFinalUpstreamReasoning(body, capabilities)
+	body = normalizeCodexFinalUpstreamReasoning(body, capabilities)
+	return normalizeCodexFinalUpstreamReasoningEffortForModel(body, baseModel)
 }
 
 func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.CodexClientModelCapabilities) []byte {
@@ -443,6 +444,17 @@ func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.Cod
 		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", defaultReasoningLevel))
 	}
 	return body
+}
+
+func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel string) []byte {
+	if strings.TrimSpace(baseModel) != "gpt-5.5" {
+		return body
+	}
+	effort := gjson.GetBytes(body, "reasoning.effort")
+	if effort.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(effort.String()), "xhigh") {
+		return body
+	}
+	return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
 }
 
 func normalizeCodexFinalUpstreamTextVerbosity(body []byte, baseModel string) []byte {

@@ -214,6 +214,22 @@ func TestNormalizeCodexFinalUpstreamBody_DefaultsOfficialReasoningAndVerbosity(t
 	}
 }
 
+func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT55XHighReasoningForUpstream(t *testing.T) {
+	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"reasoning":{"effort":"xhigh"}}`), "gpt-5.5", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("reasoning.effort = %q, want high; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5; body=%s", got, gotBody)
+	}
+}
+
 func TestNormalizeCodexFinalUpstreamBody_PreservesCallerReasoningAndVerbosity(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"reasoning":{"effort":"high","summary":"auto"},"text":{"verbosity":"high"}}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,

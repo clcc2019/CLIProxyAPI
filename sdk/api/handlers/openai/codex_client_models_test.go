@@ -22,6 +22,40 @@ func TestNormalizeCodexClientReasoningLevel(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsResponseKeepsGPT55XHighForClient(t *testing.T) {
+	response := CodexClientModelsResponse([]map[string]any{
+		{"id": "gpt-5.5"},
+	})
+
+	models, ok := response["models"].([]map[string]any)
+	if !ok || len(models) == 0 {
+		t.Fatalf("models = %#v, want non-empty []map[string]any", response["models"])
+	}
+
+	var gpt55 map[string]any
+	for _, model := range models {
+		if stringModelValue(model, "slug") == "gpt-5.5" {
+			gpt55 = model
+			break
+		}
+	}
+	if gpt55 == nil {
+		t.Fatalf("gpt-5.5 not found in response: %#v", models)
+	}
+
+	levels, ok := gpt55["supported_reasoning_levels"].([]any)
+	if !ok {
+		t.Fatalf("supported_reasoning_levels = %#v, want []any", gpt55["supported_reasoning_levels"])
+	}
+	for _, rawLevel := range levels {
+		level, ok := rawLevel.(map[string]any)
+		if ok && stringModelValue(level, "effort") == "xhigh" {
+			return
+		}
+	}
+	t.Fatalf("gpt-5.5 response should keep xhigh for clients: %#v", levels)
+}
+
 func BenchmarkNormalizeCodexClientReasoningLevel(b *testing.B) {
 	for b.Loop() {
 		if got := normalizeCodexClientReasoningLevel(" Medium "); got != "medium" {
