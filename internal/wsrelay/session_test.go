@@ -105,6 +105,32 @@ func TestSessionRequestAcceptsNilContext(t *testing.T) {
 	}
 }
 
+func TestManagerSendCleansBrokenSessionOnWriteFailure(t *testing.T) {
+	s, clientConn, cleanup := newTestSession(t)
+	defer cleanup()
+
+	mgr := NewManager(Options{})
+	s.manager = mgr
+	s.provider = "codex"
+	mgr.sessMutex.Lock()
+	mgr.sessions[s.provider] = s
+	mgr.sessMutex.Unlock()
+
+	_ = s.conn.Close()
+	_, err := mgr.Send(context.Background(), "codex", Message{ID: "req-1", Type: MessageTypeHTTPReq})
+	if err == nil {
+		t.Fatal("Send returned nil error for closed websocket")
+	}
+	if got := mgr.session("codex"); got != nil {
+		t.Fatal("broken websocket session was not removed from manager")
+	}
+	if _, ok := s.pending.Load("req-1"); ok {
+		t.Fatal("failed send left request in pending map")
+	}
+
+	_ = clientConn.Close()
+}
+
 func TestSessionDispatchKeepsTerminalMessageWhenPendingBufferFull(t *testing.T) {
 	req := &pendingRequest{ch: make(chan Message, 2)}
 	req.ch <- Message{ID: "req-1", Type: MessageTypeStreamChunk, Payload: map[string]any{"data": "old-1"}}

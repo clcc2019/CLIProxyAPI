@@ -478,49 +478,27 @@ func (s *Server) setupRoutes() {
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
-	s.engine.GET("/anthropic/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/codex/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/xai/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "xai", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+	s.engine.GET("/anthropic/callback", s.oauthCallbackRouteHandler("anthropic"))
+	s.engine.GET("/codex/callback", s.oauthCallbackRouteHandler("codex"))
+	s.engine.GET("/xai/callback", s.oauthCallbackRouteHandler("xai"))
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+}
+
+func (s *Server) oauthCallbackRouteHandler(provider string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, provider, state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	}
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.

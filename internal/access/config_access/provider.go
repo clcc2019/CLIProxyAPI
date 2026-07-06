@@ -65,56 +65,77 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	authHeader := r.Header.Get("Authorization")
 	authHeaderGoogle := r.Header.Get("X-Goog-Api-Key")
 	authHeaderAnthropic := r.Header.Get("X-Api-Key")
-	queryKey := ""
-	queryAuthToken := ""
-	if r.URL != nil {
-		queryKey = r.URL.Query().Get("key")
-		queryAuthToken = r.URL.Query().Get("auth_token")
+
+	hasCredential := false
+	if authHeader != "" {
+		hasCredential = true
+		if result, authErr, ok := p.authenticateValue(extractBearerToken(authHeader), "authorization"); ok {
+			return result, authErr
+		}
 	}
-	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" && queryAuthToken == "" {
+	if authHeaderGoogle != "" {
+		hasCredential = true
+		if result, authErr, ok := p.authenticateValue(authHeaderGoogle, "x-goog-api-key"); ok {
+			return result, authErr
+		}
+	}
+	if authHeaderAnthropic != "" {
+		hasCredential = true
+		if result, authErr, ok := p.authenticateValue(authHeaderAnthropic, "x-api-key"); ok {
+			return result, authErr
+		}
+	}
+
+	if r.URL != nil && r.URL.RawQuery != "" {
+		query := r.URL.Query()
+		queryKey := query.Get("key")
+		queryAuthToken := query.Get("auth_token")
+		if queryKey != "" {
+			hasCredential = true
+			if result, authErr, ok := p.authenticateValue(queryKey, "query-key"); ok {
+				return result, authErr
+			}
+		}
+		if queryAuthToken != "" {
+			hasCredential = true
+			if result, authErr, ok := p.authenticateValue(queryAuthToken, "query-auth-token"); ok {
+				return result, authErr
+			}
+		}
+	}
+	if !hasCredential {
 		return nil, sdkaccess.NewNoCredentialsError()
 	}
 
-	apiKey := extractBearerToken(authHeader)
-
-	candidates := []struct {
-		value  string
-		source string
-	}{
-		{apiKey, "authorization"},
-		{authHeaderGoogle, "x-goog-api-key"},
-		{authHeaderAnthropic, "x-api-key"},
-		{queryKey, "query-key"},
-		{queryAuthToken, "query-auth-token"},
-	}
-
-	for _, candidate := range candidates {
-		if candidate.value == "" {
-			continue
-		}
-		if entry, ok := p.keys[candidate.value]; ok {
-			if entry.Disabled {
-				return nil, sdkaccess.NewDisabledCredentialError()
-			}
-			meta := map[string]string{
-				"source": candidate.source,
-			}
-			if len(entry.AllowedModels) > 0 {
-				meta["allowed_models"] = strings.Join(entry.AllowedModels, ",")
-			}
-			if len(entry.ExcludedModels) > 0 {
-				meta["excluded_models"] = strings.Join(entry.ExcludedModels, ",")
-			}
-			internalconfig.AddClientAPIKeyQuotaMetadata(meta, entry.Quota)
-			return &sdkaccess.Result{
-				Provider:  p.Identifier(),
-				Principal: candidate.value,
-				Metadata:  meta,
-			}, nil
-		}
-	}
-
 	return nil, sdkaccess.NewInvalidCredentialError()
+}
+
+func (p *provider) authenticateValue(value, source string) (*sdkaccess.Result, *sdkaccess.AuthError, bool) {
+	if value == "" {
+		return nil, nil, false
+	}
+	entry, ok := p.keys[value]
+	if !ok {
+		return nil, nil, false
+	}
+	if entry.Disabled {
+		return nil, sdkaccess.NewDisabledCredentialError(), true
+	}
+	meta := map[string]string{
+		"source": source,
+	}
+	if len(entry.AllowedModels) > 0 {
+		meta["allowed_models"] = strings.Join(entry.AllowedModels, ",")
+	}
+	if len(entry.ExcludedModels) > 0 {
+		meta["excluded_models"] = strings.Join(entry.ExcludedModels, ",")
+	}
+	internalconfig.AddClientAPIKeyQuotaMetadata(meta, entry.Quota)
+	return &sdkaccess.Result{
+		Provider:  p.Identifier(),
+		Principal: value,
+		Metadata:  meta,
+	}, nil, true
 }
 
 func extractBearerToken(header string) string {

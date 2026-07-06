@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -181,6 +182,40 @@ func TestReadyz(t *testing.T) {
 			t.Fatalf("/healthz got %d while not ready, want 200", rr.Code)
 		}
 	})
+}
+
+func TestOAuthCallbackRouteWritesPendingSessionFile(t *testing.T) {
+	server := newTestServer(t)
+	state := "server-callback-test"
+	managementHandlers.RegisterOAuthSession(state, "codex")
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/callback?state="+state+"&error_description=access_denied", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if contentType := rr.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
+		t.Fatalf("content type = %q, want text/html", contentType)
+	}
+
+	callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-codex-"+state+".oauth")
+	data, err := os.ReadFile(callbackPath)
+	if err != nil {
+		t.Fatalf("read callback file: %v", err)
+	}
+	var payload struct {
+		Code  string `json:"code"`
+		State string `json:"state"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal callback file: %v", err)
+	}
+	if payload.State != state || payload.Code != "" || payload.Error != "access_denied" {
+		t.Fatalf("unexpected callback payload: %+v", payload)
+	}
 }
 
 func TestNewServer_ConfiguresInboundHTTPServerLimits(t *testing.T) {

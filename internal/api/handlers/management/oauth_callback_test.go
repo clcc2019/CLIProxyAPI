@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -78,6 +79,30 @@ func TestWriteOAuthCallbackFileForPendingSessionCreatesMissingAuthDirForCallback
 				t.Fatalf("unexpected callback payload: %+v", payload)
 			}
 		})
+	}
+}
+
+func TestWaitForOAuthCallbackFileReadsAndRemovesPayload(t *testing.T) {
+	authDir := t.TempDir()
+	state := "wait-callback-state"
+	RegisterOAuthSession(state, "codex")
+	defer CompleteOAuthSession(state)
+
+	path, errWrite := WriteOAuthCallbackFileForPendingSession(authDir, "codex", state, "test-code", "")
+	if errWrite != nil {
+		t.Fatalf("expected callback file write to succeed: %v", errWrite)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	payload, errWait := h.waitForOAuthCallbackFile("codex", state, filepath.Base(path), time.Second)
+	if errWait != nil {
+		t.Fatalf("waitForOAuthCallbackFile returned error: %v", errWait)
+	}
+	if payload["state"] != state || payload["code"] != "test-code" || payload["error"] != "" {
+		t.Fatalf("unexpected callback payload: %+v", payload)
+	}
+	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+		t.Fatalf("callback file stat error = %v, want not exist", errStat)
 	}
 }
 

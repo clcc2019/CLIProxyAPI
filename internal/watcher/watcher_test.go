@@ -23,6 +23,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if condition() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", timeout)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestApplyAuthExcludedModelsMeta_APIKey(t *testing.T) {
 	auth := &coreauth.Auth{Attributes: map[string]string{}}
 	cfg := &config.Config{}
@@ -263,6 +277,7 @@ func TestStartAndStopSuccess(t *testing.T) {
 	defer cancel()
 
 	if err := w.Start(ctx); err != nil {
+		skipIfWatchResourceLimit(t, err)
 		t.Fatalf("expected Start to succeed: %v", err)
 	}
 	cancel()
@@ -293,6 +308,8 @@ func TestStartFailsWhenConfigMissing(t *testing.T) {
 
 	if err := w.Start(ctx); err == nil {
 		t.Fatal("expected Start to fail for missing config file")
+	} else if isWatchResourceLimitError(err) {
+		t.Fatalf("expected missing config error, got watcher resource limit: %v", err)
 	}
 }
 
@@ -775,29 +792,47 @@ func TestPersistAsyncEarlyReturns(t *testing.T) {
 type errorPersister struct {
 	configCalls int32
 	authCalls   int32
+	wg          sync.WaitGroup
 }
 
 func (p *errorPersister) PersistConfig(context.Context) error {
+	defer p.wg.Done()
 	atomic.AddInt32(&p.configCalls, 1)
 	return fmt.Errorf("persist config error")
 }
 
 func (p *errorPersister) PersistAuthFiles(context.Context, string, ...string) error {
+	defer p.wg.Done()
 	atomic.AddInt32(&p.authCalls, 1)
 	return fmt.Errorf("persist auth error")
 }
 
 func TestPersistAsyncErrorPaths(t *testing.T) {
 	p := &errorPersister{}
+	p.wg.Add(2)
 	w := &Watcher{storePersister: p}
 	w.persistConfigAsync()
 	w.persistAuthAsync("msg", "a")
-	time.Sleep(30 * time.Millisecond)
+	waitForWaitGroup(t, &p.wg, time.Second)
 	if atomic.LoadInt32(&p.configCalls) != 1 {
 		t.Fatalf("expected PersistConfig to be called once, got %d", p.configCalls)
 	}
 	if atomic.LoadInt32(&p.authCalls) != 1 {
 		t.Fatalf("expected PersistAuthFiles to be called once, got %d", p.authCalls)
+	}
+}
+
+func waitForWaitGroup(t *testing.T, wg *sync.WaitGroup, timeout time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatalf("wait group did not finish within %s", timeout)
 	}
 }
 
@@ -1002,10 +1037,9 @@ func TestHandleEventConfigChangeSchedulesReload(t *testing.T) {
 
 	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Write})
 
-	time.Sleep(400 * time.Millisecond)
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected config change to trigger reload once, got %d", reloads)
-	}
+	waitForCondition(t, time.Second, func() bool {
+		return atomic.LoadInt32(&reloads) == 1
+	})
 }
 
 func TestHandleEventAuthWriteTriggersUpdate(t *testing.T) {
@@ -1500,6 +1534,29 @@ func TestStartFailsWhenAuthDirMissing(t *testing.T) {
 
 	if err := w.Start(ctx); err == nil {
 		t.Fatal("expected Start to fail for missing auth dir")
+	} else {
+		skipIfWatchResourceLimit(t, err)
+	}
+}
+
+func TestWrapWatchAddErrorAnnotatesResourceLimit(t *testing.T) {
+	err := wrapWatchAddError("config file", "/tmp/config.yaml", fmt.Errorf("no space left on device"))
+	if err == nil {
+		t.Fatal("expected wrapped error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "/tmp/config.yaml") {
+		t.Fatalf("expected path in error, got %q", message)
+	}
+	if !strings.Contains(message, "fs.inotify.max_user_watches") {
+		t.Fatalf("expected inotify tuning hint in error, got %q", message)
+	}
+}
+
+func skipIfWatchResourceLimit(t *testing.T, err error) {
+	t.Helper()
+	if isWatchResourceLimitError(err) {
+		t.Skipf("skipping fsnotify-dependent test because host watcher resources are exhausted: %v", err)
 	}
 }
 
@@ -1623,11 +1680,9 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	w.scheduleConfigReload()
 	w.scheduleConfigReload()
 
-	time.Sleep(400 * time.Millisecond)
-
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected single debounced reload, got %d", reloads)
-	}
+	waitForCondition(t, time.Second, func() bool {
+		return atomic.LoadInt32(&reloads) == 1
+	})
 	// reloadConfigIfChanged writes lastConfigHash under clientsMutex; mirror
 	// that here so -race doesn't flag a benign read.
 	w.clientsMutex.RLock()

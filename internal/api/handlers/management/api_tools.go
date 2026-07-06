@@ -382,23 +382,22 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 		}
 	}
 
-	transport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || transport == nil {
-		direct := proxyutil.ApplyHTTPTransportPoolSettings(&http.Transport{Proxy: nil})
-		actual, _ := apiCallTransportCache.LoadOrStore("direct", direct)
-		if cached, okTransport := actual.(http.RoundTripper); okTransport && cached != nil {
-			return cached
-		}
-		return direct
-	}
-	clone := transport.Clone()
-	clone.Proxy = nil
-	direct := proxyutil.ApplyHTTPTransportPoolSettings(clone)
+	direct := buildDirectAPICallTransport()
 	actual, _ := apiCallTransportCache.LoadOrStore("direct", direct)
 	if cached, okTransport := actual.(http.RoundTripper); okTransport && cached != nil {
 		return cached
 	}
 	return direct
+}
+
+func buildDirectAPICallTransport() http.RoundTripper {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || transport == nil {
+		return proxyutil.ApplyHTTPTransportPoolSettings(&http.Transport{Proxy: nil})
+	}
+	clone := transport.Clone()
+	clone.Proxy = nil
+	return proxyutil.ApplyHTTPTransportPoolSettings(clone)
 }
 
 func cachedAPICallTransport(proxyStr string) http.RoundTripper {

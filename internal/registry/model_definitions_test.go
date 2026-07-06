@@ -68,8 +68,8 @@ func TestCodexClientModelCapabilitiesForModelUsesEmbeddedCatalog(t *testing.T) {
 	if !capabilities.SupportsReasoningSummaries {
 		t.Fatal("gpt-5.4 should support reasoning summaries")
 	}
-	if capabilities.DefaultReasoningLevel != "xhigh" {
-		t.Fatalf("default reasoning level = %q, want xhigh", capabilities.DefaultReasoningLevel)
+	if capabilities.DefaultReasoningLevel != "medium" {
+		t.Fatalf("default reasoning level = %q, want medium", capabilities.DefaultReasoningLevel)
 	}
 	if !capabilities.SupportsVerbosity {
 		t.Fatal("gpt-5.4 should support verbosity")

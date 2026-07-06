@@ -133,7 +133,7 @@ func newClientAPIKeyQuotaTracker() *clientAPIKeyQuotaTracker {
 func CheckClientAPIKeyQuota(apiKey string, quota config.ClientAPIKeyQuota, now time.Time) *ClientAPIKeyQuotaExceeded {
 	apiKey = strings.TrimSpace(apiKey)
 	quota = config.NormalizeClientAPIKeyQuota(quota)
-	if apiKey == "" || !quota.HasLimits() {
+	if apiKey == "" || !normalizedClientAPIKeyQuotaHasLimits(quota) {
 		return nil
 	}
 	now = now.UTC()
@@ -145,13 +145,17 @@ func CheckClientAPIKeyQuota(apiKey string, quota config.ClientAPIKeyQuota, now t
 		usage, ok, err := store.LoadClientAPIKeyQuotaUsage(ctx, apiKey, now)
 		cancel()
 		if err == nil && ok {
-			return evaluateClientAPIKeyQuota(quota, usage, now)
+			return evaluateNormalizedClientAPIKeyQuota(quota, usage, now)
 		}
 		if err != nil {
 			log.WithError(err).Debug("client api key quota redis lookup failed")
 		}
 	}
-	return defaultClientAPIKeyQuotaTracker.check(apiKey, quota, now)
+	return defaultClientAPIKeyQuotaTracker.checkNormalized(apiKey, quota, now)
+}
+
+func normalizedClientAPIKeyQuotaHasLimits(quota config.ClientAPIKeyQuota) bool {
+	return quota.DailyCost > 0 || quota.MonthlyCost > 0 || quota.TotalCost > 0
 }
 
 // SetClientAPIKeyQuotaStore swaps the optional shared quota counter backend.
@@ -248,7 +252,14 @@ func (t *clientAPIKeyQuotaTracker) check(apiKey string, quota config.ClientAPIKe
 	}
 	apiKey = strings.TrimSpace(apiKey)
 	quota = config.NormalizeClientAPIKeyQuota(quota)
-	if apiKey == "" || !quota.HasLimits() {
+	if apiKey == "" || !normalizedClientAPIKeyQuotaHasLimits(quota) {
+		return nil
+	}
+	return t.checkNormalized(apiKey, quota, now)
+}
+
+func (t *clientAPIKeyQuotaTracker) checkNormalized(apiKey string, quota config.ClientAPIKeyQuota, now time.Time) *ClientAPIKeyQuotaExceeded {
+	if t == nil {
 		return nil
 	}
 	now = now.UTC()
@@ -257,14 +268,18 @@ func (t *clientAPIKeyQuotaTracker) check(apiKey string, quota config.ClientAPIKe
 	}
 
 	usage := t.usage(apiKey, now)
-	return evaluateClientAPIKeyQuota(quota, usage, now)
+	return evaluateNormalizedClientAPIKeyQuota(quota, usage, now)
 }
 
 func evaluateClientAPIKeyQuota(quota config.ClientAPIKeyQuota, usage ClientAPIKeyQuotaUsage, now time.Time) *ClientAPIKeyQuotaExceeded {
 	quota = config.NormalizeClientAPIKeyQuota(quota)
-	if !quota.HasLimits() {
+	if !normalizedClientAPIKeyQuotaHasLimits(quota) {
 		return nil
 	}
+	return evaluateNormalizedClientAPIKeyQuota(quota, usage, now)
+}
+
+func evaluateNormalizedClientAPIKeyQuota(quota config.ClientAPIKeyQuota, usage ClientAPIKeyQuotaUsage, now time.Time) *ClientAPIKeyQuotaExceeded {
 	now = now.UTC()
 	if now.IsZero() {
 		now = time.Now().UTC()

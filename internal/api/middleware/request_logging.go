@@ -6,15 +6,20 @@ package middleware
 import (
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpbody"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	log "github.com/sirupsen/logrus"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
+const requestLogFinalizeWarnInterval = time.Minute
+
+var lastRequestLogFinalizeWarnUnixNano atomic.Int64
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
@@ -60,9 +65,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Finalize logging after request processing
 		if err := wrapper.Finalize(c); err != nil {
-			// Log error but don't interrupt the response
-			// In a real implementation, you might want to use a proper logger here
-			_ = err
+			warnRequestLogFinalizeError(err)
 		}
 
 		// Return pooled capture/response buffers now that Finalize has consumed
@@ -72,6 +75,21 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 		wrapper.release()
 	}
+}
+
+func warnRequestLogFinalizeError(err error) {
+	if err == nil {
+		return
+	}
+	now := time.Now()
+	last := lastRequestLogFinalizeWarnUnixNano.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < requestLogFinalizeWarnInterval {
+		return
+	}
+	if !lastRequestLogFinalizeWarnUnixNano.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	log.WithError(err).Warn("request logging finalize failed")
 }
 
 type fileBodySourceFactory interface {

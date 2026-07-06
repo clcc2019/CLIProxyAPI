@@ -206,10 +206,14 @@ func (s *session) send(ctx context.Context, msg Message) error {
 	default:
 	}
 	if err := s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-		return fmt.Errorf("set write deadline: %w", err)
+		err = fmt.Errorf("set write deadline: %w", err)
+		s.cleanup(err)
+		return err
 	}
 	if err := s.conn.WriteJSON(msg); err != nil {
-		return fmt.Errorf("write json: %w", err)
+		err = fmt.Errorf("write json: %w", err)
+		s.cleanup(err)
+		return err
 	}
 	return nil
 }
@@ -219,10 +223,10 @@ func (s *session) request(ctx context.Context, msg Message) (<-chan Message, err
 	if msg.ID == "" {
 		return nil, fmt.Errorf("wsrelay: message id is required")
 	}
-	if _, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan Message, pendingResponseBuffer)}); loaded {
+	value, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan Message, pendingResponseBuffer)})
+	if loaded {
 		return nil, fmt.Errorf("wsrelay: duplicate message id %s", msg.ID)
 	}
-	value, _ := s.pending.Load(msg.ID)
 	req := value.(*pendingRequest)
 	if err := s.send(ctx, msg); err != nil {
 		if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
@@ -231,15 +235,17 @@ func (s *session) request(ctx context.Context, msg Message) (<-chan Message, err
 		}
 		return nil, err
 	}
-	go func() {
-		select {
-		case <-ctx.Done():
-			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
-				actual.(*pendingRequest).close()
+	if done := ctx.Done(); done != nil {
+		go func() {
+			select {
+			case <-done:
+				if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
+					actual.(*pendingRequest).close()
+				}
+			case <-s.closed:
 			}
-		case <-s.closed:
-		}
-	}()
+		}()
+	}
 	return req.ch, nil
 }
 

@@ -1160,6 +1160,59 @@ func TestBuildCodexIncrementalWebsocketRequestBodyIgnoresWebsocketTraceMetadata(
 	}
 }
 
+func TestBuildCodexIncrementalWebsocketRequestBodyIgnoresItemMetadataFromResponse(t *testing.T) {
+	const (
+		userItem1            = `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`
+		assistantWithMeta    = `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}`
+		assistantWithoutMeta = `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}`
+		userItem2            = `{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}`
+	)
+
+	sess := &codexWebsocketSession{}
+	firstBody := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":[%s],"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"reasoning":null,"store":false,"stream":true,"include":[]}`, userItem1))
+	sess.rememberLogicalRequest(firstBody)
+	sess.rememberCompletedResponse([]byte(fmt.Sprintf(`{"response":{"id":"resp_1","output":[%s]}}`, assistantWithMeta)))
+
+	secondBody := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":[%s,%s,%s],"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"reasoning":null,"store":false,"stream":true,"include":[]}`, userItem1, assistantWithoutMeta, userItem2))
+	wsBody, ok := buildCodexIncrementalWebsocketRequestBody(sess, secondBody, "")
+	if !ok {
+		t.Fatalf("expected response item metadata to be ignored for incremental reuse")
+	}
+	if got := gjson.GetBytes(wsBody, "previous_response_id").String(); got != "resp_1" {
+		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, wsBody)
+	}
+	if got := gjson.GetBytes(wsBody, "input.#").Int(); got != 1 {
+		t.Fatalf("delta input length = %d, want 1; body=%s", got, wsBody)
+	}
+}
+
+func TestBuildCodexIncrementalWebsocketRequestBodyIgnoresItemMetadataFromRequest(t *testing.T) {
+	const (
+		userItem1WithMetaA   = `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}`
+		userItem1WithMetaB   = `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-2"}}`
+		assistantWithoutMeta = `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}`
+		assistantWithMeta    = `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-2"}}`
+		userItem2            = `{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}`
+	)
+
+	sess := &codexWebsocketSession{}
+	firstBody := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":[%s],"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"reasoning":null,"store":false,"stream":true,"include":[]}`, userItem1WithMetaA))
+	sess.rememberLogicalRequest(firstBody)
+	sess.rememberCompletedResponse([]byte(fmt.Sprintf(`{"response":{"id":"resp_1","output":[%s]}}`, assistantWithoutMeta)))
+
+	secondBody := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":[%s,%s,%s],"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"reasoning":null,"store":false,"stream":true,"include":[]}`, userItem1WithMetaB, assistantWithMeta, userItem2))
+	wsBody, ok := buildCodexIncrementalWebsocketRequestBody(sess, secondBody, "")
+	if !ok {
+		t.Fatalf("expected request item metadata to be ignored for incremental reuse")
+	}
+	if got := gjson.GetBytes(wsBody, "previous_response_id").String(); got != "resp_1" {
+		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, wsBody)
+	}
+	if got := gjson.GetBytes(wsBody, "input.#").Int(); got != 1 {
+		t.Fatalf("delta input length = %d, want 1; body=%s", got, wsBody)
+	}
+}
+
 func TestBuildCodexIncrementalWebsocketRequestBodyRejectsServiceTierChangeAfterPrewarm(t *testing.T) {
 	const userItem = `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`
 

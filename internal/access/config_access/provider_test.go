@@ -73,3 +73,65 @@ func TestAuthenticateRejectsDisabledClientAPIKey(t *testing.T) {
 		t.Fatalf("message = %q, want %q", authErr.Message, "API key disabled")
 	}
 }
+
+func TestAuthenticateFallsBackFromInvalidHeaderToQueryKey(t *testing.T) {
+	provider := newProvider("test", internalconfig.ClientAPIKeys{{
+		APIKey: "query-key",
+	}})
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.test/v1/models?key=query-key", nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer wrong-key")
+
+	result, authErr := provider.Authenticate(context.Background(), req)
+	if authErr != nil {
+		t.Fatalf("authenticate failed: %v", authErr)
+	}
+	if result == nil || result.Principal != "query-key" || result.Metadata["source"] != "query-key" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestAuthenticateUnrelatedQueryIsNoCredentials(t *testing.T) {
+	provider := newProvider("test", internalconfig.ClientAPIKeys{{
+		APIKey: "valid-key",
+	}})
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.test/v1/models?foo=bar", nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+
+	result, authErr := provider.Authenticate(context.Background(), req)
+	if result != nil {
+		t.Fatalf("expected no result, got %#v", result)
+	}
+	if authErr == nil {
+		t.Fatal("expected auth error")
+	}
+	if authErr.StatusCode != http.StatusUnauthorized || authErr.Message != "Missing API key" {
+		t.Fatalf("unexpected auth error: %#v", authErr)
+	}
+}
+
+func BenchmarkAuthenticateAuthorizationHeader(b *testing.B) {
+	provider := newProvider("test", internalconfig.ClientAPIKeys{{
+		APIKey: "valid-key",
+	}})
+	req, err := http.NewRequest(http.MethodGet, "http://example.test/v1/models", nil)
+	if err != nil {
+		b.Fatalf("new request failed: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer valid-key")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result, authErr := provider.Authenticate(context.Background(), req)
+		if authErr != nil || result == nil {
+			b.Fatalf("authenticate failed: result=%#v err=%v", result, authErr)
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,14 +29,16 @@ func matchProvider(provider string, targets []string) (string, bool) {
 
 func (w *Watcher) start(ctx context.Context) error {
 	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
-		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
-		return errAddConfig
+		err := wrapWatchAddError("config file", w.configPath, errAddConfig)
+		log.Error(err)
+		return err
 	}
 	log.Debugf("watching config file: %s", w.configPath)
 
 	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
-		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
-		return errAddAuthDir
+		err := wrapWatchAddError("auth directory", w.authDir, errAddAuthDir)
+		log.Error(err)
+		return err
 	}
 	log.Debugf("watching auth directory: %s", w.authDir)
 
@@ -43,6 +46,26 @@ func (w *Watcher) start(ctx context.Context) error {
 
 	w.reloadClients(true, nil, false)
 	return nil
+}
+
+func wrapWatchAddError(target, path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if isWatchResourceLimitError(err) {
+		return fmt.Errorf("failed to watch %s %s: %w (file watcher resource limit reached; on Linux increase fs.inotify.max_user_watches/max_user_instances or close unused watchers)", target, path, err)
+	}
+	return fmt.Errorf("failed to watch %s %s: %w", target, path, err)
+}
+
+func isWatchResourceLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no space left on device") ||
+		strings.Contains(message, "too many open files") ||
+		strings.Contains(message, "too many open files in system")
 }
 
 func (w *Watcher) processEvents(ctx context.Context) {

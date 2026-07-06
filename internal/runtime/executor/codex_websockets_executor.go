@@ -1643,9 +1643,9 @@ func codexIncrementalInputDeltaViews(source []byte, inputResult gjson.Result, pr
 		itemView := source[start:end]
 		switch {
 		case index < len(previousInput):
-			valid = codexJSONRawEqual(itemView, previousInput[index])
+			valid = codexJSONRawEqualIgnoringInternalChatMessageMetadata(itemView, previousInput[index])
 		case index < baselineLen:
-			valid = codexJSONRawEqual(itemView, responseOutput[index-len(previousInput)])
+			valid = codexJSONRawEqualIgnoringInternalChatMessageMetadata(itemView, responseOutput[index-len(previousInput)])
 		default:
 			delta = append(delta, itemView)
 		}
@@ -2238,6 +2238,29 @@ func codexJSONRawEqual(left []byte, right []byte) bool {
 		return false
 	}
 	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+func codexJSONRawEqualIgnoringInternalChatMessageMetadata(left []byte, right []byte) bool {
+	if codexJSONRawEqual(left, right) {
+		return true
+	}
+	leftStripped, leftOK := codexStripInternalChatMessageMetadata(left)
+	rightStripped, rightOK := codexStripInternalChatMessageMetadata(right)
+	if !leftOK || !rightOK {
+		return false
+	}
+	return codexJSONRawEqual(leftStripped, rightStripped)
+}
+
+func codexStripInternalChatMessageMetadata(item []byte) ([]byte, bool) {
+	if len(bytes.TrimSpace(item)) == 0 {
+		return nil, false
+	}
+	stripped, err := sjson.DeleteBytes(item, "internal_chat_message_metadata_passthrough")
+	if err != nil {
+		return nil, false
+	}
+	return stripped, true
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {

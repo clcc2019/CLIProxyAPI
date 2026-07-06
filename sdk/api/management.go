@@ -26,10 +26,6 @@ type ManagementTokenRequester interface {
 	PostOAuthCallback(c *gin.Context)
 }
 
-type managementTokenRequester struct {
-	handler *Handler
-}
-
 // NewHandler creates a management handler for SDK consumers.
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
 	return internalmanagement.NewHandler(cfg, configFilePath, manager)
@@ -42,33 +38,7 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 
 // NewManagementTokenRequester creates a limited management handler exposing only token request endpoints.
 func NewManagementTokenRequester(cfg *config.Config, manager *coreauth.Manager) ManagementTokenRequester {
-	return &managementTokenRequester{
-		handler: NewHandlerWithoutConfigFilePath(cfg, manager),
-	}
-}
-
-func (m *managementTokenRequester) RequestAnthropicToken(c *gin.Context) {
-	m.handler.RequestAnthropicToken(c)
-}
-
-func (m *managementTokenRequester) RequestCodexToken(c *gin.Context) {
-	m.handler.RequestCodexToken(c)
-}
-
-func (m *managementTokenRequester) RequestXAIToken(c *gin.Context) {
-	m.handler.RequestXAIToken(c)
-}
-
-func (m *managementTokenRequester) RequestKimiToken(c *gin.Context) {
-	m.handler.RequestKimiToken(c)
-}
-
-func (m *managementTokenRequester) GetAuthStatus(c *gin.Context) {
-	m.handler.GetAuthStatus(c)
-}
-
-func (m *managementTokenRequester) PostOAuthCallback(c *gin.Context) {
-	m.handler.PostOAuthCallback(c)
+	return NewHandlerWithoutConfigFilePath(cfg, manager)
 }
 
 // WriteConfig persists management configuration to disk.

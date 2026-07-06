@@ -534,12 +534,12 @@ func (s *Store) LoadClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, n
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	keys := []string{
+	keys := [...]string{
 		s.clientAPIKeyQuotaKey(apiKeyHash, "total", ""),
 		s.clientAPIKeyQuotaKey(apiKeyHash, "daily", now.Format("2006-01-02")),
 		s.clientAPIKeyQuotaKey(apiKeyHash, "monthly", now.Format("2006-01")),
 	}
-	values, err := s.client.MGet(ctx, keys...).Result()
+	values, err := s.client.MGet(ctx, keys[:]...).Result()
 	if err != nil {
 		return internalusage.ClientAPIKeyQuotaUsage{}, false, err
 	}
@@ -929,19 +929,21 @@ func (s *Store) clientAPIKeyQuotaKey(apiKeyHash, scope, bucket string) string {
 }
 
 func (s *Store) key(parts ...string) string {
-	clean := make([]string, 0, len(parts)+1)
 	prefix := strings.Trim(strings.TrimSpace(s.keyPrefix), ":")
 	if prefix == "" {
 		prefix = defaultKeyPrefix
 	}
-	clean = append(clean, prefix)
+	var builder strings.Builder
+	builder.Grow(len(prefix) + len(parts)*16)
+	builder.WriteString(prefix)
 	for _, part := range parts {
 		part = strings.Trim(strings.TrimSpace(part), ":")
 		if part != "" {
-			clean = append(clean, part)
+			builder.WriteByte(':')
+			builder.WriteString(part)
 		}
 	}
-	return strings.Join(clean, ":")
+	return builder.String()
 }
 
 func redisInt(value any) (int, bool) {
