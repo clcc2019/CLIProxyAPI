@@ -89,7 +89,7 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 			auth.Attributes["note"] = note
 		}
 	}
-	if userAgent, ok := authFileMetadataFirstString(auth.Metadata, "user_agent", "user-agent", "userAgent"); ok {
+	if userAgent, ok := authFileClientProfileString(auth.Metadata, "user_agent", "user-agent", "userAgent", "header:User-Agent"); ok {
 		if auth.Attributes == nil {
 			auth.Attributes = make(map[string]string)
 		}
@@ -102,16 +102,16 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 			auth.Attributes["header:User-Agent"] = userAgent
 		}
 	}
-	if originator, ok := authFileMetadataFirstString(auth.Metadata, authFileCodexOriginatorKeys...); ok {
+	if originator, ok := authFileClientProfileString(auth.Metadata, AuthFileCodexOriginatorKey, AuthFileCodexOriginatorHeader, "header:"+AuthFileCodexOriginatorHeader); ok {
 		authFileSetOriginatorAttribute(auth, originator)
 	}
-	if betaFeatures, ok := authFileMetadataFirstString(auth.Metadata, authFileCodexBetaFeaturesKeys...); ok {
+	if betaFeatures, ok := authFileClientProfileString(auth.Metadata, AuthFileCodexBetaFeaturesKey, "beta-features", "betaFeatures", "header:"+AuthFileCodexBetaFeaturesHeader); ok {
 		authFileSetHeaderAttribute(auth, AuthFileCodexBetaFeaturesHeader, betaFeatures, authFileCodexBetaFeaturesKeys...)
 	}
-	if installationID, ok := authFileMetadataFirstString(auth.Metadata, authFileCodexInstallationIDKeys...); ok {
+	if installationID, ok := authFileClientProfileString(auth.Metadata, AuthFileCodexInstallationIDKey, "installation-id", "installationId", "header:"+AuthFileCodexInstallationIDHeader); ok {
 		authFileSetHeaderAttribute(auth, AuthFileCodexInstallationIDHeader, installationID, authFileCodexInstallationIDKeys...)
 	}
-	if includeTimingMetrics, ok := authFileMetadataFirstBool(auth.Metadata, authFileCodexIncludeTimingMetricsKeys...); ok {
+	if includeTimingMetrics, ok := authFileClientProfileBool(auth.Metadata, AuthFileCodexIncludeTimingMetricsKey, "include-timing-metrics", "includeTimingMetrics", "header:"+AuthFileCodexIncludeTimingMetricsHeader); ok {
 		if includeTimingMetrics {
 			authFileSetHeaderAttribute(auth, AuthFileCodexIncludeTimingMetricsHeader, "true", authFileCodexIncludeTimingMetricsKeys...)
 		} else {
@@ -130,6 +130,38 @@ func ApplyAuthFileOptionsFromMetadata(auth *Auth) {
 		}
 		auth.Attributes[AuthFileServiceTierPassthroughKey] = strconv.FormatBool(serviceTierPassthrough)
 	}
+}
+
+// AuthFileProviderFromMetadata infers the runtime provider for auth-file JSON.
+func AuthFileProviderFromMetadata(metadata map[string]any) string {
+	provider := strings.TrimSpace(authFileProjectionString(metadata, "type"))
+	if provider != "" {
+		return provider
+	}
+	if AuthFileLooksLikeCodexClientProfile(metadata) {
+		return "codex"
+	}
+	return ""
+}
+
+// AuthFileLooksLikeCodexClientProfile recognizes auth files that only contain
+// Codex client identity fields, such as installation_id plus user_agent.
+func AuthFileLooksLikeCodexClientProfile(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	installationID, ok := authFileClientProfileString(metadata, AuthFileCodexInstallationIDKey, "installation-id", "installationId", "header:"+AuthFileCodexInstallationIDHeader)
+	if !ok || strings.TrimSpace(installationID) == "" {
+		return false
+	}
+	if value, ok := authFileClientProfileString(metadata, "user_agent", "user-agent", "userAgent", "header:User-Agent"); ok && strings.TrimSpace(value) != "" {
+		return true
+	}
+	if value, ok := authFileClientProfileString(metadata, AuthFileCodexOriginatorKey, AuthFileCodexOriginatorHeader, "header:"+AuthFileCodexOriginatorHeader); ok && strings.TrimSpace(value) != "" {
+		return true
+	}
+	value, ok := authFileClientProfileString(metadata, AuthFileCodexBetaFeaturesKey, "beta-features", "betaFeatures", "header:"+AuthFileCodexBetaFeaturesHeader)
+	return ok && strings.TrimSpace(value) != ""
 }
 
 // ApplyAuthFileWebsocketDefault enables Codex auth-file websocket transport by
@@ -257,6 +289,109 @@ func authFileMetadataFirstBool(metadata map[string]any, keys ...string) (bool, b
 		return authFileMetadataBool(value)
 	}
 	return false, false
+}
+
+func authFileClientProfileString(metadata map[string]any, keys ...string) (string, bool) {
+	if value, ok := authFileMetadataFirstString(metadata, keys...); ok {
+		return value, true
+	}
+	if value, ok := authFileHeadersString(ExtractCustomHeadersFromMetadata(metadata), keys...); ok {
+		return value, true
+	}
+	for _, objectKey := range []string{"client_profile", "clientProfile", "client_features", "clientFeatures"} {
+		nested, ok := authFileNestedMetadata(metadata, objectKey)
+		if !ok {
+			continue
+		}
+		if value, ok := authFileMetadataFirstString(nested, keys...); ok {
+			return value, true
+		}
+		if value, ok := authFileHeadersString(ExtractCustomHeadersFromMetadata(nested), keys...); ok {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func authFileClientProfileBool(metadata map[string]any, keys ...string) (bool, bool) {
+	if value, ok := authFileMetadataFirstBool(metadata, keys...); ok {
+		return value, true
+	}
+	if value, ok := authFileHeadersBool(ExtractCustomHeadersFromMetadata(metadata), keys...); ok {
+		return value, true
+	}
+	for _, objectKey := range []string{"client_profile", "clientProfile", "client_features", "clientFeatures"} {
+		nested, ok := authFileNestedMetadata(metadata, objectKey)
+		if !ok {
+			continue
+		}
+		if value, ok := authFileMetadataFirstBool(nested, keys...); ok {
+			return value, true
+		}
+		if value, ok := authFileHeadersBool(ExtractCustomHeadersFromMetadata(nested), keys...); ok {
+			return value, true
+		}
+	}
+	return false, false
+}
+
+func authFileNestedMetadata(metadata map[string]any, key string) (map[string]any, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return nil, false
+	}
+	nested, ok := raw.(map[string]any)
+	return nested, ok
+}
+
+func authFileHeadersString(headers map[string]string, keys ...string) (string, bool) {
+	for _, key := range keys {
+		headerName, ok := strings.CutPrefix(key, "header:")
+		if !ok {
+			continue
+		}
+		if value := authFileHeaderValue(headers, headerName); value != "" {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func authFileHeadersBool(headers map[string]string, keys ...string) (bool, bool) {
+	for _, key := range keys {
+		headerName, ok := strings.CutPrefix(key, "header:")
+		if !ok {
+			continue
+		}
+		value := authFileHeaderValue(headers, headerName)
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func authFileHeaderValue(headers map[string]string, headerName string) string {
+	headerName = strings.TrimSpace(headerName)
+	if len(headers) == 0 || headerName == "" {
+		return ""
+	}
+	if value := strings.TrimSpace(headers[headerName]); value != "" {
+		return value
+	}
+	for key, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), headerName) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func authFileMetadataBool(value any) (bool, bool) {

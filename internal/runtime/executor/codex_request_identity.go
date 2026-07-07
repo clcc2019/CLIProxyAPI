@@ -241,12 +241,12 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 
 func firstNonEmptyHeaderValue(target http.Header, source http.Header, key string) string {
 	if target != nil {
-		if value := strings.TrimSpace(target.Get(key)); value != "" {
+		if value := strings.TrimSpace(codexHeaderGet(target, key)); value != "" {
 			return value
 		}
 	}
 	if source != nil {
-		if value := strings.TrimSpace(source.Get(key)); value != "" {
+		if value := strings.TrimSpace(codexHeaderGet(source, key)); value != "" {
 			return value
 		}
 	}

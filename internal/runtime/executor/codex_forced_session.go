@@ -83,12 +83,12 @@ func codexApplyForcedUpstreamSessionHeaders(ctx context.Context, headers http.He
 	if sessionID == "" || headers == nil {
 		return
 	}
-	headers.Set(codexHeaderSessionID, sessionID)
-	headers.Set(codexHeaderOfficialSessionID, sessionID)
-	headers.Set(codexHeaderThreadID, sessionID)
-	headers.Set(codexHeaderOfficialThreadID, sessionID)
-	headers.Set("X-Client-Request-Id", sessionID)
-	headers.Set(codexHeaderTurnMetadata, codexBuildTurnMetadataHeader(
+	codexSetSingleHeaderValue(headers, codexHeaderSessionID, sessionID)
+	codexSetSingleHeaderValue(headers, codexHeaderOfficialSessionID, sessionID)
+	codexSetSingleHeaderValue(headers, codexHeaderThreadID, sessionID)
+	codexSetSingleHeaderValue(headers, codexHeaderOfficialThreadID, sessionID)
+	codexSetSingleHeaderValue(headers, "X-Client-Request-Id", sessionID)
+	codexSetSingleHeaderValue(headers, codexHeaderTurnMetadata, codexBuildTurnMetadataHeader(
 		"",
 		sessionID,
 		sessionID,

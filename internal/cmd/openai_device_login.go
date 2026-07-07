@@ -8,7 +8,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -37,7 +36,6 @@ func DoCodexDeviceLogin(cfg *config.Config, options *LoginOptions) {
 		CallbackPort: options.CallbackPort,
 		Metadata: map[string]string{
 			codexLoginModeMetadataKey: codexLoginModeDevice,
-			"user_agent":              misc.CodexCLIUserAgent,
 		},
 		Prompt: promptFn,
 	}

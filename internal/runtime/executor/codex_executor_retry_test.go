@@ -72,6 +72,31 @@ func TestParseCodexRetryAfter(t *testing.T) {
 			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 42*time.Minute)
 		}
 	})
+
+	t.Run("direct natural language try_again_at", func(t *testing.T) {
+		loc := time.FixedZone("UTC+8", 8*60*60)
+		now := time.Date(2026, time.May, 1, 19, 0, 0, 0, loc)
+		body := []byte(`{"error":{"type":"usage_limit_reached","try_again_at":"May 1st, 2026 7:42 PM"}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter != 42*time.Minute {
+			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 42*time.Minute)
+		}
+	})
+
+	t.Run("direct rfc3339 retry_at", func(t *testing.T) {
+		now := time.Date(2026, time.May, 1, 19, 0, 0, 0, time.UTC)
+		body := []byte(`{"error":{"type":"usage_limit_reached","retry_at":"2026-05-01T19:42:00Z"}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter != 42*time.Minute {
+			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 42*time.Minute)
+		}
+	})
 }
 
 func BenchmarkParseCodexRetryAfterMessageTryAgainAt(b *testing.B) {

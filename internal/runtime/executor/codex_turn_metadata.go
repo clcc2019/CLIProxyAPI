@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -87,10 +88,10 @@ func codexEnsureTurnMetadataHeader(target http.Header, source http.Header, defau
 	codexFillTurnMetadataLineageDefaults(target, source, &defaults)
 	codexFillTurnMetadataRequestKindDefault(target, source, &defaults)
 	if value := firstNonEmptyHeaderValue(target, source, codexHeaderTurnMetadata); value != "" {
-		target.Set(codexHeaderTurnMetadata, codexAugmentTurnMetadataHeader(value, defaults))
+		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, codexAugmentTurnMetadataHeader(value, defaults))
 		return
 	}
-	target.Set(codexHeaderTurnMetadata, codexBuildTurnMetadataHeader(
+	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, codexBuildTurnMetadataHeader(
 		defaults.requestKind,
 		defaults.sessionID,
 		defaults.threadID,
@@ -116,7 +117,7 @@ func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header
 		updated = codexSetTurnMetadataString(updated, codexRequestKindMetadataPath, defaults.requestKind, true)
 		updated = codexSetTurnMetadataString(updated, codexWindowIDMetadataPath, defaults.windowID, true)
 		updated = codexAugmentCompactionMetadata(updated, target, source)
-		target.Set(codexHeaderTurnMetadata, updated)
+		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 		return
 	}
 	updated := codexBuildTurnMetadataHeader(
@@ -133,7 +134,7 @@ func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header
 		defaults.turnStartedAtUnixMilli,
 	)
 	updated = codexAugmentCompactionMetadata(updated, target, source)
-	target.Set(codexHeaderTurnMetadata, updated)
+	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 }
 
 func codexFillTurnMetadataLineageDefaults(target http.Header, source http.Header, defaults *codexTurnMetadataDefaults) {
@@ -346,7 +347,7 @@ func codexAugmentTurnMetadataHeader(raw string, defaults codexTurnMetadataDefaul
 }
 
 func codexResponsesAPIClientMetadataFromBody(body []byte) map[string]string {
-	metadata := gjson.GetBytes(body, "client_metadata")
+	metadata := codexGJSONGetImmutableBytes(body, "client_metadata")
 	if !metadata.IsObject() {
 		return nil
 	}
@@ -501,6 +502,9 @@ func codexNormalizeCompactionMetadataValue(value string) string {
 	if value == "" {
 		return ""
 	}
+	if normalized, ok := codexNormalizeCompactionMetadataASCII(value); ok {
+		return normalized
+	}
 
 	needsNormalization := false
 	atStart := true
@@ -544,6 +548,56 @@ func codexNormalizeCompactionMetadataValue(value string) string {
 		normalized.WriteRune(r)
 	}
 	return normalized.String()
+}
+
+func codexNormalizeCompactionMetadataASCII(value string) (string, bool) {
+	needsNormalization := false
+	previousUnderscore := false
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= utf8.RuneSelf {
+			return "", false
+		}
+		if c >= 'A' && c <= 'Z' || c == '-' || c == ' ' {
+			needsNormalization = true
+		}
+		if c == '_' {
+			if i == 0 || previousUnderscore {
+				needsNormalization = true
+			}
+			previousUnderscore = true
+		} else {
+			previousUnderscore = false
+		}
+	}
+	if previousUnderscore {
+		needsNormalization = true
+	}
+	if !needsNormalization {
+		return value, true
+	}
+
+	var normalized strings.Builder
+	normalized.Grow(len(value))
+	pendingUnderscore := false
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c == '-' || c == ' ' || c == '_' {
+			if normalized.Len() > 0 {
+				pendingUnderscore = true
+			}
+			continue
+		}
+		if pendingUnderscore {
+			normalized.WriteByte('_')
+			pendingUnderscore = false
+		}
+		normalized.WriteByte(c)
+	}
+	return normalized.String(), true
 }
 
 func codexTurnMetadataSessionID(target http.Header, source http.Header) string {

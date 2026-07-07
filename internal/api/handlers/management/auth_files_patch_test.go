@@ -374,6 +374,137 @@ func TestPatchAuthFileFieldsUpdatesUserAgent(t *testing.T) {
 	}
 }
 
+func TestPatchAuthFileFieldsUpdatesClientProfileObject(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	authPath := filepath.Join(authDir, "codex-auth.json")
+	initialDoc := map[string]any{
+		"type":            "oauth",
+		"email":           "codex@example.com",
+		"user_agent":      "node",
+		"installation_id": "03cc2394-b574-43b1-bda8-bc368436d9a3",
+		"client_profile": map[string]any{
+			"user_agent":      "node",
+			"installation_id": "03cc2394-b574-43b1-bda8-bc368436d9a3",
+		},
+	}
+	rawInitial, err := json.MarshalIndent(initialDoc, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent() error = %v", err)
+	}
+	if err := os.WriteFile(authPath, append(rawInitial, '\n'), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-auth.json",
+		FileName: "codex-auth.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":           "codex@example.com",
+			"user_agent":      "node",
+			"installation_id": "03cc2394-b574-43b1-bda8-bc368436d9a3",
+		},
+		Attributes: map[string]string{
+			"path":                           authPath,
+			"header:User-Agent":              "node",
+			"header:X-Codex-Installation-Id": "03cc2394-b574-43b1-bda8-bc368436d9a3",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = store
+
+	body, err := json.Marshal(map[string]any{
+		"name": "codex-auth.json",
+		"client_profile": map[string]any{
+			"user_agent":      "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9",
+			"installation_id": "9d5e3f12-3854-4920-9e9a-6f5dfbf7314b",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatal("expected updated auth to exist")
+	}
+	if got, _ := updated.Metadata["user_agent"].(string); got != "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("Metadata[user_agent] = %q, want updated user agent", got)
+	}
+	if got, _ := updated.Metadata["installation_id"].(string); got != "9d5e3f12-3854-4920-9e9a-6f5dfbf7314b" {
+		t.Fatalf("Metadata[installation_id] = %q, want updated installation id", got)
+	}
+	if got := updated.Attributes["header:User-Agent"]; got != "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("Attributes[header:User-Agent] = %q, want updated user agent", got)
+	}
+	if got := updated.Attributes["header:X-Codex-Installation-Id"]; got != "9d5e3f12-3854-4920-9e9a-6f5dfbf7314b" {
+		t.Fatalf("Attributes[header:X-Codex-Installation-Id] = %q, want updated installation id", got)
+	}
+
+	var persisted map[string]any
+	rawPersisted, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if err := json.Unmarshal(rawPersisted, &persisted); err != nil {
+		t.Fatalf("Unmarshal persisted auth file: %v", err)
+	}
+	if got, _ := persisted["user_agent"].(string); got != "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("persisted user_agent = %q, want updated user agent", got)
+	}
+	if got, _ := persisted["installation_id"].(string); got != "9d5e3f12-3854-4920-9e9a-6f5dfbf7314b" {
+		t.Fatalf("persisted installation_id = %q, want updated installation id", got)
+	}
+	persistedProfile, ok := persisted["client_profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("persisted client_profile = %#v, want object", persisted["client_profile"])
+	}
+	if got, _ := persistedProfile["user_agent"].(string); got != "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("persisted client_profile.user_agent = %q, want updated user agent", got)
+	}
+	if got, _ := persistedProfile["installation_id"].(string); got != "9d5e3f12-3854-4920-9e9a-6f5dfbf7314b" {
+		t.Fatalf("persisted client_profile.installation_id = %q, want updated installation id", got)
+	}
+
+	var response struct {
+		File map[string]any `json:"file"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Unmarshal response: %v", err)
+	}
+	profile, ok := response.File["client_profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("response.file.client_profile = %#v, want object", response.File["client_profile"])
+	}
+	if got, _ := profile["user_agent"].(string); got != "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("client_profile[user_agent] = %q, want updated user agent", got)
+	}
+	if got, _ := profile["installation_id"].(string); got != "9d5e3f12-3854-4920-9e9a-6f5dfbf7314b" {
+		t.Fatalf("client_profile[installation_id] = %q, want updated installation id", got)
+	}
+}
+
 func TestBuildAuthFileEntryExposesUserAgent(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	auth := &coreauth.Auth{

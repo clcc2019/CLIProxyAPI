@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -25,6 +26,13 @@ type scopedAuthFilePath struct {
 	rootDir string
 	relPath string
 	root    *os.Root
+}
+
+type authFileCandidate struct {
+	index   int
+	path    string
+	relPath string
+	info    os.FileInfo
 }
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
@@ -142,16 +150,17 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 	if err != nil {
 		return nil, fmt.Errorf("auth filestore: resolve auth dir: %w", err)
 	}
-	root, err := os.OpenRoot(absDir)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = root.Close() }()
-
-	entries := make([]*cliproxyauth.Auth, 0)
+	candidates := make([]authFileCandidate, 0)
 	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 		}
 		if d.IsDir() {
 			return nil
@@ -171,19 +180,149 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		if err != nil {
 			return nil
 		}
-		auth, err := s.readAuthFileFromRoot(root, path, dir, relPath, info)
-		if err != nil {
-			return nil
-		}
-		if auth != nil {
-			entries = append(entries, auth)
-		}
+		candidates = append(candidates, authFileCandidate{
+			index:   len(candidates),
+			path:    path,
+			relPath: relPath,
+			info:    info,
+		})
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	results, err := s.readAuthFileCandidates(ctx, dir, absDir, candidates)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]*cliproxyauth.Auth, 0, len(results))
+	for _, auth := range results {
+		if auth != nil {
+			entries = append(entries, auth)
+		}
+	}
 	return entries, nil
+}
+
+func (s *FileTokenStore) readAuthFileCandidates(ctx context.Context, dir, absDir string, candidates []authFileCandidate) ([]*cliproxyauth.Auth, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	workerCount := authFileListWorkerCount(len(candidates))
+	if workerCount <= 1 {
+		root, err := os.OpenRoot(absDir)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = root.Close() }()
+
+		results := make([]*cliproxyauth.Auth, len(candidates))
+		for _, candidate := range candidates {
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				default:
+				}
+			}
+			auth, err := s.readAuthFileFromRoot(root, candidate.path, dir, candidate.relPath, candidate.info)
+			if err != nil {
+				return nil, err
+			}
+			results[candidate.index] = auth
+		}
+		return results, nil
+	}
+
+	ctxRead, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan authFileCandidate)
+	results := make([]*cliproxyauth.Auth, len(candidates))
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	setErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			cancel()
+		}
+		errMu.Unlock()
+	}
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			root, err := os.OpenRoot(absDir)
+			if err != nil {
+				setErr(err)
+				return
+			}
+			defer func() { _ = root.Close() }()
+
+			for candidate := range jobs {
+				select {
+				case <-ctxRead.Done():
+					return
+				default:
+				}
+				auth, err := s.readAuthFileFromRoot(root, candidate.path, dir, candidate.relPath, candidate.info)
+				if err != nil {
+					setErr(err)
+					return
+				}
+				results[candidate.index] = auth
+			}
+		}()
+	}
+
+	for _, candidate := range candidates {
+		select {
+		case <-ctxRead.Done():
+			break
+		case jobs <- candidate:
+			continue
+		}
+		break
+	}
+	close(jobs)
+	wg.Wait()
+
+	errMu.Lock()
+	defer errMu.Unlock()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctxRead.Err(); err != nil && ctx != nil && ctx.Err() != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func authFileListWorkerCount(count int) int {
+	if count <= 1 {
+		return 1
+	}
+	workers := runtime.GOMAXPROCS(0) * 2
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > 16 {
+		workers = 16
+	}
+	if workers > count {
+		workers = count
+	}
+	return workers
 }
 
 // Delete removes the auth file.

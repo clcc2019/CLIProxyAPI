@@ -480,13 +480,15 @@ func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, com
 	}
 }
 
-func clearCodexReasoningReplayOnInvalidSignature(scope codexReasoningReplayScope, statusCode int, body []byte) {
+func clearCodexReasoningReplayOnInvalidSignature(scope codexReasoningReplayScope, statusCode int, body []byte) bool {
 	if !scope.valid() {
-		return
+		return false
 	}
 	if codexReasoningReplayInvalidSignatureError(body) {
 		internalcache.DeleteCodexReasoningReplayItem(scope.modelName, scope.sessionKey)
+		return true
 	}
+	return false
 }
 
 func codexReasoningReplayInvalidSignatureError(body []byte) bool {
@@ -495,7 +497,9 @@ func codexReasoningReplayInvalidSignatureError(body []byte) bool {
 	}
 	body = bytes.TrimSpace(body)
 	return asciifold.ContainsBytes(body, "invalid signature in thinking block") ||
-		asciifold.ContainsBytes(body, "invalid_encrypted_content")
+		asciifold.ContainsBytes(body, "invalid_encrypted_content") ||
+		asciifold.ContainsBytes(body, "encrypted content") && asciifold.ContainsBytes(body, "could not be verified") ||
+		asciifold.ContainsBytes(body, "encrypted content could not be decrypted or parsed")
 }
 
 func headerValueCaseInsensitive(headers http.Header, key string) string {

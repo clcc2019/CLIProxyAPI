@@ -34,6 +34,13 @@ const (
 	creditsUsedKey = "__upstream_credits_used__"
 )
 
+// GinLogrusLoggerOptions configures the Gin access logger.
+type GinLogrusLoggerOptions struct {
+	// AccessLogEnabled reports whether successful request access logs should be
+	// emitted. Warn/error status logs are still emitted when this returns false.
+	AccessLogEnabled func() bool
+}
+
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
 // client IP, and any error messages. Request ID is only added for AI API requests.
@@ -44,6 +51,13 @@ const (
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for request logging
 func GinLogrusLogger() gin.HandlerFunc {
+	return GinLogrusLoggerWithOptions(GinLogrusLoggerOptions{
+		AccessLogEnabled: func() bool { return true },
+	})
+}
+
+// GinLogrusLoggerWithOptions returns a Gin access logger with runtime-tunable options.
+func GinLogrusLoggerWithOptions(opts GinLogrusLoggerOptions) gin.HandlerFunc {
 	logger := log.StandardLogger()
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -66,6 +80,9 @@ func GinLogrusLogger() gin.HandlerFunc {
 
 		statusCode := c.Writer.Status()
 		level := ginRequestLogLevel(statusCode)
+		if level == log.InfoLevel && opts.AccessLogEnabled != nil && !opts.AccessLogEnabled() {
+			return
+		}
 		if ginRequestLogDiscarded(logger) || !logger.IsLevelEnabled(level) {
 			return
 		}

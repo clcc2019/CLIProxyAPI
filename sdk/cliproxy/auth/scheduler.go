@@ -338,10 +338,15 @@ func (s *authScheduler) pickSingleStable(ctx context.Context, provider, model st
 
 // pickMixed returns the next auth and provider for a mixed-provider request.
 func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, string, error) {
+	return s.pickMixedNormalized(ctx, normalizeProviderKeys(providers), model, opts, tried)
+}
+
+// pickMixedNormalized is pickMixed for callers that already normalized and
+// validated the provider list.
+func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, string, error) {
 	if s == nil {
 		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	normalized := normalizeProviderKeys(providers)
 	if len(normalized) == 0 {
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -512,13 +517,16 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 }
 
 func (s *authScheduler) pickMixedStable(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, affinityKey string) (*Auth, string, error) {
+	return s.pickMixedStableNormalized(ctx, normalizeProviderKeys(providers), model, opts, tried, affinityKey)
+}
+
+func (s *authScheduler) pickMixedStableNormalized(ctx context.Context, normalized []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, affinityKey string) (*Auth, string, error) {
 	if strings.TrimSpace(affinityKey) == "" {
-		return s.pickMixed(ctx, providers, model, opts, tried)
+		return s.pickMixedNormalized(ctx, normalized, model, opts, tried)
 	}
 	if s == nil {
 		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	normalized := normalizeProviderKeys(providers)
 	if len(normalized) == 0 {
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}

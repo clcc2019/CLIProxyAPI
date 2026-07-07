@@ -119,7 +119,7 @@
       "slug": "gpt-5.4",
       "display_name": "gpt-5.4",
       "description": "Strong model for everyday coding.",
-      "default_reasoning_level": "medium",
+      "default_reasoning_level": "xhigh",
       "supported_reasoning_levels": [
         {
           "effort": "low",

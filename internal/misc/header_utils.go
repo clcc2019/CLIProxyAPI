@@ -169,16 +169,25 @@ func CodexCLIUserAgentWithOriginator(originator string) string {
 	if cached, ok := codexUserAgentCache.Load(originator); ok {
 		return cached.(string)
 	}
-	userAgent := fmt.Sprintf(
+	userAgent := CodexCLIUserAgentWithOriginatorAndVersion(originator, CodexCLIVersion)
+	cached, _ := codexUserAgentCache.LoadOrStore(originator, userAgent)
+	return cached.(string)
+}
+
+func CodexCLIUserAgentWithOriginatorAndVersion(originator string, version string) string {
+	originator = codexNormalizedOriginator(originator)
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = CodexCLIVersion
+	}
+	return fmt.Sprintf(
 		"%s/%s (%s; %s) %s",
 		originator,
-		CodexCLIVersion,
+		version,
 		codexCLIOS(),
 		codexCLIArch(),
 		codexTerminal(),
 	)
-	cached, _ := codexUserAgentCache.LoadOrStore(originator, userAgent)
-	return cached.(string)
 }
 
 func codexNormalizedOriginator(originator string) string {

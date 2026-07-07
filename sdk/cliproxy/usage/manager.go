@@ -191,10 +191,24 @@ type Plugin interface {
 	HandleUsage(ctx context.Context, record Record)
 }
 
+// Item is one queued usage record with its originating context.
+type Item struct {
+	Context context.Context
+	Record  Record
+}
+
+// BatchPlugin can consume a batch of queued usage records. Managers still
+// preserve queue order inside the batch.
+type BatchPlugin interface {
+	HandleUsageBatch(items []Item)
+}
+
 type queueItem struct {
 	ctx    context.Context
 	record Record
 }
+
+const maxDispatchBatch = 64
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
 type Manager struct {
@@ -333,6 +347,7 @@ func (m *Manager) run(ctx context.Context) {
 	}()
 	defer close(contextDone)
 
+	var batchScratch [maxDispatchBatch]queueItem
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {
@@ -342,23 +357,40 @@ func (m *Manager) run(ctx context.Context) {
 			m.mu.Unlock()
 			return
 		}
-		item := m.queue[0]
-		clearQueueItem(&m.queue[0])
-		m.queue = m.queue[1:]
-		m.processing++
+		batch := m.takeBatchLocked(batchScratch[:])
+		m.processing += len(batch)
 		m.mu.Unlock()
 
-		m.dispatch(item)
+		m.dispatchBatch(batch)
+		clearQueueItems(batch)
 
 		m.mu.Lock()
-		if m.processing > 0 {
-			m.processing--
+		m.processing -= len(batch)
+		if m.processing < 0 {
+			m.processing = 0
 		}
 		if len(m.queue) == 0 && m.processing == 0 {
 			m.cond.Broadcast()
 		}
 		m.mu.Unlock()
 	}
+}
+
+func (m *Manager) takeBatchLocked(dst []queueItem) []queueItem {
+	limit := len(dst)
+	if limit <= 0 {
+		limit = maxDispatchBatch
+	}
+	if len(m.queue) < limit {
+		limit = len(m.queue)
+	}
+	batch := dst[:limit]
+	copy(batch, m.queue[:limit])
+	for i := 0; i < limit; i++ {
+		clearQueueItem(&m.queue[i])
+	}
+	m.queue = m.queue[limit:]
+	return batch
 }
 
 func (m *Manager) close() {
@@ -377,16 +409,39 @@ func clearQueueItem(item *queueItem) {
 	*item = queueItem{}
 }
 
+func clearQueueItems(items []queueItem) {
+	for i := range items {
+		clearQueueItem(&items[i])
+	}
+}
+
 func (m *Manager) dispatch(item queueItem) {
+	m.dispatchBatch([]queueItem{item})
+}
+
+func (m *Manager) dispatchBatch(batch []queueItem) {
 	plugins, _ := m.snapshot.Load().([]Plugin)
-	if len(plugins) == 0 {
+	if len(plugins) == 0 || len(batch) == 0 {
 		return
 	}
+	var items []Item
 	for _, plugin := range plugins {
 		if plugin == nil {
 			continue
 		}
-		safeInvoke(plugin, item.ctx, item.record)
+		if batchPlugin, ok := plugin.(BatchPlugin); ok && batchPlugin != nil {
+			if items == nil {
+				items = make([]Item, len(batch))
+				for i, item := range batch {
+					items[i] = Item{Context: item.ctx, Record: item.record}
+				}
+			}
+			safeInvokeBatch(batchPlugin, items)
+			continue
+		}
+		for _, item := range batch {
+			safeInvoke(plugin, item.ctx, item.record)
+		}
 	}
 }
 
@@ -397,6 +452,15 @@ func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
 		}
 	}()
 	plugin.HandleUsage(ctx, record)
+}
+
+func safeInvokeBatch(plugin BatchPlugin, items []Item) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("usage: batch plugin panic recovered: %v", r)
+		}
+	}()
+	plugin.HandleUsageBatch(items)
 }
 
 var defaultManager = NewManager(512)
