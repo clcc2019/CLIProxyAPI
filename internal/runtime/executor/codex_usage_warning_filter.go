@@ -372,33 +372,33 @@ func codexUsageWarningPrefixText(text string) string {
 	if text == "" {
 		return ""
 	}
-	var b strings.Builder
-	b.Grow(len(text))
+	var stack [128]byte
+	out := stack[:0]
 	lastSpace := false
-	for _, r := range text {
+	for i := 0; i < len(text); i++ {
+		c := text[i]
 		switch {
-		case r >= 'A' && r <= 'Z':
-			b.WriteByte(byte(r + ('a' - 'A')))
+		case c >= 'A' && c <= 'Z':
+			out = append(out, c+('a'-'A'))
 			lastSpace = false
-		case r >= 'a' && r <= 'z':
-			b.WriteByte(byte(r))
+		case c >= 'a' && c <= 'z':
+			out = append(out, c)
 			lastSpace = false
-		case r >= '0' && r <= '9':
-			b.WriteByte(byte(r))
+		case c >= '0' && c <= '9':
+			out = append(out, c)
 			lastSpace = false
-		case r == '/' || r == '%':
-			b.WriteByte(byte(r))
+		case c == '/' || c == '%':
+			out = append(out, c)
 			lastSpace = false
-		case r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == ',' || r == '.':
-			if !lastSpace && b.Len() > 0 {
-				b.WriteByte(' ')
+		case c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',' || c == '.':
+			if !lastSpace && len(out) > 0 {
+				out = append(out, ' ')
 				lastSpace = true
 			}
 		}
 	}
-	out := b.String()
 	if lastSpace && len(out) > 0 {
-		return out[:len(out)-1]
+		out = out[:len(out)-1]
 	}
-	return out
+	return string(out)
 }

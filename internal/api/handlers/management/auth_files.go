@@ -268,6 +268,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 				}
 				var metadata map[string]any
 				if err := json.Unmarshal(data, &metadata); err == nil {
+					if strings.TrimSpace(typeValue) == "" {
+						typeValue = coreauth.AuthFileProviderFromMetadata(metadata)
+						if typeValue != "" {
+							fileData["type"] = typeValue
+						}
+					}
 					if authFileMetadataHasRefreshToken(metadata) {
 						fileData["has_refresh_token"] = true
 					}

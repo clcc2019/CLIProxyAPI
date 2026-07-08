@@ -51,6 +51,9 @@ const (
 	codexResponsesWebsocketReadBuffer   = 8
 	codexResponsesWebsocketReadLimit    = 64 << 20
 	codexResponsesWebsocketMaxParked    = 16
+	codexWebsocketHeaderInitialCapacity = 12
+	codexDefaultResponsesHTTPURL        = "https://chatgpt.com/backend-api/codex/responses"
+	codexDefaultResponsesWebsocketURL   = "wss://chatgpt.com/backend-api/codex/responses"
 )
 
 var codexResponsesWebsocketParkTTL = 10 * time.Second
@@ -1223,24 +1226,24 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 
 	executionSessionID := executionSessionIDFromOptions(opts)
 	body = codexSanitizeForcedUpstreamSessionBody(ctx, body)
-	body, wsHeaders := e.applyCodexPromptCacheHeaders(ctx, opts.SourceFormat, executionSessionID, req, body)
+	body, wsHeaders, promptCacheID := e.applyCodexPromptCacheHeaders(ctx, opts.SourceFormat, executionSessionID, req, body)
 	codexApplyForcedUpstreamSessionHeaders(ctx, wsHeaders)
 	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	explicitTurnMetadata := ""
 	if codexForcedUpstreamSessionID(ctx) == "" {
 		explicitTurnMetadata = codexExplicitWebsocketTurnMetadata(ctx, body)
 	}
-	if explicitTurnMetadata != "" && strings.TrimSpace(wsHeaders.Get(codexHeaderTurnMetadata)) == "" {
-		wsHeaders.Set(codexHeaderTurnMetadata, explicitTurnMetadata)
+	if explicitTurnMetadata != "" && trimHeaderValue(wsHeaders, codexHeaderTurnMetadata) == "" {
+		codexSetSingleHeaderValue(wsHeaders, codexHeaderTurnMetadata, explicitTurnMetadata)
 	}
 	codexEnsureExecutionSessionHeader(wsHeaders, codexGinHeadersFromContext(ctx), executionSessionID)
 	wsHeaders = applyCodexWebsocketHeadersForRequestKind(ctx, wsHeaders, auth, apiKey, e.cfg, codexWebsocketTurnMetadataRequestKind(body))
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(wsHeaders, responsesAPIClientMetadata)
-	turnStateScope := strings.TrimSpace(wsHeaders.Get(codexHeaderTurnMetadata))
+	turnStateScope := trimHeaderValue(wsHeaders, codexHeaderTurnMetadata)
 	if explicitTurnMetadata != "" {
 		turnStateScope = explicitTurnMetadata
 	}
-	body = codexApplyWebsocketClientMetadataWithStreamStartMS(ctx, body, wsHeaders, auth, e.cfg, strconv.FormatInt(time.Now().UnixMilli(), 10))
+	body = codexApplyWebsocketClientMetadataWithResponseCreateType(ctx, body, wsHeaders, auth, e.cfg, strconv.FormatInt(time.Now().UnixMilli(), 10))
 	wsHeaders.Del("Traceparent")
 	wsHeaders.Del("Tracestate")
 
@@ -1251,16 +1254,15 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		authType, authValue = auth.AccountInfo()
 	}
 
-	reuseKey := codexWebsocketReusableKey(opts.SourceFormat, authID, wsURL, body)
 	prepared := &codexPreparedWebsocketRequest{
 		body:               body,
 		wsURL:              wsURL,
 		wsHeaders:          wsHeaders,
 		authID:             authID,
 		executionSessionID: executionSessionID,
-		reuseKey:           reuseKey,
 	}
 	if prepared.executionSessionID != "" {
+		prepared.reuseKey = codexWebsocketReusableKeyFromParts(authID, wsURL, promptCacheID, trimHeaderValue(wsHeaders, codexHeaderWindowID))
 		prepared.sess = e.getOrCreateSession(prepared.executionSessionID, prepared.reuseKey)
 		if prepared.sess != nil {
 			prepared.sess.reqMu.Lock()
@@ -1279,10 +1281,16 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		}
 	}
 
-	prepared.wsReqBody = buildCodexWebsocketRequestBodyWithCurrentTurnMetadata(body)
 	if !prepared.httpFallback && prepared.sess != nil {
 		if incrementalBody, ok := buildCodexIncrementalWebsocketRequestBody(prepared.sess, body, wsHeaders.Get("X-Codex-Turn-Metadata")); ok {
 			prepared.wsReqBody = incrementalBody
+		}
+	}
+	if len(prepared.wsReqBody) == 0 {
+		if codexWebsocketRequestBodyReady(body) {
+			prepared.wsReqBody = body
+		} else {
+			prepared.wsReqBody = buildCodexWebsocketRequestBodyWithCurrentTurnMetadata(body)
 		}
 	}
 	prepared.wsReqLog = helps.UpstreamRequestLog{
@@ -1316,11 +1324,17 @@ func codexEnsureExecutionSessionHeader(headers http.Header, source http.Header, 
 	if firstNonEmptyHeaderValue(headers, source, "Conversation_id") != "" {
 		return
 	}
-	headers.Set(codexHeaderSessionID, executionSessionID)
+	codexSetSingleHeaderValue(headers, codexHeaderSessionID, executionSessionID)
 }
 
 func codexWebsocketReusableKey(_ sdktranslator.Format, authID string, wsURL string, body []byte) string {
 	promptCacheID := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+	windowID := strings.TrimSpace(gjson.GetBytes(body, "client_metadata."+codexClientMetadataWindowID).String())
+	return codexWebsocketReusableKeyFromParts(authID, wsURL, promptCacheID, windowID)
+}
+
+func codexWebsocketReusableKeyFromParts(authID string, wsURL string, promptCacheID string, windowID string) string {
+	promptCacheID = strings.TrimSpace(promptCacheID)
 	if promptCacheID == "" {
 		return ""
 	}
@@ -1329,7 +1343,7 @@ func codexWebsocketReusableKey(_ sdktranslator.Format, authID string, wsURL stri
 	if authID == "" || wsURL == "" {
 		return ""
 	}
-	windowID := strings.TrimSpace(gjson.GetBytes(body, "client_metadata."+codexClientMetadataWindowID).String())
+	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {
 		return authID + "|" + wsURL + "|" + promptCacheID
 	}
@@ -1578,6 +1592,10 @@ func buildCodexWebsocketRequestBodyWithCurrentTurnMetadata(body []byte) []byte {
 		return updated
 	}
 	return body
+}
+
+func codexWebsocketRequestBodyReady(body []byte) bool {
+	return strings.TrimSpace(codexGJSONGetImmutableBytes(body, "type").String()) == "response.create"
 }
 
 func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body []byte, turnMetadataHeader string) ([]byte, bool) {
@@ -2401,7 +2419,17 @@ func buildCodexWebsocketDialer(proxyURL string) *websocket.Dialer {
 }
 
 func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(httpURL))
+	httpURL = strings.TrimSpace(httpURL)
+	if httpURL == codexDefaultResponsesHTTPURL {
+		return codexDefaultResponsesWebsocketURL, nil
+	}
+	if rest, ok := strings.CutPrefix(httpURL, "https://"); ok {
+		return "wss://" + rest, nil
+	}
+	if rest, ok := strings.CutPrefix(httpURL, "http://"); ok {
+		return "ws://" + rest, nil
+	}
+	parsed, err := url.Parse(httpURL)
 	if err != nil {
 		return "", err
 	}
@@ -2413,10 +2441,10 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Context, from sdktranslator.Format, executionSessionID string, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
-	headers := make(http.Header, codexRequestHeaderInitialCapacity)
+func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Context, from sdktranslator.Format, executionSessionID string, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header, string) {
+	headers := make(http.Header, codexWebsocketHeaderInitialCapacity)
 	if len(rawJSON) == 0 {
-		return rawJSON, headers
+		return rawJSON, headers, ""
 	}
 
 	var resolution codexPromptCacheResolution
@@ -2439,17 +2467,14 @@ func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Conte
 			threadFallbackValue = resolution.threadHeaderID
 		}
 		if sessionHeaderValue := codexPromptCacheSessionHeaderValue(ctx, sessionFallbackValue); sessionHeaderValue != "" {
-			headers.Set(codexHeaderSessionID, sessionHeaderValue)
+			codexSetSingleHeaderValue(headers, codexHeaderSessionID, sessionHeaderValue)
 		}
 		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, threadFallbackValue); threadHeaderValue != "" {
-			headers.Set(codexHeaderThreadID, threadHeaderValue)
-		}
-		if conversationID := strings.TrimSpace(fallbackHeaderValue); conversationID != "" {
-			headers.Set("Conversation_id", conversationID)
+			codexSetSingleHeaderValue(headers, codexHeaderThreadID, threadHeaderValue)
 		}
 	}
 
-	return rawJSON, headers
+	return rawJSON, headers, resolution.cache.ID
 }
 
 func codexExplicitWebsocketTurnMetadata(ctx context.Context, body []byte) string {
@@ -2478,7 +2503,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 		headers = make(http.Header, codexRequestHeaderInitialCapacity)
 	}
 	if strings.TrimSpace(token) != "" {
-		headers.Set("Authorization", "Bearer "+token)
+		codexSetSingleHeaderValue(headers, "Authorization", "Bearer "+token)
 	}
 
 	ginHeaders := codexGinHeadersFromContext(ctx)
@@ -2486,18 +2511,18 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	codexPreparePinnedClientProfileHeaders(headers, auth)
 	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithPriority(headers, profileHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
-	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderResponsesAPIIncludeTimingMetrics, "")
+	ensureHeaderWithPriority(headers, profileHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
+	codexEnsureHeader(headers, profileHeaders, codexWireHeaderResponsesAPIIncludeTimingMetrics, "")
 	if codexIncludeTimingMetrics(cfg) {
-		headers.Set(codexWireHeaderResponsesAPIIncludeTimingMetrics, "true")
+		codexSetSingleHeaderValue(headers, codexWireHeaderResponsesAPIIncludeTimingMetrics, "true")
 	}
 	codexEnsureVersionHeader(headers, profileHeaders)
-	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderOpenAISubagent, "")
-	misc.EnsureHeader(headers, profileHeaders, codexWireHeaderOAIAttestation, "")
+	codexEnsureHeader(headers, profileHeaders, codexWireHeaderOpenAISubagent, "")
+	codexEnsureHeader(headers, profileHeaders, codexWireHeaderOAIAttestation, "")
 
-	headers.Set(codexWireHeaderOpenAIBeta, codexResponsesWebsocketBetaHeaderValue)
+	codexSetSingleHeaderValue(headers, codexWireHeaderOpenAIBeta, codexResponsesWebsocketBetaHeaderValue)
 	identity := codexIdentity(headers, profileHeaders, auth, cfgUserAgent)
-	headers.Set("User-Agent", identity.userAgent)
+	codexSetSingleHeaderValue(headers, "User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: true,
 	})
@@ -2505,13 +2530,13 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	codexEnsureTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
 		requestKind: strings.TrimSpace(requestKind),
 		sessionID:   sessionID,
-		threadID:    strings.TrimSpace(headers.Get(codexHeaderThreadID)),
+		threadID:    trimHeaderValue(headers, codexHeaderThreadID),
 		turnID:      uuid.NewString(),
 		sandbox:     codexDefaultSandboxTag,
-		windowID:    strings.TrimSpace(headers.Get(codexHeaderWindowID)),
+		windowID:    trimHeaderValue(headers, codexHeaderWindowID),
 	})
-	misc.EnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
-	headers.Set("Originator", identity.originator)
+	codexEnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
+	codexSetSingleHeaderValue(headers, "Originator", identity.originator)
 	apiKeyAuth := codexIsAPIKeyAuth(auth)
 	if accountID := codexAccountID(auth, apiKeyAuth); accountID != "" {
 		codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, accountID)
@@ -2525,7 +2550,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	if util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs) {
 		codexEnsureVersionHeader(headers, nil)
 		if cfgUserAgent != "" {
-			headers.Set("User-Agent", cfgUserAgent)
+			codexSetSingleHeaderValue(headers, "User-Agent", cfgUserAgent)
 		}
 	}
 
@@ -2548,21 +2573,39 @@ func ensureHeaderWithPriority(target http.Header, source http.Header, key, confi
 	if target == nil {
 		return
 	}
-	if strings.TrimSpace(target.Get(key)) != "" {
+	if trimHeaderValue(target, key) != "" {
 		return
 	}
 	if source != nil {
-		if val := strings.TrimSpace(source.Get(key)); val != "" {
-			target.Set(key, val)
+		if val := trimHeaderValue(source, key); val != "" {
+			codexSetSingleHeaderValue(target, key, val)
 			return
 		}
 	}
 	if val := strings.TrimSpace(configValue); val != "" {
-		target.Set(key, val)
+		codexSetSingleHeaderValue(target, key, val)
 		return
 	}
 	if val := strings.TrimSpace(fallbackValue); val != "" {
-		target.Set(key, val)
+		codexSetSingleHeaderValue(target, key, val)
+	}
+}
+
+func codexEnsureHeader(target http.Header, source http.Header, key, defaultValue string) {
+	if target == nil {
+		return
+	}
+	if source != nil {
+		if val := trimHeaderValue(source, key); val != "" {
+			codexSetSingleHeaderValue(target, key, val)
+			return
+		}
+	}
+	if trimHeaderValue(target, key) != "" {
+		return
+	}
+	if val := strings.TrimSpace(defaultValue); val != "" {
+		codexSetSingleHeaderValue(target, key, val)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -49,10 +48,7 @@ func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
-		Metadata: map[string]string{
-			"user_agent": misc.CodexCLIUserAgent,
-		},
-		Prompt: promptFn,
+		Prompt:       promptFn,
 	}
 
 	_, savedPath, err := manager.Login(context.Background(), "codex", cfg, authOpts)

@@ -2715,16 +2715,19 @@ func authRuntimeOnly(auth *Auth) bool {
 
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
-	m.mu.Lock()
+	m.mu.RLock()
 	if m.store == nil {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 		return nil
 	}
-	items, err := m.store.List(ctx)
+	store := m.store
+	m.mu.RUnlock()
+
+	items, err := store.List(ctx)
 	if err != nil {
-		m.mu.Unlock()
 		return err
 	}
+	m.mu.Lock()
 	m.auths = make(map[string]*Auth, len(items))
 	m.removedAuths = make(map[string]authRemovalTombstone)
 	for _, auth := range items {
@@ -5924,12 +5927,12 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	opts = withProviderScopeMetadata(opts, eligibleProviders)
 	model = strings.TrimSpace(model)
 	if model != "" && m.mixedLegacySelectionRequired(eligibleProviders, model, tried) {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 	if affinity := schedulerBackedSessionAffinitySelector(m.selector); affinity != nil {
+		opts = withProviderScopeMetadata(opts, eligibleProviders)
 		return m.pickNextMixedWithSchedulerAffinity(ctx, affinity, eligibleProviders, model, opts, tried)
 	}
 	return m.pickNextMixedWithScheduler(ctx, eligibleProviders, model, opts, tried)
@@ -6012,10 +6015,10 @@ func (m *Manager) pickCachedMixedWithScheduler(ctx context.Context, providers []
 func (m *Manager) pickNextMixedStableWithScheduler(ctx context.Context, eligibleProviders []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, affinityKey string) (*Auth, ProviderExecutor, string, error) {
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixedStable(ctx, eligibleProviders, model, opts, tried, affinityKey)
+		selected, providerKey, errPick := m.scheduler.pickMixedStableNormalized(ctx, eligibleProviders, model, opts, tried, affinityKey)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixedStable(ctx, eligibleProviders, model, opts, tried, affinityKey)
+			selected, providerKey, errPick = m.scheduler.pickMixedStableNormalized(ctx, eligibleProviders, model, opts, tried, affinityKey)
 		}
 		if errPick != nil {
 			return nil, nil, "", errPick
@@ -6050,10 +6053,10 @@ func (m *Manager) pickNextMixedWithScheduler(ctx context.Context, eligibleProvid
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		selected, providerKey, errPick := m.scheduler.pickMixedNormalized(ctx, eligibleProviders, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+			selected, providerKey, errPick = m.scheduler.pickMixedNormalized(ctx, eligibleProviders, model, opts, tried)
 		}
 		if errPick != nil {
 			return nil, nil, "", errPick

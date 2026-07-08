@@ -142,6 +142,32 @@ func TestClientAPIKeyQuotaTrackerChargesCacheCreationAsPromptInput(t *testing.T)
 	}
 }
 
+func TestClientAPIKeyQuotaTrackerClearsPriceCacheOnModelPriceUpdate(t *testing.T) {
+	tracker := newClientAPIKeyQuotaTracker()
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	record := coreusage.Record{
+		APIKey:      "client-key",
+		RequestedAt: now,
+		Model:       "gpt-test",
+		Detail:      coreusage.Detail{InputTokens: 1_000_000},
+	}
+
+	tracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1},
+	})
+	tracker.record(record)
+
+	tracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 2},
+	})
+	tracker.record(record)
+
+	usage := tracker.usage("client-key", now)
+	if usage.TotalCost != 3 || usage.DailyCost != 3 || usage.MonthlyCost != 3 {
+		t.Fatalf("usage after price update = %#v, want all costs=3", usage)
+	}
+}
+
 func TestClientAPIKeyQuotaCheckUsesSharedStoreWhenAvailable(t *testing.T) {
 	resetClientAPIKeyQuotaGlobals(t)
 	defaultClientAPIKeyQuotaTracker.setModelPrices(config.ModelPrices{
@@ -197,6 +223,135 @@ func TestClientAPIKeyQuotaPluginWritesSharedStore(t *testing.T) {
 	add := store.adds[0]
 	if add.apiKey != "client-key" || !add.timestamp.Equal(now) || add.cost != 2 {
 		t.Fatalf("shared store add = %#v, want api key, timestamp and cost=2", add)
+	}
+}
+
+func TestClientAPIKeyQuotaPluginBatchesSharedStoreAdds(t *testing.T) {
+	resetClientAPIKeyQuotaGlobals(t)
+	defaultClientAPIKeyQuotaTracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1, Completion: 2},
+	})
+	store := &fakeClientAPIKeyQuotaStore{}
+	SetClientAPIKeyQuotaStore(store)
+
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	clientAPIKeyQuotaPlugin{}.HandleUsageBatch([]coreusage.Item{
+		{
+			Context: context.Background(),
+			Record: coreusage.Record{
+				APIKey:      "client-key",
+				RequestedAt: now,
+				Model:       "gpt-test",
+				Detail:      coreusage.Detail{InputTokens: 1_000_000},
+			},
+		},
+		{
+			Context: context.Background(),
+			Record: coreusage.Record{
+				APIKey:      "client-key",
+				RequestedAt: now.Add(time.Minute),
+				Model:       "gpt-test",
+				Detail:      coreusage.Detail{OutputTokens: 500_000},
+			},
+		},
+	})
+
+	if len(store.adds) != 1 {
+		t.Fatalf("shared store adds = %d, want 1", len(store.adds))
+	}
+	add := store.adds[0]
+	if add.apiKey != "client-key" || !add.timestamp.Equal(now) || add.cost != 2 {
+		t.Fatalf("shared store add = %#v, want earliest timestamp and cost=2", add)
+	}
+	usage := defaultClientAPIKeyQuotaTracker.usage("client-key", now)
+	if usage.DailyCost != 2 || usage.MonthlyCost != 2 || usage.TotalCost != 2 {
+		t.Fatalf("local usage = %#v, want all costs=2", usage)
+	}
+}
+
+func BenchmarkClientAPIKeyQuotaRecordBatch(b *testing.B) {
+	tracker := newClientAPIKeyQuotaTracker()
+	tracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1, Completion: 2, Cache: 0.5},
+	})
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	items := make([]coreusage.Item, 64)
+	for i := range items {
+		items[i] = coreusage.Item{
+			Context: context.Background(),
+			Record: coreusage.Record{
+				APIKey:      "client-key",
+				RequestedAt: now.Add(time.Duration(i) * time.Second),
+				Model:       "gpt-test",
+				Detail: coreusage.Detail{
+					InputTokens:  1_000,
+					CachedTokens: 250,
+					OutputTokens: 500,
+				},
+			},
+		}
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tracker.recordBatch(items, true)
+	}
+}
+
+func BenchmarkClientAPIKeyQuotaRecordBatchLocalOnly(b *testing.B) {
+	tracker := newClientAPIKeyQuotaTracker()
+	tracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1, Completion: 2, Cache: 0.5},
+	})
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	items := make([]coreusage.Item, 64)
+	for i := range items {
+		items[i] = coreusage.Item{
+			Context: context.Background(),
+			Record: coreusage.Record{
+				APIKey:      "client-key",
+				RequestedAt: now.Add(time.Duration(i) * time.Second),
+				Model:       "gpt-test",
+				Detail: coreusage.Detail{
+					InputTokens:  1_000,
+					CachedTokens: 250,
+					OutputTokens: 500,
+				},
+			},
+		}
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tracker.recordBatch(items, false)
+	}
+}
+
+func BenchmarkClientAPIKeyQuotaRecordIndividually(b *testing.B) {
+	tracker := newClientAPIKeyQuotaTracker()
+	tracker.setModelPrices(config.ModelPrices{
+		"gpt-test": {Prompt: 1, Completion: 2, Cache: 0.5},
+	})
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	records := make([]coreusage.Record, 64)
+	for i := range records {
+		records[i] = coreusage.Record{
+			APIKey:      "client-key",
+			RequestedAt: now.Add(time.Duration(i) * time.Second),
+			Model:       "gpt-test",
+			Detail: coreusage.Detail{
+				InputTokens:  1_000,
+				CachedTokens: 250,
+				OutputTokens: 500,
+			},
+		}
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for j := range records {
+			tracker.record(records[j])
+		}
 	}
 }
 

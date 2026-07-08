@@ -18,8 +18,8 @@ func TestCodexStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
 			if info == nil {
 				t.Fatal("gpt-5.5 not found")
 			}
-			if info.ContextLength != 1050000 {
-				t.Fatalf("context length = %d, want 1050000", info.ContextLength)
+			if info.ContextLength != 272000 {
+				t.Fatalf("context length = %d, want 272000", info.ContextLength)
 			}
 		})
 	}
@@ -28,8 +28,8 @@ func TestCodexStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
 	if info == nil {
 		t.Fatal("LookupStaticModelInfo did not find gpt-5.5")
 	}
-	if info.ContextLength != 1050000 {
-		t.Fatalf("lookup context length = %d, want 1050000", info.ContextLength)
+	if info.ContextLength != 272000 {
+		t.Fatalf("lookup context length = %d, want 272000", info.ContextLength)
 	}
 }
 
@@ -40,6 +40,28 @@ func TestCodexFreeStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T
 	}
 	if info.ContextLength != 272000 {
 		t.Fatalf("context length = %d, want 272000", info.ContextLength)
+	}
+}
+
+func TestStaticProviderModelsIncludeLatestSyncedModels(t *testing.T) {
+	tests := []struct {
+		name   string
+		models []*ModelInfo
+		id     string
+	}{
+		{name: "claude sonnet 5", models: GetClaudeModels(), id: "claude-sonnet-5"},
+		{name: "claude fable 5", models: GetClaudeModels(), id: "claude-fable-5"},
+		{name: "codex plus spark", models: GetCodexPlusModels(), id: "gpt-5.3-codex-spark"},
+		{name: "kimi k2.7 code", models: GetKimiModels(), id: "kimi-k2.7-code"},
+		{name: "kimi k2.7 code highspeed", models: GetKimiModels(), id: "kimi-k2.7-code-highspeed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if findModelInfo(tt.models, tt.id) == nil {
+				t.Fatalf("%s not found", tt.id)
+			}
+		})
 	}
 }
 
@@ -68,8 +90,8 @@ func TestCodexClientModelCapabilitiesForModelUsesEmbeddedCatalog(t *testing.T) {
 	if !capabilities.SupportsReasoningSummaries {
 		t.Fatal("gpt-5.4 should support reasoning summaries")
 	}
-	if capabilities.DefaultReasoningLevel != "medium" {
-		t.Fatalf("default reasoning level = %q, want medium", capabilities.DefaultReasoningLevel)
+	if capabilities.DefaultReasoningLevel != "xhigh" {
+		t.Fatalf("default reasoning level = %q, want xhigh", capabilities.DefaultReasoningLevel)
 	}
 	if !capabilities.SupportsVerbosity {
 		t.Fatal("gpt-5.4 should support verbosity")

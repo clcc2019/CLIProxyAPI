@@ -82,10 +82,11 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 
 	authSvc := codex.NewCodexAuth(cfg)
 
+	clientFeatures := NewCodexClientFeatures(opts.Metadata)
 	authURL, err := authSvc.GenerateAuthURLWithOptions(
 		state,
 		pkceCodes,
-		codexLoginOriginator(opts),
+		clientFeatures.Originator,
 		codexLoginWorkspaceID(opts),
 	)
 	if err != nil {
@@ -199,32 +200,21 @@ waitForCallback:
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle, opts)
+	return a.buildAuthRecordWithClientFeatures(authSvc, authBundle, opts, clientFeatures)
 }
 
 func codexLoginUserAgent(opts *LoginOptions) string {
-	if opts == nil || len(opts.Metadata) == 0 {
-		return misc.CodexCLIUserAgent
+	if opts == nil {
+		return NewCodexClientFeatures(nil).UserAgent
 	}
-	if ua := strings.TrimSpace(opts.Metadata["user_agent"]); ua != "" {
-		return ua
-	}
-	if ua := strings.TrimSpace(opts.Metadata["user-agent"]); ua != "" {
-		return ua
-	}
-	return misc.CodexCLIUserAgentWithOriginator(codexLoginOriginator(opts))
+	return NewCodexClientFeatures(opts.Metadata).UserAgent
 }
 
 func codexLoginOriginator(opts *LoginOptions) string {
-	if opts == nil || len(opts.Metadata) == 0 {
-		return misc.CodexCLIOriginator
+	if opts == nil {
+		return NewCodexClientFeatures(nil).Originator
 	}
-	for _, key := range []string{"originator", "Originator", "header:Originator", "header:originator"} {
-		if value := strings.TrimSpace(opts.Metadata[key]); value != "" {
-			return value
-		}
-	}
-	return misc.CodexCLIOriginator
+	return NewCodexClientFeatures(opts.Metadata).Originator
 }
 
 func codexLoginWorkspaceID(opts *LoginOptions) string {

@@ -227,9 +227,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	// Initialize Codex auth service
 	openaiAuth := codex.NewCodexAuth(h.cfg)
+	clientFeatures := sdkAuth.NewCodexClientFeatures(nil)
 
 	// Generate authorization URL
-	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, err := openaiAuth.GenerateAuthURLWithOptions(state, pkceCodes, clientFeatures.Originator, "")
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -240,6 +241,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	isWebUI := isWebUIRequest(c)
 	requestUserAgent := codexLoginRequestUserAgent(c)
+	if requestUserAgent != "" {
+		clientFeatures.UserAgent = requestUserAgent
+	}
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
@@ -326,12 +330,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		if planType != "" {
 			record.Metadata["plan_type"] = planType
 		}
-		if requestUserAgent != "" {
-			record.Metadata["user_agent"] = requestUserAgent
-			record.Attributes = map[string]string{
-				"header:User-Agent": requestUserAgent,
-			}
-		}
+		clientFeatures.AddToMetadata(record.Metadata)
+		record.Attributes = map[string]string{}
+		clientFeatures.AddToAttributes(record.Attributes)
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")

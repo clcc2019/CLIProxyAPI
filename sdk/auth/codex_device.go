@@ -251,6 +251,14 @@ func codexDeviceIsSuccessStatus(code int) bool {
 }
 
 func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle, opts *LoginOptions) (*coreauth.Auth, error) {
+	var metadataInput map[string]string
+	if opts != nil {
+		metadataInput = opts.Metadata
+	}
+	return a.buildAuthRecordWithClientFeatures(authSvc, authBundle, opts, NewCodexClientFeatures(metadataInput))
+}
+
+func (a *CodexAuthenticator) buildAuthRecordWithClientFeatures(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle, opts *LoginOptions, clientFeatures CodexClientFeatures) (*coreauth.Auth, error) {
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
 	if tokenStorage == nil || tokenStorage.Email == "" {
@@ -282,8 +290,6 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	}
 
 	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
-	originator := codexLoginOriginator(opts)
-	userAgent := codexLoginUserAgent(opts)
 	metadata := map[string]any{
 		"email":        tokenStorage.Email,
 		"access_token": tokenStorage.AccessToken,
@@ -300,12 +306,7 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	if tokenStorage.IDToken != "" {
 		metadata["id_token"] = tokenStorage.IDToken
 	}
-	if originator != "" {
-		metadata["originator"] = originator
-	}
-	if userAgent != "" {
-		metadata["user_agent"] = userAgent
-	}
+	clientFeatures.AddToMetadata(metadata)
 
 	fmt.Println("Codex authentication successful")
 	if authBundle.APIKey != "" {
@@ -319,12 +320,7 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	if tokenStorage.AccountID != "" {
 		attrs["account_id"] = tokenStorage.AccountID
 	}
-	if originator != "" {
-		attrs["header:Originator"] = originator
-	}
-	if userAgent != "" {
-		attrs["header:User-Agent"] = userAgent
-	}
+	clientFeatures.AddToAttributes(attrs)
 
 	return &coreauth.Auth{
 		ID:         fileName,

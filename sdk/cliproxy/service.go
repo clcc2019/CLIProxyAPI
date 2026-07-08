@@ -480,15 +480,49 @@ func (s *Service) rebindExecutors() {
 		return
 	}
 	auths := s.coreManager.List()
-	reboundCodex := false
+	rebound := make(map[string]struct{}, len(auths))
 	for _, auth := range auths {
-		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-			if reboundCodex {
-				continue
-			}
-			reboundCodex = true
+		key := executorRebindKeyForAuth(auth)
+		if key == "" {
+			continue
 		}
+		if _, ok := rebound[key]; ok {
+			continue
+		}
+		rebound[key] = struct{}{}
 		s.ensureExecutorsForAuthWithMode(auth, true)
+	}
+}
+
+func executorRebindKeyForAuth(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "codex" {
+		return "codex"
+	}
+	if auth.Disabled {
+		return ""
+	}
+	if compatProviderKey, compatName, isCompat := openAICompatInfoFromAuth(auth); isCompat {
+		key := strings.ToLower(strings.TrimSpace(compatProviderKey))
+		if key == "" {
+			key = strings.ToLower(strings.TrimSpace(compatName))
+		}
+		if key == "" {
+			key = "openai-compatibility"
+		}
+		return "compat:" + key
+	}
+	if provider == "" {
+		return "compat:openai-compatibility"
+	}
+	switch provider {
+	case "claude", "kimi", "xai":
+		return provider
+	default:
+		return "compat:" + provider
 	}
 }
 

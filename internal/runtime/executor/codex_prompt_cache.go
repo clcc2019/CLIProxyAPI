@@ -59,14 +59,14 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 
 	// Path 1: the caller already supplied a prompt_cache_key. Trust it; this
 	// is the codex-rs native path (prompt_cache_key == conversation_id).
-	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "prompt_cache_key").String()); key != "" {
+	if key := strings.TrimSpace(codexGJSONGetImmutableBytes(req.Payload, "prompt_cache_key").String()); key != "" {
 		key = codexNormalizePromptCacheKey(key)
 		return codexPromptCacheResolution{
 			cache:            helps.CodexCache{ID: key},
 			headerEligibleID: key,
 		}
 	}
-	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "metadata.prompt_cache_key").String()); key != "" {
+	if key := strings.TrimSpace(codexGJSONGetImmutableBytes(req.Payload, "metadata.prompt_cache_key").String()); key != "" {
 		key = codexNormalizePromptCacheKey(key)
 		return codexPromptCacheResolution{
 			cache:            helps.CodexCache{ID: key},
@@ -80,7 +80,7 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 	// existing deployments keep warming the same cache entry. We only fall
 	// back to the generic fingerprinting logic when user_id is missing.
 	if from == "claude" {
-		if userID := strings.TrimSpace(gjson.GetBytes(req.Payload, "metadata.user_id").String()); userID != "" {
+		if userID := strings.TrimSpace(codexGJSONGetImmutableBytes(req.Payload, "metadata.user_id").String()); userID != "" {
 			key := fmt.Sprintf("%s-%s", req.Model, userID)
 			return codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
 		}
@@ -288,7 +288,7 @@ func codexPromptCachePayloadTurnMetadataValue(payload []byte, path string) strin
 	if len(payload) == 0 {
 		return ""
 	}
-	metadata := gjson.GetBytes(payload, "client_metadata."+codexClientMetadataTurnMetadata)
+	metadata := codexGJSONGetImmutableBytes(payload, "client_metadata."+codexClientMetadataTurnMetadata)
 	if metadata.IsObject() {
 		return strings.TrimSpace(metadata.Get(path).String())
 	}
@@ -355,7 +355,7 @@ func codexPromptCacheTurnMetadataValue(headers http.Header, path string) string 
 	if headers == nil {
 		return ""
 	}
-	raw := strings.TrimSpace(headers.Get(codexHeaderTurnMetadata))
+	raw := trimHeaderValue(headers, codexHeaderTurnMetadata)
 	if raw == "" {
 		return ""
 	}
@@ -418,7 +418,7 @@ func conversationContentFingerprint(req cliproxyexecutor.Request) string {
 	// message + same model ⇒ same conversation, which is the assumption
 	// prompt caching is built on anyway.
 	if content := firstUserContent(payload); content != "" {
-		if user := strings.TrimSpace(gjson.GetBytes(payload, "user").String()); user != "" {
+		if user := strings.TrimSpace(codexGJSONGetImmutableBytes(payload, "user").String()); user != "" {
 			return "c:" + shortHashString("user="+user+"\x00content="+content)
 		}
 		return "c:" + shortHashString(content)
@@ -432,7 +432,7 @@ func conversationContentFingerprint(req cliproxyexecutor.Request) string {
 // schemas this proxy accepts.
 func firstUserContent(payload []byte) string {
 	// OpenAI Chat Completions: messages[*].role == "user"
-	if msgs := gjson.GetBytes(payload, "messages"); msgs.IsArray() {
+	if msgs := codexGJSONGetImmutableBytes(payload, "messages"); msgs.IsArray() {
 		for _, m := range msgs.Array() {
 			if strings.EqualFold(strings.TrimSpace(m.Get("role").String()), "user") {
 				if c := strings.TrimSpace(m.Get("content").Raw); c != "" && c != "null" {
@@ -442,7 +442,7 @@ func firstUserContent(payload []byte) string {
 		}
 	}
 	// OpenAI Responses: input[*].role == "user"
-	if inputs := gjson.GetBytes(payload, "input"); inputs.IsArray() {
+	if inputs := codexGJSONGetImmutableBytes(payload, "input"); inputs.IsArray() {
 		for _, m := range inputs.Array() {
 			if strings.EqualFold(strings.TrimSpace(m.Get("role").String()), "user") {
 				if c := strings.TrimSpace(m.Get("content").Raw); c != "" && c != "null" {
@@ -461,7 +461,7 @@ func firstUserContent(payload []byte) string {
 	// Anthropic Messages API: messages[*].role == "user"; same field name as
 	// OpenAI chat so the first branch already handles it. Fall back to
 	// top-level "prompt" for older / non-standard clients.
-	if p := strings.TrimSpace(gjson.GetBytes(payload, "prompt").Raw); p != "" && p != "null" {
+	if p := strings.TrimSpace(codexGJSONGetImmutableBytes(payload, "prompt").Raw); p != "" && p != "null" {
 		return p
 	}
 	return ""

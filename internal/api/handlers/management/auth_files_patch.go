@@ -18,27 +18,40 @@ import (
 )
 
 type patchAuthFileFieldsRequest struct {
-	Name                         string            `json:"name"`
-	Prefix                       *string           `json:"prefix"`
-	ProxyURL                     *string           `json:"proxy_url"`
-	ProxyURLLegacy               *string           `json:"proxy-url"`
-	ProxyURLCamel                *string           `json:"proxyUrl"`
-	Headers                      map[string]string `json:"headers"`
-	Priority                     json.RawMessage   `json:"priority"`
-	Note                         *string           `json:"note"`
-	UserAgent                    *string           `json:"user_agent"`
-	UserAgentCamel               *string           `json:"userAgent"`
-	ExcludedModels               *[]string         `json:"excluded_models"`
-	ExcludedModelsLegacy         *[]string         `json:"excluded-models"`
-	ExcludedModelsCamel          *[]string         `json:"excludedModels"`
-	DisableCooling               json.RawMessage   `json:"disable_cooling"`
-	DisableCoolingLegacy         json.RawMessage   `json:"disable-cooling"`
-	DisableCoolingCamel          json.RawMessage   `json:"disableCooling"`
-	Websockets                   *bool             `json:"websockets"`
-	ServiceTierPassthrough       *bool             `json:"service_tier_passthrough"`
-	ServiceTierPassthroughLegacy *bool             `json:"service-tier-passthrough"`
-	ServiceTierPassthroughCamel  *bool             `json:"serviceTierPassthrough"`
-	Fast                         *bool             `json:"fast"`
+	Name                         string              `json:"name"`
+	Prefix                       *string             `json:"prefix"`
+	ProxyURL                     *string             `json:"proxy_url"`
+	ProxyURLLegacy               *string             `json:"proxy-url"`
+	ProxyURLCamel                *string             `json:"proxyUrl"`
+	Headers                      map[string]string   `json:"headers"`
+	Priority                     json.RawMessage     `json:"priority"`
+	Note                         *string             `json:"note"`
+	UserAgent                    *string             `json:"user_agent"`
+	UserAgentCamel               *string             `json:"userAgent"`
+	InstallationID               *string             `json:"installation_id"`
+	InstallationIDLegacy         *string             `json:"installation-id"`
+	InstallationIDCamel          *string             `json:"installationId"`
+	ClientProfile                *clientProfilePatch `json:"client_profile"`
+	ClientFeatures               *clientProfilePatch `json:"client_features"`
+	ExcludedModels               *[]string           `json:"excluded_models"`
+	ExcludedModelsLegacy         *[]string           `json:"excluded-models"`
+	ExcludedModelsCamel          *[]string           `json:"excludedModels"`
+	DisableCooling               json.RawMessage     `json:"disable_cooling"`
+	DisableCoolingLegacy         json.RawMessage     `json:"disable-cooling"`
+	DisableCoolingCamel          json.RawMessage     `json:"disableCooling"`
+	Websockets                   *bool               `json:"websockets"`
+	ServiceTierPassthrough       *bool               `json:"service_tier_passthrough"`
+	ServiceTierPassthroughLegacy *bool               `json:"service-tier-passthrough"`
+	ServiceTierPassthroughCamel  *bool               `json:"serviceTierPassthrough"`
+	Fast                         *bool               `json:"fast"`
+}
+
+type clientProfilePatch struct {
+	UserAgent            *string `json:"user_agent"`
+	UserAgentCamel       *string `json:"userAgent"`
+	InstallationID       *string `json:"installation_id"`
+	InstallationIDLegacy *string `json:"installation-id"`
+	InstallationIDCamel  *string `json:"installationId"`
 }
 
 func (req patchAuthFileFieldsRequest) resolvedProxyURL() *string {
@@ -55,7 +68,56 @@ func (req patchAuthFileFieldsRequest) resolvedUserAgent() *string {
 	if req.UserAgent != nil {
 		return req.UserAgent
 	}
-	return req.UserAgentCamel
+	if req.UserAgentCamel != nil {
+		return req.UserAgentCamel
+	}
+	if req.ClientProfile != nil {
+		if value := req.ClientProfile.resolvedUserAgent(); value != nil {
+			return value
+		}
+	}
+	if req.ClientFeatures != nil {
+		return req.ClientFeatures.resolvedUserAgent()
+	}
+	return nil
+}
+
+func (req patchAuthFileFieldsRequest) resolvedInstallationID() *string {
+	if req.InstallationID != nil {
+		return req.InstallationID
+	}
+	if req.InstallationIDLegacy != nil {
+		return req.InstallationIDLegacy
+	}
+	if req.InstallationIDCamel != nil {
+		return req.InstallationIDCamel
+	}
+	if req.ClientProfile != nil {
+		if value := req.ClientProfile.resolvedInstallationID(); value != nil {
+			return value
+		}
+	}
+	if req.ClientFeatures != nil {
+		return req.ClientFeatures.resolvedInstallationID()
+	}
+	return nil
+}
+
+func (p clientProfilePatch) resolvedUserAgent() *string {
+	if p.UserAgent != nil {
+		return p.UserAgent
+	}
+	return p.UserAgentCamel
+}
+
+func (p clientProfilePatch) resolvedInstallationID() *string {
+	if p.InstallationID != nil {
+		return p.InstallationID
+	}
+	if p.InstallationIDLegacy != nil {
+		return p.InstallationIDLegacy
+	}
+	return p.InstallationIDCamel
 }
 
 func (req patchAuthFileFieldsRequest) resolvedExcludedModels() *[]string {
@@ -192,6 +254,17 @@ func applyPatchAuthFileDocument(
 			doc["user_agent"] = userAgent
 		}
 	}
+	if reqInstallationID := req.resolvedInstallationID(); reqInstallationID != nil {
+		installationID := strings.TrimSpace(*reqInstallationID)
+		delete(doc, "installation-id")
+		delete(doc, "installationId")
+		if installationID == "" {
+			delete(doc, coreauth.AuthFileCodexInstallationIDKey)
+		} else {
+			doc[coreauth.AuthFileCodexInstallationIDKey] = installationID
+		}
+	}
+	applyPatchAuthFileClientProfileObjects(doc, req)
 	if reqExcludedModels := req.resolvedExcludedModels(); reqExcludedModels != nil {
 		models := normalizeExcludedModelsInput(*reqExcludedModels)
 		delete(doc, "excluded-models")
@@ -220,6 +293,47 @@ func applyPatchAuthFileDocument(
 		delete(doc, "serviceTierPassthrough")
 		delete(doc, "fast")
 		doc[coreauth.AuthFileServiceTierPassthroughKey] = *reqServiceTierPassthrough
+	}
+}
+
+func applyPatchAuthFileClientProfileObjects(doc map[string]any, req patchAuthFileFieldsRequest) {
+	if doc == nil {
+		return
+	}
+	for _, key := range []string{"client_profile", "client_features"} {
+		raw, ok := doc[key]
+		if !ok {
+			continue
+		}
+		profile, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if reqUserAgent := req.resolvedUserAgent(); reqUserAgent != nil {
+			userAgent := strings.TrimSpace(*reqUserAgent)
+			delete(profile, "user-agent")
+			delete(profile, "userAgent")
+			if userAgent == "" {
+				delete(profile, "user_agent")
+			} else {
+				profile["user_agent"] = userAgent
+			}
+		}
+		if reqInstallationID := req.resolvedInstallationID(); reqInstallationID != nil {
+			installationID := strings.TrimSpace(*reqInstallationID)
+			delete(profile, "installation-id")
+			delete(profile, "installationId")
+			if installationID == "" {
+				delete(profile, coreauth.AuthFileCodexInstallationIDKey)
+			} else {
+				profile[coreauth.AuthFileCodexInstallationIDKey] = installationID
+			}
+		}
+		if len(profile) == 0 {
+			delete(doc, key)
+		} else {
+			doc[key] = profile
+		}
 	}
 }
 
@@ -395,6 +509,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 	reqProxyURL := req.resolvedProxyURL()
 	reqUserAgent := req.resolvedUserAgent()
+	reqInstallationID := req.resolvedInstallationID()
 	reqExcludedModels := req.resolvedExcludedModels()
 	reqServiceTierPassthrough := req.resolvedServiceTierPassthrough()
 	disableCoolingRaw := req.DisableCooling
@@ -515,7 +630,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if priorityPresent || req.Note != nil || reqUserAgent != nil || disableCoolingPresent || req.Websockets != nil || reqServiceTierPassthrough != nil {
+	if priorityPresent || req.Note != nil || reqUserAgent != nil || reqInstallationID != nil || disableCoolingPresent || req.Websockets != nil || reqServiceTierPassthrough != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -560,6 +675,24 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 				delete(targetAuth.Attributes, "user_agent")
 				delete(targetAuth.Attributes, "user-agent")
 				delete(targetAuth.Attributes, "userAgent")
+			}
+		}
+		if reqInstallationID != nil {
+			trimmedInstallationID := strings.TrimSpace(*reqInstallationID)
+			delete(targetAuth.Metadata, "installation-id")
+			delete(targetAuth.Metadata, "installationId")
+			if trimmedInstallationID == "" {
+				delete(targetAuth.Metadata, coreauth.AuthFileCodexInstallationIDKey)
+				delete(targetAuth.Attributes, "header:"+coreauth.AuthFileCodexInstallationIDHeader)
+				delete(targetAuth.Attributes, coreauth.AuthFileCodexInstallationIDKey)
+				delete(targetAuth.Attributes, "installation-id")
+				delete(targetAuth.Attributes, "installationId")
+			} else {
+				targetAuth.Metadata[coreauth.AuthFileCodexInstallationIDKey] = trimmedInstallationID
+				targetAuth.Attributes["header:"+coreauth.AuthFileCodexInstallationIDHeader] = trimmedInstallationID
+				delete(targetAuth.Attributes, coreauth.AuthFileCodexInstallationIDKey)
+				delete(targetAuth.Attributes, "installation-id")
+				delete(targetAuth.Attributes, "installationId")
 			}
 		}
 		if disableCoolingPresent {
