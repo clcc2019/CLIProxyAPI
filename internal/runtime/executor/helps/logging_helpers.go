@@ -791,55 +791,13 @@ func extractHTMLTitle(body []byte) string {
 	if end == -1 {
 		return ""
 	}
-	titleBytes := bytes.TrimSpace(body[start : start+end])
-	if len(titleBytes) == 0 {
-		return ""
-	}
-	if !bytes.ContainsAny(titleBytes, "& \t\r\n") {
-		return string(titleBytes)
-	}
-	title := html.UnescapeString(string(titleBytes))
+	title := string(body[start : start+end])
+	title = html.UnescapeString(title)
+	title = strings.TrimSpace(title)
 	if title == "" {
 		return ""
 	}
-	return collapseWhitespace(title)
-}
-
-func collapseWhitespace(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	needsCollapse := false
-	lastSpace := false
-	for _, r := range value {
-		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
-			if lastSpace || r != ' ' {
-				needsCollapse = true
-			}
-			lastSpace = true
-			continue
-		}
-		lastSpace = false
-	}
-	if !needsCollapse {
-		return value
-	}
-	var b strings.Builder
-	b.Grow(len(value))
-	lastSpace = false
-	for _, r := range value {
-		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
-			if !lastSpace && b.Len() > 0 {
-				b.WriteByte(' ')
-				lastSpace = true
-			}
-			continue
-		}
-		b.WriteRune(r)
-		lastSpace = false
-	}
-	return b.String()
+	return strings.Join(strings.Fields(title), " ")
 }
 
 // extractJSONErrorMessage attempts to extract error.message from JSON error responses

@@ -3,7 +3,6 @@
 package tui
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -115,7 +114,7 @@ func (c *Client) postJSON(path string, body any) error {
 	if err != nil {
 		return err
 	}
-	_, code, err := c.doRequest("POST", path, bytes.NewReader(jsonBody))
+	_, code, err := c.doRequest("POST", path, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return err
 	}
@@ -178,7 +177,7 @@ func (c *Client) DeleteAuthFile(name string) error {
 // ToggleAuthFile enables or disables an auth file.
 func (c *Client) ToggleAuthFile(name string, disabled bool) error {
 	body, _ := json.Marshal(map[string]any{"name": name, "disabled": disabled})
-	_, err := c.patch("/v0/management/auth-files/status", bytes.NewReader(body))
+	_, err := c.patch("/v0/management/auth-files/status", strings.NewReader(string(body)))
 	return err
 }
 
@@ -186,7 +185,7 @@ func (c *Client) ToggleAuthFile(name string, disabled bool) error {
 func (c *Client) PatchAuthFileFields(name string, fields map[string]any) error {
 	fields["name"] = name
 	body, _ := json.Marshal(fields)
-	_, err := c.patch("/v0/management/auth-files/fields", bytes.NewReader(body))
+	_, err := c.patch("/v0/management/auth-files/fields", strings.NewReader(string(body)))
 	return err
 }
 
@@ -270,7 +269,7 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 func (c *Client) AddAPIKey(key string) error {
 	body := map[string]any{"old": nil, "new": key}
 	jsonBody, _ := json.Marshal(body)
-	_, err := c.patch("/v0/management/api-keys", bytes.NewReader(jsonBody))
+	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
 	return err
 }
 
@@ -278,7 +277,7 @@ func (c *Client) AddAPIKey(key string) error {
 func (c *Client) EditAPIKey(index int, newValue string) error {
 	body := map[string]any{"index": index, "value": newValue}
 	jsonBody, _ := json.Marshal(body)
-	_, err := c.patch("/v0/management/api-keys", bytes.NewReader(jsonBody))
+	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
 	return err
 }
 
@@ -369,21 +368,21 @@ func (c *Client) GetAuthStatus(state string) (string, string, error) {
 // PutBoolField updates a boolean config field.
 func (c *Client) PutBoolField(path string, value bool) error {
 	body, _ := json.Marshal(map[string]any{"value": value})
-	_, err := c.put("/v0/management/"+path, bytes.NewReader(body))
+	_, err := c.put("/v0/management/"+path, strings.NewReader(string(body)))
 	return err
 }
 
 // PutIntField updates an integer config field.
 func (c *Client) PutIntField(path string, value int) error {
 	body, _ := json.Marshal(map[string]any{"value": value})
-	_, err := c.put("/v0/management/"+path, bytes.NewReader(body))
+	_, err := c.put("/v0/management/"+path, strings.NewReader(string(body)))
 	return err
 }
 
 // PutStringField updates a string config field.
 func (c *Client) PutStringField(path string, value string) error {
 	body, _ := json.Marshal(map[string]any{"value": value})
-	_, err := c.put("/v0/management/"+path, bytes.NewReader(body))
+	_, err := c.put("/v0/management/"+path, strings.NewReader(string(body)))
 	return err
 }
 

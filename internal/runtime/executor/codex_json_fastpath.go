@@ -15,7 +15,7 @@ func codexSetPromptCacheKey(body []byte, cacheID string) []byte {
 		return body
 	}
 
-	existing := codexGJSONGetImmutableBytes(body, "prompt_cache_key")
+	existing := gjson.GetBytes(body, "prompt_cache_key")
 	if existing.Exists() && existing.Type == gjson.String && existing.String() == cacheID {
 		return body
 	}

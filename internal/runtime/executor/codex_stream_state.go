@@ -152,10 +152,6 @@ func (s *codexStreamFunctionCallState) appendArgumentsDelta(delta string) {
 	if s == nil || delta == "" {
 		return
 	}
-	if s.Arguments == "" && s.argumentsBuilder.Len() == 0 {
-		s.Arguments = delta
-		return
-	}
 	s.ensureArgumentsBuilderCapacity(len(delta))
 	if s.Arguments != "" && s.argumentsBuilder.Len() == 0 {
 		s.argumentsBuilder.WriteString(s.Arguments)
@@ -1123,7 +1119,7 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 	}
 
 	outputResult := gjson.GetBytes(completedData, "response.output")
-	if outputResult.Exists() && outputResult.IsArray() && codexJSONArrayHasItemsRaw(outputResult.Raw) {
+	if outputResult.Exists() && outputResult.IsArray() && outputResult.Get("#").Int() > 0 {
 		return completedData, 0
 	}
 
@@ -1234,20 +1230,6 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 
 	patched := patchCodexCompletedOutputWithRecoveredItemsAtResult(completedData, outputResult, recovered)
 	return patched, len(recovered)
-}
-
-func codexJSONArrayHasItemsRaw(raw string) bool {
-	for i := 0; i < len(raw); i++ {
-		switch raw[i] {
-		case ' ', '\t', '\r', '\n', '[':
-			continue
-		case ']':
-			return false
-		default:
-			return true
-		}
-	}
-	return false
 }
 
 func (s *codexStreamCompletionState) patchCompletedOutputFromRecordedItemsOnly(completedData []byte, outputResult gjson.Result) ([]byte, int) {

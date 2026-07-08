@@ -71,23 +71,7 @@ func isCodexAuthFilePreviewSource(doc map[string]any) bool {
 	if strings.EqualFold(strings.TrimSpace(valueAsString(doc["provider"])), "codex") {
 		return true
 	}
-	if strings.EqualFold(strings.TrimSpace(valueAsString(doc["authProvider"])), "openai") {
-		return true
-	}
-	return authFilePreviewLooksLikeCodexClientProfile(doc)
-}
-
-func authFilePreviewLooksLikeCodexClientProfile(doc map[string]any) bool {
-	if authFilePreviewClientProfileString(doc, coreauth.AuthFileCodexInstallationIDKey, "installation-id", "installationId", "header:"+coreauth.AuthFileCodexInstallationIDHeader) == "" {
-		return false
-	}
-	if authFilePreviewClientProfileString(doc, "user_agent", "user-agent", "userAgent", "header:User-Agent") != "" {
-		return true
-	}
-	if authFilePreviewClientProfileString(doc, coreauth.AuthFileCodexOriginatorKey, coreauth.AuthFileCodexOriginatorHeader, "header:"+coreauth.AuthFileCodexOriginatorHeader) != "" {
-		return true
-	}
-	return authFilePreviewClientProfileString(doc, coreauth.AuthFileCodexBetaFeaturesKey, "beta-features", "betaFeatures", "header:"+coreauth.AuthFileCodexBetaFeaturesHeader) != ""
+	return strings.EqualFold(strings.TrimSpace(valueAsString(doc["authProvider"])), "openai")
 }
 
 func buildCodexAuthFilePreview(doc map[string]any) codexAuthFilePreview {
@@ -164,9 +148,6 @@ func authFilePreviewClientProfileString(metadata map[string]any, keys ...string)
 	if value := authFilePreviewMetadataString(metadata, keys...); value != "" {
 		return value
 	}
-	if value := authFilePreviewClientProfileObjectString(metadata, keys...); value != "" {
-		return value
-	}
 	headers := authFileMetadataHeaders(metadata)
 	for _, key := range keys {
 		headerName, ok := strings.CutPrefix(key, "header:")
@@ -180,38 +161,8 @@ func authFilePreviewClientProfileString(metadata map[string]any, keys ...string)
 	return ""
 }
 
-func authFilePreviewClientProfileObjectString(metadata map[string]any, keys ...string) string {
-	for _, objectKey := range []string{"client_profile", "clientProfile", "client_features", "clientFeatures"} {
-		raw, ok := metadata[objectKey]
-		if !ok || raw == nil {
-			continue
-		}
-		nested, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		if value := authFilePreviewMetadataString(nested, keys...); value != "" {
-			return value
-		}
-		headers := authFileMetadataHeaders(nested)
-		for _, key := range keys {
-			headerName, ok := strings.CutPrefix(key, "header:")
-			if !ok {
-				continue
-			}
-			if value := authFileHeaderValue(headers, headerName); value != "" {
-				return value
-			}
-		}
-	}
-	return ""
-}
-
 func authFilePreviewClientProfileBool(metadata map[string]any, keys ...string) *bool {
 	if parsed := authFilePreviewOptionalBool(metadata, keys...); parsed != nil {
-		return parsed
-	}
-	if parsed := authFilePreviewClientProfileObjectBool(metadata, keys...); parsed != nil {
 		return parsed
 	}
 	headers := authFileMetadataHeaders(metadata)
@@ -223,34 +174,6 @@ func authFilePreviewClientProfileBool(metadata map[string]any, keys ...string) *
 		value := authFileHeaderValue(headers, headerName)
 		if parsed, err := strconv.ParseBool(value); err == nil {
 			return &parsed
-		}
-	}
-	return nil
-}
-
-func authFilePreviewClientProfileObjectBool(metadata map[string]any, keys ...string) *bool {
-	for _, objectKey := range []string{"client_profile", "clientProfile", "client_features", "clientFeatures"} {
-		raw, ok := metadata[objectKey]
-		if !ok || raw == nil {
-			continue
-		}
-		nested, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		if parsed := authFilePreviewOptionalBool(nested, keys...); parsed != nil {
-			return parsed
-		}
-		headers := authFileMetadataHeaders(nested)
-		for _, key := range keys {
-			headerName, ok := strings.CutPrefix(key, "header:")
-			if !ok {
-				continue
-			}
-			value := authFileHeaderValue(headers, headerName)
-			if parsed, err := strconv.ParseBool(value); err == nil {
-				return &parsed
-			}
 		}
 	}
 	return nil

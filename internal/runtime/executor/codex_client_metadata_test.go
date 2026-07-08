@@ -3,7 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"testing"
@@ -132,25 +131,6 @@ func TestCodexApplyHTTPClientMetadataIncludesOfficialIdentityProjection(t *testi
 	assertMetadata("keep", "value")
 }
 
-func TestCodexAppendJSONStringEscapesJSONStrings(t *testing.T) {
-	for _, value := range []string{
-		"plain-ascii",
-		`quote"backslash\`,
-		"line\nfeed",
-		"nul\x00byte",
-		"unicode-雪",
-	} {
-		raw := codexAppendJSONString(nil, value)
-		var decoded string
-		if err := json.Unmarshal(raw, &decoded); err != nil {
-			t.Fatalf("json.Unmarshal(%q) error = %v", string(raw), err)
-		}
-		if decoded != value {
-			t.Fatalf("decoded = %q, want %q; raw=%s", decoded, value, raw)
-		}
-	}
-}
-
 func TestPrepareCodexHTTPCallProjectsGeneratedIdentityIntoClientMetadata(t *testing.T) {
 	resetCodexWindowStateStore()
 	executor := NewCodexExecutor(nil)
@@ -231,32 +211,6 @@ func TestCodexApplyWebsocketClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	}
 	if windowID := gjson.GetBytes(got, "client_metadata.x-codex-window-id").String(); windowID != "session-1:0" {
 		t.Fatalf("client_metadata.x-codex-window-id = %q, want session-1:0; body=%s", windowID, got)
-	}
-}
-
-func TestCodexApplyWebsocketClientMetadataWithResponseCreateTypeAppendsType(t *testing.T) {
-	resetCodexWindowStateStore()
-	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
-	headers := http.Header{}
-	headers.Set(codexHeaderInstallationID, "install-1")
-	headers.Set(codexHeaderWindowID, "window-1")
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
-
-	got := codexApplyWebsocketClientMetadataWithResponseCreateType(context.Background(), body, headers, auth, nil, "1234")
-
-	if typ := gjson.GetBytes(got, "type").String(); typ != "response.create" {
-		t.Fatalf("type = %q, want response.create; body=%s", typ, got)
-	}
-	if id := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); id != "install-1" {
-		t.Fatalf("client_metadata.x-codex-installation-id = %q, want install-1; body=%s", id, got)
-	}
-	if start := gjson.GetBytes(got, "client_metadata.x-codex-ws-stream-request-start-ms").String(); start != "1234" {
-		t.Fatalf("client_metadata.x-codex-ws-stream-request-start-ms = %q, want 1234; body=%s", start, got)
-	}
-
-	wsReqBody := buildCodexWebsocketRequestBodyWithCurrentTurnMetadata(got)
-	if len(wsReqBody) == 0 || &wsReqBody[0] != &got[0] {
-		t.Fatalf("websocket request body should reuse metadata body when type and input already exist; got %s want %s", wsReqBody, got)
 	}
 }
 

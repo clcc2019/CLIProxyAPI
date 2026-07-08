@@ -18,74 +18,27 @@ func init() {
 }
 
 func (clientAPIKeyQuotaPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
-	clientAPIKeyQuotaPlugin{}.HandleUsageBatch([]coreusage.Item{{
-		Context: ctx,
-		Record:  record,
-	}})
-}
-
-func (clientAPIKeyQuotaPlugin) HandleUsageBatch(items []coreusage.Item) {
-	if len(items) == 0 {
+	cost := defaultClientAPIKeyQuotaTracker.record(record)
+	if cost <= 0 {
 		return
 	}
 	store := clientAPIKeyQuotaStoreSnapshot()
-	adds := defaultClientAPIKeyQuotaTracker.recordBatch(items, store != nil)
-	var pending map[clientAPIKeyQuotaStoreAddKey]clientAPIKeyQuotaStoreAdd
-	for _, addResult := range adds {
-		key := clientAPIKeyQuotaStoreAddKey{
-			apiKey: addResult.apiKey,
-			day:    addResult.day,
-			month:  addResult.month,
-		}
-		if pending == nil {
-			pending = make(map[clientAPIKeyQuotaStoreAddKey]clientAPIKeyQuotaStoreAdd, 1)
-		}
-		add := pending[key]
-		if add.timestamp.IsZero() || addResult.timestamp.Before(add.timestamp) {
-			add.timestamp = addResult.timestamp
-		}
-		add.cost += addResult.cost
-		pending[key] = add
-	}
-	if len(pending) == 0 || store == nil {
+	if store == nil {
 		return
 	}
-	ctx := clientAPIKeyQuotaBatchContext(items)
+	apiKey := strings.TrimSpace(record.APIKey)
+	if apiKey == "" {
+		return
+	}
+	timestamp := record.RequestedAt.UTC()
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
 	storeCtx, cancel := clientAPIKeyQuotaStoreContext(ctx)
 	defer cancel()
-	for key, add := range pending {
-		if err := store.AddClientAPIKeyQuotaUsage(storeCtx, key.apiKey, add.timestamp, add.cost); err != nil {
-			log.WithError(err).Debug("client api key quota redis update failed")
-		}
+	if err := store.AddClientAPIKeyQuotaUsage(storeCtx, apiKey, timestamp, cost); err != nil {
+		log.WithError(err).Debug("client api key quota redis update failed")
 	}
-}
-
-type clientAPIKeyQuotaStoreAddKey struct {
-	apiKey string
-	day    string
-	month  string
-}
-
-type clientAPIKeyQuotaStoreAdd struct {
-	timestamp time.Time
-	cost      float64
-}
-
-type clientAPIKeyQuotaRecordAdd struct {
-	apiKey    string
-	timestamp time.Time
-	day       string
-	month     string
-	cost      float64
-}
-
-func clientAPIKeyQuotaBatchContext(items []coreusage.Item) context.Context {
-	for _, item := range items {
-		if item.Context != nil {
-			return item.Context
-		}
-	}
-	return context.Background()
 }
 
 // ClientAPIKeyQuotaUsage is the quota-relevant usage already recorded for one API key.
@@ -152,15 +105,9 @@ type ClientAPIKeyQuotaStore interface {
 type clientAPIKeyQuotaTracker struct {
 	mu          sync.RWMutex
 	modelPrices config.ModelPrices
-	priceCache  map[string]map[string]clientAPIKeyQuotaPriceCacheEntry
 	total       map[string]clientAPIKeyQuotaCounters
 	daily       map[string]map[string]clientAPIKeyQuotaCounters
 	monthly     map[string]map[string]clientAPIKeyQuotaCounters
-}
-
-type clientAPIKeyQuotaPriceCacheEntry struct {
-	price config.ModelPrice
-	ok    bool
 }
 
 type persistedClientAPIKeyQuotaState = ClientAPIKeyQuotaState
@@ -237,7 +184,6 @@ func (t *clientAPIKeyQuotaTracker) setModelPrices(prices config.ModelPrices) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.modelPrices = config.EffectiveModelPrices(prices)
-	t.priceCache = nil
 }
 
 func (t *clientAPIKeyQuotaTracker) persistedState() persistedClientAPIKeyQuotaState {
@@ -298,79 +244,6 @@ func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) float64 {
 	t.addCountersLocked(t.monthly, apiKey, timestamp.Format("2006-01"), cost)
 	t.pruneLocked(timestamp)
 	return cost
-}
-
-func (t *clientAPIKeyQuotaTracker) recordBatch(items []coreusage.Item, collectAdds bool) []clientAPIKeyQuotaRecordAdd {
-	if t == nil || len(items) == 0 {
-		return nil
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if len(t.modelPrices) == 0 {
-		return nil
-	}
-
-	var adds []clientAPIKeyQuotaRecordAdd
-	if collectAdds {
-		adds = make([]clientAPIKeyQuotaRecordAdd, 0, len(items))
-	}
-	var pruneReference time.Time
-	var lastDayYear int
-	var lastDayYearDay int
-	var lastDay string
-	var lastMonthYear int
-	var lastMonth time.Month
-	var lastMonthValue string
-	for _, item := range items {
-		record := item.Record
-		apiKey := strings.TrimSpace(record.APIKey)
-		if apiKey == "" {
-			continue
-		}
-
-		timestamp := record.RequestedAt.UTC()
-		if timestamp.IsZero() {
-			timestamp = time.Now().UTC()
-		}
-
-		cost := t.costForRecordLocked(record)
-		if cost <= 0 {
-			continue
-		}
-
-		year, monthValue, _ := timestamp.Date()
-		yearDay := timestamp.YearDay()
-		if lastDay == "" || year != lastDayYear || yearDay != lastDayYearDay {
-			lastDayYear = year
-			lastDayYearDay = yearDay
-			lastDay = timestamp.Format("2006-01-02")
-		}
-		if lastMonthValue == "" || year != lastMonthYear || monthValue != lastMonth {
-			lastMonthYear = year
-			lastMonth = monthValue
-			lastMonthValue = timestamp.Format("2006-01")
-		}
-		t.addCountersLocked(t.total, apiKey, "", cost)
-		t.addCountersLocked(t.daily, apiKey, lastDay, cost)
-		t.addCountersLocked(t.monthly, apiKey, lastMonthValue, cost)
-		if pruneReference.IsZero() || timestamp.After(pruneReference) {
-			pruneReference = timestamp
-		}
-		if collectAdds {
-			adds = append(adds, clientAPIKeyQuotaRecordAdd{
-				apiKey:    apiKey,
-				timestamp: timestamp,
-				day:       lastDay,
-				month:     lastMonthValue,
-				cost:      cost,
-			})
-		}
-	}
-	if !pruneReference.IsZero() {
-		t.pruneLocked(pruneReference)
-	}
-	return adds
 }
 
 func (t *clientAPIKeyQuotaTracker) check(apiKey string, quota config.ClientAPIKeyQuota, now time.Time) *ClientAPIKeyQuotaExceeded {
@@ -503,7 +376,7 @@ func (t *clientAPIKeyQuotaTracker) costForRecordLocked(record coreusage.Record) 
 	if t == nil || len(t.modelPrices) == 0 {
 		return 0
 	}
-	price, ok := t.lookupModelPriceLocked(record.Model, record.Alias)
+	price, ok := config.LookupModelPrice(t.modelPrices, record.Model, record.Alias)
 	if !ok {
 		return 0
 	}
@@ -527,30 +400,6 @@ func (t *clientAPIKeyQuotaTracker) costForRecordLocked(record coreusage.Record) 
 		return 0
 	}
 	return cost
-}
-
-func (t *clientAPIKeyQuotaTracker) lookupModelPriceLocked(model string, alias string) (config.ModelPrice, bool) {
-	if t == nil {
-		return config.ModelPrice{}, false
-	}
-	if t.priceCache != nil {
-		if byAlias := t.priceCache[model]; byAlias != nil {
-			if entry, ok := byAlias[alias]; ok {
-				return entry.price, entry.ok
-			}
-		}
-	}
-	price, ok := config.LookupModelPrice(t.modelPrices, model, alias)
-	if t.priceCache == nil {
-		t.priceCache = make(map[string]map[string]clientAPIKeyQuotaPriceCacheEntry)
-	}
-	byAlias := t.priceCache[model]
-	if byAlias == nil {
-		byAlias = make(map[string]clientAPIKeyQuotaPriceCacheEntry)
-		t.priceCache[model] = byAlias
-	}
-	byAlias[alias] = clientAPIKeyQuotaPriceCacheEntry{price: price, ok: ok}
-	return price, ok
 }
 
 func maxInt64(value, minimum int64) int64 {

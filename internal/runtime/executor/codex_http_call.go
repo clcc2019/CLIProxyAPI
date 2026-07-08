@@ -130,7 +130,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
 	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
-	prepared, err := e.prepareCodexRequestWithKindBody(ctx, from, executionSessionID, url, requestKind, req, body, requestKind == codexFinalUpstreamCompact)
+	prepared, err := e.prepareCodexRequestWithKind(ctx, from, executionSessionID, url, requestKind, req, body)
 	if err != nil {
 		return codexPreparedHTTPCall{}, err
 	}
@@ -143,7 +143,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	}
 	if requestKind == codexFinalUpstreamCompact {
 		if installationID := codexResolvedInstallationID(prepared.httpReq.Header, ginHeaders, auth, e.cfg); installationID != "" {
-			codexSetSingleHeaderValue(prepared.httpReq.Header, codexHeaderInstallationID, installationID)
+			prepared.httpReq.Header.Set(codexHeaderInstallationID, installationID)
 		}
 	}
 	if requestKind != codexFinalUpstreamCompact {

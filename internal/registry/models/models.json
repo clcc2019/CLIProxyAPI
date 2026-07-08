@@ -46,8 +46,7 @@
         "levels": [
           "low",
           "medium",
-          "high",
-          "max"
+          "high"
         ]
       }
     },
@@ -104,51 +103,6 @@
       "type": "claude",
       "display_name": "Claude Opus 4.8",
       "description": "Premium model combining maximum intelligence with practical performance",
-      "context_length": 1000000,
-      "max_completion_tokens": 128000,
-      "thinking": {
-        "min": 1024,
-        "max": 128000,
-        "zero_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ]
-      }
-    },
-    {
-      "id": "claude-sonnet-5",
-      "object": "model",
-      "created": 1782777600,
-      "owned_by": "anthropic",
-      "type": "claude",
-      "display_name": "Claude Sonnet 5",
-      "description": "Anthropic's agentic Sonnet model for coding, tool use, and enterprise workflows",
-      "context_length": 1000000,
-      "max_completion_tokens": 128000,
-      "thinking": {
-        "zero_allowed": true,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ]
-      }
-    },
-    {
-      "id": "claude-fable-5",
-      "object": "model",
-      "created": 1781049600,
-      "owned_by": "anthropic",
-      "type": "claude",
-      "display_name": "Claude Fable 5",
-      "description": "Anthropic's most capable widely released model, for the most demanding reasoning and long-horizon agentic work",
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
@@ -374,7 +328,7 @@
       "display_name": "GPT 5.5",
       "version": "gpt-5.5",
       "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
+      "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -413,29 +367,6 @@
     }
   ],
   "codex-plus": [
-    {
-      "id": "gpt-5.3-codex-spark",
-      "object": "model",
-      "created": 1770912000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
     {
       "id": "gpt-5.4",
       "object": "model",
@@ -491,7 +422,7 @@
       "display_name": "GPT 5.5",
       "version": "gpt-5.5",
       "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
+      "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -608,7 +539,7 @@
       "display_name": "GPT 5.5",
       "version": "gpt-5.5",
       "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
+      "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -672,12 +603,7 @@
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
+        "dynamic_allowed": true
       }
     },
     {
@@ -687,19 +613,14 @@
       "owned_by": "moonshot",
       "type": "kimi",
       "display_name": "Kimi K2.5",
-      "description": "Kimi K2.5 - Native multimodal agentic model with text, image, and video input; supports thinking and non-thinking modes",
-      "context_length": 262144,
+      "description": "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
+      "context_length": 131072,
       "max_completion_tokens": 32768,
       "thinking": {
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
+        "dynamic_allowed": true
       }
     },
     {
@@ -709,63 +630,14 @@
       "owned_by": "moonshot",
       "type": "kimi",
       "display_name": "Kimi K2.6",
-      "description": "Kimi K2.6 - Native multimodal agentic model with stronger long-horizon agentic coding, long-context reasoning, and preserved thinking support",
+      "description": "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    },
-    {
-      "id": "kimi-k2.7-code",
-      "object": "model",
-      "created": 1780396800,
-      "owned_by": "moonshot",
-      "type": "kimi",
-      "display_name": "Kimi K2.7 Code",
-      "description": "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
-      "context_length": 262144,
-      "max_completion_tokens": 65536,
-      "thinking": {
-        "min": 1024,
-        "max": 32000,
-        "zero_allowed": false,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    },
-    {
-      "id": "kimi-k2.7-code-highspeed",
-      "object": "model",
-      "created": 1780396800,
-      "owned_by": "moonshot",
-      "type": "kimi",
-      "display_name": "Kimi K2.7 Code HighSpeed",
-      "description": "Kimi K2.7 Code HighSpeed - Same capabilities as Kimi K2.7 Code with higher output speed (~180 tokens/s)",
-      "context_length": 262144,
-      "max_completion_tokens": 65536,
-      "thinking": {
-        "min": 1024,
-        "max": 32000,
-        "zero_allowed": false,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
+        "dynamic_allowed": true
       }
     }
   ],
@@ -780,7 +652,16 @@
       "name": "grok-build-0.1",
       "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
       "context_length": 256000,
-      "max_completion_tokens": 256000
+      "max_completion_tokens": 256000,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
     },
     {
       "id": "grok-4.3",
@@ -893,8 +774,15 @@
       "display_name": "Composer 2.5 Fast",
       "name": "grok-composer-2.5-fast",
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
-      "context_length": 200000,
-      "max_completion_tokens": 32768
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
     }
   ]
 }

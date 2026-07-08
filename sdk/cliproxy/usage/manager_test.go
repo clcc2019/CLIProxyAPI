@@ -12,16 +12,6 @@ func (f pluginFunc) HandleUsage(ctx context.Context, record Record) {
 	f(ctx, record)
 }
 
-type batchPluginFunc func([]Item)
-
-func (f batchPluginFunc) HandleUsage(context.Context, Record) {
-	panic("batch plugin should be invoked through HandleUsageBatch")
-}
-
-func (f batchPluginFunc) HandleUsageBatch(items []Item) {
-	f(items)
-}
-
 func TestManagerFlushWaitsForQueueAndInFlightRecord(t *testing.T) {
 	manager := NewManager(8)
 	started := make(chan struct{})
@@ -134,56 +124,6 @@ func TestManagerDispatchUsesLatestRegisteredPluginSnapshot(t *testing.T) {
 	}
 	if got := receiveUsageTestRecord(t, secondSeen); got != "after" {
 		t.Fatalf("second plugin record = %q, want after", got)
-	}
-}
-
-func TestManagerDispatchesBatchPluginWithQueuedRecordsInOrder(t *testing.T) {
-	manager := NewManager(8)
-	started := make(chan struct{})
-	release := make(chan struct{})
-	seen := make(chan []string, 2)
-
-	manager.Register(pluginFunc(func(_ context.Context, record Record) {
-		if record.Provider == "first" {
-			close(started)
-			<-release
-		}
-	}))
-	manager.Register(batchPluginFunc(func(items []Item) {
-		values := make([]string, 0, len(items))
-		for _, item := range items {
-			values = append(values, item.Record.Provider)
-		}
-		seen <- values
-	}))
-
-	manager.Publish(context.Background(), Record{Provider: "first"})
-	<-started
-	manager.Publish(context.Background(), Record{Provider: "second"})
-	manager.Publish(context.Background(), Record{Provider: "third"})
-	close(release)
-
-	if err := manager.Flush(context.Background()); err != nil {
-		t.Fatalf("Flush returned error: %v", err)
-	}
-
-	var batches [][]string
-	for {
-		select {
-		case batch := <-seen:
-			batches = append(batches, batch)
-		default:
-			if len(batches) != 2 {
-				t.Fatalf("batches = %v, want two batches", batches)
-			}
-			if got := batches[0]; len(got) != 1 || got[0] != "first" {
-				t.Fatalf("first batch = %v, want [first]", got)
-			}
-			if got := batches[1]; len(got) != 2 || got[0] != "second" || got[1] != "third" {
-				t.Fatalf("second batch = %v, want [second third]", got)
-			}
-			return
-		}
 	}
 }
 

@@ -32,24 +32,11 @@ func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) bool 
 		// synthetic requests (e.g. &http.Request{Header: ...}) and only
 		// consume r.Header afterwards, so keep the value in the header
 		// map too.
-		canonicalName := http.CanonicalHeaderKey(name)
-		if canonicalName == "Host" {
+		if http.CanonicalHeaderKey(name) == "Host" {
 			r.Host = val
 		}
-		setSingleHeaderValue(r.Header, canonicalName, val)
+		r.Header.Set(name, val)
 		applied = true
 	}
 	return applied
-}
-
-func setSingleHeaderValue(headers http.Header, key string, value string) {
-	if headers == nil {
-		return
-	}
-	if values := headers[key]; len(values) > 0 {
-		values[0] = value
-		headers[key] = values[:1]
-		return
-	}
-	headers[key] = []string{value}
 }

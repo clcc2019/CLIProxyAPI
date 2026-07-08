@@ -175,9 +175,8 @@ type Server struct {
 	accessManager *sdkaccess.Manager
 
 	// requestLogger is the request logger instance for dynamic configuration updates.
-	requestLogger           logging.RequestLogger
-	loggerToggle            func(bool)
-	requestAccessLogEnabled *atomic.Bool
+	requestLogger logging.RequestLogger
+	loggerToggle  func(bool)
 
 	// configFilePath is the absolute path to the YAML config file for persistence.
 	configFilePath string
@@ -263,13 +262,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		optionState.engineConfigurator(engine)
 	}
 
-	requestAccessLogEnabled := &atomic.Bool{}
-	requestAccessLogEnabled.Store(cfg != nil && cfg.RequestLog)
-
 	// Add middleware
-	engine.Use(logging.GinLogrusLoggerWithOptions(logging.GinLogrusLoggerOptions{
-		AccessLogEnabled: requestAccessLogEnabled.Load,
-	}))
+	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
 	engine.Use(middleware.RequestBodyLimitMiddleware(inboundMaxRequestBytes))
 	// Concurrency limiter is opt-in via cfg.Limits.MaxInFlightRequests; when 0
@@ -307,17 +301,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create server instance
 	s := &Server{
-		engine:                  engine,
-		handlers:                handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
-		cfg:                     cfg,
-		accessManager:           accessManager,
-		requestLogger:           requestLogger,
-		loggerToggle:            toggle,
-		requestAccessLogEnabled: requestAccessLogEnabled,
-		configFilePath:          configFilePath,
-		currentPath:             wd,
-		envManagementSecret:     envManagementSecret,
-		wsRoutes:                make(map[string]struct{}),
+		engine:              engine,
+		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
+		cfg:                 cfg,
+		accessManager:       accessManager,
+		requestLogger:       requestLogger,
+		loggerToggle:        toggle,
+		configFilePath:      configFilePath,
+		currentPath:         wd,
+		envManagementSecret: envManagementSecret,
+		wsRoutes:            make(map[string]struct{}),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -1240,9 +1233,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
 			toggler.SetEnabled(cfg.RequestLog)
 		}
-	}
-	if s.requestAccessLogEnabled != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
-		s.requestAccessLogEnabled.Store(cfg.RequestLog)
 	}
 
 	if oldCfg == nil || oldCfg.Home.Enabled != cfg.Home.Enabled {

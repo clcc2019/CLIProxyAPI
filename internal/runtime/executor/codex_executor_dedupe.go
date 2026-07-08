@@ -3,7 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"io"
 	"net/http"
 	"strings"
 
@@ -78,10 +77,6 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 // URL classification when the caller already knows whether the target is the
 // /responses or /responses/compact endpoint.
 func (e *CodexExecutor) prepareCodexRequestWithKind(ctx context.Context, from sdktranslator.Format, executionSessionID string, url string, requestKind codexFinalUpstreamRequestKind, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
-	return e.prepareCodexRequestWithKindBody(ctx, from, executionSessionID, url, requestKind, req, rawJSON, true)
-}
-
-func (e *CodexExecutor) prepareCodexRequestWithKindBody(ctx context.Context, from sdktranslator.Format, executionSessionID string, url string, requestKind codexFinalUpstreamRequestKind, req cliproxyexecutor.Request, rawJSON []byte, attachBody bool) (codexPreparedRequest, error) {
 	resolution := e.resolvePromptCacheResolution(ctx, from, executionSessionID, req)
 	cache := resolution.cache
 	body := codexSanitizeForcedUpstreamSessionBody(ctx, rawJSON)
@@ -90,11 +85,7 @@ func (e *CodexExecutor) prepareCodexRequestWithKindBody(ctx context.Context, fro
 		body = codexSetPromptCacheKey(body, cache.ID)
 	}
 
-	var bodyReader io.Reader
-	if attachBody {
-		bodyReader = bytes.NewReader(body)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return codexPreparedRequest{}, err
 	}
@@ -112,10 +103,10 @@ func (e *CodexExecutor) prepareCodexRequestWithKindBody(ctx context.Context, fro
 			threadFallbackValue = resolution.threadHeaderID
 		}
 		if sessionHeaderValue := codexPromptCacheSessionHeaderValue(ctx, sessionFallbackValue); sessionHeaderValue != "" {
-			codexSetSingleHeaderValue(httpReq.Header, codexHeaderSessionID, sessionHeaderValue)
+			httpReq.Header.Set(codexHeaderSessionID, sessionHeaderValue)
 		}
 		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, threadFallbackValue); threadHeaderValue != "" {
-			codexSetSingleHeaderValue(httpReq.Header, codexHeaderThreadID, threadHeaderValue)
+			httpReq.Header.Set(codexHeaderThreadID, threadHeaderValue)
 		}
 	}
 	codexApplyForcedUpstreamSessionHeaders(ctx, httpReq.Header)

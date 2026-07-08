@@ -116,7 +116,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-	bodyWithoutReplay := body
 	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
@@ -152,44 +151,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 	}
 	if result.statusCode < 200 || result.statusCode >= 300 {
-		if clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body) {
-			helps.LogWithRequestID(ctx).Debug("codex executor: retrying request without cached reasoning replay after encrypted content verification failure")
-			preparedBody = bodyWithoutReplay
-			call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
-			if err != nil {
-				return resp, err
-			}
-			body = call.prepared.body
-			helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-			result, usageOwner, err = e.fetchCodexResponsesAggregate(ctx, auth, call.url, call.prepared, needResponseHeaders)
-			if err != nil {
-				return resp, err
-			}
-		}
-	}
-	if result.statusCode < 200 || result.statusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
-		codexPublishRateLimitsFromErrorBody(ctx, auth, result.body)
-		err = newCodexStatusErr(result.statusCode, result.body)
-		return resp, err
-	}
-	if len(result.errorBody) > 0 {
-		if clearCodexReasoningReplayOnInvalidSignature(replayScope, result.errorStatus, result.errorBody) {
-			helps.LogWithRequestID(ctx).Debug("codex executor: retrying request without cached reasoning replay after encrypted content verification failure")
-			preparedBody = bodyWithoutReplay
-			call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
-			if err != nil {
-				return resp, err
-			}
-			body = call.prepared.body
-			helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-			result, usageOwner, err = e.fetchCodexResponsesAggregate(ctx, auth, call.url, call.prepared, needResponseHeaders)
-			if err != nil {
-				return resp, err
-			}
-		}
-	}
-	if result.statusCode < 200 || result.statusCode >= 300 {
+		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
 		codexPublishRateLimitsFromErrorBody(ctx, auth, result.body)
 		err = newCodexStatusErr(result.statusCode, result.body)
@@ -255,7 +217,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-	bodyWithoutReplay := body
 	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
@@ -322,22 +283,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		break
 	}
 	if result.statusCode < 200 || result.statusCode >= 300 {
-		if clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body) {
-			helps.LogWithRequestID(ctx).Debug("codex executor: retrying compact request without cached reasoning replay after encrypted content verification failure")
-			preparedBody = bodyWithoutReplay
-			call, err = e.prepareCodexHTTPCall(ctx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, false)
-			if err != nil {
-				return resp, err
-			}
-			body = call.prepared.body
-			helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-			result, usageOwner, err = e.fetchCodexNonStreamResponse(ctx, auth, call.url, call.prepared, needResponseHeaders)
-			if err != nil {
-				return resp, err
-			}
-		}
-	}
-	if result.statusCode < 200 || result.statusCode >= 300 {
+		clearCodexReasoningReplayOnInvalidSignature(replayScope, result.statusCode, result.body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
 		codexPublishRateLimitsFromErrorBody(ctx, auth, result.body)
 		err = newCodexStatusErr(result.statusCode, result.body)
@@ -413,7 +359,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-	bodyWithoutReplay := body
 	body, replayScope := applyCodexReasoningReplayCache(upstreamCtx, from, req, opts, body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
@@ -477,35 +422,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			}
 		}
-		if clearCodexReasoningReplayOnInvalidSignature(replayScope, httpResp.StatusCode, data) {
-			helps.LogWithRequestID(ctx).Debug("codex executor: retrying stream request without cached reasoning replay after encrypted content verification failure")
-			preparedBody = bodyWithoutReplay
-			call, err = e.prepareCodexHTTPCall(upstreamCtx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
-			if err != nil {
-				return nil, err
-			}
-			body = call.prepared.body
-			helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-			httpResp, err = e.doCodexHTTPRequest(upstreamCtx, auth, call.prepared)
-			if err != nil {
-				codexRecordAPIResponseError(ctx, e.cfg, err)
-				return nil, err
-			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
-			e.rememberCodexHTTPTurnState(auth, call.prepared, httpResp.Header)
-			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
-				goto codexStreamResponseOK
-			}
-			data, readErr = helps.ReadErrorResponseBody(httpResp.Body)
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("codex executor: close response body error: %v", errClose)
-			}
-			if readErr != nil {
-				codexRecordAPIResponseError(ctx, e.cfg, readErr)
-				return nil, readErr
-			}
-		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		clearCodexReasoningReplayOnInvalidSignature(replayScope, httpResp.StatusCode, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		codexPublishRateLimitsFromErrorBody(ctx, auth, data)
 		err = newCodexStatusErr(httpResp.StatusCode, data)
@@ -532,7 +450,6 @@ codexStreamResponseOK:
 			}
 		}
 		turnStateRetryUsed := false
-		reasoningReplayRetryUsed := false
 		for streamAttempt := 0; ; streamAttempt++ {
 			if streamAttempt > 0 {
 				retryResp, retryErr := e.doCodexHTTPRequest(upstreamCtx, auth, call.prepared)
@@ -565,23 +482,7 @@ codexStreamResponseOK:
 						return
 					}
 					helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-					if !reasoningReplayRetryUsed && clearCodexReasoningReplayOnInvalidSignature(replayScope, httpResp.StatusCode, data) {
-						reasoningReplayRetryUsed = true
-						helps.LogWithRequestID(ctx).Debug("codex executor: retrying stream request without cached reasoning replay after encrypted content verification failure")
-						preparedBody = bodyWithoutReplay
-						retryCall, retryErr := e.prepareCodexHTTPCall(upstreamCtx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
-						if retryErr != nil {
-							codexRecordAPIResponseError(ctx, e.cfg, retryErr)
-							reporter.PublishFailureWithError(upstreamCtx, retryErr)
-							_ = send(cliproxyexecutor.StreamChunk{Err: retryErr})
-							reporter.EnsurePublished(upstreamCtx)
-							return
-						}
-						call = retryCall
-						body = call.prepared.body
-						helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
-						continue
-					}
+					clearCodexReasoningReplayOnInvalidSignature(replayScope, httpResp.StatusCode, data)
 					codexPublishRateLimitsFromErrorBody(ctx, auth, data)
 					statusErr := newCodexStatusErr(httpResp.StatusCode, data)
 					codexRecordAPIResponseError(ctx, e.cfg, statusErr)
@@ -725,24 +626,6 @@ codexStreamResponseOK:
 				turnStateRetryUsed = true
 				statusCode := statusCodeFromCodexError(errRead)
 				e.dropCodexHTTPTurnStateForRetry(upstreamCtx, auth, call.prepared, "stream terminal error", statusCode)
-				continue
-			}
-			if !reasoningReplayRetryUsed && !emittedPayload && !completedStreamObserved && pendingTerminalErr == nil && codexReasoningReplayInvalidSignatureError(codexErrorBodyForTurnStateRetry(errRead)) {
-				reasoningReplayRetryUsed = true
-				clearCodexReasoningReplayOnInvalidSignature(replayScope, statusCodeFromCodexError(errRead), codexErrorBodyForTurnStateRetry(errRead))
-				helps.LogWithRequestID(ctx).Debug("codex executor: retrying stream request without cached reasoning replay after encrypted content verification failure")
-				preparedBody = bodyWithoutReplay
-				retryCall, retryErr := e.prepareCodexHTTPCall(upstreamCtx, auth, from, executionSessionIDFromOptions(opts), url, req, preparedBody, apiKey, true)
-				if retryErr != nil {
-					codexRecordAPIResponseError(ctx, e.cfg, retryErr)
-					reporter.PublishFailureWithError(upstreamCtx, retryErr)
-					_ = send(cliproxyexecutor.StreamChunk{Err: retryErr})
-					reporter.EnsurePublished(upstreamCtx)
-					return
-				}
-				call = retryCall
-				body = call.prepared.body
-				helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
 				continue
 			}
 			if codexShouldRetryStreamRead(ctx, errRead, emittedPayload, completedStreamObserved, pendingTerminalErr, terminalFailure, streamAttempt) {

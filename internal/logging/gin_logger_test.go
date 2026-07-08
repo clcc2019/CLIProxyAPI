@@ -1,7 +1,6 @@
 package logging
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -45,76 +44,6 @@ func TestGinLogrusLogger_PreservesRequestIDWhenOutputDiscarded(t *testing.T) {
 	}
 	if ginRequestID == "" {
 		t.Fatal("expected gin context to keep request ID when logger output is discarded")
-	}
-}
-
-func TestGinLogrusLogger_DisabledSuppressesSuccessfulAccessLog(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	engine := gin.New()
-	engine.Use(GinLogrusLoggerWithOptions(GinLogrusLoggerOptions{
-		AccessLogEnabled: func() bool { return false },
-	}))
-
-	var ctxRequestID string
-	engine.POST("/v1/responses", func(c *gin.Context) {
-		ctxRequestID = GetRequestID(c.Request.Context())
-		c.Status(http.StatusOK)
-	})
-
-	var out bytes.Buffer
-	prevOutput := log.StandardLogger().Out
-	prevLevel := log.StandardLogger().Level
-	log.SetOutput(&out)
-	log.SetLevel(log.InfoLevel)
-	t.Cleanup(func() {
-		log.SetOutput(prevOutput)
-		log.SetLevel(prevLevel)
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-	engine.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	if ctxRequestID == "" {
-		t.Fatal("expected request context to keep request ID when access log is disabled")
-	}
-	if got := out.String(); got != "" {
-		t.Fatalf("access log output = %q, want empty", got)
-	}
-}
-
-func TestGinLogrusLogger_DisabledStillLogsErrors(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	engine := gin.New()
-	engine.Use(GinLogrusLoggerWithOptions(GinLogrusLoggerOptions{
-		AccessLogEnabled: func() bool { return false },
-	}))
-	engine.POST("/v1/responses", func(c *gin.Context) {
-		c.Status(http.StatusInternalServerError)
-	})
-
-	var out bytes.Buffer
-	prevOutput := log.StandardLogger().Out
-	prevLevel := log.StandardLogger().Level
-	log.SetOutput(&out)
-	log.SetLevel(log.InfoLevel)
-	t.Cleanup(func() {
-		log.SetOutput(prevOutput)
-		log.SetLevel(prevLevel)
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-	engine.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
-	}
-	if got := out.String(); !bytes.Contains([]byte(got), []byte(`500 |`)) || !bytes.Contains([]byte(got), []byte(`/v1/responses`)) {
-		t.Fatalf("access log output = %q, want 500 log", got)
 	}
 }
 

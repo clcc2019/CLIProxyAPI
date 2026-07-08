@@ -55,16 +55,6 @@ func TestBuildCodexResponsesWebsocketURLMatchesMixedCaseScheme(t *testing.T) {
 	}
 }
 
-func TestBuildCodexResponsesWebsocketURLFastPathPreservesRequestURI(t *testing.T) {
-	got, err := buildCodexResponsesWebsocketURL(" https://chatgpt.com/backend-api/codex/responses?model=gpt-5.4 ")
-	if err != nil {
-		t.Fatalf("buildCodexResponsesWebsocketURL error = %v", err)
-	}
-	if got != "wss://chatgpt.com/backend-api/codex/responses?model=gpt-5.4" {
-		t.Fatalf("websocket URL = %q, want wss://chatgpt.com/backend-api/codex/responses?model=gpt-5.4", got)
-	}
-}
-
 func TestNormalizeCodexWebsocketCompletionReturnsEventType(t *testing.T) {
 	textPayload := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
 	normalized, eventType := normalizeCodexWebsocketCompletion(textPayload)

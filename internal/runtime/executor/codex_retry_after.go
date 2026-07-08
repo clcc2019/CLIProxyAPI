@@ -9,17 +9,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const (
-	codexRetryAtLayoutShortMinute     = "Jan 2, 2006 3:04 PM"
-	codexRetryAtLayoutShortSecond     = "Jan 2, 2006 3:04:05 PM"
-	codexRetryAtLayoutShortMinuteZone = "Jan 2, 2006 3:04 PM MST"
-	codexRetryAtLayoutShortSecondZone = "Jan 2, 2006 3:04:05 PM MST"
-	codexRetryAtLayoutLongMinute      = "January 2, 2006 3:04 PM"
-	codexRetryAtLayoutLongSecond      = "January 2, 2006 3:04:05 PM"
-	codexRetryAtLayoutLongMinuteZone  = "January 2, 2006 3:04 PM MST"
-	codexRetryAtLayoutLongSecondZone  = "January 2, 2006 3:04:05 PM MST"
-)
-
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
 	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
 		return nil
@@ -45,17 +34,16 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 }
 
 func parseCodexRetryAfterMessage(errorBody []byte, now time.Time) *time.Duration {
-	if retryAfter := parseCodexRetryAfterCandidate(gjson.GetBytes(errorBody, "error.retry_at").String(), now); retryAfter != nil {
-		return retryAfter
+	candidates := []string{
+		gjson.GetBytes(errorBody, "error.retry_at").String(),
+		gjson.GetBytes(errorBody, "error.try_again_at").String(),
+		gjson.GetBytes(errorBody, "error.message").String(),
+		gjson.GetBytes(errorBody, "message").String(),
 	}
-	if retryAfter := parseCodexRetryAfterCandidate(gjson.GetBytes(errorBody, "error.try_again_at").String(), now); retryAfter != nil {
-		return retryAfter
-	}
-	if retryAfter := parseCodexRetryAfterCandidate(gjson.GetBytes(errorBody, "error.message").String(), now); retryAfter != nil {
-		return retryAfter
-	}
-	if retryAfter := parseCodexRetryAfterCandidate(gjson.GetBytes(errorBody, "message").String(), now); retryAfter != nil {
-		return retryAfter
+	for _, candidate := range candidates {
+		if retryAfter := parseCodexRetryAfterCandidate(candidate, now); retryAfter != nil {
+			return retryAfter
+		}
 	}
 	return nil
 }
@@ -65,13 +53,12 @@ func parseCodexRetryAfterCandidate(candidate string, now time.Time) *time.Durati
 	if candidate == "" {
 		return nil
 	}
-	if idx := asciifold.Index(candidate, "try again at "); idx >= 0 {
-		normalized := normalizeCodexOrdinalDaySuffixes(candidate[idx+len("try again at "):])
-		return parseCodexRetryAfterCandidateValue(normalized, now)
-	}
 	normalized := normalizeCodexOrdinalDaySuffixes(candidate)
 	if retryAfter := parseCodexRetryAfterCandidateValue(normalized, now); retryAfter != nil {
 		return retryAfter
+	}
+	if idx := asciifold.Index(normalized, "try again at "); idx >= 0 {
+		return parseCodexRetryAfterCandidateValue(normalized[idx+len("try again at "):], now)
 	}
 	return nil
 }
@@ -146,19 +133,6 @@ func parseCodexRetryAfterCandidateValue(value string, now time.Time) *time.Durat
 }
 
 func parseCodexRetryAtTime(value string, loc *time.Location) (time.Time, bool) {
-	if layout, inLocation, ok := fastCodexRetryAtLayout(value); ok {
-		var parsed time.Time
-		var err error
-		if inLocation {
-			parsed, err = time.ParseInLocation(layout, value, loc)
-		} else {
-			parsed, err = time.Parse(layout, value)
-		}
-		if err == nil {
-			return parsed, true
-		}
-	}
-
 	layoutsWithLocation := []string{
 		"January 2, 2006 3:04:05 PM",
 		"January 2, 2006 3:04 PM",
@@ -186,69 +160,4 @@ func parseCodexRetryAtTime(value string, loc *time.Location) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
-}
-
-func fastCodexRetryAtLayout(value string) (layout string, inLocation bool, ok bool) {
-	if strings.Contains(value, "T") && strings.Contains(value, "-") {
-		return time.RFC3339, false, true
-	}
-	if !strings.Contains(value, ",") || (!strings.Contains(value, " AM") && !strings.Contains(value, " PM")) {
-		return "", false, false
-	}
-
-	monthEnd := strings.IndexByte(value, ' ')
-	if monthEnd <= 0 {
-		return "", false, false
-	}
-	if !isCodexMonthName(value[:monthEnd]) {
-		return "", false, false
-	}
-
-	longMonth := monthEnd > len("Jan")
-	withSeconds := strings.Count(value, ":") >= 2
-	withZone := false
-	if lastSpace := strings.LastIndexByte(value, ' '); lastSpace >= 0 && lastSpace+1 < len(value) {
-		last := value[lastSpace+1:]
-		withZone = last != "AM" && last != "PM"
-	}
-	switch {
-	case longMonth && withSeconds && withZone:
-		return codexRetryAtLayoutLongSecondZone, false, true
-	case longMonth && withSeconds:
-		return codexRetryAtLayoutLongSecond, true, true
-	case longMonth && withZone:
-		return codexRetryAtLayoutLongMinuteZone, false, true
-	case longMonth:
-		return codexRetryAtLayoutLongMinute, true, true
-	case withSeconds && withZone:
-		return codexRetryAtLayoutShortSecondZone, false, true
-	case withSeconds:
-		return codexRetryAtLayoutShortSecond, true, true
-	case withZone:
-		return codexRetryAtLayoutShortMinuteZone, false, true
-	default:
-		return codexRetryAtLayoutShortMinute, true, true
-	}
-}
-
-func isCodexMonthName(value string) bool {
-	if len(value) < 3 {
-		return false
-	}
-	var prefix [3]byte
-	for i := 0; i < len(prefix); i++ {
-		c := value[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		prefix[i] = c
-	}
-	switch prefix {
-	case [3]byte{'j', 'a', 'n'}, [3]byte{'f', 'e', 'b'}, [3]byte{'m', 'a', 'r'}, [3]byte{'a', 'p', 'r'},
-		[3]byte{'m', 'a', 'y'}, [3]byte{'j', 'u', 'n'}, [3]byte{'j', 'u', 'l'}, [3]byte{'a', 'u', 'g'},
-		[3]byte{'s', 'e', 'p'}, [3]byte{'o', 'c', 't'}, [3]byte{'n', 'o', 'v'}, [3]byte{'d', 'e', 'c'}:
-		return true
-	default:
-		return false
-	}
 }

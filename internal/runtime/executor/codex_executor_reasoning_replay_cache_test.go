@@ -602,61 +602,6 @@ func TestCodexExecutorReasoningReplayCacheClearsOnNonStreamResponseFailedInvalid
 	}
 }
 
-func TestCodexExecutorReasoningReplayRetryWithoutReplayOnNonStreamEncryptedContentVerificationFailure(t *testing.T) {
-	internalcache.ClearCodexReasoningReplayCache()
-	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
-
-	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(21)
-	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-retry-nonstream", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
-
-	var bodies [][]byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, errRead := io.ReadAll(r.Body)
-		if errRead != nil {
-			t.Fatalf("read body: %v", errRead)
-		}
-		bodies = append(bodies, body)
-
-		w.Header().Set("Content-Type", "text/event-stream")
-		if len(bodies) == 1 {
-			_, _ = w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"The encrypted content gAAA...lio7 could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","code":"invalid_request_error"}}}` + "\n\n"))
-			return
-		}
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_2","object":"response","created_at":0,"status":"completed","model":"gpt-5.4","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}` + "\n\n"))
-	}))
-	defer server.Close()
-
-	executor := NewCodexExecutor(&config.Config{})
-	_, err := executor.Execute(context.Background(), &cliproxyauth.Auth{
-		ID: "auth-replay-retry-nonstream",
-		Attributes: map[string]string{
-			"base_url": server.URL,
-			"api_key":  "test",
-		},
-	}, cliproxyexecutor.Request{
-		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"session-retry-nonstream\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("claude"),
-		Stream:       false,
-	})
-	if err != nil {
-		t.Fatalf("Execute should retry without cached replay: %v", err)
-	}
-	if len(bodies) != 2 {
-		t.Fatalf("upstream request count = %d, want 2", len(bodies))
-	}
-	if got := gjson.GetBytes(bodies[0], "input.0.encrypted_content").String(); got != cachedEncryptedContent {
-		t.Fatalf("first request encrypted_content = %q, want cached value; body=%s", got, string(bodies[0]))
-	}
-	if got := gjson.GetBytes(bodies[1], "input.0.type").String(); got == "reasoning" {
-		t.Fatalf("retry request should omit cached reasoning replay; body=%s", string(bodies[1]))
-	}
-	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", "claude:session-retry-nonstream"); ok {
-		t.Fatal("encrypted content verification failure should clear cached replay item")
-	}
-}
-
 func TestCodexExecutorReasoningReplayCacheClearsOnStreamResponseFailedInvalidSignature(t *testing.T) {
 	internalcache.ClearCodexReasoningReplayCache()
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
@@ -703,76 +648,12 @@ func TestCodexExecutorReasoningReplayCacheClearsOnStreamResponseFailedInvalidSig
 	}
 }
 
-func TestCodexExecutorReasoningReplayRetryWithoutReplayOnStreamEncryptedContentVerificationFailure(t *testing.T) {
-	internalcache.ClearCodexReasoningReplayCache()
-	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
-
-	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(22)
-	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", "claude:session-retry-stream", []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
-
-	var bodies [][]byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, errRead := io.ReadAll(r.Body)
-		if errRead != nil {
-			t.Fatalf("read body: %v", errRead)
-		}
-		bodies = append(bodies, body)
-
-		w.Header().Set("Content-Type", "text/event-stream")
-		if len(bodies) == 1 {
-			_, _ = w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"The encrypted content gAAA...lio7 could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","code":"invalid_request_error"}}}` + "\n\n"))
-			return
-		}
-		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_2","object":"response","created_at":0,"status":"completed","model":"gpt-5.4","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}` + "\n\n"))
-	}))
-	defer server.Close()
-
-	executor := NewCodexExecutor(&config.Config{})
-	streamResult, err := executor.ExecuteStream(context.Background(), &cliproxyauth.Auth{
-		ID: "auth-replay-retry-stream",
-		Attributes: map[string]string{
-			"base_url": server.URL,
-			"api_key":  "test",
-		},
-	}, cliproxyexecutor.Request{
-		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"session-retry-stream\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("claude"),
-		Stream:       true,
-	})
-	if err != nil {
-		t.Fatalf("ExecuteStream setup error: %v", err)
-	}
-
-	for chunk := range streamResult.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("stream should retry without cached replay, got chunk error: %v", chunk.Err)
-		}
-	}
-	if len(bodies) != 2 {
-		t.Fatalf("upstream request count = %d, want 2", len(bodies))
-	}
-	if got := gjson.GetBytes(bodies[0], "input.0.encrypted_content").String(); got != cachedEncryptedContent {
-		t.Fatalf("first request encrypted_content = %q, want cached value; body=%s", got, string(bodies[0]))
-	}
-	if got := gjson.GetBytes(bodies[1], "input.0.type").String(); got == "reasoning" {
-		t.Fatalf("retry request should omit cached reasoning replay; body=%s", string(bodies[1]))
-	}
-	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", "claude:session-retry-stream"); ok {
-		t.Fatal("encrypted content verification failure should clear cached replay item")
-	}
-}
-
 func TestCodexReasoningReplayInvalidSignatureErrorCaseInsensitive(t *testing.T) {
 	if !codexReasoningReplayInvalidSignatureError([]byte(`{"error":{"message":"Invalid Signature In Thinking Block"}}`)) {
 		t.Fatal("expected mixed-case invalid signature message to match")
 	}
 	if !codexReasoningReplayInvalidSignatureError([]byte(`{"error":{"code":"INVALID_ENCRYPTED_CONTENT"}}`)) {
 		t.Fatal("expected mixed-case invalid encrypted content code to match")
-	}
-	if !codexReasoningReplayInvalidSignatureError([]byte(`{"error":{"message":"The encrypted content gAAA...jE4G could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}`)) {
-		t.Fatal("expected encrypted content verification failure to match")
 	}
 	if codexReasoningReplayInvalidSignatureError([]byte(`{"error":{"message":"unrelated"}}`)) {
 		t.Fatal("did not expect unrelated error to match")

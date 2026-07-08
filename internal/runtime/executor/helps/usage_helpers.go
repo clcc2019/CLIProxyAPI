@@ -804,11 +804,6 @@ func usageDetailIsZero(detail usage.Detail) bool {
 
 var stopChunkWithoutUsage sync.Map
 
-var (
-	usageMetadataJSONKey    = []byte(`"usageMetadata"`)
-	cpaUsageMetadataJSONKey = []byte(`"cpaUsageMetadata"`)
-)
-
 func rememberStopWithoutUsage(traceID string) {
 	stopChunkWithoutUsage.Store(traceID, struct{}{})
 	time.AfterFunc(10*time.Minute, func() { stopChunkWithoutUsage.Delete(traceID) })
@@ -955,59 +950,19 @@ func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
 
 	if usageMetadata = gjson.GetBytes(cleaned, "usageMetadata"); usageMetadata.Exists() {
 		// Rename usageMetadata to cpaUsageMetadata in the message_start event of Claude
-		if renamed, ok := renameUsageMetadataFieldRaw(cleaned, usageMetadata); ok {
-			cleaned = renamed
-		} else {
-			cleaned, _ = sjson.SetRawBytes(cleaned, "cpaUsageMetadata", []byte(usageMetadata.Raw))
-			cleaned, _ = sjson.DeleteBytes(cleaned, "usageMetadata")
-		}
+		cleaned, _ = sjson.SetRawBytes(cleaned, "cpaUsageMetadata", []byte(usageMetadata.Raw))
+		cleaned, _ = sjson.DeleteBytes(cleaned, "usageMetadata")
 		changed = true
 	}
 
 	if usageMetadata = gjson.GetBytes(cleaned, "response.usageMetadata"); usageMetadata.Exists() {
 		// Rename usageMetadata to cpaUsageMetadata in the message_start event of Claude
-		if renamed, ok := renameUsageMetadataFieldRaw(cleaned, usageMetadata); ok {
-			cleaned = renamed
-		} else {
-			cleaned, _ = sjson.SetRawBytes(cleaned, "response.cpaUsageMetadata", []byte(usageMetadata.Raw))
-			cleaned, _ = sjson.DeleteBytes(cleaned, "response.usageMetadata")
-		}
+		cleaned, _ = sjson.SetRawBytes(cleaned, "response.cpaUsageMetadata", []byte(usageMetadata.Raw))
+		cleaned, _ = sjson.DeleteBytes(cleaned, "response.usageMetadata")
 		changed = true
 	}
 
 	return cleaned, changed
-}
-
-func renameUsageMetadataFieldRaw(jsonBytes []byte, usageMetadata gjson.Result) ([]byte, bool) {
-	if len(jsonBytes) == 0 || !usageMetadata.Exists() || usageMetadata.Index <= 0 || usageMetadata.Index > len(jsonBytes) {
-		return nil, false
-	}
-	idx := usageMetadata.Index - 1
-	for idx >= 0 && isJSONWhitespace(jsonBytes[idx]) {
-		idx--
-	}
-	if idx < 0 || jsonBytes[idx] != ':' {
-		return nil, false
-	}
-	idx--
-	for idx >= 0 && isJSONWhitespace(jsonBytes[idx]) {
-		idx--
-	}
-	keyEnd := idx + 1
-	keyStart := keyEnd - len(usageMetadataJSONKey)
-	if keyStart < 0 || !bytes.Equal(jsonBytes[keyStart:keyEnd], usageMetadataJSONKey) {
-		return nil, false
-	}
-
-	renamed := make([]byte, 0, len(jsonBytes)-len(usageMetadataJSONKey)+len(cpaUsageMetadataJSONKey))
-	renamed = append(renamed, jsonBytes[:keyStart]...)
-	renamed = append(renamed, cpaUsageMetadataJSONKey...)
-	renamed = append(renamed, jsonBytes[keyEnd:]...)
-	return renamed, true
-}
-
-func isJSONWhitespace(c byte) bool {
-	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
 }
 
 func hasUsageMetadata(jsonBytes []byte) bool {

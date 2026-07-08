@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -60,44 +59,6 @@ func TestFileTokenStoreSaveDisabledPersistsFlagForTokenStorage(t *testing.T) {
 	}
 	if disabled, _ := meta["disabled"].(bool); !disabled {
 		t.Fatalf("disabled=%v, want true (raw=%s)", meta["disabled"], string(raw))
-	}
-}
-
-func TestFileTokenStoreListReadsJSONFilesInWalkOrder(t *testing.T) {
-	ctx := context.Background()
-	baseDir := t.TempDir()
-	nestedDir := filepath.Join(baseDir, "nested")
-	if err := os.MkdirAll(nestedDir, 0o700); err != nil {
-		t.Fatalf("create nested dir: %v", err)
-	}
-	files := map[string]string{
-		"a.json":             `{"type":"codex","label":"a"}`,
-		"b.json":             `{"type":"claude","label":"b"}`,
-		"nested/c.json":      `{"type":"xai","label":"c"}`,
-		"nested/empty.json":  ``,
-		"nested/ignored.txt": `{"type":"codex","label":"ignored"}`,
-	}
-	for name, data := range files {
-		path := filepath.Join(baseDir, filepath.FromSlash(name))
-		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-
-	store := NewFileTokenStore()
-	store.SetBaseDir(baseDir)
-	auths, err := store.List(ctx)
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-
-	labels := make([]string, 0, len(auths))
-	for _, auth := range auths {
-		labels = append(labels, auth.Label)
-	}
-	want := []string{"a", "b", "c"}
-	if !reflect.DeepEqual(labels, want) {
-		t.Fatalf("labels = %#v, want %#v", labels, want)
 	}
 }
 

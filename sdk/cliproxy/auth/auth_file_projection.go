@@ -55,7 +55,7 @@ func NewAuthFromAuthFileMetadata(metadata map[string]any, opts AuthFileProjectio
 		metadata = normalized
 	}
 
-	provider := AuthFileProviderFromMetadata(metadata)
+	provider := strings.TrimSpace(authFileProjectionString(metadata, "type"))
 	if provider == "" {
 		provider = "unknown"
 	}

@@ -20,7 +20,6 @@ const (
 
 type codexWindowStateEntry struct {
 	generation uint64
-	windowID   string
 	lastSeen   time.Time
 }
 
@@ -52,7 +51,8 @@ func codexCurrentWindowID(sessionID string) string {
 	if sessionID == "" {
 		return ""
 	}
-	return globalCodexWindowStateStore.currentWindowID(sessionID)
+	generation := globalCodexWindowStateStore.currentGeneration(sessionID)
+	return sessionID + ":" + strconv.FormatUint(generation, 10)
 }
 
 func codexAdvanceWindowGeneration(sessionID string) {
@@ -63,10 +63,10 @@ func codexWindowStateKey(headers http.Header) string {
 	if headers == nil {
 		return ""
 	}
-	if threadID := trimHeaderValue(headers, codexHeaderThreadID); threadID != "" {
+	if threadID := strings.TrimSpace(headers.Get(codexHeaderThreadID)); threadID != "" {
 		return threadID
 	}
-	return trimHeaderValue(headers, codexHeaderSessionID)
+	return strings.TrimSpace(headers.Get(codexHeaderSessionID))
 }
 
 // shardFor returns the shard that owns sessionID. The FNV-1a hash is cheap and
@@ -102,27 +102,6 @@ func (s *codexWindowStateStore) currentGeneration(sessionID string) uint64 {
 	return entry.generation
 }
 
-func (s *codexWindowStateStore) currentWindowID(sessionID string) string {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" || s == nil {
-		return ""
-	}
-
-	now := time.Now()
-	s.maybeCleanup(now)
-	shard := s.shardFor(sessionID)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
-	entry := shard.sessions[sessionID]
-	entry.lastSeen = now
-	if entry.windowID == "" {
-		entry.windowID = sessionID + ":" + strconv.FormatUint(entry.generation, 10)
-	}
-	shard.sessions[sessionID] = entry
-	return entry.windowID
-}
-
 func (s *codexWindowStateStore) advance(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" || s == nil {
@@ -137,7 +116,6 @@ func (s *codexWindowStateStore) advance(sessionID string) {
 
 	entry := shard.sessions[sessionID]
 	entry.generation++
-	entry.windowID = ""
 	entry.lastSeen = now
 	shard.sessions[sessionID] = entry
 }

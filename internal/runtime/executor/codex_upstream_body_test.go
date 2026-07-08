@@ -195,7 +195,7 @@ func TestNormalizeCodexFinalUpstreamBody_ParsesParallelToolCallString(t *testing
 	}
 }
 
-func TestNormalizeCodexFinalUpstreamBody_DefaultsOfficialReasoningAndVerbosity(t *testing.T) {
+func TestNormalizeCodexFinalUpstreamBody_DefaultsOfficialMediumReasoningAndVerbosity(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[]}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,
 		streamMode:                  codexStreamFieldTrue,
@@ -203,8 +203,8 @@ func TestNormalizeCodexFinalUpstreamBody_DefaultsOfficialReasoningAndVerbosity(t
 		suppressDefaultInstructions: true,
 	})
 
-	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "xhigh" {
-		t.Fatalf("reasoning.effort = %q, want xhigh; body=%s", got, gotBody)
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "medium" {
+		t.Fatalf("reasoning.effort = %q, want medium; body=%s", got, gotBody)
 	}
 	if got := gjson.GetBytes(gotBody, "include").Array(); len(got) != 1 || got[0].String() != "reasoning.encrypted_content" {
 		t.Fatalf("include should contain reasoning.encrypted_content; body=%s", gotBody)

@@ -98,10 +98,9 @@ func codexApplyHTTPClientMetadataWithSource(body []byte, target http.Header, sou
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
-	var entries [11]codexClientMetadataEntry
 	return codexSetClientMetadata(
 		body,
-		codexResponsesClientMetadataEntries(entries[:0], target, source, auth, cfg, false, ""),
+		codexResponsesClientMetadataEntries(target, source, auth, cfg, false, ""),
 		true,
 	)
 }
@@ -111,58 +110,43 @@ func codexApplyWebsocketClientMetadata(ctx context.Context, body []byte, headers
 }
 
 func codexApplyWebsocketClientMetadataWithStreamStartMS(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config, streamStartMS string) []byte {
-	return codexApplyWebsocketClientMetadataWithOptions(ctx, body, headers, auth, cfg, streamStartMS, false)
-}
-
-func codexApplyWebsocketClientMetadataWithResponseCreateType(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config, streamStartMS string) []byte {
-	return codexApplyWebsocketClientMetadataWithOptions(ctx, body, headers, auth, cfg, streamStartMS, true)
-}
-
-func codexApplyWebsocketClientMetadataWithOptions(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config, streamStartMS string, appendResponseCreateType bool) []byte {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
 
+	source := codexGinHeadersFromContext(ctx)
+	body = codexSetClientMetadata(body, codexResponsesClientMetadataEntries(headers, source, auth, cfg, true, streamStartMS), true)
+
 	// codex-rs carries websocket trace context through client_metadata, not a
-	// top-level trace field. Remove it before appending metadata so the fast path
-	// scans and copies the smaller original body.
-	if bytes.Contains(body, []byte(`"trace"`)) && codexGJSONGetImmutableBytes(body, "trace").Exists() {
+	// top-level trace field.
+	if bytes.Contains(body, []byte(`"trace"`)) && gjson.GetBytes(body, "trace").Exists() {
 		if updated, err := sjson.DeleteBytes(body, "trace"); err == nil {
 			body = updated
 		}
 	}
-
-	source := codexGinHeadersFromContext(ctx)
-	var entries [11]codexClientMetadataEntry
-	metadataEntries := codexResponsesClientMetadataEntries(entries[:0], headers, source, auth, cfg, true, streamStartMS)
-	if appendResponseCreateType {
-		body = codexSetClientMetadataAndResponseCreateType(body, metadataEntries)
-	} else {
-		body = codexSetClientMetadata(body, metadataEntries, true)
-	}
 	return body
 }
 
-func codexResponsesClientMetadataEntries(dst []codexClientMetadataEntry, target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config, websocket bool, streamStartMS string) []codexClientMetadataEntry {
+func codexResponsesClientMetadataEntries(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config, websocket bool, streamStartMS string) []codexClientMetadataEntry {
 	turnMetadata := firstNonEmptyHeaderValue(target, source, codexHeaderTurnMetadata)
-	dst = append(dst,
-		codexClientMetadataEntry{key: codexClientMetadataInstallationID, value: codexResolvedInstallationID(target, source, auth, cfg)},
-		codexClientMetadataEntry{key: codexClientMetadataSessionID, value: codexClientMetadataSessionIDValue(target, source, turnMetadata)},
-		codexClientMetadataEntry{key: codexClientMetadataThreadID, value: codexClientMetadataThreadIDValue(target, source, turnMetadata)},
-		codexClientMetadataEntry{key: codexClientMetadataTurnID, value: codexClientMetadataTurnIDValue(turnMetadata)},
-		codexClientMetadataEntry{key: codexClientMetadataWindowID, value: codexClientMetadataWindowIDValue(target, source, turnMetadata)},
-		codexClientMetadataEntry{key: codexClientMetadataSubagent, value: firstNonEmptyHeaderValue(target, source, codexWireHeaderOpenAISubagent)},
-		codexClientMetadataEntry{key: codexClientMetadataParentThreadID, value: firstNonEmptyHeaderValue(target, source, codexHeaderParentThreadID)},
-		codexClientMetadataEntry{key: codexClientMetadataTurnMetadata, value: turnMetadata},
-	)
+	entries := []codexClientMetadataEntry{
+		{key: codexClientMetadataInstallationID, value: codexResolvedInstallationID(target, source, auth, cfg)},
+		{key: codexClientMetadataSessionID, value: codexClientMetadataSessionIDValue(target, source, turnMetadata)},
+		{key: codexClientMetadataThreadID, value: codexClientMetadataThreadIDValue(target, source, turnMetadata)},
+		{key: codexClientMetadataTurnID, value: codexClientMetadataTurnIDValue(turnMetadata)},
+		{key: codexClientMetadataWindowID, value: codexClientMetadataWindowIDValue(target, source, turnMetadata)},
+		{key: codexClientMetadataSubagent, value: firstNonEmptyHeaderValue(target, source, codexWireHeaderOpenAISubagent)},
+		{key: codexClientMetadataParentThreadID, value: firstNonEmptyHeaderValue(target, source, codexHeaderParentThreadID)},
+		{key: codexClientMetadataTurnMetadata, value: turnMetadata},
+	}
 	if websocket {
-		dst = append(dst,
+		entries = append(entries,
 			codexClientMetadataEntry{key: codexWSClientMetadataTraceparent, value: firstNonEmptyHeaderValue(target, source, "Traceparent")},
 			codexClientMetadataEntry{key: codexWSClientMetadataTracestate, value: firstNonEmptyHeaderValue(target, source, "Tracestate")},
 			codexClientMetadataEntry{key: codexClientMetadataWSStreamRequestStartMS, value: streamStartMS},
 		)
 	}
-	return dst
+	return entries
 }
 
 func codexClientMetadataSessionIDValue(target http.Header, source http.Header, turnMetadata string) string {
@@ -174,9 +158,6 @@ func codexClientMetadataSessionIDValue(target http.Header, source http.Header, t
 	}
 	if value := firstNonEmptyHeaderValue(target, source, "X-Session-ID"); value != "" {
 		return value
-	}
-	if turnMetadata == "" {
-		return ""
 	}
 	return strings.TrimSpace(gjson.Get(turnMetadata, "session_id").String())
 }
@@ -191,25 +172,16 @@ func codexClientMetadataThreadIDValue(target http.Header, source http.Header, tu
 	if value := firstNonEmptyHeaderValue(target, source, "X-Thread-ID"); value != "" {
 		return value
 	}
-	if turnMetadata == "" {
-		return ""
-	}
 	return strings.TrimSpace(gjson.Get(turnMetadata, "thread_id").String())
 }
 
 func codexClientMetadataTurnIDValue(turnMetadata string) string {
-	if turnMetadata == "" {
-		return ""
-	}
 	return strings.TrimSpace(gjson.Get(turnMetadata, "turn_id").String())
 }
 
 func codexClientMetadataWindowIDValue(target http.Header, source http.Header, turnMetadata string) string {
 	if value := firstNonEmptyHeaderValue(target, source, codexHeaderWindowID); value != "" {
 		return value
-	}
-	if turnMetadata == "" {
-		return ""
 	}
 	return strings.TrimSpace(gjson.Get(turnMetadata, codexWindowIDMetadataPath).String())
 }
@@ -221,14 +193,14 @@ func codexEnsureResponsesIdentityHeaders(target http.Header, source http.Header)
 	ensureHeaderWithPriority(target, source, codexHeaderParentThreadID, "", "")
 	ensureHeaderWithPriority(target, source, codexWireHeaderMemgenRequest, "", "")
 	ensureHeaderWithPriority(target, source, codexHeaderWindowID, "", "")
-	if trimHeaderValue(target, codexHeaderWindowID) == "" {
+	if strings.TrimSpace(target.Get(codexHeaderWindowID)) == "" {
 		windowKey := firstNonEmptyHeaderValue(target, source, codexHeaderThreadID)
 		if windowKey == "" {
-			windowKey = trimHeaderValue(target, codexHeaderSessionID)
+			windowKey = strings.TrimSpace(target.Get(codexHeaderSessionID))
 		}
 		if windowKey != "" {
 			if windowID := codexCurrentWindowID(windowKey); windowID != "" {
-				codexSetSingleHeaderValue(target, codexHeaderWindowID, windowID)
+				target.Set(codexHeaderWindowID, windowID)
 			}
 		}
 	}
@@ -261,7 +233,7 @@ func codexSetClientMetadata(body []byte, entries []codexClientMetadataEntry, ove
 	if len(entries) == 0 {
 		return body
 	}
-	metadata := codexGJSONGetImmutableBytes(body, "client_metadata")
+	metadata := gjson.GetBytes(body, "client_metadata")
 	if overwrite && (!metadata.Exists() || metadata.Type == gjson.Null || !metadata.IsObject()) {
 		if !metadata.Exists() {
 			if updated, ok := codexAppendTopLevelClientMetadataObject(body, entries); ok {
@@ -278,12 +250,6 @@ func codexSetClientMetadata(body []byte, entries []codexClientMetadataEntry, ove
 		}
 	}
 	if overwrite && metadata.IsObject() {
-		if updated, changed, ok := codexReplaceMergedClientMetadataObject(body, metadata, entries); ok {
-			if !changed {
-				return body
-			}
-			return updated
-		}
 		if metadataBody, ok := codexBuildMergedClientMetadataObject(metadata, entries); ok {
 			if updated, ok := codexReplaceClientMetadataRaw(body, metadata, metadataBody); ok {
 				return updated
@@ -335,17 +301,6 @@ func codexSetClientMetadata(body []byte, entries []codexClientMetadataEntry, ove
 	return updated
 }
 
-func codexSetClientMetadataAndResponseCreateType(body []byte, entries []codexClientMetadataEntry) []byte {
-	metadata := codexGJSONGetImmutableBytes(body, "client_metadata")
-	requestType := codexGJSONGetImmutableBytes(body, "type")
-	if !metadata.Exists() && !requestType.Exists() {
-		if updated, ok := codexAppendTopLevelClientMetadataObjectAndResponseCreateType(body, entries); ok {
-			return updated
-		}
-	}
-	return codexSetClientMetadata(body, entries, true)
-}
-
 func codexReplaceClientMetadataRaw(body []byte, metadata gjson.Result, metadataBody []byte) ([]byte, bool) {
 	start, end, ok := codexJSONResultRawRange(body, metadata)
 	if !ok {
@@ -359,8 +314,8 @@ func codexReplaceClientMetadataRaw(body []byte, metadata gjson.Result, metadataB
 }
 
 func codexAppendTopLevelClientMetadataObject(body []byte, entries []codexClientMetadataEntry) ([]byte, bool) {
-	fieldCount, fieldsCap := codexClientMetadataOverrideFieldsCapacity(entries)
-	if fieldCount == 0 {
+	overrideCount := codexClientMetadataValidOverrideCount(entries)
+	if overrideCount == 0 {
 		return nil, false
 	}
 	trimmed, suffix, hasFields, ok := codexPrepareTopLevelObjectAppend(body)
@@ -368,16 +323,13 @@ func codexAppendTopLevelClientMetadataObject(body []byte, entries []codexClientM
 		return nil, false
 	}
 
-	extra := codexJSONStringCapacity("client_metadata") + fieldsCap + 3
-	if hasFields {
-		extra++
-	}
+	extra := len("client_metadata") + overrideCount*48 + 6
 	updated := make([]byte, 0, len(body)+extra)
 	updated = append(updated, trimmed[:len(trimmed)-1]...)
 	if hasFields {
 		updated = append(updated, ',')
 	}
-	updated = codexAppendJSONString(updated, "client_metadata")
+	updated = strconv.AppendQuote(updated, "client_metadata")
 	updated = append(updated, ':', '{')
 	wrote := false
 	for i, entry := range entries {
@@ -389,125 +341,14 @@ func codexAppendTopLevelClientMetadataObject(body []byte, entries []codexClientM
 		if wrote {
 			updated = append(updated, ',')
 		}
-		updated = codexAppendJSONString(updated, key)
+		updated = strconv.AppendQuote(updated, key)
 		updated = append(updated, ':')
-		updated = codexAppendJSONString(updated, value)
+		updated = strconv.AppendQuote(updated, value)
 		wrote = true
 	}
 	updated = append(updated, '}', '}')
 	updated = append(updated, suffix...)
 	return updated, true
-}
-
-func codexAppendTopLevelClientMetadataObjectAndResponseCreateType(body []byte, entries []codexClientMetadataEntry) ([]byte, bool) {
-	fieldCount, fieldsCap := codexClientMetadataOverrideFieldsCapacity(entries)
-	if fieldCount == 0 {
-		return nil, false
-	}
-	trimmed, suffix, hasFields, ok := codexPrepareTopLevelObjectAppend(body)
-	if !ok {
-		return nil, false
-	}
-
-	extra := codexJSONStringCapacity("client_metadata") + fieldsCap + 3
-	extra += codexJSONStringCapacity("type") + codexJSONStringCapacity("response.create") + 2
-	if hasFields {
-		extra++
-	}
-	updated := make([]byte, 0, len(body)+extra)
-	updated = append(updated, trimmed[:len(trimmed)-1]...)
-	if hasFields {
-		updated = append(updated, ',')
-	}
-	updated = codexAppendJSONString(updated, "client_metadata")
-	updated = append(updated, ':', '{')
-	wrote := false
-	for i, entry := range entries {
-		key := strings.TrimSpace(entry.key)
-		value := strings.TrimSpace(entry.value)
-		if key == "" || value == "" || codexClientMetadataHasLaterOverride(entries, i, key) {
-			continue
-		}
-		if wrote {
-			updated = append(updated, ',')
-		}
-		updated = codexAppendJSONString(updated, key)
-		updated = append(updated, ':')
-		updated = codexAppendJSONString(updated, value)
-		wrote = true
-	}
-	updated = append(updated, '}', ',')
-	updated = codexAppendJSONString(updated, "type")
-	updated = append(updated, ':')
-	updated = codexAppendJSONString(updated, "response.create")
-	updated = append(updated, '}')
-	updated = append(updated, suffix...)
-	return updated, true
-}
-
-func codexReplaceMergedClientMetadataObject(body []byte, metadata gjson.Result, entries []codexClientMetadataEntry) ([]byte, bool, bool) {
-	overrideCount, overrideCap := codexClientMetadataOverrideFieldsCapacity(entries)
-	if overrideCount == 0 && (!metadata.Exists() || !metadata.IsObject()) {
-		return nil, false, false
-	}
-	start, end, ok := codexJSONResultRawRange(body, metadata)
-	if !ok {
-		return nil, false, false
-	}
-
-	updated := make([]byte, 0, len(body)-len(metadata.Raw)+len(metadata.Raw)+overrideCap)
-	updated = append(updated, body[:start]...)
-	updated = append(updated, '{')
-	wrote := false
-	changed := overrideCount > 0
-	appendFieldRaw := func(key string, rawValue string) {
-		if wrote {
-			updated = append(updated, ',')
-		}
-		updated = codexAppendJSONString(updated, key)
-		updated = append(updated, ':')
-		updated = append(updated, rawValue...)
-		wrote = true
-	}
-	appendFieldString := func(key string, value string) {
-		if wrote {
-			updated = append(updated, ',')
-		}
-		updated = codexAppendJSONString(updated, key)
-		updated = append(updated, ':')
-		updated = codexAppendJSONString(updated, value)
-		wrote = true
-	}
-
-	metadata.ForEach(func(key, value gjson.Result) bool {
-		keyString := key.String()
-		if _, overwritten := codexClientMetadataOverrideValue(entries, keyString); overwritten {
-			changed = true
-			return true
-		}
-		if value.Type != gjson.String {
-			changed = true
-			return true
-		}
-		rawValue := value.Raw
-		if rawValue == "" {
-			appendFieldString(keyString, value.String())
-			return true
-		}
-		appendFieldRaw(keyString, rawValue)
-		return true
-	})
-	for i, entry := range entries {
-		key := strings.TrimSpace(entry.key)
-		value := strings.TrimSpace(entry.value)
-		if key == "" || value == "" || codexClientMetadataHasLaterOverride(entries, i, key) {
-			continue
-		}
-		appendFieldString(key, value)
-	}
-	updated = append(updated, '}')
-	updated = append(updated, body[end:]...)
-	return updated, changed, true
 }
 
 func codexBuildClientMetadataObject(entries []codexClientMetadataEntry) ([]byte, bool) {
@@ -535,9 +376,9 @@ func codexBuildClientMetadataObject(entries []codexClientMetadataEntry) ([]byte,
 		if wrote {
 			body = append(body, ',')
 		}
-		body = codexAppendJSONString(body, key)
+		body = strconv.AppendQuote(body, key)
 		body = append(body, ':')
-		body = codexAppendJSONString(body, value)
+		body = strconv.AppendQuote(body, value)
 		wrote = true
 	}
 	if !wrote {
@@ -548,31 +389,22 @@ func codexBuildClientMetadataObject(entries []codexClientMetadataEntry) ([]byte,
 }
 
 func codexBuildMergedClientMetadataObject(metadata gjson.Result, entries []codexClientMetadataEntry) ([]byte, bool) {
-	overrideCount, overrideCap := codexClientMetadataOverrideFieldsCapacity(entries)
+	overrideCount := codexClientMetadataValidOverrideCount(entries)
 	if overrideCount == 0 && (!metadata.Exists() || !metadata.IsObject()) {
 		return nil, false
 	}
 
-	body := make([]byte, 0, len(metadata.Raw)+overrideCap)
+	body := make([]byte, 0, len(metadata.Raw)+overrideCount*48)
 	body = append(body, '{')
 	wrote := false
 	changed := overrideCount > 0
-	appendFieldRaw := func(key string, rawValue string) {
+	appendField := func(key string, rawValue string) {
 		if wrote {
 			body = append(body, ',')
 		}
-		body = codexAppendJSONString(body, key)
+		body = strconv.AppendQuote(body, key)
 		body = append(body, ':')
 		body = append(body, rawValue...)
-		wrote = true
-	}
-	appendFieldString := func(key string, value string) {
-		if wrote {
-			body = append(body, ',')
-		}
-		body = codexAppendJSONString(body, key)
-		body = append(body, ':')
-		body = codexAppendJSONString(body, value)
 		wrote = true
 	}
 
@@ -588,10 +420,9 @@ func codexBuildMergedClientMetadataObject(metadata gjson.Result, entries []codex
 		}
 		rawValue := value.Raw
 		if rawValue == "" {
-			appendFieldString(keyString, value.String())
-			return true
+			rawValue = strconv.Quote(value.String())
 		}
-		appendFieldRaw(keyString, rawValue)
+		appendField(keyString, rawValue)
 		return true
 	})
 	for i, entry := range entries {
@@ -600,7 +431,7 @@ func codexBuildMergedClientMetadataObject(metadata gjson.Result, entries []codex
 		if key == "" || value == "" || codexClientMetadataHasLaterOverride(entries, i, key) {
 			continue
 		}
-		appendFieldString(key, value)
+		appendField(key, strconv.Quote(value))
 	}
 	body = append(body, '}')
 	if !changed {
@@ -609,22 +440,14 @@ func codexBuildMergedClientMetadataObject(metadata gjson.Result, entries []codex
 	return body, true
 }
 
-func codexClientMetadataOverrideFieldsCapacity(entries []codexClientMetadataEntry) (int, int) {
+func codexClientMetadataValidOverrideCount(entries []codexClientMetadataEntry) int {
 	count := 0
-	capacity := 0
-	for i, entry := range entries {
-		key := strings.TrimSpace(entry.key)
-		value := strings.TrimSpace(entry.value)
-		if key == "" || value == "" || codexClientMetadataHasLaterOverride(entries, i, key) {
-			continue
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.key) != "" && strings.TrimSpace(entry.value) != "" {
+			count++
 		}
-		if count > 0 {
-			capacity++
-		}
-		capacity += codexJSONStringCapacity(key) + codexJSONStringCapacity(value) + 1
-		count++
 	}
-	return count, capacity
+	return count
 }
 
 func codexClientMetadataOverrideValue(entries []codexClientMetadataEntry, key string) (string, bool) {
@@ -681,9 +504,9 @@ func codexClientMetadataStringMapRaw(metadata gjson.Result, collectExistingKeys 
 		if !first {
 			buf = append(buf, ',')
 		}
-		buf = codexAppendJSONString(buf, keyString)
+		buf = strconv.AppendQuote(buf, keyString)
 		buf = append(buf, ':')
-		buf = codexAppendJSONString(buf, value.String())
+		buf = strconv.AppendQuote(buf, value.String())
 		if existingKeys != nil {
 			existingKeys[keyString] = struct{}{}
 		}
@@ -692,67 +515,6 @@ func codexClientMetadataStringMapRaw(metadata gjson.Result, collectExistingKeys 
 	})
 	buf = append(buf, '}')
 	return buf, existingKeys, changed
-}
-
-func codexAppendJSONString(dst []byte, value string) []byte {
-	if !codexJSONStringASCII(value) {
-		return strconv.AppendQuote(dst, value)
-	}
-	dst = append(dst, '"')
-	start := 0
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		if c >= 0x20 && c != '"' && c != '\\' {
-			continue
-		}
-		dst = append(dst, value[start:i]...)
-		switch c {
-		case '"', '\\':
-			dst = append(dst, '\\', c)
-		case '\b':
-			dst = append(dst, '\\', 'b')
-		case '\f':
-			dst = append(dst, '\\', 'f')
-		case '\n':
-			dst = append(dst, '\\', 'n')
-		case '\r':
-			dst = append(dst, '\\', 'r')
-		case '\t':
-			dst = append(dst, '\\', 't')
-		default:
-			const hex = "0123456789abcdef"
-			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0x0f])
-		}
-		start = i + 1
-	}
-	dst = append(dst, value[start:]...)
-	dst = append(dst, '"')
-	return dst
-}
-
-func codexJSONStringCapacity(value string) int {
-	capacity := len(value) + 2
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		switch c {
-		case '"', '\\', '\b', '\f', '\n', '\r', '\t':
-			capacity++
-		default:
-			if c < 0x20 {
-				capacity += 5
-			}
-		}
-	}
-	return capacity
-}
-
-func codexJSONStringASCII(value string) bool {
-	for i := 0; i < len(value); i++ {
-		if value[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
 }
 
 func codexResolvedInstallationID(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) string {

@@ -63,53 +63,6 @@ func TestListAuthFilesFromDisk_IncludesDisabledAndDisableCooling(t *testing.T) {
 	}
 }
 
-func TestListAuthFilesFromDisk_InfersCodexClientProfileOnlyFile(t *testing.T) {
-	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
-
-	authDir := t.TempDir()
-	filePath := filepath.Join(authDir, "codex-profile.json")
-	initial := `{
-  "installation_id": "03cc2394-b574-43b1-bda8-bc368436d9a3",
-  "user_agent": "node"
-}`
-	if err := os.WriteFile(filePath, []byte(initial), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
-	rec := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rec)
-	req := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
-	ctx.Request = req
-
-	h.ListAuthFiles(ctx)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
-	}
-
-	var response struct {
-		Files []map[string]any `json:"files"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("Unmarshal(response) error = %v", err)
-	}
-	if len(response.Files) != 1 {
-		t.Fatalf("len(files) = %d, want 1", len(response.Files))
-	}
-	file := response.Files[0]
-	if got := file["type"]; got != "codex" {
-		t.Fatalf("file.type = %#v, want codex", got)
-	}
-	if got := file["user_agent"]; got != "node" {
-		t.Fatalf("file.user_agent = %#v, want node", got)
-	}
-	if got := file["installation_id"]; got != "03cc2394-b574-43b1-bda8-bc368436d9a3" {
-		t.Fatalf("file.installation_id = %#v, want source installation id", got)
-	}
-}
-
 func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

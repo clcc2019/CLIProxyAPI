@@ -747,20 +747,6 @@ func TestPatchCodexCompletedOutputRecoversFunctionCallDeltaArguments(t *testing.
 	}
 }
 
-func TestPatchCodexCompletedOutputSkipsWhitespaceNonEmptyOutput(t *testing.T) {
-	streamState := newCodexStreamCompletionState()
-	streamState.recordEvent([]byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"recovered"}]},"output_index":0}`))
-	completed := []byte("{\"response\":{\"output\":[ \n {\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"existing\"}]} \n ]}}")
-
-	patched, recoveredCount := streamState.patchCompletedOutputIfEmpty(completed)
-	if recoveredCount != 0 {
-		t.Fatalf("recovered count = %d, want 0", recoveredCount)
-	}
-	if string(patched) != string(completed) {
-		t.Fatalf("non-empty output should be preserved:\n got: %s\nwant: %s", patched, completed)
-	}
-}
-
 func TestCodexEventTypeUsesTopLevelType(t *testing.T) {
 	eventData := []byte(`{"nested":{"type":"response.completed"},"type":"response.function_call_arguments.delta"}`)
 	if got := codexEventType(eventData); got != codexEventFunctionCallArgumentsDelta {

@@ -566,22 +566,6 @@ func TestFilterSSEUsageMetadataRebuildsOnlyModifiedDataLines(t *testing.T) {
 	}
 }
 
-func TestStripUsageMetadataFromJSONRenamesResponseWrappedMetadata(t *testing.T) {
-	payload := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":1}}}`)
-
-	got, changed := StripUsageMetadataFromJSON(payload)
-
-	if !changed {
-		t.Fatal("expected response usage metadata to be renamed")
-	}
-	if bytes.Contains(got, []byte(`"usageMetadata"`)) {
-		t.Fatalf("old usage metadata key remains: %s", got)
-	}
-	if !bytes.Contains(got, []byte(`"cpaUsageMetadata":{"promptTokenCount":1}`)) {
-		t.Fatalf("renamed response usage metadata missing: %s", got)
-	}
-}
-
 func BenchmarkFilterSSEUsageMetadataPassthrough(b *testing.B) {
 	payload := []byte("event: message\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n")
 	b.ReportAllocs()

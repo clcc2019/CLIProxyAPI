@@ -37,22 +37,3 @@ func TestCodexWindowStateStoreCleanupRotatesAcrossShards(t *testing.T) {
 		}
 	}
 }
-
-func TestCodexWindowStateStoreCurrentWindowIDCachesUntilAdvance(t *testing.T) {
-	store := newCodexWindowStateStore()
-
-	first := store.currentWindowID("session-1")
-	second := store.currentWindowID("session-1")
-	if first != "session-1:0" {
-		t.Fatalf("first window id = %q, want session-1:0", first)
-	}
-	if second != first {
-		t.Fatalf("cached window id = %q, want %q", second, first)
-	}
-
-	store.advance("session-1")
-	advanced := store.currentWindowID("session-1")
-	if advanced != "session-1:1" {
-		t.Fatalf("advanced window id = %q, want session-1:1", advanced)
-	}
-}

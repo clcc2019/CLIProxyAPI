@@ -86,48 +86,6 @@ func TestNewAuthFromAuthFileMetadataAppliesCodexClientProfileFields(t *testing.T
 	}
 }
 
-func TestNewAuthFromAuthFileDataInfersCodexFromClientProfileOnlyFile(t *testing.T) {
-	auth, err := NewAuthFromAuthFileData([]byte(`{
-		"installation_id": "03cc2394-b574-43b1-bda8-bc368436d9a3",
-		"user_agent": "node"
-	}`), AuthFileProjectionOptions{ID: "codex-profile.json"})
-	if err != nil {
-		t.Fatalf("NewAuthFromAuthFileData error: %v", err)
-	}
-
-	if auth.Provider != "codex" {
-		t.Fatalf("Provider = %q, want codex", auth.Provider)
-	}
-	if got := auth.Attributes["header:User-Agent"]; got != "node" {
-		t.Fatalf("Attributes[header:User-Agent] = %q, want node; attrs=%#v", got, auth.Attributes)
-	}
-	if got := auth.Attributes["header:X-Codex-Installation-Id"]; got != "03cc2394-b574-43b1-bda8-bc368436d9a3" {
-		t.Fatalf("Attributes[header:X-Codex-Installation-Id] = %q, want source installation id; attrs=%#v", got, auth.Attributes)
-	}
-	if got := auth.Attributes["websockets"]; got != "true" {
-		t.Fatalf("Attributes[websockets] = %q, want default true; attrs=%#v", got, auth.Attributes)
-	}
-}
-
-func TestNewAuthFromAuthFileMetadataReadsNestedCodexClientProfileFields(t *testing.T) {
-	auth := NewAuthFromAuthFileMetadata(map[string]any{
-		"client_profile": map[string]any{
-			"installation_id": "install-1",
-			"user_agent":      "node",
-		},
-	}, AuthFileProjectionOptions{ID: "codex-profile.json"})
-
-	if auth.Provider != "codex" {
-		t.Fatalf("Provider = %q, want codex", auth.Provider)
-	}
-	if got := auth.Attributes["header:User-Agent"]; got != "node" {
-		t.Fatalf("Attributes[header:User-Agent] = %q, want node; attrs=%#v", got, auth.Attributes)
-	}
-	if got := auth.Attributes["header:X-Codex-Installation-Id"]; got != "install-1" {
-		t.Fatalf("Attributes[header:X-Codex-Installation-Id] = %q, want nested installation id; attrs=%#v", got, auth.Attributes)
-	}
-}
-
 func TestNewAuthFromAuthFileMetadataDefaultsCodexWebsocketsEnabled(t *testing.T) {
 	auth := NewAuthFromAuthFileMetadata(map[string]any{
 		"type":  "codex",
