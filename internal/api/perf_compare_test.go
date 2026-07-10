@@ -111,25 +111,30 @@ type perfScenario struct {
 	id          string
 	name        string
 	concurrency int
+	turns       int
 	run         func(*perfFixture, uint64) (int, error)
 }
 
 type perfScenarioResult struct {
-	Name             string  `json:"name"`
-	Concurrency      int     `json:"concurrency"`
-	DurationMs       float64 `json:"duration_ms"`
-	Requests         int64   `json:"requests"`
-	Errors           int64   `json:"errors"`
-	ResponseBytes    int64   `json:"response_bytes"`
-	RPS              float64 `json:"rps"`
-	AvgMs            float64 `json:"avg_ms"`
-	P50Ms            float64 `json:"p50_ms"`
-	P95Ms            float64 `json:"p95_ms"`
-	P99Ms            float64 `json:"p99_ms"`
-	MaxMs            float64 `json:"max_ms"`
-	AllocBytesPerReq float64 `json:"alloc_bytes_per_req"`
-	MallocsPerReq    float64 `json:"mallocs_per_req"`
-	FirstError       string  `json:"first_error,omitempty"`
+	Name              string  `json:"name"`
+	Concurrency       int     `json:"concurrency"`
+	DurationMs        float64 `json:"duration_ms"`
+	Requests          int64   `json:"requests"`
+	Errors            int64   `json:"errors"`
+	ResponseBytes     int64   `json:"response_bytes"`
+	RPS               float64 `json:"rps"`
+	Turns             int     `json:"turns"`
+	TurnsPerSecond    float64 `json:"turns_per_second"`
+	AvgMs             float64 `json:"avg_ms"`
+	P50Ms             float64 `json:"p50_ms"`
+	P95Ms             float64 `json:"p95_ms"`
+	P99Ms             float64 `json:"p99_ms"`
+	MaxMs             float64 `json:"max_ms"`
+	AllocBytesPerReq  float64 `json:"alloc_bytes_per_req"`
+	MallocsPerReq     float64 `json:"mallocs_per_req"`
+	AllocBytesPerTurn float64 `json:"alloc_bytes_per_turn"`
+	MallocsPerTurn    float64 `json:"mallocs_per_turn"`
+	FirstError        string  `json:"first_error,omitempty"`
 }
 
 type perfSuiteResult struct {
@@ -321,6 +326,7 @@ func buildPerfScenarios(opts perfOptions) []perfScenario {
 			id:          perfScenarioWSSingleTurn,
 			name:        "codex_responses_websocket_single_turn",
 			concurrency: maxInt(opts.wsConcurrency, 1),
+			turns:       1,
 			run: func(f *perfFixture, seq uint64) (int, error) {
 				variant := f.variant(seq)
 				return variant.wsClient.do(f.wsURL+"/v1/responses", variant.wsTurnBodies[:1], variant.wsHeaders)
@@ -331,8 +337,9 @@ func buildPerfScenarios(opts perfOptions) []perfScenario {
 	if opts.turns > 1 {
 		scenarios = append(scenarios, perfScenario{
 			id:          perfScenarioWSMultiTurn,
-			name:        "codex_responses_websocket_multi_turn",
+			name:        fmt.Sprintf("codex_responses_websocket_multi_turn_%d", opts.turns),
 			concurrency: maxInt(opts.wsConcurrency, 1),
+			turns:       opts.turns,
 			run: func(f *perfFixture, seq uint64) (int, error) {
 				variant := f.variant(seq)
 				return variant.wsClient.do(f.wsURL+"/v1/responses", variant.wsTurnBodies, variant.wsHeaders)
@@ -783,6 +790,7 @@ func runPerfScenario(t *testing.T, fixture *perfFixture, duration time.Duration,
 		Name:        scenario.name,
 		Concurrency: maxInt(scenario.concurrency, 1),
 		DurationMs:  float64(duration.Milliseconds()),
+		Turns:       maxInt(scenario.turns, 1),
 	}
 
 	runtime.GC()
@@ -843,6 +851,7 @@ func runPerfScenario(t *testing.T, fixture *perfFixture, duration time.Duration,
 	result.ResponseBytes = responseBytes.Load()
 	if totalDuration > 0 {
 		result.RPS = float64(result.Requests) / totalDuration.Seconds()
+		result.TurnsPerSecond = result.RPS * float64(result.Turns)
 	}
 	if len(latencies) > 0 {
 		var sum int64
@@ -858,6 +867,8 @@ func runPerfScenario(t *testing.T, fixture *perfFixture, duration time.Duration,
 	if result.Requests > 0 {
 		result.AllocBytesPerReq = float64(after.TotalAlloc-before.TotalAlloc) / float64(result.Requests)
 		result.MallocsPerReq = float64(after.Mallocs-before.Mallocs) / float64(result.Requests)
+		result.AllocBytesPerTurn = result.AllocBytesPerReq / float64(result.Turns)
+		result.MallocsPerTurn = result.MallocsPerReq / float64(result.Turns)
 	}
 	return result
 }
@@ -901,6 +912,10 @@ func (c *perfDownstreamWebsocketClient) do(url string, payloads [][]byte, header
 	if err != nil {
 		return 0, err
 	}
+	// Each benchmark operation represents one logical downstream session. Keep
+	// all turns in this operation on the same connection, then close it so the
+	// next sample cannot inherit lastRequest/lastResponse state from this one.
+	defer c.closeConnLocked()
 
 	total := 0
 	for _, payload := range payloads {

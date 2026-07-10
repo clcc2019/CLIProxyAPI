@@ -85,3 +85,55 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 	}
 	return updated
 }
+
+func dropOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte, reason string) ([]byte, bool) {
+	if !bytes.Contains(body, []byte(`"encrypted_content"`)) {
+		return body, false
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body, false
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = "openai responses upstream"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "upstream rejected encrypted content"
+	}
+
+	items := input.Array()
+	rawItems := make([][]byte, 0, len(items))
+	changed := false
+	for index, item := range items {
+		rawItem := []byte(item.Raw)
+		if strings.TrimSpace(item.Get("type").String()) != "reasoning" || !item.Get("encrypted_content").Exists() {
+			rawItems = append(rawItems, rawItem)
+			continue
+		}
+		next, err := sjson.DeleteBytes(rawItem, "encrypted_content")
+		if err != nil {
+			helps.LogWithRequestID(ctx).Debugf("%s: failed to drop reasoning encrypted_content at input[%d]: %v", provider, index, err)
+			rawItems = append(rawItems, rawItem)
+			continue
+		}
+		rawItems = append(rawItems, next)
+		changed = true
+
+		itemID := strings.TrimSpace(item.Get("id").String())
+		if itemID == "" {
+			itemID = fmt.Sprintf("input[%d]", index)
+		}
+		helps.LogWithRequestID(ctx).Debugf("%s: dropped reasoning encrypted_content at input[%d] item_id=%q reason=%s", provider, index, itemID, reason)
+	}
+	if !changed {
+		return body, false
+	}
+	updated, err := helps.SetRawJSONBytes(body, "input", codexRawJSONArray(rawItems))
+	if err != nil {
+		helps.LogWithRequestID(ctx).Debugf("%s: failed to rewrite reasoning input after encrypted_content drop: %v", provider, err)
+		return body, false
+	}
+	return updated, true
+}

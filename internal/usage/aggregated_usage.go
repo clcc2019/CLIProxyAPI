@@ -272,13 +272,21 @@ func (s *RequestStatistics) AggregatedUsageSnapshot(now time.Time) AggregatedUsa
 		if normalizedDetail.Timestamp.IsZero() {
 			continue
 		}
+		requestCount := record.Requests
+		if requestCount <= 0 {
+			requestCount = 1
+		}
+		latency := record.Latency
+		if latency.Count == 0 {
+			addLatencySample(&latency, normalizedDetail.LatencyMs)
+		}
 		globalModelNames[modelName] = struct{}{}
 		for _, cfg := range aggregatedUsageWindowConfigs {
 			acc := accumulators[cfg.key]
 			if acc == nil || !acc.includes(normalizedDetail.Timestamp) {
 				continue
 			}
-			acc.addRecord(apiName, modelName, normalizedDetail)
+			acc.addAggregateRecord(apiName, modelName, normalizedDetail, requestCount, latency)
 		}
 	}
 
@@ -346,7 +354,15 @@ func aggregateRecordsToAllSnapshot(records []usageAggregateRecord, now time.Time
 			continue
 		}
 		modelNames[modelName] = struct{}{}
-		acc.addRecord(apiName, modelName, detail)
+		requestCount := record.Requests
+		if requestCount <= 0 {
+			requestCount = 1
+		}
+		latency := record.Latency
+		if latency.Count == 0 {
+			addLatencySample(&latency, detail.LatencyMs)
+		}
+		acc.addAggregateRecord(apiName, modelName, detail, requestCount, latency)
 	}
 	if acc.totalRequests == 0 {
 		return result
@@ -435,7 +451,16 @@ func (a *aggregatedUsageWindowAccumulator) includes(ts time.Time) bool {
 }
 
 func (a *aggregatedUsageWindowAccumulator) addRecord(apiName, modelName string, detail RequestDetail) {
+	latency := LatencyStats{}
+	addLatencySample(&latency, detail.LatencyMs)
+	a.addAggregateRecord(apiName, modelName, detail, 1, latency)
+}
+
+func (a *aggregatedUsageWindowAccumulator) addAggregateRecord(apiName, modelName string, detail RequestDetail, requests int64, latency LatencyStats) {
 	if a == nil {
+		return
+	}
+	if requests <= 0 {
 		return
 	}
 
@@ -445,41 +470,41 @@ func (a *aggregatedUsageWindowAccumulator) addRecord(apiName, modelName string, 
 	}
 	tokens := normaliseTokenStats(detail.Tokens)
 
-	a.totalRequests++
+	a.totalRequests += requests
 	if detail.Failed {
-		a.failureCount++
+		a.failureCount += requests
 	} else {
-		a.successCount++
+		a.successCount += requests
 	}
 	a.totalTokens += tokens.TotalTokens
 	mergeTokenStats(&a.tokenBreakdown, tokens)
-	addLatencySample(&a.latency, detail.LatencyMs)
+	mergeLatencyStats(&a.latency, latency)
 	a.modelNames[modelName] = struct{}{}
 
 	if !detail.Timestamp.Before(a.rateStart) {
-		a.rateRequests++
+		a.rateRequests += requests
 		a.rateTokens += tokens.TotalTokens
 	}
 
-	a.addSparkline(detail.Timestamp, tokens.TotalTokens)
-	a.addModelSeries(a.requestsHour, modelName, truncateToHourUTC(detail.Timestamp), 1)
+	a.addSparkline(detail.Timestamp, requests, tokens.TotalTokens)
+	a.addModelSeries(a.requestsHour, modelName, truncateToHourUTC(detail.Timestamp), requests)
 	a.addModelSeries(a.tokensHour, modelName, truncateToHourUTC(detail.Timestamp), tokens.TotalTokens)
 	dayBucket := truncateToDayUTC(detail.Timestamp)
-	a.addModelSeries(a.requestsDay, modelName, dayBucket, 1)
+	a.addModelSeries(a.requestsDay, modelName, dayBucket, requests)
 	a.addModelSeries(a.tokensDay, modelName, dayBucket, tokens.TotalTokens)
 	a.addTokenSeries(a.tokenBreakdownHour, truncateToBucketUTC(detail.Timestamp, a.analysisBucket), tokens)
 	a.addTokenSeries(a.tokenBreakdownDay, dayBucket, tokens)
-	a.addLatencySeries(a.latencyHour, truncateToBucketUTC(detail.Timestamp, a.analysisBucket), detail.LatencyMs)
-	a.addLatencySeries(a.latencyDay, dayBucket, detail.LatencyMs)
+	a.addLatencySeries(a.latencyHour, truncateToBucketUTC(detail.Timestamp, a.analysisBucket), latency)
+	a.addLatencySeries(a.latencyDay, dayBucket, latency)
 	a.addCostBasisSeries(a.costBasisHour, modelName, truncateToBucketUTC(detail.Timestamp, a.analysisBucket), tokens)
 	a.addCostBasisSeries(a.costBasisDay, modelName, dayBucket, tokens)
 	a.trackDayRange(dayBucket)
-	a.addAPIAggregate(apiName, modelName, detail, tokens)
-	a.addModelAggregate(modelName, detail, tokens)
-	a.addCredentialAggregate(detail, tokens)
+	a.addAPIAggregate(apiName, modelName, detail, requests, tokens, latency)
+	a.addModelAggregate(modelName, detail, requests, tokens, latency)
+	a.addCredentialAggregate(detail, requests, tokens)
 }
 
-func (a *aggregatedUsageWindowAccumulator) addSparkline(ts time.Time, totalTokens int64) {
+func (a *aggregatedUsageWindowAccumulator) addSparkline(ts time.Time, requests, totalTokens int64) {
 	if a == nil {
 		return
 	}
@@ -491,7 +516,7 @@ func (a *aggregatedUsageWindowAccumulator) addSparkline(ts time.Time, totalToken
 	if index < 0 || index >= len(a.sparkRequests) {
 		return
 	}
-	a.sparkRequests[index]++
+	a.sparkRequests[index] += requests
 	a.sparkTokens[index] += totalTokens
 }
 
@@ -516,12 +541,12 @@ func (a *aggregatedUsageWindowAccumulator) addTokenSeries(target map[time.Time]T
 	target[bucket] = current
 }
 
-func (a *aggregatedUsageWindowAccumulator) addLatencySeries(target map[time.Time]LatencyStats, bucket time.Time, latencyMs int64) {
-	if a == nil || latencyMs <= 0 {
+func (a *aggregatedUsageWindowAccumulator) addLatencySeries(target map[time.Time]LatencyStats, bucket time.Time, latency LatencyStats) {
+	if a == nil || latency.Count <= 0 {
 		return
 	}
 	current := target[bucket]
-	addLatencySample(&current, latencyMs)
+	mergeLatencyStats(&current, latency)
 	target[bucket] = current
 }
 
@@ -560,7 +585,7 @@ func (a *aggregatedUsageWindowAccumulator) trackDayRange(bucket time.Time) {
 	}
 }
 
-func (a *aggregatedUsageWindowAccumulator) addAPIAggregate(apiName, modelName string, detail RequestDetail, tokens TokenStats) {
+func (a *aggregatedUsageWindowAccumulator) addAPIAggregate(apiName, modelName string, detail RequestDetail, requests int64, tokens TokenStats, latency LatencyStats) {
 	if a == nil {
 		return
 	}
@@ -576,33 +601,33 @@ func (a *aggregatedUsageWindowAccumulator) addAPIAggregate(apiName, modelName st
 		}
 		a.apiStats[apiName] = apiAcc
 	}
-	apiAcc.totalRequests++
+	apiAcc.totalRequests += requests
 	if detail.Failed {
-		apiAcc.failureCount++
+		apiAcc.failureCount += requests
 	} else {
-		apiAcc.successCount++
+		apiAcc.successCount += requests
 	}
 	apiAcc.totalTokens += tokens.TotalTokens
 	mergeTokenStats(&apiAcc.tokenBreakdown, tokens)
-	addLatencySample(&apiAcc.latency, detail.LatencyMs)
+	mergeLatencyStats(&apiAcc.latency, latency)
 
 	modelAcc := apiAcc.models[modelName]
 	if modelAcc == nil {
 		modelAcc = &aggregatedUsageModelAccumulator{}
 		apiAcc.models[modelName] = modelAcc
 	}
-	modelAcc.requests++
+	modelAcc.requests += requests
 	if detail.Failed {
-		modelAcc.failureCount++
+		modelAcc.failureCount += requests
 	} else {
-		modelAcc.successCount++
+		modelAcc.successCount += requests
 	}
 	modelAcc.tokens += tokens.TotalTokens
 	mergeTokenStats(&modelAcc.tokenBreakdown, tokens)
-	addLatencySample(&modelAcc.latency, detail.LatencyMs)
+	mergeLatencyStats(&modelAcc.latency, latency)
 }
 
-func (a *aggregatedUsageWindowAccumulator) addModelAggregate(modelName string, detail RequestDetail, tokens TokenStats) {
+func (a *aggregatedUsageWindowAccumulator) addModelAggregate(modelName string, detail RequestDetail, requests int64, tokens TokenStats, latency LatencyStats) {
 	if a == nil {
 		return
 	}
@@ -611,18 +636,18 @@ func (a *aggregatedUsageWindowAccumulator) addModelAggregate(modelName string, d
 		modelAcc = &aggregatedUsageModelAccumulator{}
 		a.modelStats[modelName] = modelAcc
 	}
-	modelAcc.requests++
+	modelAcc.requests += requests
 	if detail.Failed {
-		modelAcc.failureCount++
+		modelAcc.failureCount += requests
 	} else {
-		modelAcc.successCount++
+		modelAcc.successCount += requests
 	}
 	modelAcc.tokens += tokens.TotalTokens
 	mergeTokenStats(&modelAcc.tokenBreakdown, tokens)
-	addLatencySample(&modelAcc.latency, detail.LatencyMs)
+	mergeLatencyStats(&modelAcc.latency, latency)
 }
 
-func (a *aggregatedUsageWindowAccumulator) addCredentialAggregate(detail RequestDetail, tokens TokenStats) {
+func (a *aggregatedUsageWindowAccumulator) addCredentialAggregate(detail RequestDetail, requests int64, tokens TokenStats) {
 	if a == nil {
 		return
 	}
@@ -637,11 +662,11 @@ func (a *aggregatedUsageWindowAccumulator) addCredentialAggregate(detail Request
 		}
 		a.credentials[credKey] = acc
 	}
-	acc.totalRequests++
+	acc.totalRequests += requests
 	if detail.Failed {
-		acc.failureCount++
+		acc.failureCount += requests
 	} else {
-		acc.successCount++
+		acc.successCount += requests
 	}
 	acc.totalTokens += tokens.TotalTokens
 }

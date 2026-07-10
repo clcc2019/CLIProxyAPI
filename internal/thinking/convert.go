@@ -20,6 +20,7 @@ import (
 //   - high    → 24576
 //   - xhigh   → 32768
 //   - max     → 128000
+//   - ultra   → 128000
 //
 // Returns:
 //   - budget: The converted budget value
@@ -43,6 +44,10 @@ func ConvertLevelToBudget(level string) (int, bool) {
 	case strings.EqualFold(level, "max"):
 		// "max" is used by Claude adaptive thinking effort. We map it to a large budget
 		// and rely on per-model clamping when converting to budget-only providers.
+		return 128000, true
+	case strings.EqualFold(level, "ultra"):
+		// Delegation semantics cannot be represented by a numeric budget. Preserve
+		// the maximum reasoning budget when crossing to a budget-only provider.
 		return 128000, true
 	default:
 		return 0, false
@@ -130,7 +135,7 @@ func MapToClaudeEffort(level string, supportsMax bool) (string, bool) {
 		return "medium", true
 	case strings.EqualFold(level, "high"):
 		return "high", true
-	case strings.EqualFold(level, "xhigh") || strings.EqualFold(level, "max"):
+	case strings.EqualFold(level, "xhigh") || strings.EqualFold(level, "max") || strings.EqualFold(level, "ultra"):
 		if supportsMax {
 			return "max", true
 		}

@@ -363,3 +363,183 @@ func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.
 		t.Fatalf("different product Version = %q, want pinned upgraded version", got)
 	}
 }
+
+func TestApplyCodexHeadersReplacesLegacyDefaultPinnedClientProfile(t *testing.T) {
+	const legacyDefaultUA = "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	const clientUA = "codex_vscode/0.144.1 (darwin; arm64)"
+
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-legacy-default-profile",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":                              "codex",
+			"access_token":                      "oauth-token",
+			codexClientProfilePinnedMetadataKey: true,
+			"user_agent":                        legacyDefaultUA,
+			"originator":                        "codex_cli_rs",
+			"headers": map[string]any{
+				"User-Agent": legacyDefaultUA,
+				"Originator": "codex_cli_rs",
+				"Version":    "0.133.0",
+			},
+		},
+		Attributes: map[string]string{
+			"auth_kind":         "oauth",
+			"header:User-Agent": legacyDefaultUA,
+			"originator":        "codex_cli_rs",
+			"header:Originator": "codex_cli_rs",
+			"header:Version":    "0.133.0",
+		},
+	}
+	var published *cliproxyauth.Auth
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent": clientUA,
+		"Originator": "codex_vscode",
+		"Version":    "0.144.1",
+	})
+	ctx = cliproxyauth.WithAuthUpdateCallback(ctx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if published == nil {
+		t.Fatal("expected legacy default profile replacement to publish auth update")
+	}
+	if got := req.Header.Get("User-Agent"); got != clientUA {
+		t.Fatalf("request User-Agent = %q, want %q", got, clientUA)
+	}
+	if got := req.Header.Get("Originator"); got != "codex_vscode" {
+		t.Fatalf("request Originator = %q, want codex_vscode", got)
+	}
+	if got := req.Header.Get("Version"); got != "0.144.1" {
+		t.Fatalf("request Version = %q, want 0.144.1", got)
+	}
+	if got := auth.Metadata["user_agent"]; got != clientUA {
+		t.Fatalf("auth user_agent = %v, want %s", got, clientUA)
+	}
+	if got := auth.Metadata["originator"]; got != "codex_vscode" {
+		t.Fatalf("auth originator = %v, want codex_vscode", got)
+	}
+	if got := auth.Attributes["header:User-Agent"]; got != clientUA {
+		t.Fatalf("auth header:User-Agent = %q, want %q", got, clientUA)
+	}
+	if got := auth.Attributes["header:Version"]; got != "0.144.1" {
+		t.Fatalf("auth header:Version = %q, want 0.144.1", got)
+	}
+}
+
+func TestApplyCodexHeadersReplacesLegacyDefaultUnpinnedClientProfile(t *testing.T) {
+	const legacyDefaultUA = "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	const clientUA = "codex_vscode/0.144.1 (darwin; arm64)"
+
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-legacy-default-unpinned-profile",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "oauth-token",
+			"user_agent":   legacyDefaultUA,
+			"originator":   "codex_cli_rs",
+			"headers": map[string]any{
+				"User-Agent": legacyDefaultUA,
+				"Originator": "codex_cli_rs",
+				"Version":    "0.133.0",
+			},
+		},
+		Attributes: map[string]string{
+			"auth_kind":         "oauth",
+			"header:User-Agent": legacyDefaultUA,
+			"originator":        "codex_cli_rs",
+			"header:Originator": "codex_cli_rs",
+			"header:Version":    "0.133.0",
+		},
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent": clientUA,
+		"Originator": "codex_vscode",
+		"Version":    "0.144.1",
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if got := req.Header.Get("User-Agent"); got != clientUA {
+		t.Fatalf("request User-Agent = %q, want %q", got, clientUA)
+	}
+	if got := req.Header.Get("Originator"); got != "codex_vscode" {
+		t.Fatalf("request Originator = %q, want codex_vscode", got)
+	}
+	if got := auth.Metadata["originator"]; got != "codex_vscode" {
+		t.Fatalf("auth originator = %v, want codex_vscode", got)
+	}
+	if got := auth.Attributes["header:Originator"]; got != "codex_vscode" {
+		t.Fatalf("auth header:Originator = %q, want codex_vscode", got)
+	}
+	if got := auth.Attributes["header:Version"]; got != "0.144.1" {
+		t.Fatalf("auth header:Version = %q, want 0.144.1", got)
+	}
+	headers, ok := auth.Metadata["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth metadata headers = %T, want map[string]any", auth.Metadata["headers"])
+	}
+	if got := headers["Version"]; got != "0.144.1" {
+		t.Fatalf("auth metadata Version = %v, want 0.144.1", got)
+	}
+}
+
+func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
+	const explicitUA = "codex_cli_rs/0.144.1 (Linux; x86_64) custom-terminal/1.0"
+
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-explicit-current-cli-profile",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":                              "codex",
+			"access_token":                      "oauth-token",
+			codexClientProfilePinnedMetadataKey: true,
+			"user_agent":                        explicitUA,
+			"originator":                        "codex_cli_rs",
+			"headers": map[string]any{
+				"User-Agent": explicitUA,
+				"Originator": "codex_cli_rs",
+				"Version":    "0.144.1",
+			},
+		},
+		Attributes: map[string]string{
+			"auth_kind":         "oauth",
+			"header:User-Agent": explicitUA,
+			"originator":        "codex_cli_rs",
+			"header:Originator": "codex_cli_rs",
+			"header:Version":    "0.144.1",
+		},
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "codex_vscode/0.145.0 (darwin; arm64)",
+		"Originator": "codex_vscode",
+		"Version":    "0.145.0",
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if got := req.Header.Get("User-Agent"); got != explicitUA {
+		t.Fatalf("request User-Agent = %q, want explicit profile %q", got, explicitUA)
+	}
+	if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
+		t.Fatalf("request Originator = %q, want codex_cli_rs", got)
+	}
+	if got := req.Header.Get("Version"); got != "0.144.1" {
+		t.Fatalf("request Version = %q, want 0.144.1", got)
+	}
+}

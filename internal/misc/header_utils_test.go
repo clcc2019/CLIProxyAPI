@@ -31,17 +31,19 @@ func TestBuildCodexUserAgent_FallsBackToDefaultVersion(t *testing.T) {
 }
 
 func TestCodexCLIVersionPinned(t *testing.T) {
-	const want = "0.134.0-alpha.3"
+	const want = "0.144.1"
 	if CodexCLIVersion != want {
 		t.Fatalf("CodexCLIVersion = %q, want %q", CodexCLIVersion, want)
 	}
 }
 
-func TestCodexCLIVersionMeetsGpt55CatalogMinimum(t *testing.T) {
-	minVersion := codexCatalogMinimalClientVersion(t, "gpt-5.5")
+func TestCodexCLIVersionMeetsCatalogMinimums(t *testing.T) {
+	minVersions := codexCatalogMinimalClientVersions(t)
 
-	if compareCodexSemver(t, CodexCLIVersion, minVersion) < 0 {
-		t.Fatalf("CodexCLIVersion = %q, below gpt-5.5 minimal_client_version %q", CodexCLIVersion, minVersion)
+	for slug, minVersion := range minVersions {
+		if compareCodexSemver(t, CodexCLIVersion, minVersion) < 0 {
+			t.Fatalf("CodexCLIVersion = %q, below %s minimal_client_version %q", CodexCLIVersion, slug, minVersion)
+		}
 	}
 }
 
@@ -214,7 +216,7 @@ func TestCodexCLIUserAgentWithOriginatorUsesNormalizedCacheKey(t *testing.T) {
 	}
 }
 
-func codexCatalogMinimalClientVersion(t *testing.T, slug string) string {
+func codexCatalogMinimalClientVersions(t *testing.T) map[string]string {
 	t.Helper()
 
 	type catalog struct {
@@ -234,16 +236,22 @@ func codexCatalogMinimalClientVersion(t *testing.T, slug string) string {
 		t.Fatalf("parse Codex model catalog: %v", err)
 	}
 
+	out := make(map[string]string, len(parsed.Models))
 	for _, model := range parsed.Models {
-		if model.Slug == slug {
-			if strings.TrimSpace(model.MinimalClientVersion) == "" {
-				t.Fatalf("%s missing minimal_client_version in Codex model catalog", slug)
-			}
-			return model.MinimalClientVersion
+		slug := strings.TrimSpace(model.Slug)
+		if slug == "" {
+			continue
 		}
+		minVersion := strings.TrimSpace(model.MinimalClientVersion)
+		if minVersion == "" {
+			t.Fatalf("%s missing minimal_client_version in Codex model catalog", slug)
+		}
+		out[slug] = minVersion
 	}
-	t.Fatalf("%s not found in Codex model catalog", slug)
-	return ""
+	if len(out) == 0 {
+		t.Fatal("Codex model catalog has no models")
+	}
+	return out
 }
 
 func compareCodexSemver(t *testing.T, left, right string) int {

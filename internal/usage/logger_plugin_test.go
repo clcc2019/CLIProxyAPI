@@ -510,6 +510,57 @@ func TestRequestStatisticsSnapshotRecentDetailsReturnsGlobalNewestDetails(t *tes
 	}
 }
 
+func TestRequestStatisticsSnapshotRecentDetailsCompactOmitsUnrelatedAggregateHierarchy(t *testing.T) {
+	stats := NewRequestStatistics()
+	start := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+	records := []struct {
+		apiKey string
+		model  string
+		offset time.Duration
+	}{
+		{apiKey: "api-a", model: "gpt-5.4", offset: 0},
+		{apiKey: "api-b", model: "gpt-5.5", offset: time.Second},
+		{apiKey: "api-a", model: "gpt-5.4", offset: 2 * time.Second},
+		{apiKey: "api-c", model: "gpt-5.6", offset: 3 * time.Second},
+	}
+	for _, record := range records {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      record.apiKey,
+			Model:       record.model,
+			RequestedAt: start.Add(record.offset),
+			Detail: coreusage.Detail{
+				InputTokens:  1,
+				OutputTokens: 1,
+				TotalTokens:  2,
+			},
+		})
+	}
+
+	snapshot := stats.SnapshotRecentDetailsCompact(2)
+	if got := snapshot.TotalRequests; got != int64(len(records)) {
+		t.Fatalf("total requests = %d, want %d", got, len(records))
+	}
+	if got := len(snapshot.APIs); got != 2 {
+		t.Fatalf("compact APIs len = %d, want 2", got)
+	}
+	if _, ok := snapshot.APIs["api-b"]; ok {
+		t.Fatal("compact snapshot retained aggregate-only api-b")
+	}
+	if snapshot.RequestsByDay != nil || snapshot.RequestsByHour != nil || snapshot.TokensByDay != nil || snapshot.TokensByHour != nil {
+		t.Fatal("compact snapshot retained aggregate time-series maps")
+	}
+
+	detailCount := 0
+	for _, apiSnapshot := range snapshot.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			detailCount += len(modelSnapshot.Details)
+		}
+	}
+	if detailCount != 2 {
+		t.Fatalf("compact details len = %d, want 2", detailCount)
+	}
+}
+
 func TestRequestStatisticsMergeSnapshotSummaryOnly(t *testing.T) {
 	stats := NewRequestStatistics()
 	summary := StatisticsSnapshot{

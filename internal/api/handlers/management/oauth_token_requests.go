@@ -243,6 +243,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	requestUserAgent := codexLoginRequestUserAgent(c)
 	if requestUserAgent != "" {
 		clientFeatures.UserAgent = requestUserAgent
+		clientFeatures.UserAgentExplicit = true
 	}
 	var forwarder *callbackForwarder
 	if isWebUI {

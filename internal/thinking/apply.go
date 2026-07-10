@@ -215,7 +215,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 //
 // Parsing priority:
 //  1. Special values: "none" → ModeNone, "auto"/"-1" → ModeAuto
-//  2. Level names: "minimal", "low", "medium", "high", "xhigh" → ModeLevel
+//  2. Level names: "minimal", "low", "medium", "high", "xhigh", "max", "ultra" → ModeLevel
 //  3. Numeric values: positive integers → ModeBudget, 0 → ModeNone
 //
 // If none of the above match, returns empty ThinkingConfig (treated as no config).
@@ -230,7 +230,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 		}
 	}
 
-	// 2. Try level parsing (minimal, low, medium, high, xhigh)
+	// 2. Try level parsing (minimal, low, medium, high, xhigh, max, ultra)
 	if level, ok := ParseLevelSuffix(rawSuffix); ok {
 		return ThinkingConfig{Mode: ModeLevel, Level: level}
 	}
@@ -504,6 +504,8 @@ func normalizeReasoningEffortValue(value string) string {
 		return "xhigh"
 	case strings.EqualFold(value, "max"):
 		return "max"
+	case strings.EqualFold(value, "ultra"):
+		return "ultra"
 	case strings.EqualFold(value, "auto"):
 		return "auto"
 	case strings.EqualFold(value, "adaptive"):

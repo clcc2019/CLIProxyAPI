@@ -190,3 +190,34 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "claude-sonnet-4-5-20250514(8192)")
 	}
 }
+
+func TestApplyOAuthModelAlias_BuiltinCodexGPT56Alias(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+
+	auth := &Auth{ID: "codex-oauth", Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
+
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "gpt-5.6(max)")
+	if resolvedModel != "gpt-5.6-sol(max)" {
+		t.Fatalf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gpt-5.6-sol(max)")
+	}
+	if resolvedModel = mgr.applyOAuthModelAlias(auth, "gpt-5.6(ultra)"); resolvedModel != "gpt-5.6-sol(ultra)" {
+		t.Fatalf("applyOAuthModelAlias() ultra model = %q, want %q", resolvedModel, "gpt-5.6-sol(ultra)")
+	}
+}
+
+func TestApplyOAuthModelAlias_BuiltinCodexGPT56AliasSkipsAPIKey(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+
+	auth := &Auth{ID: "codex-key", Provider: "codex", Attributes: map[string]string{"auth_kind": "apikey"}}
+
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "gpt-5.6")
+	if resolvedModel != "gpt-5.6" {
+		t.Fatalf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gpt-5.6")
+	}
+}

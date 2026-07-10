@@ -20,8 +20,9 @@ const (
 	codexPromptResolutionMemoMaxEntries  = 512
 	codexPromptResolutionMemoMaxBytes    = 8 << 20
 	// codexPromptResolutionMemoMaxPayload caps the per-payload size considered
-	// for memoisation. Hashing and byte-comparing large payloads on every turn
-	// outweighs the hit rate because each turn typically carries fresh content.
+	// for memoisation and in-flight deduplication. Hashing and byte-comparing
+	// large payloads on every turn outweighs the hit rate because each turn
+	// typically carries fresh content.
 	// 32KB is the empirical sweet spot: small enough that hashing is cheap,
 	// large enough to catch the short-prompt fast-path cache used by the SDK.
 	codexPromptResolutionMemoMaxPayload = 32 << 10
@@ -94,7 +95,24 @@ func (m *codexFinalUpstreamBodyMemo) get(baseModel string, opts codexFinalUpstre
 		return nil
 	}
 	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, input)
+	return m.getWithHash(hash, baseModel, opts, input)
+}
 
+func (m *codexFinalUpstreamBodyMemo) getWithHash(hash uint64, baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
+	output := m.getSharedWithHash(hash, baseModel, opts, input)
+	if output == nil {
+		return nil
+	}
+	return bytes.Clone(output)
+}
+
+// getSharedWithHash returns the memo-owned immutable output. It is reserved for
+// the final request preparation path, whose downstream JSON edits always
+// allocate a new buffer and never write through the returned slice.
+func (m *codexFinalUpstreamBodyMemo) getSharedWithHash(hash uint64, baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
+	if m == nil || len(input) == 0 {
+		return nil
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	entry, ok := m.entries[hash]
@@ -103,7 +121,7 @@ func (m *codexFinalUpstreamBodyMemo) get(baseModel string, opts codexFinalUpstre
 		return nil
 	}
 	codexMetrics.memoBodyHit.Add(1)
-	return bytes.Clone(entry.output)
+	return entry.output
 }
 
 func (m *codexFinalUpstreamBodyMemo) set(baseModel string, opts codexFinalUpstreamBodyOptions, input []byte, output []byte) {
@@ -115,7 +133,17 @@ func (m *codexFinalUpstreamBodyMemo) set(baseModel string, opts codexFinalUpstre
 		return
 	}
 	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, input)
+	m.setWithHash(hash, baseModel, opts, input, output)
+}
 
+func (m *codexFinalUpstreamBodyMemo) setWithHash(hash uint64, baseModel string, opts codexFinalUpstreamBodyOptions, input []byte, output []byte) {
+	if m == nil || len(input) == 0 || len(output) == 0 {
+		return
+	}
+	size := len(input) + len(output)
+	if size > codexFinalUpstreamBodyMemoMaxItem || size > codexFinalUpstreamBodyMemoMaxBytes {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.entries == nil {
@@ -188,7 +216,13 @@ func (m *codexPromptResolutionMemo) get(from sdktranslator.Format, model string,
 		return codexPromptCacheResolution{}, false
 	}
 	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
+	return m.getWithHash(hash, from, model, scope, executionSessionID, payload)
+}
 
+func (m *codexPromptResolutionMemo) getWithHash(hash uint64, from sdktranslator.Format, model string, scope string, executionSessionID string, payload []byte) (codexPromptCacheResolution, bool) {
+	if m == nil {
+		return codexPromptCacheResolution{}, false
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	entry, ok := m.entries[hash]
@@ -214,7 +248,17 @@ func (m *codexPromptResolutionMemo) set(from sdktranslator.Format, model string,
 		return
 	}
 	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
+	m.setWithHash(hash, from, model, scope, executionSessionID, payload, resolution)
+}
 
+func (m *codexPromptResolutionMemo) setWithHash(hash uint64, from sdktranslator.Format, model string, scope string, executionSessionID string, payload []byte, resolution codexPromptCacheResolution) {
+	if m == nil {
+		return
+	}
+	size := len(payload)
+	if size > codexPromptResolutionMemoMaxPayload || size > codexPromptResolutionMemoMaxBytes {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.entries == nil {
@@ -278,7 +322,12 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
-	if cached := globalCodexFinalUpstreamBodyMemo.get(baseModel, opts, body); cached != nil {
+	if len(body) > codexFinalUpstreamBodyMemoMaxItem {
+		codexMetrics.memoBodyMiss.Add(1)
+		return normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
+	}
+	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, body)
+	if cached := globalCodexFinalUpstreamBodyMemo.getSharedWithHash(hash, baseModel, opts, body); cached != nil {
 		return cached
 	}
 
@@ -288,7 +337,7 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 	// singleflight channel/goroutine hop keeps per-request latency lower for
 	// the common case where each request's body is unique.
 	out := normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
-	globalCodexFinalUpstreamBodyMemo.set(baseModel, opts, body, out)
+	globalCodexFinalUpstreamBodyMemo.setWithHash(hash, baseModel, opts, body, out)
 	return out
 }
 
@@ -331,6 +380,10 @@ func boolToByte(v bool) byte {
 
 func promptResolutionMemoInflightKey(from sdktranslator.Format, model string, scope string, executionSessionID string, payload []byte) string {
 	hash := hashCodexPromptResolutionMemoKey(from, model, scope, executionSessionID, payload)
+	return promptResolutionMemoInflightKeyWithHash(from, model, scope, executionSessionID, hash)
+}
+
+func promptResolutionMemoInflightKeyWithHash(from sdktranslator.Format, model string, scope string, executionSessionID string, hash uint64) string {
 	var hashBytes [8]byte
 	binary.LittleEndian.PutUint64(hashBytes[:], hash)
 

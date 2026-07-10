@@ -39,24 +39,24 @@ func (s codexReasoningReplayScope) valid() bool {
 	return strings.TrimSpace(s.modelName) != "" && strings.TrimSpace(s.sessionKey) != ""
 }
 
-func applyCodexReasoningReplayCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, codexReasoningReplayScope) {
+func applyCodexReasoningReplayCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, codexReasoningReplayScope, bool) {
 	scope := codexReasoningReplayScopeFromRequest(ctx, from, req, opts, body)
 	if !scope.valid() {
-		return body, scope
+		return body, scope, false
 	}
 	items, ok := internalcache.GetCodexReasoningReplayItems(scope.modelName, scope.sessionKey)
 	if !ok {
-		return body, scope
+		return body, scope, false
 	}
 	items = filterCodexReasoningReplayItemsForInput(body, items)
 	if len(items) == 0 {
-		return body, scope
+		return body, scope, false
 	}
 	updated, ok := insertCodexReasoningReplayItems(body, items)
 	if !ok {
-		return body, scope
+		return body, scope, false
 	}
-	return updated, scope
+	return updated, scope, true
 }
 
 func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) codexReasoningReplayScope {
@@ -480,13 +480,13 @@ func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, com
 	}
 }
 
-func clearCodexReasoningReplayOnInvalidSignature(scope codexReasoningReplayScope, statusCode int, body []byte) bool {
+func clearCodexReasoningReplayOnInvalidSignature(scope codexReasoningReplayScope, replayApplied bool, statusCode int, body []byte) bool {
 	if !scope.valid() {
 		return false
 	}
 	if codexReasoningReplayInvalidSignatureError(body) {
 		internalcache.DeleteCodexReasoningReplayItem(scope.modelName, scope.sessionKey)
-		return true
+		return replayApplied
 	}
 	return false
 }

@@ -46,18 +46,18 @@ func TestBuildAuthRecordPersistsConfiguredUserAgent(t *testing.T) {
 	if got, _ := record.Metadata["user_agent"].(string); got != misc.CodexCLIUserAgent {
 		t.Fatalf("Metadata[user_agent] = %q, want %q", got, misc.CodexCLIUserAgent)
 	}
-	if got, _ := record.Metadata["originator"].(string); got != codexDefaultClientOriginator {
-		t.Fatalf("Metadata[originator] = %q, want %q", got, codexDefaultClientOriginator)
+	if _, ok := record.Metadata["originator"]; ok {
+		t.Fatal("Metadata[originator] should not persist default originator")
 	}
 	if got := record.Attributes["header:User-Agent"]; got != misc.CodexCLIUserAgent {
 		t.Fatalf("Attributes[header:User-Agent] = %q, want %q", got, misc.CodexCLIUserAgent)
 	}
-	if got := record.Attributes["header:Originator"]; got != codexDefaultClientOriginator {
-		t.Fatalf("Attributes[header:Originator] = %q, want %q", got, codexDefaultClientOriginator)
+	if _, ok := record.Attributes["header:Originator"]; ok {
+		t.Fatal("Attributes[header:Originator] should not persist default originator")
 	}
 }
 
-func TestBuildAuthRecordPersistsDefaultUserAgentWhenUnset(t *testing.T) {
+func TestBuildAuthRecordDoesNotPersistDefaultClientProfileWhenUnset(t *testing.T) {
 	authenticator := NewCodexAuthenticator()
 	authSvc := &codex.CodexAuth{}
 	bundle := &codex.CodexAuthBundle{
@@ -79,20 +79,20 @@ func TestBuildAuthRecordPersistsDefaultUserAgentWhenUnset(t *testing.T) {
 	} else if _, errParse := uuid.Parse(got); errParse != nil {
 		t.Fatalf("Metadata[installation_id] = %q, want UUID: %v", got, errParse)
 	}
-	if got, _ := record.Metadata["originator"].(string); got != codexDefaultClientOriginator {
-		t.Fatalf("Metadata[originator] = %q, want %q", got, codexDefaultClientOriginator)
+	if _, ok := record.Metadata["originator"]; ok {
+		t.Fatal("Metadata[originator] should not persist default originator")
 	}
-	if got, _ := record.Metadata["user_agent"].(string); !strings.HasPrefix(got, codexDefaultClientOriginator+"/"+codexDefaultClientVersion+" ") {
-		t.Fatalf("Metadata[user_agent] = %q, want Codex CLI client profile", got)
+	if _, ok := record.Metadata["user_agent"]; ok {
+		t.Fatal("Metadata[user_agent] should not persist default user agent")
 	}
 	if got := record.Attributes["header:X-Codex-Installation-Id"]; got == "" {
 		t.Fatal("Attributes[header:X-Codex-Installation-Id] is empty")
 	}
-	if got := record.Attributes["header:Originator"]; got != codexDefaultClientOriginator {
-		t.Fatalf("Attributes[header:Originator] = %q, want %q", got, codexDefaultClientOriginator)
+	if _, ok := record.Attributes["header:Originator"]; ok {
+		t.Fatal("Attributes[header:Originator] should not persist default originator")
 	}
-	if got := record.Attributes["header:User-Agent"]; !strings.HasPrefix(got, codexDefaultClientOriginator+"/"+codexDefaultClientVersion+" ") {
-		t.Fatalf("Attributes[header:User-Agent] = %q, want Codex CLI client profile", got)
+	if _, ok := record.Attributes["header:User-Agent"]; ok {
+		t.Fatal("Attributes[header:User-Agent] should not persist default user agent")
 	}
 }
 
@@ -123,11 +123,11 @@ func TestBuildAuthRecordDerivesUserAgentFromConfiguredOriginator(t *testing.T) {
 	if got := record.Attributes["header:Originator"]; got != "codex_vscode" {
 		t.Fatalf("Attributes[header:Originator] = %q, want %q", got, "codex_vscode")
 	}
-	if got, _ := record.Metadata["user_agent"].(string); !strings.HasPrefix(got, "codex_vscode/") {
-		t.Fatalf("Metadata[user_agent] = %q, want codex_vscode/ prefix", got)
+	if _, ok := record.Metadata["user_agent"]; ok {
+		t.Fatal("Metadata[user_agent] should not persist derived user agent")
 	}
-	if got := record.Attributes["header:User-Agent"]; !strings.HasPrefix(got, "codex_vscode/") {
-		t.Fatalf("Attributes[header:User-Agent] = %q, want codex_vscode/ prefix", got)
+	if _, ok := record.Attributes["header:User-Agent"]; ok {
+		t.Fatal("Attributes[header:User-Agent] should not persist derived user agent")
 	}
 }
 
@@ -147,8 +147,14 @@ func TestNewCodexClientFeaturesGeneratesRandomInstallationID(t *testing.T) {
 	if first.Originator != codexDefaultClientOriginator {
 		t.Fatalf("Originator = %q, want %q", first.Originator, codexDefaultClientOriginator)
 	}
+	if first.OriginatorExplicit {
+		t.Fatal("OriginatorExplicit should be false for default originator")
+	}
 	if !strings.HasPrefix(first.UserAgent, codexDefaultClientOriginator+"/"+codexDefaultClientVersion+" ") {
 		t.Fatalf("UserAgent = %q, want Codex CLI version prefix", first.UserAgent)
+	}
+	if first.UserAgentExplicit {
+		t.Fatal("UserAgentExplicit should be false for default user agent")
 	}
 }
 
@@ -167,6 +173,9 @@ func TestNewCodexClientFeaturesUsesMetadataOverrides(t *testing.T) {
 	}
 	if features.UserAgent != "codex_vscode/1.2.3" {
 		t.Fatalf("UserAgent = %q, want override", features.UserAgent)
+	}
+	if !features.InstallationExplicit || !features.OriginatorExplicit || !features.UserAgentExplicit {
+		t.Fatalf("explicit flags = installation:%v originator:%v user_agent:%v, want all true", features.InstallationExplicit, features.OriginatorExplicit, features.UserAgentExplicit)
 	}
 }
 

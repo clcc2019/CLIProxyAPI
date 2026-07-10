@@ -23,6 +23,21 @@ func TestCodexFinalUpstreamBodyMemoSkipsOversizedEntry(t *testing.T) {
 	}
 }
 
+func TestCodexFinalUpstreamBodyMemoPublicGetReturnsClone(t *testing.T) {
+	memo := &codexFinalUpstreamBodyMemo{}
+	opts := codexFinalUpstreamBodyOptions{requestKind: codexFinalUpstreamResponses, streamMode: codexStreamFieldTrue}
+	input := []byte(`{"model":"gpt-5.4"}`)
+	output := []byte(`{"model":"gpt-5.4","stream":true}`)
+	memo.set("gpt-5.4", opts, input, output)
+
+	first := memo.get("gpt-5.4", opts, input)
+	first[0] = '['
+	second := memo.get("gpt-5.4", opts, input)
+	if !bytes.Equal(second, output) {
+		t.Fatalf("memo get exposed internal output: %s", second)
+	}
+}
+
 func TestCodexPromptResolutionMemoSkipsOversizedPayload(t *testing.T) {
 	memo := &codexPromptResolutionMemo{}
 	payload := bytes.Repeat([]byte("x"), codexPromptResolutionMemoMaxPayload+1)
@@ -44,6 +59,31 @@ func BenchmarkPromptResolutionMemoInflightKey(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		if key := promptResolutionMemoInflightKey(sdktranslator.FormatOpenAI, "gpt-5.4", "scope-123", "session-123", payload); key == "" {
+			b.Fatal("empty inflight key")
+		}
+	}
+}
+
+func TestPromptResolutionMemoInflightKeyWithHashMatchesPayloadHash(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"message","content":"hello"}]}`)
+	from := sdktranslator.FormatOpenAI
+	model := "gpt-5.4"
+	scope := "scope-123"
+	sessionID := "session-123"
+	hash := hashCodexPromptResolutionMemoKey(from, model, scope, sessionID, payload)
+
+	if got, want := promptResolutionMemoInflightKeyWithHash(from, model, scope, sessionID, hash), promptResolutionMemoInflightKey(from, model, scope, sessionID, payload); got != want {
+		t.Fatalf("precomputed inflight key = %q, want %q", got, want)
+	}
+}
+
+func BenchmarkPromptResolutionMemoInflightKeyWithPrecomputedHash(b *testing.B) {
+	payload := bytes.Repeat([]byte(`{"input":[{"type":"message","content":"hello"}]}`), 16)
+	hash := hashCodexPromptResolutionMemoKey(sdktranslator.FormatOpenAI, "gpt-5.4", "scope-123", "session-123", payload)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if key := promptResolutionMemoInflightKeyWithHash(sdktranslator.FormatOpenAI, "gpt-5.4", "scope-123", "session-123", hash); key == "" {
 			b.Fatal("empty inflight key")
 		}
 	}

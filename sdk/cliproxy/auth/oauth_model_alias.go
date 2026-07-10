@@ -76,9 +76,28 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string {
 	upstreamModel := m.resolveOAuthUpstreamModel(auth, requestedModel)
 	if upstreamModel == "" {
+		upstreamModel = resolveBuiltinCodexOAuthModelAlias(auth, requestedModel)
+	}
+	if upstreamModel == "" {
 		return requestedModel
 	}
 	return upstreamModel
+}
+
+func resolveBuiltinCodexOAuthModelAlias(auth *Auth, requestedModel string) string {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return ""
+	}
+	if modelAliasChannel(auth) == "" {
+		return ""
+	}
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
+	for _, candidate := range candidates {
+		if strings.EqualFold(strings.TrimSpace(candidate), "gpt-5.6") {
+			return preserveResolvedModelSuffix("gpt-5.6-sol", requestResult)
+		}
+	}
+	return ""
 }
 
 func modelAliasLookupCandidates(requestedModel string) (thinking.SuffixResult, []string) {

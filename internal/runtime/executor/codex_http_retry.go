@@ -226,7 +226,6 @@ func codexClonePreparedHTTPRequestForFirstAttempt(prepared codexPreparedRequest)
 		return nil, errors.New("codex executor: request is nil")
 	}
 	req := prepared.httpReq.Clone(prepared.httpReq.Context())
-	req.Header = prepared.httpReq.Header.Clone()
 	req.Host = prepared.httpReq.Host
 	if prepared.httpReq.GetBody != nil {
 		body, err := prepared.httpReq.GetBody()
@@ -249,7 +248,6 @@ func codexClonePreparedHTTPRequestForRetry(prepared codexPreparedRequest) *http.
 		return nil
 	}
 	retryReq := prepared.httpReq.Clone(prepared.httpReq.Context())
-	retryReq.Header = prepared.httpReq.Header.Clone()
 	retryReq.Host = prepared.httpReq.Host
 	codexResetRequestBody(retryReq, prepared.body)
 	return retryReq

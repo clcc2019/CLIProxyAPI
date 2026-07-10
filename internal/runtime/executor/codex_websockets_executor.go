@@ -1238,6 +1238,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	}
 	codexEnsureExecutionSessionHeader(wsHeaders, codexGinHeadersFromContext(ctx), executionSessionID)
 	wsHeaders = applyCodexWebsocketHeadersForRequestKind(ctx, wsHeaders, auth, apiKey, e.cfg, codexWebsocketTurnMetadataRequestKind(body))
+	codexApplyModelHeaderOverrides(wsHeaders, baseModel)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(wsHeaders, responsesAPIClientMetadata)
 	turnStateScope := trimHeaderValue(wsHeaders, codexHeaderTurnMetadata)
 	if explicitTurnMetadata != "" {
@@ -2239,6 +2240,15 @@ func codexGJSONGetImmutableBytes(source []byte, path string) gjson.Result {
 		return gjson.Result{}
 	}
 	return gjson.Get(unsafe.String(unsafe.SliceData(source), len(source)), path)
+}
+
+// codexGJSONParseImmutableBytes parses without gjson.ParseBytes' defensive
+// []byte-to-string copy. The result must not outlive or mutate source.
+func codexGJSONParseImmutableBytes(source []byte) gjson.Result {
+	if len(source) == 0 {
+		return gjson.Result{}
+	}
+	return gjson.Parse(unsafe.String(unsafe.SliceData(source), len(source)))
 }
 
 func codexJSONRawEqual(left []byte, right []byte) bool {

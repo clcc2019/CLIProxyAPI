@@ -345,6 +345,27 @@ func TestCodexApplyWebsocketClientMetadataReplacesNonObjectMetadata(t *testing.T
 	}
 }
 
+func TestCodexSetClientMetadataNormalizesEntriesOnce(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
+	entries := []codexClientMetadataEntry{
+		{key: " duplicate ", value: " first "},
+		{key: " keep ", value: " value "},
+		{key: "duplicate", value: " second "},
+		{key: "empty", value: "   "},
+	}
+
+	got := codexSetClientMetadata(body, entries, true)
+	if value := gjson.GetBytes(got, "client_metadata.duplicate").String(); value != "second" {
+		t.Fatalf("duplicate value = %q, want second; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.keep").String(); value != "value" {
+		t.Fatalf("keep value = %q, want value; body=%s", value, got)
+	}
+	if gjson.GetBytes(got, "client_metadata.empty").Exists() {
+		t.Fatalf("empty metadata entry should be omitted; body=%s", got)
+	}
+}
+
 func BenchmarkCodexApplyWebsocketClientMetadataNoExistingMetadata(b *testing.B) {
 	body := []byte(`{"model":"gpt-5-codex","input":[{"role":"user","content":"hello"}],"tools":[],"stream":true}`)
 	headers := http.Header{}

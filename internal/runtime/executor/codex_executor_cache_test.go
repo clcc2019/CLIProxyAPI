@@ -563,6 +563,41 @@ func TestCodexExecutorCacheHelper_ConversationIDFieldPreferredOverContent(t *tes
 	}
 }
 
+func TestCodexPromptCachePayloadConversationHintPrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "top-level snake", payload: `{"conversation_id":"conv-snake"}`, want: "conv-snake"},
+		{name: "top-level camel", payload: `{"conversationId":"conv-camel"}`, want: "conv-camel"},
+		{name: "metadata snake", payload: `{"metadata":{"conversation_id":"meta-snake"}}`, want: "meta-snake"},
+		{name: "metadata camel", payload: `{"metadata":{"conversationId":"meta-camel"}}`, want: "meta-camel"},
+		{name: "top-level beats metadata", payload: `{"session_id":"top-session","metadata":{"conversation_id":"meta-conversation"}}`, want: "top-session"},
+		{name: "field precedence ignores object order", payload: `{"conversationId":"camel","conversation_id":"snake"}`, want: "snake"},
+		{name: "trimmed", payload: `{"metadata":{"thread_id":" thread-1 "}}`, want: "thread-1"},
+		{name: "invalid root", payload: `[]`, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codexPromptCachePayloadConversationHint([]byte(tt.payload)); got != tt.want {
+				t.Fatalf("hint = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkCodexPromptCachePayloadConversationHint(b *testing.B) {
+	payload := []byte(`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello from a representative prompt cache request"}]}],"metadata":{"conversation_id":"conversation-123","trace_id":"trace-123"}}`)
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := codexPromptCachePayloadConversationHint(payload); got != "conversation-123" {
+			b.Fatalf("hint = %q", got)
+		}
+	}
+}
+
 func TestCodexExecutorCacheHelper_CompactUsesCallerProvidedPromptCacheKeyAsSessionID(t *testing.T) {
 	executor := &CodexExecutor{}
 	ctx := ctxWithAPIKey(t, "api-key-compact")
@@ -631,6 +666,29 @@ func TestCodexExecutorCacheHelper_ExecutionSessionMetadataShortCircuitsPayloadFi
 	}
 	if got := globalCodexPromptResolutionMemo.orderLen(); got != memoEntriesBefore {
 		t.Fatalf("execution session prompt cache resolution should bypass payload memo: entries before=%d after=%d", memoEntriesBefore, got)
+	}
+}
+
+func TestCodexExecutorCacheHelper_LargePayloadSkipsPromptMemoSingleflightHash(t *testing.T) {
+	ResetCodexMetrics()
+	t.Cleanup(ResetCodexMetrics)
+
+	executor := &CodexExecutor{}
+	ctx := ctxWithAPIKey(t, "api-key-large-prompt")
+	payload := []byte(`{"model":"gpt-5","input":[{"role":"user","content":"` + strings.Repeat("x", codexPromptResolutionMemoMaxPayload+1) + `"}]}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+	resolution := executor.resolvePromptCacheResolution(ctx, sdktranslator.FormatOpenAI, "", req)
+	if resolution.cache.ID == "" {
+		t.Fatal("expected a prompt cache resolution for large payload")
+	}
+
+	metrics := CodexMetrics()
+	if metrics.MemoPromptHit != 0 {
+		t.Fatalf("large payload unexpectedly hit prompt memo: %d", metrics.MemoPromptHit)
+	}
+	if metrics.MemoPromptMiss != 1 {
+		t.Fatalf("large payload memo misses = %d, want 1 bypass without singleflight re-lookup", metrics.MemoPromptMiss)
 	}
 }
 

@@ -54,6 +54,33 @@ func TestGetModelInfoReturnsClone(t *testing.T) {
 	}
 }
 
+func TestLookupModelHeaderOverridesUsesProviderSpecificModelWithoutCloning(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-global", "openai", []*ModelInfo{{
+		ID: "m1",
+		Config: &ModelConfig{OverrideHeader: map[string]string{
+			"User-Agent": "global-agent",
+		}},
+	}})
+	r.RegisterClient("client-codex", "codex", []*ModelInfo{{
+		ID: "m1",
+		Config: &ModelConfig{OverrideHeader: map[string]string{
+			" user-agent ":  " codex-agent ",
+			"ORIGINATOR":    " codex-originator ",
+			"Version":       " 1.2.3 ",
+			"Authorization": "ignored",
+		}},
+	}})
+
+	overrides, found := r.lookupModelHeaderOverrides("m1", "codex")
+	if !found {
+		t.Fatal("expected registered model")
+	}
+	if overrides.UserAgent != "codex-agent" || overrides.Originator != "codex-originator" || overrides.Version != "1.2.3" {
+		t.Fatalf("unexpected overrides: %+v", overrides)
+	}
+}
+
 func TestGetModelsForClientReturnsClones(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "codex", []*ModelInfo{{

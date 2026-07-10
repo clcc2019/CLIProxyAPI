@@ -1737,13 +1737,13 @@ func TestCodexEnsureVersionHeaderNormalizesMinimum(t *testing.T) {
 		},
 		{
 			name:          "newer prerelease is preserved",
-			sourceVersion: "0.134.0-alpha.4",
-			want:          "0.134.0-alpha.4",
+			sourceVersion: "0.144.2-alpha.1",
+			want:          "0.144.2-alpha.1",
 		},
 		{
 			name:          "newer stable client is preserved",
-			sourceVersion: "0.135.0",
-			want:          "0.135.0",
+			sourceVersion: "0.145.0",
+			want:          "0.145.0",
 		},
 		{
 			name:          "invalid client version is upgraded",
@@ -1752,8 +1752,8 @@ func TestCodexEnsureVersionHeaderNormalizesMinimum(t *testing.T) {
 		},
 		{
 			name:          "target version is used when source is empty",
-			targetVersion: "0.135.0",
-			want:          "0.135.0",
+			targetVersion: "0.145.0",
+			want:          "0.145.0",
 		},
 	}
 

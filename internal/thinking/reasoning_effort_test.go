@@ -7,6 +7,11 @@ func TestExtractReasoningEffortUsesSuffixOverBody(t *testing.T) {
 	if got != "high" {
 		t.Fatalf("ExtractReasoningEffort() = %q, want %q", got, "high")
 	}
+
+	got = ExtractReasoningEffort([]byte(`{"reasoning":{"effort":"low"}}`), "openai-response", "gpt-5.6-sol(ultra)")
+	if got != "ultra" {
+		t.Fatalf("ExtractReasoningEffort() ultra = %q, want %q", got, "ultra")
+	}
 }
 
 func TestExtractReasoningEffortConvertsBudgetToLevel(t *testing.T) {
@@ -45,6 +50,7 @@ func TestNormalizeReasoningEffortValue(t *testing.T) {
 	}{
 		{name: "empty", value: " ", want: ""},
 		{name: "known mixed case", value: "\tAdaptive\r\n", want: "adaptive"},
+		{name: "ultra", value: " ULTRA ", want: "ultra"},
 		{name: "unknown lower fallback", value: "Custom-Effort", want: "custom-effort"},
 	}
 
@@ -67,6 +73,9 @@ func TestConvertLevelToBudgetMatchesMixedCaseLevels(t *testing.T) {
 	if _, ok := ConvertLevelToBudget(" medium "); ok {
 		t.Fatal("ConvertLevelToBudget() should not trim whitespace")
 	}
+	if got, ok := ConvertLevelToBudget("UlTrA"); !ok || got != 128000 {
+		t.Fatalf("ConvertLevelToBudget(UlTrA) = %d, %t; want 128000, true", got, ok)
+	}
 }
 
 func TestParseSuffixModesMatchMixedCaseWithoutTrimming(t *testing.T) {
@@ -75,6 +84,9 @@ func TestParseSuffixModesMatchMixedCaseWithoutTrimming(t *testing.T) {
 	}
 	if got, ok := ParseLevelSuffix("XhIgH"); got != LevelXHigh || !ok {
 		t.Fatalf("ParseLevelSuffix(XhIgH) = %q, %t; want %q, true", got, ok, LevelXHigh)
+	}
+	if got, ok := ParseLevelSuffix("UlTrA"); got != LevelUltra || !ok {
+		t.Fatalf("ParseLevelSuffix(UlTrA) = %q, %t; want %q, true", got, ok, LevelUltra)
 	}
 	if _, ok := ParseLevelSuffix(" high "); ok {
 		t.Fatal("ParseLevelSuffix should not trim whitespace")
@@ -102,7 +114,9 @@ func TestMapToClaudeEffortMatchesMixedCaseLevels(t *testing.T) {
 		{name: "max supported", level: " XHIGH ", supportsMax: true, want: "max", wantOK: true},
 		{name: "max clamped", level: "Max", want: "high", wantOK: true},
 		{name: "auto", level: "AUTO", want: "high", wantOK: true},
-		{name: "unknown", level: "ultra", wantOK: false},
+		{name: "ultra max supported", level: "ultra", supportsMax: true, want: "max", wantOK: true},
+		{name: "ultra clamped", level: "ULTRA", want: "high", wantOK: true},
+		{name: "unknown", level: "extreme", wantOK: false},
 	}
 
 	for i := range tests {

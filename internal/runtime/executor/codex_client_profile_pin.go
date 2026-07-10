@@ -33,6 +33,9 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 	}
 	if codexClientProfilePinned(auth) {
 		changed := false
+		if codexMaybeUpdatePinnedOriginator(auth, target, source) {
+			changed = true
+		}
 		if codexMaybeUpdatePinnedUserAgent(auth, target, source) {
 			changed = true
 		}
@@ -47,24 +50,35 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 
 	changed := false
 	codexEnsureAuthMetadata(auth)
+	legacyGeneratedProfile := codexGeneratedDefaultUserAgent(codexAuthUserAgent(auth))
 	if pinned, ok := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool); !ok || !pinned {
 		auth.Metadata[codexClientProfilePinnedMetadataKey] = true
 		changed = true
 	}
-	if value := firstNonEmptyHeaderValue(target, source, "User-Agent"); value != "" && codexAuthUserAgent(auth) == "" {
-		auth.Metadata["user_agent"] = value
-		codexSetAuthAttribute(auth, "header:User-Agent", value)
-		codexSetAuthMetadataHeader(auth, "User-Agent", value)
-		changed = true
+	// Resolve the legacy originator before replacing its generated User-Agent.
+	// codexGeneratedDefaultOriginator uses the current User-Agent to distinguish
+	// an old generated profile from an explicit codex_cli_rs profile.
+	if value := firstNonEmptyHeaderValue(target, source, "Originator"); value != "" {
+		current := codexAuthOriginator(auth)
+		if current == "" || codexGeneratedDefaultOriginator(auth, current) {
+			codexEnsureAuthMetadata(auth)
+			auth.Metadata["originator"] = value
+			codexSetAuthAttribute(auth, "originator", value)
+			codexSetAuthAttribute(auth, "header:Originator", value)
+			changed = true
+		}
 	}
-	if value := firstNonEmptyHeaderValue(target, source, "Originator"); value != "" && codexAuthOriginator(auth) == "" {
-		codexEnsureAuthMetadata(auth)
-		auth.Metadata["originator"] = value
-		codexSetAuthAttribute(auth, "originator", value)
-		changed = true
+	if value := firstNonEmptyHeaderValue(target, source, "User-Agent"); value != "" {
+		current := codexAuthUserAgent(auth)
+		if current == "" || codexGeneratedDefaultUserAgent(current) {
+			auth.Metadata["user_agent"] = value
+			codexSetAuthAttribute(auth, "header:User-Agent", value)
+			codexSetAuthMetadataHeader(auth, "User-Agent", value)
+			changed = true
+		}
 	}
 	for _, headerName := range codexPinnedClientProfileHeaders {
-		if codexAuthHeaderFixed(auth, headerName) {
+		if codexAuthHeaderFixed(auth, headerName) && !(legacyGeneratedProfile && strings.EqualFold(headerName, "Version")) {
 			continue
 		}
 		value := firstNonEmptyHeaderValue(target, source, headerName)
@@ -93,6 +107,28 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 	cliproxyauth.PublishAuthUpdate(ctx, auth)
 }
 
+func codexMaybeUpdatePinnedOriginator(auth *cliproxyauth.Auth, target http.Header, source http.Header) bool {
+	if auth == nil {
+		return false
+	}
+	candidate := firstNonEmptyHeaderValue(target, source, "Originator")
+	if candidate == "" {
+		return false
+	}
+	current := codexAuthOriginator(auth)
+	if current != "" && !codexGeneratedDefaultOriginator(auth, current) {
+		return false
+	}
+	if current == candidate {
+		return false
+	}
+	codexEnsureAuthMetadata(auth)
+	auth.Metadata["originator"] = candidate
+	codexSetAuthAttribute(auth, "originator", candidate)
+	codexSetAuthAttribute(auth, "header:Originator", candidate)
+	return true
+}
+
 func codexMaybeUpdatePinnedUserAgent(auth *cliproxyauth.Auth, target http.Header, source http.Header) bool {
 	if auth == nil {
 		return false
@@ -102,7 +138,7 @@ func codexMaybeUpdatePinnedUserAgent(auth *cliproxyauth.Auth, target http.Header
 		return false
 	}
 	current := codexAuthUserAgent(auth)
-	if current != "" && !codexPinnedUserAgentShouldUpdate(current, candidate) {
+	if current != "" && !codexGeneratedDefaultUserAgent(current) && !codexPinnedUserAgentShouldUpdate(current, candidate) {
 		return false
 	}
 	if current == "" || current != candidate {
@@ -166,6 +202,31 @@ func codexPinnedUserAgentShouldUpdate(current string, candidate string) bool {
 	}
 	cmp, ok := codexCompareVersions(candidateVersion, currentVersion)
 	return ok && cmp > 0
+}
+
+func codexGeneratedDefaultOriginator(auth *cliproxyauth.Auth, originator string) bool {
+	originator = strings.TrimSpace(originator)
+	if originator == "" {
+		return false
+	}
+	if !strings.EqualFold(originator, misc.CodexDefaultOriginator) {
+		return false
+	}
+	userAgent := codexAuthUserAgent(auth)
+	return userAgent == "" || codexGeneratedDefaultUserAgent(userAgent)
+}
+
+func codexGeneratedDefaultUserAgent(userAgent string) bool {
+	product, version, ok := codexUserAgentProductVersion(userAgent)
+	if !ok || !strings.EqualFold(product, misc.CodexDefaultOriginator) {
+		return false
+	}
+
+	// New auth records no longer persist generated defaults. Treat only an older
+	// codex_cli_rs version as a legacy generated value; a current/newer value may
+	// have been explicitly configured and must remain pinned.
+	cmp, ok := codexCompareVersions(version, codexDefaultVersionHeader())
+	return ok && cmp < 0
 }
 
 func codexUserAgentProductVersion(userAgent string) (string, string, bool) {

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const persistedStatisticsStateVersion = 1
+const persistedStatisticsStateVersion = 2
 
 type persistedStatisticsState struct {
 	Version           int                              `json:"version"`
@@ -24,6 +24,8 @@ type persistedUsageAggregateRecord struct {
 	APIName   string        `json:"api_name"`
 	ModelName string        `json:"model_name"`
 	Detail    RequestDetail `json:"detail"`
+	Requests  int64         `json:"requests,omitempty"`
+	Latency   LatencyStats  `json:"latency,omitempty"`
 }
 
 // SavePersistedState writes the current statistics state to disk so it can be
@@ -109,7 +111,7 @@ func LoadPersistedStateBytes(data []byte, stats *RequestStatistics) (bool, error
 	if errUnmarshal := json.Unmarshal(data, &state); errUnmarshal != nil {
 		return false, fmt.Errorf("usage: unmarshal persisted state: %w", errUnmarshal)
 	}
-	if state.Version != 0 && state.Version != persistedStatisticsStateVersion {
+	if state.Version != 0 && state.Version != 1 && state.Version != persistedStatisticsStateVersion {
 		return false, fmt.Errorf("usage: unsupported persisted state version %d", state.Version)
 	}
 
@@ -153,6 +155,8 @@ func (s *RequestStatistics) persistedState() persistedStatisticsState {
 				APIName:   apiName,
 				ModelName: modelName,
 				Detail:    detail,
+				Requests:  record.Requests,
+				Latency:   record.Latency,
 			})
 		}
 	}
@@ -230,6 +234,7 @@ func (s *RequestStatistics) restorePersistedState(state persistedStatisticsState
 
 	s.tokensByDay = cloneStringInt64Map(snapshot.TokensByDay)
 	s.tokensByHour = make(map[int]int64, len(snapshot.TokensByHour))
+	s.dayKeyCache = make(map[usageDayKey]string)
 	for hourKey, count := range snapshot.TokensByHour {
 		hour, ok := parseSnapshotHour(hourKey)
 		if !ok {
@@ -246,11 +251,11 @@ func (s *RequestStatistics) restorePersistedState(state persistedStatisticsState
 	}
 
 	s.aggregateRecords = nil
+	s.aggregateRecordIndex = make(map[usageAggregateRecordKey]int)
 	s.oldestAggregateRecordAt = time.Time{}
 	s.newestAggregateRecordAt = time.Time{}
 
-	seen := make(map[string]struct{}, len(state.AggregateRecords))
-	appendRecord := func(apiName, modelName string, detail RequestDetail) {
+	appendRecord := func(apiName, modelName string, detail RequestDetail, requests int64, latency LatencyStats) {
 		detail = normalizeImportedRequestDetail(detail)
 		if detail.Timestamp.IsZero() {
 			return
@@ -263,17 +268,43 @@ func (s *RequestStatistics) restorePersistedState(state persistedStatisticsState
 		if modelName == "" {
 			modelName = "unknown"
 		}
-		key := dedupKey(apiName, modelName, detail)
-		if _, exists := seen[key]; exists {
+		if requests <= 0 {
+			requests = 1
+		}
+		if latency.Count == 0 {
+			addLatencySample(&latency, detail.LatencyMs)
+		}
+		detail.Timestamp = detail.Timestamp.UTC().Truncate(time.Minute)
+		detail.APIKey = ""
+		detail.Source = strings.TrimSpace(detail.Source)
+		detail.AuthIndex = strings.TrimSpace(detail.AuthIndex)
+		detail.ModelReasoningEffort = ""
+		detail.ErrorMessage = ""
+		detail.LatencyMs = 0
+		key := usageAggregateRecordKey{
+			Minute:    detail.Timestamp.Unix(),
+			APIName:   apiName,
+			ModelName: modelName,
+			Source:    detail.Source,
+			AuthIndex: detail.AuthIndex,
+			Failed:    detail.Failed,
+		}
+		if index, exists := s.aggregateRecordIndex[key]; exists {
+			record := &s.aggregateRecords[index]
+			record.Requests += requests
+			mergeTokenStats(&record.Detail.Tokens, detail.Tokens)
+			mergeLatencyStats(&record.Latency, latency)
 			return
 		}
-		seen[key] = struct{}{}
+		s.aggregateRecordIndex[key] = len(s.aggregateRecords)
 		s.aggregateRecords = append(s.aggregateRecords, usageAggregateRecord{
 			APIName:   apiName,
 			ModelName: modelName,
 			Detail:    detail,
+			Requests:  requests,
+			Latency:   latency,
 		})
-		recordTime := detail.Timestamp.UTC()
+		recordTime := detail.Timestamp
 		if s.oldestAggregateRecordAt.IsZero() || recordTime.Before(s.oldestAggregateRecordAt) {
 			s.oldestAggregateRecordAt = recordTime
 		}
@@ -283,17 +314,19 @@ func (s *RequestStatistics) restorePersistedState(state persistedStatisticsState
 	}
 
 	for _, record := range state.AggregateRecords {
-		appendRecord(record.APIName, record.ModelName, record.Detail)
+		appendRecord(record.APIName, record.ModelName, record.Detail, record.Requests, record.Latency)
 	}
 
-	for apiName, apiSnapshot := range snapshot.APIs {
-		for modelName, modelSnapshot := range apiSnapshot.Models {
-			for _, detail := range modelSnapshot.Details {
-				normalized := normalizeImportedRequestDetail(detail)
-				if normalized.Timestamp.IsZero() || normalized.Timestamp.Before(cutoff) {
-					continue
+	if len(state.AggregateRecords) == 0 {
+		for apiName, apiSnapshot := range snapshot.APIs {
+			for modelName, modelSnapshot := range apiSnapshot.Models {
+				for _, detail := range modelSnapshot.Details {
+					normalized := normalizeImportedRequestDetail(detail)
+					if normalized.Timestamp.IsZero() || normalized.Timestamp.Before(cutoff) {
+						continue
+					}
+					appendRecord(apiName, modelName, normalized, 1, LatencyStats{})
 				}
-				appendRecord(apiName, modelName, normalized)
 			}
 		}
 	}

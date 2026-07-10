@@ -359,6 +359,62 @@ func TestGetDetailedUsageStatisticsRecentReturnsGlobalRecentDetails(t *testing.T
 	}
 }
 
+func TestGetDetailedUsageStatisticsRecentCompactReturnsOnlyEventHierarchy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stats := usage.NewRequestStatistics()
+	start := time.Date(2026, 4, 10, 13, 0, 0, 0, time.UTC)
+	for index, record := range []struct {
+		apiKey string
+		model  string
+	}{
+		{apiKey: "compact-api-a", model: "gpt-5.4"},
+		{apiKey: "compact-api-b", model: "gpt-5.5"},
+		{apiKey: "compact-api-c", model: "gpt-5.6"},
+	} {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      record.apiKey,
+			Model:       record.model,
+			RequestedAt: start.Add(time.Duration(index) * time.Minute),
+			Detail: coreusage.Detail{
+				InputTokens:  1,
+				OutputTokens: 1,
+				TotalTokens:  2,
+			},
+		})
+	}
+
+	handler := &Handler{usageStats: stats}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/details?recent=1&compact=true", nil)
+
+	handler.GetDetailedUsageStatistics(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Usage usage.StatisticsSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := payload.Usage.TotalRequests; got != 3 {
+		t.Fatalf("total_requests = %d, want 3", got)
+	}
+	if got := len(payload.Usage.APIs); got != 1 {
+		t.Fatalf("compact APIs len = %d, want 1", got)
+	}
+	if _, ok := payload.Usage.APIs["compact-api-c"]; !ok {
+		t.Fatalf("compact response does not contain newest request API: %#v", payload.Usage.APIs)
+	}
+	if payload.Usage.RequestsByDay != nil || payload.Usage.RequestsByHour != nil || payload.Usage.TokensByDay != nil || payload.Usage.TokensByHour != nil {
+		t.Fatal("compact response retained aggregate time-series maps")
+	}
+}
+
 func TestGetDetailedUsageStatisticsRejectsInvalidRecentLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

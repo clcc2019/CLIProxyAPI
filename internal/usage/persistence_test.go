@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -191,5 +192,103 @@ func TestPersistedStateRestoresClientAPIKeyQuotaCounters(t *testing.T) {
 	usage := defaultClientAPIKeyQuotaTracker.usage("persisted-quota-key", now)
 	if usage.DailyCost != 1 || usage.MonthlyCost != 1 || usage.TotalCost != 1 {
 		t.Fatalf("restored quota usage = %+v, want all costs 1", usage)
+	}
+}
+
+func TestPersistedStateRestoresCompactedAggregateBucket(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Minute)
+	stats := NewRequestStatistics()
+	for i, latency := range []time.Duration{125 * time.Millisecond, 375 * time.Millisecond} {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      "compacted-api",
+			Model:       "gpt-test",
+			Source:      "user@example.com",
+			AuthIndex:   "auth-1",
+			RequestedAt: now.Add(time.Duration(i) * time.Second),
+			Latency:     latency,
+			Detail: coreusage.Detail{
+				InputTokens:  int64(i + 1),
+				OutputTokens: 2,
+				TotalTokens:  int64(i + 3),
+			},
+		})
+	}
+	if got := len(stats.aggregateRecords); got != 1 {
+		t.Fatalf("aggregateRecords len before persistence = %d, want 1", got)
+	}
+
+	data, err := MarshalPersistedState(stats)
+	if err != nil {
+		t.Fatalf("MarshalPersistedState error: %v", err)
+	}
+	restored := NewRequestStatistics()
+	if _, err = LoadPersistedStateBytes(data, restored); err != nil {
+		t.Fatalf("LoadPersistedStateBytes error: %v", err)
+	}
+	if got := len(restored.aggregateRecords); got != 1 {
+		t.Fatalf("aggregateRecords len after persistence = %d, want 1", got)
+	}
+
+	window := restored.AggregatedUsageSnapshot(now.Add(30 * time.Second)).Windows["1h"]
+	if window.TotalRequests != 2 || window.TotalTokens != 7 {
+		t.Fatalf("restored totals = requests %d tokens %d, want 2 and 7", window.TotalRequests, window.TotalTokens)
+	}
+	if window.Latency.Count != 2 || window.Latency.TotalMs != 500 || window.Latency.MinMs != 125 || window.Latency.MaxMs != 375 {
+		t.Fatalf("restored latency = %+v", window.Latency)
+	}
+}
+
+func TestLoadPersistedStateVersionOneAggregateRecords(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Minute)
+	state := persistedStatisticsState{
+		Version: 1,
+		SavedAt: now,
+		Snapshot: StatisticsSnapshot{
+			TotalRequests: 2,
+			SuccessCount:  2,
+			TotalTokens:   9,
+			APIs:          map[string]APISnapshot{},
+		},
+		AggregateRecords: []persistedUsageAggregateRecord{
+			{
+				APIName:   "legacy-api",
+				ModelName: "gpt-legacy",
+				Detail: RequestDetail{
+					Timestamp: now.Add(5 * time.Second),
+					Source:    "legacy-user",
+					LatencyMs: 100,
+					Tokens:    TokenStats{InputTokens: 2, OutputTokens: 2, TotalTokens: 4},
+				},
+			},
+			{
+				APIName:   "legacy-api",
+				ModelName: "gpt-legacy",
+				Detail: RequestDetail{
+					Timestamp: now.Add(10 * time.Second),
+					Source:    "legacy-user",
+					LatencyMs: 300,
+					Tokens:    TokenStats{InputTokens: 3, OutputTokens: 2, TotalTokens: 5},
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal error: %v", err)
+	}
+
+	restored := NewRequestStatistics()
+	if _, err = LoadPersistedStateBytes(data, restored); err != nil {
+		t.Fatalf("LoadPersistedStateBytes error: %v", err)
+	}
+	if got := len(restored.aggregateRecords); got != 1 {
+		t.Fatalf("migrated aggregateRecords len = %d, want 1", got)
+	}
+	window := restored.AggregatedUsageSnapshot(now.Add(30 * time.Second)).Windows["1h"]
+	if window.TotalRequests != 2 || window.TotalTokens != 9 {
+		t.Fatalf("migrated totals = requests %d tokens %d, want 2 and 9", window.TotalRequests, window.TotalTokens)
+	}
+	if window.Latency.Count != 2 || window.Latency.TotalMs != 400 || window.Latency.MinMs != 100 || window.Latency.MaxMs != 300 {
+		t.Fatalf("migrated latency = %+v", window.Latency)
 	}
 }

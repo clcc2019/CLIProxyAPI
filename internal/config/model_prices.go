@@ -223,8 +223,12 @@ var defaultModelPrices = buildDefaultModelPrices()
 
 func buildDefaultModelPrices() ModelPrices {
 	prices := ModelPrices{
-		"gpt-5.4": {Prompt: 2.5, Completion: 15, Cache: 0.25},
-		"gpt-5.5": {Prompt: 5, Completion: 30, Cache: 0.25},
+		"gpt-5.4":       {Prompt: 2.5, Completion: 15, Cache: 0.25},
+		"gpt-5.5":       {Prompt: 5, Completion: 30, Cache: 0.25},
+		"gpt-5.6":       {Prompt: 5, Completion: 30, Cache: 0.5},
+		"gpt-5.6-sol":   {Prompt: 5, Completion: 30, Cache: 0.5},
+		"gpt-5.6-terra": {Prompt: 2.5, Completion: 15, Cache: 0.25},
+		"gpt-5.6-luna":  {Prompt: 1, Completion: 6, Cache: 0.1},
 	}
 
 	// USD per 1M tokens. Cache is the read-hit price; cache write tokens stay in

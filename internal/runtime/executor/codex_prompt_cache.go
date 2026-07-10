@@ -138,11 +138,23 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 		}
 	}
 
-	if cached, ok := globalCodexPromptResolutionMemo.get(from, req.Model, scope, executionSessionID, req.Payload); ok {
+	// Large, per-turn payloads rarely repeat. The memo deliberately excludes
+	// them, so avoid also hashing the entire body merely to construct a
+	// singleflight key that cannot lead to a memo hit.
+	if len(req.Payload) > codexPromptResolutionMemoMaxPayload {
+		codexMetrics.memoPromptMiss.Add(1)
+		return resolveCodexPromptCacheResolutionUncached(ctx, from, scope, req)
+	}
+
+	// Reuse one precomputed hash across the optimistic lookup, the in-flight
+	// key, the post-singleflight lookup, and insertion. A cold small request
+	// previously hashed its full payload up to four times on this hot path.
+	memoHash := hashCodexPromptResolutionMemoKey(from, req.Model, scope, executionSessionID, req.Payload)
+	if cached, ok := globalCodexPromptResolutionMemo.getWithHash(memoHash, from, req.Model, scope, executionSessionID, req.Payload); ok {
 		return cached
 	}
 
-	flightKey := promptResolutionMemoInflightKey(from, req.Model, scope, executionSessionID, req.Payload)
+	flightKey := promptResolutionMemoInflightKeyWithHash(from, req.Model, scope, executionSessionID, memoHash)
 	// Use WithoutCancel so the singleflight work keeps its tracing/request-id
 	// context (used inside the callback for logging) but is not cancelled when
 	// one particular caller's ctx is cancelled. Several callers may share this
@@ -153,56 +165,52 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 		if err := flightCtx.Err(); err != nil {
 			return codexPromptCacheResolution{}, err
 		}
-		if cached, ok := globalCodexPromptResolutionMemo.get(from, req.Model, scope, executionSessionID, req.Payload); ok {
+		if cached, ok := globalCodexPromptResolutionMemo.getWithHash(memoHash, from, req.Model, scope, executionSessionID, req.Payload); ok {
 			return cached, nil
 		}
-		resolution := codexPromptCacheResolution{}
-		// Path 7: derive a conversation fingerprint from whatever
-		// conversation-scoped fields the caller happened to include. The
-		// fingerprint goes through codexCacheStore, so repeated requests with
-		// the same fingerprint map to the same stable UUID even after the
-		// translator re-renders the payload.
-		if fp := conversationIdentifierFingerprint(req); fp != "" {
-			key := "fp:" + scope + ":" + req.Model + ":" + fp
-			cache := loadOrCreateCodexCache(key)
-			resolution = codexPromptCacheResolution{
-				cache:            cache,
-				headerEligibleID: cache.ID,
-			}
-			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-			return resolution, nil
-		}
-		// Path 8: final structured fallback for clients without explicit
-		// session signals. This preserves the existing content-based reuse.
-		if fp := conversationContentFingerprint(req); fp != "" {
-			key := "fp:" + scope + ":" + req.Model + ":" + fp
-			resolution = codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
-			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-			return resolution, nil
-		}
-
-		// Path 9 (fallback): api_key-level stable UUID. This is strictly less
-		// precise than a real conversation id but preserves backwards-compatible
-		// behaviour for callers that send neither prompt_cache_key nor any
-		// identifiable content (e.g. the upstream smoke tests that post just
-		// {"model": "..."}).
-		if from == "openai" {
-			if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
-				resolution = codexPromptCacheResolution{
-					cache: helps.CodexCache{
-						ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
-					},
-				}
-				globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
-				return resolution, nil
-			}
-		}
-
-		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+		resolution := resolveCodexPromptCacheResolutionUncached(ctx, from, scope, req)
+		globalCodexPromptResolutionMemo.setWithHash(memoHash, from, req.Model, scope, executionSessionID, req.Payload, resolution)
 		return resolution, nil
 	})
 	if err != nil {
 		return codexPromptCacheResolution{}
+	}
+	return resolution
+}
+
+func resolveCodexPromptCacheResolutionUncached(ctx context.Context, from sdktranslator.Format, scope string, req cliproxyexecutor.Request) codexPromptCacheResolution {
+	resolution := codexPromptCacheResolution{}
+	// Path 7: derive a conversation fingerprint from whatever
+	// conversation-scoped fields the caller happened to include. The
+	// fingerprint goes through codexCacheStore, so repeated requests with
+	// the same fingerprint map to the same stable UUID even after the
+	// translator re-renders the payload.
+	if fp := conversationIdentifierFingerprint(req); fp != "" {
+		key := "fp:" + scope + ":" + req.Model + ":" + fp
+		cache := loadOrCreateCodexCache(key)
+		return codexPromptCacheResolution{
+			cache:            cache,
+			headerEligibleID: cache.ID,
+		}
+	}
+	// Path 8: final structured fallback for clients without explicit session
+	// signals. This preserves the existing content-based reuse.
+	if fp := conversationContentFingerprint(req); fp != "" {
+		key := "fp:" + scope + ":" + req.Model + ":" + fp
+		return codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
+	}
+
+	// Path 9 (fallback): api_key-level stable UUID. This is strictly less
+	// precise than a real conversation id but preserves backwards-compatible
+	// behaviour for callers that send neither prompt_cache_key nor any
+	// identifiable content (e.g. the upstream smoke tests that post just
+	// {"model": "..."}).
+	if from == "openai" {
+		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+			resolution.cache = helps.CodexCache{
+				ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
+			}
+		}
 	}
 	return resolution
 }
@@ -213,25 +221,6 @@ func codexNormalizePromptCacheKey(key string) string {
 		return key
 	}
 	return "pc-" + uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache-key:"+key)).String()
-}
-
-// codexPromptCacheConversationHintFields lists the JSON paths inspected for a
-// caller-owned conversation identifier, in precedence order. Declared as a
-// package-level variable so it is constructed once rather than on every
-// request.
-var codexPromptCacheConversationHintFields = []string{
-	"conversation_id",
-	"conversationId",
-	"thread_id",
-	"threadId",
-	"session_id",
-	"sessionId",
-	"metadata.conversation_id",
-	"metadata.conversationId",
-	"metadata.thread_id",
-	"metadata.threadId",
-	"metadata.session_id",
-	"metadata.sessionId",
 }
 
 var codexPromptCacheHeaderHintKeys = []string{
@@ -264,15 +253,68 @@ func codexPromptCachePayloadConversationHint(payload []byte) string {
 	if len(payload) == 0 {
 		return ""
 	}
-	// gjson.GetManyBytes parses the payload once and resolves all paths in a
-	// single traversal, avoiding the N re-parses that the old
-	// `for path := range paths { gjson.GetBytes(...) }` loop incurred.
-	results := gjson.GetManyBytes(payload, codexPromptCacheConversationHintFields...)
-	for _, result := range results {
-		if !result.Exists() {
-			continue
+	root := codexGJSONParseImmutableBytes(payload)
+	if !root.IsObject() {
+		return ""
+	}
+
+	var topLevel [6]string
+	var metadata gjson.Result
+	codexCollectPromptCacheConversationHints(root, &topLevel, &metadata)
+	if value := firstCodexPromptCacheConversationHint(topLevel[:]); value != "" {
+		return value
+	}
+	if !metadata.IsObject() {
+		return ""
+	}
+	var nested [6]string
+	codexCollectPromptCacheConversationHints(metadata, &nested, nil)
+	return firstCodexPromptCacheConversationHint(nested[:])
+}
+
+func codexCollectPromptCacheConversationHints(object gjson.Result, values *[6]string, metadata *gjson.Result) {
+	if values == nil || !object.IsObject() {
+		return
+	}
+	object.ForEach(func(key, value gjson.Result) bool {
+		keyString := key.String()
+		if metadata != nil && keyString == "metadata" {
+			if !metadata.Exists() && value.IsObject() {
+				*metadata = value
+			}
+			return true
 		}
-		if value := strings.TrimSpace(result.String()); value != "" {
+		index := codexPromptCacheConversationHintIndex(keyString)
+		if index < 0 || values[index] != "" {
+			return true
+		}
+		values[index] = strings.TrimSpace(value.String())
+		return true
+	})
+}
+
+func codexPromptCacheConversationHintIndex(key string) int {
+	switch key {
+	case "conversation_id":
+		return 0
+	case "conversationId":
+		return 1
+	case "thread_id":
+		return 2
+	case "threadId":
+		return 3
+	case "session_id":
+		return 4
+	case "sessionId":
+		return 5
+	default:
+		return -1
+	}
+}
+
+func firstCodexPromptCacheConversationHint(values []string) string {
+	for _, value := range values {
+		if value != "" {
 			return value
 		}
 	}

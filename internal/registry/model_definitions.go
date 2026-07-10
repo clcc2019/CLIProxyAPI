@@ -248,6 +248,10 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 // LookupStaticModelInfo searches all static model definitions for a model by ID.
 // Returns nil if no matching model is found.
 func LookupStaticModelInfo(modelID string) *ModelInfo {
+	return cloneModelInfo(lookupStaticModelInfo(modelID))
+}
+
+func lookupStaticModelInfo(modelID string) *ModelInfo {
 	if modelID == "" {
 		return nil
 	}
@@ -260,7 +264,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	if snapshot == nil {
 		return nil
 	}
-	return cloneModelInfo(snapshot.byID[modelID])
+	return snapshot.byID[modelID]
 }
 
 func staticModelLookupSnapshotFor(data *staticModelsJSON) *staticModelLookupSnapshot {

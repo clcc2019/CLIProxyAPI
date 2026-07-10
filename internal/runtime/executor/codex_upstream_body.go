@@ -447,11 +447,17 @@ func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.Cod
 }
 
 func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel string) []byte {
-	if strings.TrimSpace(baseModel) != "gpt-5.5" {
+	effort := gjson.GetBytes(body, "reasoning.effort")
+	if effort.Type != gjson.String {
 		return body
 	}
-	effort := gjson.GetBytes(body, "reasoning.effort")
-	if effort.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(effort.String()), "xhigh") {
+
+	model := strings.TrimSpace(baseModel)
+	effortValue := strings.TrimSpace(effort.String())
+	switch {
+	case model == "gpt-5.5" && strings.EqualFold(effortValue, "xhigh"):
+	case model == "gpt-5.6-sol" && (strings.EqualFold(effortValue, "xhigh") || strings.EqualFold(effortValue, "max")):
+	default:
 		return body
 	}
 	return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))

@@ -32,6 +32,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -42,9 +43,9 @@ import (
 const (
 	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
 	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.133.0"
-	defaultCodexUserAgent    = "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
-	defaultCodexOriginator   = "codex_cli_rs"
+	defaultClientVersion     = misc.CodexCLIVersion
+	defaultCodexUserAgent    = misc.CodexDefaultOriginator + "/" + defaultClientVersion + " (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	defaultCodexOriginator   = misc.CodexDefaultOriginator
 	accessTokenRefreshLeeway = 30 * time.Second
 )
 

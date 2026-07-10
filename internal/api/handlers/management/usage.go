@@ -76,10 +76,15 @@ func (h *Handler) GetDetailedUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errLimit.Error()})
 		return
 	}
+	compactRecent := parseUsageCompact(c.Query("compact"))
 
 	var snapshot usage.StatisticsSnapshot
 	if recentLimit > 0 {
-		snapshot = h.recentDetailedUsageSnapshot(recentLimit)
+		if compactRecent {
+			snapshot = h.recentCompactUsageSnapshot(recentLimit)
+		} else {
+			snapshot = h.recentDetailedUsageSnapshot(recentLimit)
+		}
 	} else {
 		snapshot = usage.TrimDetailedSnapshot(
 			h.detailedUsageSnapshot(),
@@ -279,6 +284,14 @@ func parseUsageRecentLimit(value string) (int, error) {
 	return limit, nil
 }
 
+// parseUsageCompact recognizes an opt-in compact response for global-recent
+// request events. Invalid values intentionally fall back to the compatible
+// full snapshot shape.
+func parseUsageCompact(value string) bool {
+	compact, err := strconv.ParseBool(strings.TrimSpace(value))
+	return err == nil && compact
+}
+
 func usageSnapshotContainsDetails(snapshot usage.StatisticsSnapshot) bool {
 	for _, apiSnapshot := range snapshot.APIs {
 		for _, modelSnapshot := range apiSnapshot.Models {
@@ -309,6 +322,13 @@ func (h *Handler) recentDetailedUsageSnapshot(limit int) usage.StatisticsSnapsho
 		return usage.StatisticsSnapshot{}
 	}
 	return h.usageStats.SnapshotRecentDetails(limit)
+}
+
+func (h *Handler) recentCompactUsageSnapshot(limit int) usage.StatisticsSnapshot {
+	if h == nil || h.usageStats == nil {
+		return usage.StatisticsSnapshot{}
+	}
+	return h.usageStats.SnapshotRecentDetailsCompact(limit)
 }
 
 func (h *Handler) aggregatedUsageSnapshot(now time.Time) usage.AggregatedUsageSnapshot {

@@ -230,6 +230,42 @@ func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT55XHighReasoningForUpstrea
 	}
 }
 
+func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT56SolExpensiveReasoningForUpstream(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		effort     string
+		wantEffort string
+	}{
+		{name: "sol xhigh", model: "gpt-5.6-sol", effort: "xhigh", wantEffort: "high"},
+		{name: "sol max", model: "gpt-5.6-sol", effort: "max", wantEffort: "high"},
+		{name: "sol high unchanged", model: "gpt-5.6-sol", effort: "high", wantEffort: "high"},
+		{name: "sol medium unchanged", model: "gpt-5.6-sol", effort: "medium", wantEffort: "medium"},
+		{name: "sol ultra unchanged", model: "gpt-5.6-sol", effort: "ultra", wantEffort: "ultra"},
+		{name: "terra max unchanged", model: "gpt-5.6-terra", effort: "max", wantEffort: "max"},
+		{name: "luna xhigh unchanged", model: "gpt-5.6-luna", effort: "xhigh", wantEffort: "xhigh"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"client-alias","input":[],"reasoning":{"effort":"` + tt.effort + `"}}`)
+			gotBody := normalizeCodexFinalUpstreamBody(body, tt.model, &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+				requestKind:                 codexFinalUpstreamResponses,
+				streamMode:                  codexStreamFieldTrue,
+				store:                       false,
+				suppressDefaultInstructions: true,
+			})
+
+			if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != tt.wantEffort {
+				t.Fatalf("reasoning.effort = %q, want %q; body=%s", got, tt.wantEffort, gotBody)
+			}
+			if got := gjson.GetBytes(gotBody, "model").String(); got != tt.model {
+				t.Fatalf("model = %q, want %q; body=%s", got, tt.model, gotBody)
+			}
+		})
+	}
+}
+
 func TestNormalizeCodexFinalUpstreamBody_PreservesCallerReasoningAndVerbosity(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"reasoning":{"effort":"high","summary":"auto"},"text":{"verbosity":"high"}}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,

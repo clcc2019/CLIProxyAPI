@@ -120,6 +120,62 @@ func TestCodexHTTPRequestForAttemptTreatsZstdEncodingCaseInsensitively(t *testin
 	}
 }
 
+func TestCodexHTTPRequestForAttemptClonesHeadersIndependently(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex"}`)
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header["X-Test"] = []string{"original", "second"}
+	prepared := codexPreparedRequest{httpReq: req, body: body}
+
+	first, err := codexHTTPRequestForAttempt(prepared, "", 0)
+	if err != nil {
+		t.Fatalf("first attempt error = %v", err)
+	}
+	retry, err := codexHTTPRequestForAttempt(prepared, "", 1)
+	if err != nil {
+		t.Fatalf("retry attempt error = %v", err)
+	}
+	first.Header["X-Test"][0] = "first-mutated"
+	retry.Header["X-Test"][1] = "retry-mutated"
+
+	if got := req.Header["X-Test"]; len(got) != 2 || got[0] != "original" || got[1] != "second" {
+		t.Fatalf("prepared headers mutated through clone: %#v", got)
+	}
+	if got := retry.Header["X-Test"][0]; got != "original" {
+		t.Fatalf("first and retry clones share header values: %q", got)
+	}
+}
+
+func BenchmarkCodexHTTPRequestForFirstAttempt(b *testing.B) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(body))
+	if err != nil {
+		b.Fatal(err)
+	}
+	req.Header = http.Header{
+		"Authorization":              []string{"Bearer token"},
+		"Content-Type":               []string{"application/json"},
+		"User-Agent":                 []string{"codex_cli_rs/0.144.1"},
+		codexHeaderSessionID:         []string{"session-1"},
+		codexHeaderThreadID:          []string{"thread-1"},
+		codexHeaderTurnMetadata:      []string{`{"session_id":"session-1","thread_id":"thread-1"}`},
+		codexHeaderInstallationID:    []string{"installation-1"},
+		codexHeaderOfficialSessionID: []string{"session-1"},
+	}
+	prepared := codexPreparedRequest{httpReq: req, body: body}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		attempt, err := codexHTTPRequestForAttempt(prepared, "", 0)
+		if err != nil || attempt == nil {
+			b.Fatalf("attempt = %#v, err = %v", attempt, err)
+		}
+		_ = attempt.Body.Close()
+	}
+}
+
 func TestDoCodexHTTPRequestRetriesMixedCaseZstdStatusWithoutCompression(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{

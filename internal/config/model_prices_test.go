@@ -22,6 +22,42 @@ func TestEffectiveModelPricesIncludesClaudeDefaults(t *testing.T) {
 	}
 }
 
+func TestEffectiveModelPricesIncludesGPT56Defaults(t *testing.T) {
+	prices := EffectiveModelPrices(nil)
+
+	tests := []struct {
+		name       string
+		prompt     float64
+		completion float64
+		cache      float64
+	}{
+		{name: "gpt-5.6", prompt: 5, completion: 30, cache: 0.5},
+		{name: "gpt-5.6-sol", prompt: 5, completion: 30, cache: 0.5},
+		{name: "gpt-5.6-terra", prompt: 2.5, completion: 15, cache: 0.25},
+		{name: "gpt-5.6-luna", prompt: 1, completion: 6, cache: 0.1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			price, ok := LookupModelPrice(prices, tt.name)
+			if !ok {
+				t.Fatalf("expected %s price to resolve", tt.name)
+			}
+			if price.Prompt != tt.prompt || price.Completion != tt.completion || price.Cache != tt.cache {
+				t.Fatalf("unexpected %s price: %+v", tt.name, price)
+			}
+		})
+	}
+
+	price, ok := LookupModelPrice(prices, "gpt-5.6-sol(max)")
+	if !ok {
+		t.Fatal("expected gpt-5.6-sol(max) alias to resolve")
+	}
+	if price.Prompt != 5 || price.Completion != 30 || price.Cache != 0.5 {
+		t.Fatalf("unexpected gpt-5.6-sol(max) price: %+v", price)
+	}
+}
+
 func TestEffectiveModelPricesKeepsUserOverride(t *testing.T) {
 	prices := EffectiveModelPrices(ModelPrices{
 		"claude-sonnet-4.6": {Prompt: 9, Completion: 10, Cache: 1},

@@ -33,6 +33,72 @@ func TestCodexStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
 	}
 }
 
+func TestCodexStaticModelsIncludeGPT56Family(t *testing.T) {
+	tests := []struct {
+		name   string
+		models []*ModelInfo
+		ids    []string
+	}{
+		{name: "free", models: GetCodexFreeModels(), ids: []string{"gpt-5.6-terra", "gpt-5.6-luna"}},
+		{name: "team", models: GetCodexTeamModels(), ids: []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
+		{name: "plus", models: GetCodexPlusModels(), ids: []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
+		{name: "pro", models: GetCodexProModels(), ids: []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, id := range tt.ids {
+				info := findModelInfo(tt.models, id)
+				if info == nil {
+					t.Fatalf("%s not found", id)
+				}
+				if info.ContextLength != 372000 {
+					t.Fatalf("%s context length = %d, want 372000", id, info.ContextLength)
+				}
+			}
+		})
+	}
+
+	info := LookupStaticModelInfo("gpt-5.6-sol")
+	if info == nil {
+		t.Fatal("LookupStaticModelInfo did not find gpt-5.6-sol")
+	}
+	if info.ContextLength != 372000 {
+		t.Fatalf("lookup context length = %d, want 372000", info.ContextLength)
+	}
+
+	luna := findModelInfo(GetCodexFreeModels(), "gpt-5.6-luna")
+	if luna == nil || luna.Config == nil {
+		t.Fatal("gpt-5.6-luna model config was not loaded")
+	}
+	if got := luna.Config.OverrideHeader["user-agent"]; got != "codex-tui/0.144.1 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.1)" {
+		t.Fatalf("gpt-5.6-luna user-agent override = %q", got)
+	}
+	if got := luna.Config.OverrideHeader["originator"]; got != "codex-tui" {
+		t.Fatalf("gpt-5.6-luna originator override = %q, want codex-tui", got)
+	}
+	overrides := LookupModelHeaderOverrides("gpt-5.6-luna", "codex")
+	if overrides.UserAgent != luna.Config.OverrideHeader["user-agent"] || overrides.Originator != "codex-tui" {
+		t.Fatalf("static model header projection = %+v", overrides)
+	}
+
+	clone := cloneModelInfo(luna)
+	clone.Config.OverrideHeader["originator"] = "mutated"
+	if got := luna.Config.OverrideHeader["originator"]; got != "codex-tui" {
+		t.Fatalf("model config clone shares override map, original originator = %q", got)
+	}
+}
+
+func BenchmarkLookupModelHeaderOverrides(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		overrides := LookupModelHeaderOverrides("gpt-5.6-luna", "codex")
+		if overrides.UserAgent == "" || overrides.Originator == "" {
+			b.Fatal("missing model header overrides")
+		}
+	}
+}
+
 func TestCodexFreeStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
 	info := findModelInfo(GetCodexFreeModels(), "gpt-5.5")
 	if info == nil {
@@ -102,6 +168,19 @@ func TestCodexClientModelCapabilitiesForModelUsesEmbeddedCatalog(t *testing.T) {
 
 	if _, ok := CodexClientModelCapabilitiesForModel("unknown-model"); ok {
 		t.Fatal("unknown model should not have embedded Codex client capabilities")
+	}
+}
+
+func TestCodexClientModelCapabilitiesIncludeGPT56(t *testing.T) {
+	capabilities, ok := CodexClientModelCapabilitiesForModel("gpt-5.6-sol")
+	if !ok {
+		t.Fatal("expected gpt-5.6-sol in embedded Codex client model catalog")
+	}
+	if !capabilities.SupportsParallelToolCalls {
+		t.Fatal("gpt-5.6-sol should support parallel tool calls")
+	}
+	if capabilities.DefaultReasoningLevel != "low" {
+		t.Fatalf("default reasoning level = %q, want low", capabilities.DefaultReasoningLevel)
 	}
 }
 

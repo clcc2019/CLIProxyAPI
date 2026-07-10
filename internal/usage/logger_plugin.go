@@ -4,6 +4,7 @@
 package usage
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"sort"
@@ -102,8 +103,10 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+	dayKeyCache    map[usageDayKey]string
 
 	aggregateRecords        []usageAggregateRecord
+	aggregateRecordIndex    map[usageAggregateRecordKey]int
 	oldestAggregateRecordAt time.Time
 	newestAggregateRecordAt time.Time
 	rolledUpAggregated      *AggregatedUsageSnapshot
@@ -136,6 +139,23 @@ type usageAggregateRecord struct {
 	APIName   string
 	ModelName string
 	Detail    RequestDetail
+	Requests  int64
+	Latency   LatencyStats
+}
+
+type usageAggregateRecordKey struct {
+	Minute    int64
+	APIName   string
+	ModelName string
+	Source    string
+	AuthIndex string
+	Failed    bool
+}
+
+type usageDayKey struct {
+	Year  int
+	Month time.Month
+	Day   int
 }
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
@@ -212,6 +232,8 @@ func NewRequestStatistics() *RequestStatistics {
 		requestsByHour:          make(map[int]int64),
 		tokensByDay:             make(map[string]int64),
 		tokensByHour:            make(map[int]int64),
+		dayKeyCache:             make(map[usageDayKey]string),
+		aggregateRecordIndex:    make(map[usageAggregateRecordKey]int),
 		importedSummaryHashes:   make(map[string]struct{}),
 		importedAggregateHashes: make(map[string]struct{}),
 		importedSummarySources:  make(map[string]StatisticsSnapshot),
@@ -248,7 +270,8 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if modelName == "" {
 		modelName = "unknown"
 	}
-	dayKey := timestamp.Format("2006-01-02")
+	year, month, day := timestamp.Date()
+	dayIndex := usageDayKey{Year: year, Month: month, Day: day}
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
@@ -261,6 +284,14 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.failureCount.Add(1)
 	}
 	s.totalTokens.Add(totalTokens)
+	if s.dayKeyCache == nil {
+		s.dayKeyCache = make(map[usageDayKey]string)
+	}
+	dayKey, ok := s.dayKeyCache[dayIndex]
+	if !ok {
+		dayKey = timestamp.Format("2006-01-02")
+		s.dayKeyCache[dayIndex] = dayKey
+	}
 
 	stats, ok := s.apis[statsKey]
 	if !ok {
@@ -317,15 +348,47 @@ func (s *RequestStatistics) appendAggregateRecord(apiName, modelName string, det
 	if modelName == "" {
 		modelName = "unknown"
 	}
-	detail.Tokens = normaliseTokenStats(detail.Tokens)
 	recordTime := detail.Timestamp.UTC()
-	s.aggregateRecords = append(s.aggregateRecords, usageAggregateRecord{
+	// Dashboard series are minute-granular, so equivalent requests can share
+	// one retained aggregate without affecting emitted series resolution.
+	detail.Timestamp = recordTime.Truncate(time.Minute)
+	detail.APIKey = ""
+	detail.Source = strings.TrimSpace(detail.Source)
+	detail.AuthIndex = strings.TrimSpace(detail.AuthIndex)
+	detail.ModelReasoningEffort = ""
+	detail.ErrorMessage = ""
+	detail.Tokens = normaliseTokenStats(detail.Tokens)
+	if s.aggregateRecordIndex == nil {
+		s.aggregateRecordIndex = make(map[usageAggregateRecordKey]int)
+	}
+	key := usageAggregateRecordKey{
+		Minute:    detail.Timestamp.Unix(),
 		APIName:   apiName,
 		ModelName: modelName,
-		Detail:    detail,
-	})
+		Source:    detail.Source,
+		AuthIndex: detail.AuthIndex,
+		Failed:    detail.Failed,
+	}
+	if index, ok := s.aggregateRecordIndex[key]; ok {
+		record := &s.aggregateRecords[index]
+		record.Requests++
+		mergeTokenStats(&record.Detail.Tokens, detail.Tokens)
+		addLatencySample(&record.Latency, detail.LatencyMs)
+	} else {
+		latency := LatencyStats{}
+		addLatencySample(&latency, detail.LatencyMs)
+		detail.LatencyMs = 0
+		s.aggregateRecordIndex[key] = len(s.aggregateRecords)
+		s.aggregateRecords = append(s.aggregateRecords, usageAggregateRecord{
+			APIName:   apiName,
+			ModelName: modelName,
+			Detail:    detail,
+			Requests:  1,
+			Latency:   latency,
+		})
+	}
 	if !recordTime.IsZero() && (s.oldestAggregateRecordAt.IsZero() || recordTime.Before(s.oldestAggregateRecordAt)) {
-		s.oldestAggregateRecordAt = recordTime
+		s.oldestAggregateRecordAt = detail.Timestamp
 	}
 	s.pruneAggregateRecordsLocked(recordTime)
 }
@@ -365,6 +428,7 @@ func (s *RequestStatistics) pruneAggregateRecordsLocked(reference time.Time) {
 	}
 	clear(s.aggregateRecords[len(retained):])
 	s.aggregateRecords = retained
+	s.rebuildAggregateRecordIndexLocked()
 
 	rolledUp := aggregateRecordsToAllSnapshot(expired, s.newestAggregateRecordAt)
 	if len(rolledUp.Windows) == 0 {
@@ -376,6 +440,29 @@ func (s *RequestStatistics) pruneAggregateRecordsLocked(reference time.Time) {
 	}
 	merged := mergeAggregatedUsageSnapshot(*s.rolledUpAggregated, rolledUp)
 	s.rolledUpAggregated = &merged
+}
+
+func (s *RequestStatistics) rebuildAggregateRecordIndexLocked() {
+	if s == nil {
+		return
+	}
+	if len(s.aggregateRecords) == 0 {
+		clear(s.aggregateRecordIndex)
+		return
+	}
+	index := make(map[usageAggregateRecordKey]int, len(s.aggregateRecords))
+	for i := range s.aggregateRecords {
+		record := &s.aggregateRecords[i]
+		index[usageAggregateRecordKey{
+			Minute:    record.Detail.Timestamp.UTC().Truncate(time.Minute).Unix(),
+			APIName:   record.APIName,
+			ModelName: record.ModelName,
+			Source:    strings.TrimSpace(record.Detail.Source),
+			AuthIndex: strings.TrimSpace(record.Detail.AuthIndex),
+			Failed:    record.Detail.Failed,
+		}] = i
+	}
+	s.aggregateRecordIndex = index
 }
 
 func trimRequestDetails(details *[]RequestDetail, limit int) {
@@ -456,51 +543,74 @@ type recentRequestDetail struct {
 	apiName   string
 	modelName string
 	detail    RequestDetail
+	order     int
 }
 
-// SnapshotRecentDetails returns a summary snapshot containing only the newest
-// request details across all APIs/models. Aggregate counters still represent the
-// full retained statistics, so callers can render recent event lists without
-// transferring every retained detail record.
-func (s *RequestStatistics) SnapshotRecentDetails(limit int) StatisticsSnapshot {
-	if limit <= 0 {
-		return s.Snapshot()
+// recentRequestDetailHeap retains the least-recent candidate at its root. It
+// keeps global-recent snapshots bounded without repeatedly shifting a
+// limit-sized sorted slice for every retained request detail.
+type recentRequestDetailHeap []recentRequestDetail
+
+func (h recentRequestDetailHeap) Len() int { return len(h) }
+
+func (h recentRequestDetailHeap) Less(i, j int) bool {
+	return lessRecentRequestDetail(h[i], h[j])
+}
+
+func lessRecentRequestDetail(left, right recentRequestDetail) bool {
+	if !left.detail.Timestamp.Equal(right.detail.Timestamp) {
+		return left.detail.Timestamp.Before(right.detail.Timestamp)
+	}
+	// For equal timestamps, retain a deterministic subset where possible.
+	if left.apiName != right.apiName {
+		return left.apiName > right.apiName
+	}
+	if left.modelName != right.modelName {
+		return left.modelName > right.modelName
+	}
+	return left.order > right.order
+}
+
+func (h recentRequestDetailHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *recentRequestDetailHeap) Push(value any) {
+	*h = append(*h, value.(recentRequestDetail))
+}
+
+func (h *recentRequestDetailHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	value := old[last]
+	old[last] = recentRequestDetail{}
+	*h = old[:last]
+	return value
+}
+
+func collectRecentRequestDetailsLocked(s *RequestStatistics, limit int) []recentRequestDetail {
+	if s == nil || limit <= 0 {
+		return nil
 	}
 
-	result := StatisticsSnapshot{}
-	if s == nil {
-		return result
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	result = s.snapshotWithDetailsLocked(false)
-	candidates := make([]recentRequestDetail, 0, limit)
+	candidates := make(recentRequestDetailHeap, 0, limit)
+	heap.Init(&candidates)
+	order := 0
 	addCandidate := func(apiName, modelName string, detail RequestDetail) {
 		candidate := recentRequestDetail{
 			apiName:   apiName,
 			modelName: modelName,
 			detail:    detail,
+			order:     order,
 		}
-		insertIndex := len(candidates)
-		for idx, existing := range candidates {
-			if detail.Timestamp.After(existing.detail.Timestamp) {
-				insertIndex = idx
-				break
-			}
-		}
-		if insertIndex == len(candidates) {
-			if len(candidates) < limit {
-				candidates = append(candidates, candidate)
-			}
+		order++
+
+		if candidates.Len() < limit {
+			heap.Push(&candidates, candidate)
 			return
 		}
-		candidates = append(candidates, recentRequestDetail{})
-		copy(candidates[insertIndex+1:], candidates[insertIndex:])
-		candidates[insertIndex] = candidate
-		if len(candidates) > limit {
-			candidates = candidates[:limit]
+		// The heap root is the oldest/least-preferred retained detail.
+		if lessRecentRequestDetail(candidates[0], candidate) {
+			heap.Pop(&candidates)
+			heap.Push(&candidates, candidate)
 		}
 	}
 
@@ -528,25 +638,60 @@ func (s *RequestStatistics) SnapshotRecentDetails(limit int) StatisticsSnapshot 
 		}
 	}
 
-	if len(candidates) == 0 {
-		return result
-	}
-
-	sort.SliceStable(candidates, func(i, j int) bool {
-		left, right := candidates[i], candidates[j]
+	result := append([]recentRequestDetail(nil), candidates...)
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := result[i], result[j]
 		if left.apiName != right.apiName {
 			return left.apiName < right.apiName
 		}
 		if left.modelName != right.modelName {
 			return left.modelName < right.modelName
 		}
-		return left.detail.Timestamp.Before(right.detail.Timestamp)
+		if !left.detail.Timestamp.Equal(right.detail.Timestamp) {
+			return left.detail.Timestamp.Before(right.detail.Timestamp)
+		}
+		return left.order < right.order
 	})
+	return result
+}
 
-	if result.APIs == nil {
-		result.APIs = make(map[string]APISnapshot)
+// SnapshotRecentDetails returns a summary snapshot containing only the newest
+// request details across all APIs/models. Aggregate counters still represent the
+// full retained statistics, so callers can render recent event lists without
+// transferring every retained detail record.
+func (s *RequestStatistics) SnapshotRecentDetails(limit int) StatisticsSnapshot {
+	return s.snapshotRecentDetails(limit, false)
+}
+
+// SnapshotRecentDetailsCompact returns only the aggregate counters and API/model
+// entries needed to represent the newest request details. It is intended for
+// high-frequency event views that do not need the complete aggregate hierarchy.
+func (s *RequestStatistics) SnapshotRecentDetailsCompact(limit int) StatisticsSnapshot {
+	return s.snapshotRecentDetails(limit, true)
+}
+
+func (s *RequestStatistics) snapshotRecentDetails(limit int, compact bool) StatisticsSnapshot {
+	if limit <= 0 {
+		return s.Snapshot()
 	}
-	for _, candidate := range candidates {
+	if s == nil {
+		return StatisticsSnapshot{}
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result StatisticsSnapshot
+	if compact {
+		result = s.compactSummarySnapshotLocked()
+	} else {
+		result = s.snapshotWithDetailsLocked(false)
+	}
+
+	for _, candidate := range collectRecentRequestDetailsLocked(s, limit) {
+		if result.APIs == nil {
+			result.APIs = make(map[string]APISnapshot)
+		}
 		apiSnapshot := result.APIs[candidate.apiName]
 		if apiSnapshot.Models == nil {
 			apiSnapshot.Models = make(map[string]ModelSnapshot)
@@ -557,6 +702,31 @@ func (s *RequestStatistics) SnapshotRecentDetails(limit int) StatisticsSnapshot 
 		result.APIs[candidate.apiName] = apiSnapshot
 	}
 
+	return result
+}
+
+func (s *RequestStatistics) compactSummarySnapshotLocked() StatisticsSnapshot {
+	result := StatisticsSnapshot{
+		TotalRequests: s.totalRequests.Load(),
+		SuccessCount:  s.successCount.Load(),
+		FailureCount:  s.failureCount.Load(),
+		TotalTokens:   s.totalTokens.Load(),
+	}
+	addTotals := func(snapshot StatisticsSnapshot) {
+		result.TotalRequests += snapshot.TotalRequests
+		result.SuccessCount += snapshot.SuccessCount
+		result.FailureCount += snapshot.FailureCount
+		result.TotalTokens += snapshot.TotalTokens
+	}
+	if s.importedSummary != nil {
+		addTotals(*s.importedSummary)
+	}
+	for _, imported := range s.importedSummarySources {
+		addTotals(imported)
+	}
+	for _, imported := range s.importedDetailedSources {
+		addTotals(imported)
+	}
 	return result
 }
 

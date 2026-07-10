@@ -59,11 +59,28 @@ type ModelInfo struct {
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and used for provider-specific thinking budget normalization.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
+	// Config holds provider-specific request metadata bundled with a model.
+	Config *ModelConfig `json:"config,omitempty"`
 
 	// UserDefined indicates this model was defined through config file's models[]
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
 	// UserDefined models have thinking configuration passed through without validation.
 	UserDefined bool `json:"-"`
+}
+
+// ModelConfig describes provider-specific request behavior for a model.
+type ModelConfig struct {
+	// OverrideHeader contains trusted model identity headers applied after the
+	// normal client/auth header resolution step.
+	OverrideHeader map[string]string `json:"override_header,omitempty"`
+}
+
+// ModelHeaderOverrides is the allocation-free, immutable projection of the
+// trusted identity headers used on the request hot path.
+type ModelHeaderOverrides struct {
+	UserAgent  string
+	Originator string
+	Version    string
 }
 
 type availableModelsCacheEntry struct {
@@ -229,7 +246,26 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
 		return info
 	}
-	return cloneModelInfo(LookupStaticModelInfo(modelID))
+	return LookupStaticModelInfo(modelID)
+}
+
+// LookupModelHeaderOverrides resolves only the trusted model identity headers.
+// Returning strings by value avoids cloning the full ModelInfo and its maps on
+// every upstream request while preserving LookupModelInfo's defensive-copy API.
+func LookupModelHeaderOverrides(modelID string, provider ...string) ModelHeaderOverrides {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ModelHeaderOverrides{}
+	}
+
+	p := ""
+	if len(provider) > 0 {
+		p = strings.ToLower(strings.TrimSpace(provider[0]))
+	}
+	if overrides, found := GetGlobalRegistry().lookupModelHeaderOverrides(modelID, p); found {
+		return overrides
+	}
+	return modelHeaderOverridesFromInfo(lookupStaticModelInfo(modelID))
 }
 
 // SetHook sets an optional hook for observing model registration changes.
@@ -599,6 +635,16 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 			copyThinking.Levels = append([]string(nil), model.Thinking.Levels...)
 		}
 		copyModel.Thinking = &copyThinking
+	}
+	if model.Config != nil {
+		copyConfig := *model.Config
+		if len(model.Config.OverrideHeader) > 0 {
+			copyConfig.OverrideHeader = make(map[string]string, len(model.Config.OverrideHeader))
+			for key, value := range model.Config.OverrideHeader {
+				copyConfig.OverrideHeader[key] = value
+			}
+		}
+		copyModel.Config = &copyConfig
 	}
 	return &copyModel
 }
@@ -1259,6 +1305,45 @@ func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 		return cloneModelInfo(reg.Info)
 	}
 	return nil
+}
+
+func (r *ModelRegistry) lookupModelHeaderOverrides(modelID, provider string) (ModelHeaderOverrides, bool) {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	reg, ok := r.models[modelID]
+	if !ok || reg == nil {
+		return ModelHeaderOverrides{}, false
+	}
+	if provider != "" && reg.InfoByProvider != nil && reg.Providers != nil {
+		if count := reg.Providers[provider]; count > 0 {
+			if info := reg.InfoByProvider[provider]; info != nil {
+				return modelHeaderOverridesFromInfo(info), true
+			}
+		}
+	}
+	return modelHeaderOverridesFromInfo(reg.Info), true
+}
+
+func modelHeaderOverridesFromInfo(info *ModelInfo) ModelHeaderOverrides {
+	if info == nil || info.Config == nil || len(info.Config.OverrideHeader) == 0 {
+		return ModelHeaderOverrides{}
+	}
+	var overrides ModelHeaderOverrides
+	for rawName, rawValue := range info.Config.OverrideHeader {
+		value := strings.TrimSpace(rawValue)
+		if value == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(rawName)) {
+		case "user-agent":
+			overrides.UserAgent = value
+		case "originator":
+			overrides.Originator = value
+		case "version":
+			overrides.Version = value
+		}
+	}
+	return overrides
 }
 
 // convertModelToMap converts ModelInfo to the appropriate format for different handler types
