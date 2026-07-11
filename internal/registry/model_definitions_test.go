@@ -156,6 +156,9 @@ func TestCodexClientModelCapabilitiesForModelUsesEmbeddedCatalog(t *testing.T) {
 	if !capabilities.SupportsReasoningSummaries {
 		t.Fatal("gpt-5.4 should support reasoning summaries")
 	}
+	if !capabilities.SupportsReasoningSummaryParameter {
+		t.Fatal("gpt-5.4 should default to supporting the reasoning.summary parameter")
+	}
 	if capabilities.DefaultReasoningLevel != "medium" {
 		t.Fatalf("default reasoning level = %q, want medium", capabilities.DefaultReasoningLevel)
 	}

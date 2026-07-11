@@ -15,6 +15,49 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+type trackingRetryBody struct {
+	reader *bytes.Reader
+	closed bool
+}
+
+func (b *trackingRetryBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
+func (b *trackingRetryBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestCodexDrainAndCloseRetryResponseDrainsSmallBody(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 8<<10)
+	body := &trackingRetryBody{reader: bytes.NewReader(payload)}
+	resp := &http.Response{Body: body}
+
+	if err := codexDrainAndCloseRetryResponse(resp); err != nil {
+		t.Fatalf("codexDrainAndCloseRetryResponse() error = %v", err)
+	}
+	if !body.closed {
+		t.Fatal("expected response body to be closed")
+	}
+	if body.reader.Len() != 0 {
+		t.Fatalf("remaining body bytes = %d, want 0", body.reader.Len())
+	}
+}
+
+func TestCodexDrainAndCloseRetryResponseBoundsLargeBody(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), codexHTTPRetryDrainLimit*2)
+	body := &trackingRetryBody{reader: bytes.NewReader(payload)}
+	resp := &http.Response{Body: body}
+
+	if err := codexDrainAndCloseRetryResponse(resp); err != nil {
+		t.Fatalf("codexDrainAndCloseRetryResponse() error = %v", err)
+	}
+	if !body.closed {
+		t.Fatal("expected response body to be closed")
+	}
+	if got, want := body.reader.Len(), len(payload)-codexHTTPRetryDrainLimit; got != want {
+		t.Fatalf("remaining body bytes = %d, want %d", got, want)
+	}
+}
+
 func TestDoCodexHTTPRequestRetriesZstdEOFWithoutCompression(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{

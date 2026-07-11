@@ -21,6 +21,7 @@ const (
 	codexHTTPMaxRequestRetries    = 4
 	codexHTTPMaxStreamReadRetries = 5
 	codexHTTPRetryBaseDelay       = 200 * time.Millisecond
+	codexHTTPRetryDrainLimit      = 64 << 10
 )
 
 var codexHTTPRetryableTransportMarkers = []string{
@@ -56,7 +57,7 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 				statusCode = httpResp.StatusCode
 			}
 			if httpResp != nil && httpResp.Body != nil {
-				if errClose := httpResp.Body.Close(); errClose != nil {
+				if errClose := codexDrainAndCloseRetryResponse(httpResp); errClose != nil {
 					log.Errorf("codex executor: close zstd rejection response body: %v", errClose)
 				}
 			}
@@ -70,7 +71,7 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 				statusCode = httpResp.StatusCode
 			}
 			if httpResp != nil && httpResp.Body != nil {
-				if errClose := httpResp.Body.Close(); errClose != nil {
+				if errClose := codexDrainAndCloseRetryResponse(httpResp); errClose != nil {
 					log.Errorf("codex executor: close stale turn state response body: %v", errClose)
 				}
 			}
@@ -95,7 +96,7 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 				return httpResp, err
 			}
 			if httpResp != nil && httpResp.Body != nil {
-				if errClose := httpResp.Body.Close(); errClose != nil {
+				if errClose := codexDrainAndCloseRetryResponse(httpResp); errClose != nil {
 					log.Errorf("codex executor: close response body after transport error: %v", errClose)
 				}
 			}
@@ -106,7 +107,7 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 				statusCode = httpResp.StatusCode
 			}
 			if httpResp != nil && httpResp.Body != nil {
-				if errClose := httpResp.Body.Close(); errClose != nil {
+				if errClose := codexDrainAndCloseRetryResponse(httpResp); errClose != nil {
 					log.Errorf("codex executor: close retryable response body: %v", errClose)
 				}
 			}
@@ -116,6 +117,22 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 			return nil, errSleep
 		}
 	}
+}
+
+// codexDrainAndCloseRetryResponse consumes small retry/error bodies before
+// closing them. Reaching EOF lets net/http reuse HTTP/1.1 connections while
+// the limit prevents an unexpectedly large or endless body from delaying a
+// retry indefinitely.
+func codexDrainAndCloseRetryResponse(resp *http.Response) error {
+	if resp == nil || resp.Body == nil {
+		return nil
+	}
+	_, errDrain := io.Copy(io.Discard, io.LimitReader(resp.Body, codexHTTPRetryDrainLimit))
+	errClose := resp.Body.Close()
+	if errClose != nil {
+		return errClose
+	}
+	return errDrain
 }
 
 func codexShouldRetryHTTPResponseWithoutTurnState(resp *http.Response, prepared codexPreparedRequest) bool {

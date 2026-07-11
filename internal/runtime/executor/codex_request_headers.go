@@ -119,7 +119,7 @@ func codexSetOriginatorHeader(headers http.Header, originator string) {
 		return
 	}
 	originator = strings.TrimSpace(originator)
-	if originator == "" || originator == codexOriginator {
+	if originator == "" {
 		headers.Del("Originator")
 		return
 	}

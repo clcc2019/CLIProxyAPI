@@ -52,6 +52,7 @@ type codexFinalUpstreamBodyOptions struct {
 	streamMode                  codexStreamFieldMode
 	preservePreviousResponseID  bool
 	preserveGenerate            bool
+	preserveNativeFields        bool
 	store                       bool
 	omitServiceTier             bool
 	suppressDefaultInstructions bool
@@ -107,6 +108,7 @@ var codexAllowedResponsesFinalUpstreamFields = map[string]struct{}{
 	"reasoning":           {},
 	"store":               {},
 	"stream":              {},
+	"stream_options":      {},
 	"include":             {},
 	"service_tier":        {},
 	"prompt_cache_key":    {},
@@ -228,10 +230,18 @@ func pruneCodexFinalUpstreamBody(body []byte, opts codexFinalUpstreamBodyOptions
 		if field == "" {
 			return true
 		}
-		if field == "previous_response_id" && opts.preservePreviousResponseID && opts.requestKind != codexFinalUpstreamCompact {
+		if field == "previous_response_id" {
+			if opts.preservePreviousResponseID && opts.requestKind != codexFinalUpstreamCompact {
+				return true
+			}
+			edits = append(edits, helps.DeleteJSONEdit(field))
 			return true
 		}
-		if field == "generate" && opts.preserveGenerate && opts.requestKind != codexFinalUpstreamCompact {
+		if field == "generate" {
+			if opts.preserveGenerate && opts.requestKind != codexFinalUpstreamCompact {
+				return true
+			}
+			edits = append(edits, helps.DeleteJSONEdit(field))
 			return true
 		}
 		if field == "service_tier" && opts.omitServiceTier {
@@ -239,6 +249,9 @@ func pruneCodexFinalUpstreamBody(body []byte, opts codexFinalUpstreamBodyOptions
 			return true
 		}
 		if _, ok := allowedFields[field]; ok {
+			return true
+		}
+		if opts.preserveNativeFields {
 			return true
 		}
 		edits = append(edits, helps.DeleteJSONEdit(field))
@@ -259,6 +272,32 @@ func pruneCodexFinalUpstreamBody(body []byte, opts codexFinalUpstreamBodyOptions
 		return body
 	}
 	return helps.EditJSONBytes(body, edits...)
+}
+
+func normalizeCodexFinalUpstreamStreamOptions(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
+	if opts.requestKind != codexFinalUpstreamResponses {
+		return codexDeleteJSONIfExists(body, gjson.GetBytes(body, "stream_options"), "stream_options")
+	}
+	streamOptions := gjson.GetBytes(body, "stream_options")
+	if !streamOptions.Exists() {
+		return body
+	}
+	if opts.preserveNativeFields {
+		if streamOptions.IsObject() {
+			return body
+		}
+		return codexDeleteJSONIfExists(body, streamOptions, "stream_options")
+	}
+	delivery := streamOptions.Get("reasoning_summary_delivery")
+	if !streamOptions.IsObject() || delivery.Type != gjson.String || strings.TrimSpace(delivery.String()) != "sequential_cutoff" {
+		return codexDeleteJSONIfExists(body, streamOptions, "stream_options")
+	}
+	// Keep the wire shape aligned with codex-api::StreamOptions and discard
+	// generic OpenAI stream options such as include_usage.
+	if updated, err := helps.SetRawJSONBytes(body, "stream_options", []byte(`{"reasoning_summary_delivery":"sequential_cutoff"}`)); err == nil {
+		return updated
+	}
+	return body
 }
 
 // codexFinalUpstreamScanFields lists the fields read by
@@ -284,6 +323,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	body = normalizeCodexFinalUpstreamInputItemIDs(body, opts)
 	body = normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body, auth)
 	body = normalizeCodexFinalUpstreamModelControls(body, baseModel)
+	body = normalizeCodexFinalUpstreamStreamOptions(body, opts)
 	body = normalizeCodexFinalUpstreamToolOutputImageDetail(body, baseModel)
 	body = normalizeCodexFinalUpstreamServiceTier(body, baseModel, opts)
 
@@ -425,9 +465,6 @@ func normalizeCodexFinalUpstreamInputItems(body []byte, opts codexFinalUpstreamB
 }
 
 func normalizeCodexFinalUpstreamInputItemIDs(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
-	if opts.store {
-		return body
-	}
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() || !strings.Contains(input.Raw, `"id"`) {
 		return body
@@ -444,7 +481,7 @@ func normalizeCodexFinalUpstreamInputItemIDs(body []byte, opts codexFinalUpstrea
 		itemRaw := []byte(item.Raw)
 		if item.IsObject() {
 			id := item.Get("id")
-			if id.Exists() {
+			if id.Exists() && (!codexResponseItemIDPrefixed(id) || (!opts.store && !opts.preserveNativeFields)) {
 				itemRaw = codexDeleteJSONIfExists(itemRaw, id, "id")
 				changed = true
 			}
@@ -459,6 +496,14 @@ func normalizeCodexFinalUpstreamInputItemIDs(body []byte, opts codexFinalUpstrea
 		return updated
 	}
 	return body
+}
+
+func codexResponseItemIDPrefixed(id gjson.Result) bool {
+	if id.Type != gjson.String {
+		return false
+	}
+	prefix, suffix, ok := strings.Cut(strings.TrimSpace(id.String()), "_")
+	return ok && prefix != "" && suffix != ""
 }
 
 func normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body []byte, auth *cliproxyauth.Auth) []byte {
@@ -511,7 +556,12 @@ func codexPreservesInputItemPassthroughMetadata(auth *cliproxyauth.Auth) bool {
 }
 
 func normalizeCodexFinalUpstreamModelControls(body []byte, baseModel string) []byte {
-	capabilities, _ := codexClientModelCapabilitiesForModel(baseModel)
+	capabilities, ok := codexClientModelCapabilitiesForModel(baseModel)
+	if !ok {
+		// The official ModelInfo field defaults to true when an older/unknown
+		// catalog entry omits it.
+		capabilities.SupportsReasoningSummaryParameter = true
+	}
 	body = normalizeCodexFinalUpstreamReasoning(body, capabilities)
 	return normalizeCodexFinalUpstreamReasoningEffortForModel(body, baseModel)
 }
@@ -640,13 +690,6 @@ func codexClientModelSupportsServiceTier(capabilities registry.CodexClientModelC
 
 func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.CodexClientModelCapabilities) []byte {
 	reasoning := gjson.GetBytes(body, "reasoning")
-	if !capabilities.SupportsReasoningSummaries {
-		if reasoning.Exists() {
-			return helps.EditJSONBytes(body, helps.DeleteJSONEdit("reasoning"))
-		}
-		return body
-	}
-
 	defaultReasoningLevel := strings.TrimSpace(capabilities.DefaultReasoningLevel)
 	if !reasoning.Exists() || reasoning.Type == gjson.Null || !reasoning.IsObject() {
 		rawReasoning := []byte("{}")
@@ -656,17 +699,24 @@ func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.Cod
 		return helps.EditJSONBytes(body, helps.SetRawJSONEdit("reasoning", rawReasoning))
 	}
 
+	edits := make([]helps.JSONEdit, 0, 2)
+	if !capabilities.SupportsReasoningSummaryParameter && reasoning.Get("summary").Exists() {
+		edits = append(edits, helps.DeleteJSONEdit("reasoning.summary"))
+	}
 	effort := reasoning.Get("effort")
 	if defaultReasoningLevel != "" && (!effort.Exists() || effort.Type == gjson.Null || (effort.Type == gjson.String && strings.TrimSpace(effort.String()) == "")) {
-		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", codexReasoningEffortForRequest(defaultReasoningLevel)))
+		edits = append(edits, helps.SetJSONEdit("reasoning.effort", codexReasoningEffortForRequest(defaultReasoningLevel)))
 	}
 	if effort.Type == gjson.String {
 		requestEffort := codexReasoningEffortForRequest(effort.String())
 		if requestEffort != effort.String() {
-			return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", requestEffort))
+			edits = append(edits, helps.SetJSONEdit("reasoning.effort", requestEffort))
 		}
 	}
-	return body
+	if len(edits) == 0 {
+		return body
+	}
+	return helps.EditJSONBytes(body, edits...)
 }
 
 func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel string) []byte {

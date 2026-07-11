@@ -65,6 +65,20 @@ func PublishAuthUpdate(ctx context.Context, auth *Auth) {
 	cb(ctx, auth.Clone())
 }
 
+// PublishAuthProfileUpdate publishes a narrowly scoped client-profile update.
+// The manager uses the marker to merge it with the latest auth snapshot instead
+// of replacing newer state captured by another concurrent request.
+func PublishAuthProfileUpdate(ctx context.Context, auth *Auth) {
+	if ctx == nil || auth == nil {
+		return
+	}
+	cb, _ := ctx.Value(authUpdateContextKey{}).(AuthUpdateCallback)
+	if cb == nil {
+		return
+	}
+	cb(withExecutionAuthProfileUpdate(ctx), auth.Clone())
+}
+
 func PublishRateLimitUpdate(ctx context.Context, authID string, snapshots []RateLimitSnapshot) {
 	if ctx == nil || strings.TrimSpace(authID) == "" || len(snapshots) == 0 {
 		return

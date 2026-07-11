@@ -23,6 +23,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestResponsesWebsocketUpgraderEnablesCompression(t *testing.T) {
+	if !responsesWebsocketUpgrader.EnableCompression {
+		t.Fatal("Responses WebSocket upgrader should negotiate permessage-deflate")
+	}
+}
+
 func TestDefaultWebsocketOriginPort(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -242,6 +242,46 @@ func (s *codexWebsocketSession) rememberTurnStateHeader(headers http.Header) {
 	s.turnState.Store(state)
 }
 
+func (s *codexWebsocketSession) rememberTurnStateEvent(payload []byte) {
+	if s == nil {
+		return
+	}
+	if state := codexWebsocketTurnStateFromEvent(payload); state != "" {
+		s.turnState.Store(state)
+	}
+}
+
+// codexWebsocketTurnStateFromEvent mirrors codex-rs's response.metadata
+// handling. WebSocket turn state may arrive in an event rather than in the
+// upgrade response headers and must be replayed for later requests in the
+// same turn.
+func codexWebsocketTurnStateFromEvent(payload []byte) string {
+	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "type").String()), "response.metadata") {
+		return ""
+	}
+	headers := gjson.GetBytes(payload, "headers")
+	if !headers.IsObject() {
+		return ""
+	}
+	state := ""
+	headers.ForEach(func(key, value gjson.Result) bool {
+		if !strings.EqualFold(strings.TrimSpace(key.String()), codexHeaderTurnState) {
+			return true
+		}
+		switch {
+		case value.Type == gjson.String:
+			state = strings.TrimSpace(value.String())
+		case value.IsArray():
+			values := value.Array()
+			if len(values) > 0 {
+				state = strings.TrimSpace(values[0].String())
+			}
+		}
+		return false
+	})
+	return state
+}
+
 func (s *codexWebsocketSession) rememberLogicalRequest(body []byte) {
 	if s == nil {
 		return
@@ -547,7 +587,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body, originalTranslated := helps.TranslateRequestWithOriginal(e.cfg, from, to, baseModel, req.Payload, originalPayload, false)
+	body, originalTranslated, _ := codexTranslateRequestWithOriginal(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, false, opts.Headers)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -704,6 +744,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			continue
 		}
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
+		if sess != nil {
+			sess.rememberTurnStateEvent(payload)
+		}
 		if codexPublishRateLimitsFromEvent(ctx, auth, payload) {
 			continue
 		}
@@ -845,7 +888,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body, originalTranslated := helps.TranslateRequestWithOriginal(e.cfg, from, to, baseModel, req.Payload, originalPayload, true)
+	body, originalTranslated, _ := codexTranslateRequestWithOriginal(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, true, opts.Headers)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1055,6 +1098,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				continue
 			}
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
+			if sess != nil {
+				sess.rememberTurnStateEvent(payload)
+			}
 			if codexPublishRateLimitsFromEvent(ctx, auth, payload) {
 				continue
 			}
@@ -1217,13 +1263,16 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	ctx = contextWithCachedCodexGinHeaders(ctx)
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	ginHeaders := codexGinHeadersFromContext(ctx)
 	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, codexFinalUpstreamBodyOptions{
 		requestKind:                codexFinalUpstreamResponses,
 		streamMode:                 codexStreamFieldTrue,
 		preservePreviousResponseID: true,
 		preserveGenerate:           true,
-		store:                      codexShouldStoreResponses(auth, httpURL),
-		omitServiceTier:            auth == nil || !auth.ServiceTierPassthrough(),
+		preserveNativeFields: codexNativeClientRequest(opts.SourceFormat, opts.Headers, body) ||
+			codexNativeClientRequest(opts.SourceFormat, ginHeaders, body),
+		store:           codexShouldStoreResponses(auth, httpURL),
+		omitServiceTier: auth == nil || !auth.ServiceTierPassthrough(),
 	})
 
 	executionSessionID := executionSessionIDFromOptions(opts)
@@ -1452,12 +1501,14 @@ func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequestWithReason(
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
 	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
-	dialer.HandshakeTimeout = codexResponsesWebsocketHandshakeTO
-	dialer.EnableCompression = true
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	helps.AddChatGPTCloudflareCookies(headers, wsURL)
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	if resp != nil {
+		helps.StoreChatGPTCloudflareCookies(wsURL, resp.Cookies())
+	}
 	if conn != nil {
 		conn.SetReadLimit(codexResponsesWebsocketReadLimit)
 		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
@@ -2417,10 +2468,7 @@ func buildCodexWebsocketDialer(proxyURL string) *websocket.Dialer {
 		}
 		dialer.Proxy = nil
 		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			return socksDialer.Dial(network, addr)
+			return proxyutil.DialContext(ctx, socksDialer, network, addr)
 		}
 	case "http", "https":
 		dialer.Proxy = http.ProxyURL(setting.URL)
@@ -2568,7 +2616,6 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 			codexSetSingleHeaderValue(headers, "User-Agent", cfgUserAgent)
 		}
 	}
-
 	return headers
 }
 

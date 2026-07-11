@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -148,5 +151,54 @@ func TestGenerateFilenameSanitizesPathAndQuery(t *testing.T) {
 	}
 	if !strings.HasSuffix(filename, "-req-1.log") {
 		t.Fatalf("filename suffix = %q, want *-req-1.log", filename)
+	}
+}
+
+func TestCleanupOldRequestLogsKeepsNewestTwenty(t *testing.T) {
+	dir := t.TempDir()
+	baseTime := time.Unix(1700000000, 0)
+	for i := 0; i < 25; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("v1-responses-2026-07-11T100000-req-%02d.log", i))
+		if err := os.WriteFile(name, []byte("request"), 0o600); err != nil {
+			t.Fatalf("write request log: %v", err)
+		}
+		modTime := baseTime.Add(time.Duration(i) * time.Second)
+		if err := os.Chtimes(name, modTime, modTime); err != nil {
+			t.Fatalf("set request log time: %v", err)
+		}
+	}
+	for _, name := range []string{"error-v1-responses-2026-07-11T100000-failed.log", "app.log", "response-body-part.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("unrelated"), 0o600); err != nil {
+			t.Fatalf("write unrelated log: %v", err)
+		}
+	}
+
+	if err := cleanupOldRequestLogs(dir, requestLogRetentionMaxFiles); err != nil {
+		t.Fatalf("cleanupOldRequestLogs() error = %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read log directory: %v", err)
+	}
+	requestLogs := 0
+	for _, entry := range entries {
+		if requestLogFilenamePattern.MatchString(entry.Name()) && !strings.HasPrefix(entry.Name(), "error-") {
+			requestLogs++
+		}
+	}
+	if requestLogs != requestLogRetentionMaxFiles {
+		t.Fatalf("retained request logs = %d, want %d", requestLogs, requestLogRetentionMaxFiles)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "v1-responses-2026-07-11T100000-req-04.log")); !os.IsNotExist(err) {
+		t.Fatalf("old request log was not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "v1-responses-2026-07-11T100000-req-24.log")); err != nil {
+		t.Fatalf("newest request log was removed: %v", err)
+	}
+	for _, name := range []string{"error-v1-responses-2026-07-11T100000-failed.log", "app.log", "response-body-part.tmp"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("unrelated file %s was removed: %v", name, err)
+		}
 	}
 }

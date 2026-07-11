@@ -138,6 +138,31 @@ func newProxyForwardDialer() *net.Dialer {
 	return &net.Dialer{Timeout: DefaultDialTimeout, KeepAlive: DefaultDialKeepAlive}
 }
 
+// DialContext uses a proxy dialer's context-aware implementation when
+// available. All dialers built by this package support it; the fallback keeps
+// compatibility with third-party proxy.Dialer implementations.
+func DialContext(ctx context.Context, dialer proxy.Dialer, network, addr string) (net.Conn, error) {
+	if dialer == nil {
+		return nil, fmt.Errorf("proxy dialer is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+		conn, err := contextDialer.DialContext(ctx, network, addr)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+		}
+		return conn, err
+	}
+	return dialer.Dial(network, addr)
+}
+
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
 func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	setting, errParse := Parse(raw)
@@ -159,10 +184,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			transport := cloneDefaultTransport()
 			transport.Proxy = nil
 			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				return dialer.Dial(network, addr)
+				return DialContext(ctx, dialer, network, addr)
 			}
 			return ApplyHTTPTransportPoolSettings(transport), setting.Mode, nil
 		}
@@ -207,20 +229,54 @@ type connectProxyDialer struct {
 }
 
 func (d *connectProxyDialer) Dial(network, addr string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, addr)
+}
+
+func (d *connectProxyDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if d == nil || d.proxyURL == nil {
 		return nil, fmt.Errorf("proxy dialer is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	baseDialer := &net.Dialer{Timeout: DefaultDialTimeout, KeepAlive: DefaultDialKeepAlive}
 	var conn net.Conn
 	var err error
 	switch d.proxyURL.Scheme {
 	case "https":
-		conn, err = tls.DialWithDialer(baseDialer, network, d.proxyURL.Host, &tls.Config{ServerName: d.proxyURL.Hostname()})
+		var rawConn net.Conn
+		rawConn, err = baseDialer.DialContext(ctx, network, d.proxyURL.Host)
+		if err == nil {
+			tlsConn := tls.Client(rawConn, &tls.Config{ServerName: d.proxyURL.Hostname()})
+			err = tlsConn.HandshakeContext(ctx)
+			if err != nil {
+				rawConn.Close()
+			} else {
+				conn = tlsConn
+			}
+		}
 	default:
-		conn, err = baseDialer.Dial(network, d.proxyURL.Host)
+		conn, err = baseDialer.DialContext(ctx, network, d.proxyURL.Host)
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// CONNECT negotiation happens after TCP/TLS setup. Close the connection on
+	// cancellation so a proxy that accepts but never answers cannot pin a
+	// request until the process-level dial timeout expires.
+	negotiationDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-negotiationDone:
+		}
+	}()
+	defer close(negotiationDone)
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+		defer conn.SetDeadline(time.Time{})
 	}
 
 	if _, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr); err != nil {
@@ -241,6 +297,9 @@ func (d *connectProxyDialer) Dial(network, addr string) (net.Conn, error) {
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		conn.Close()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()

@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"sync"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -289,13 +291,13 @@ func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.
 	applyCodexHeaders(upgradeReq, auth, "oauth-token", true, nil)
 
 	if published == nil {
-		t.Fatal("expected pinned client version upgrade to publish auth update")
+		t.Fatal("expected fixed client version upgrade to publish auth update")
 	}
 	if got := upgradeReq.Header.Get("User-Agent"); got != "codex_vscode/9.2.0 (darwin; arm64)" {
-		t.Fatalf("upgrade User-Agent = %q, want upgraded client UA", got)
+		t.Fatalf("upgrade User-Agent = %q, want upgraded fixed-client UA", got)
 	}
 	if got := upgradeReq.Header.Get("Version"); got != "9.2.0" {
-		t.Fatalf("upgrade Version = %q, want upgraded client version", got)
+		t.Fatalf("upgrade Version = %q, want upgraded fixed-client version", got)
 	}
 	if got := auth.Metadata["user_agent"]; got != "codex_vscode/9.2.0 (darwin; arm64)" {
 		t.Fatalf("auth user_agent = %v, want upgraded UA", got)
@@ -331,10 +333,10 @@ func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.
 		t.Fatalf("downgrade should not publish auth update: %#v", published.Metadata)
 	}
 	if got := downgradeReq.Header.Get("User-Agent"); got != "codex_vscode/9.2.0 (darwin; arm64)" {
-		t.Fatalf("downgrade request User-Agent = %q, want pinned upgraded UA", got)
+		t.Fatalf("downgrade request User-Agent = %q, want upgraded fixed-client UA", got)
 	}
 	if got := downgradeReq.Header.Get("Version"); got != "9.2.0" {
-		t.Fatalf("downgrade request Version = %q, want pinned upgraded version", got)
+		t.Fatalf("downgrade request Version = %q, want upgraded fixed-client version", got)
 	}
 
 	published = nil
@@ -357,14 +359,144 @@ func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.
 		t.Fatalf("different product should not publish auth update: %#v", published.Metadata)
 	}
 	if got := differentReq.Header.Get("User-Agent"); got != "codex_vscode/9.2.0 (darwin; arm64)" {
-		t.Fatalf("different product User-Agent = %q, want pinned upgraded UA", got)
+		t.Fatalf("different product User-Agent = %q, want fixed codex_vscode UA", got)
 	}
 	if got := differentReq.Header.Get("Version"); got != "9.2.0" {
-		t.Fatalf("different product Version = %q, want pinned upgraded version", got)
+		t.Fatalf("different product Version = %q, want fixed codex_vscode version", got)
 	}
 }
 
-func TestApplyCodexHeadersReplacesLegacyDefaultPinnedClientProfile(t *testing.T) {
+func TestApplyCodexHeadersRejectsMismatchedPinnedClientVersions(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			codexClientProfilePinnedMetadataKey: true,
+			"user_agent":                        "codex_vscode/1.0.0",
+			"headers": map[string]any{
+				"User-Agent": "codex_vscode/1.0.0",
+				"Version":    "1.0.0",
+			},
+		},
+		Attributes: map[string]string{
+			"header:User-Agent": "codex_vscode/1.0.0",
+			"header:Version":    "1.0.0",
+		},
+	}
+	var published *cliproxyauth.Auth
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "codex_vscode/2.0.0",
+		"Version":    "1.5.0",
+	})
+	ctx = cliproxyauth.WithAuthUpdateCallback(ctx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if published != nil {
+		t.Fatalf("mismatched client versions should not publish an update: %#v", published.Metadata)
+	}
+	if got := req.Header.Get("User-Agent"); got != "codex_vscode/1.0.0" {
+		t.Fatalf("User-Agent = %q, want pinned version", got)
+	}
+	if got := req.Header.Get("Version"); got != "1.0.0" {
+		t.Fatalf("Version = %q, want pinned version", got)
+	}
+}
+
+func TestCodexPinnedClientVersionUpdateDetachesShallowAuthMaps(t *testing.T) {
+	original := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			codexClientProfilePinnedMetadataKey: true,
+			"user_agent":                        "codex_vscode/1.0.0",
+			"headers": map[string]any{
+				"User-Agent": "codex_vscode/1.0.0",
+				"Version":    "1.0.0",
+			},
+		},
+		Attributes: map[string]string{
+			"header:User-Agent": "codex_vscode/1.0.0",
+			"header:Version":    "1.0.0",
+		},
+	}
+	execution := original.CloneShallow()
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "codex_vscode/2.0.0",
+		"Version":    "2.0.0",
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, execution, "oauth-token", true, nil)
+
+	if got := original.Attributes["header:User-Agent"]; got != "codex_vscode/1.0.0" {
+		t.Fatalf("shared source User-Agent was mutated: %q", got)
+	}
+	if got := original.Attributes["header:Version"]; got != "1.0.0" {
+		t.Fatalf("shared source Version was mutated: %q", got)
+	}
+	originalHeaders := original.Metadata["headers"].(map[string]any)
+	if got := originalHeaders["Version"]; got != "1.0.0" {
+		t.Fatalf("shared nested metadata Version was mutated: %v", got)
+	}
+	if got := execution.Attributes["header:Version"]; got != "2.0.0" {
+		t.Fatalf("execution Version = %q, want 2.0.0", got)
+	}
+}
+
+func TestCodexPinnedClientVersionUpdatesDoNotMutateConcurrentShallowSource(t *testing.T) {
+	original := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			codexClientProfilePinnedMetadataKey: true,
+			"user_agent":                        "codex_vscode/1.0.0",
+			"headers": map[string]any{
+				"User-Agent": "codex_vscode/1.0.0",
+				"Version":    "1.0.0",
+			},
+		},
+		Attributes: map[string]string{
+			"header:User-Agent": "codex_vscode/1.0.0",
+			"header:Version":    "1.0.0",
+		},
+	}
+
+	const workers = 24
+	executions := make([]*cliproxyauth.Auth, workers)
+	for index := range executions {
+		executions[index] = original.CloneShallow()
+	}
+	var wg sync.WaitGroup
+	for index, execution := range executions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			version := "2.0." + strconv.Itoa(index+1)
+			headers := http.Header{
+				"User-Agent": {"codex_vscode/" + version},
+				"Version":    {version},
+			}
+			codexPinClientProfileFromFirstRequest(context.Background(), execution, nil, headers, nil)
+		}()
+	}
+	wg.Wait()
+
+	if got := original.Attributes["header:Version"]; got != "1.0.0" {
+		t.Fatalf("shared source Version was mutated concurrently: %q", got)
+	}
+	if got := original.Metadata["headers"].(map[string]any)["Version"]; got != "1.0.0" {
+		t.Fatalf("shared nested metadata Version was mutated concurrently: %v", got)
+	}
+}
+
+func TestApplyCodexHeadersKeepsLegacyDefaultPinnedClientProfile(t *testing.T) {
 	const legacyDefaultUA = "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	const clientUA = "codex_vscode/0.144.1 (darwin; arm64)"
 
@@ -407,29 +539,29 @@ func TestApplyCodexHeadersReplacesLegacyDefaultPinnedClientProfile(t *testing.T)
 
 	applyCodexHeaders(req, auth, "oauth-token", true, nil)
 
-	if published == nil {
-		t.Fatal("expected legacy default profile replacement to publish auth update")
+	if published != nil {
+		t.Fatalf("pinned legacy profile should not publish auth update: %#v", published.Metadata)
 	}
-	if got := req.Header.Get("User-Agent"); got != clientUA {
-		t.Fatalf("request User-Agent = %q, want %q", got, clientUA)
+	if got := req.Header.Get("User-Agent"); got != legacyDefaultUA {
+		t.Fatalf("request User-Agent = %q, want pinned %q", got, legacyDefaultUA)
 	}
-	if got := req.Header.Get("Originator"); got != "codex_vscode" {
-		t.Fatalf("request Originator = %q, want codex_vscode", got)
+	if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
+		t.Fatalf("request Originator = %q, want pinned codex_cli_rs", got)
 	}
 	if got := req.Header.Get("Version"); got != "0.144.1" {
 		t.Fatalf("request Version = %q, want 0.144.1", got)
 	}
-	if got := auth.Metadata["user_agent"]; got != clientUA {
-		t.Fatalf("auth user_agent = %v, want %s", got, clientUA)
+	if got := auth.Metadata["user_agent"]; got != legacyDefaultUA {
+		t.Fatalf("auth user_agent = %v, want pinned %s", got, legacyDefaultUA)
 	}
-	if got := auth.Metadata["originator"]; got != "codex_vscode" {
-		t.Fatalf("auth originator = %v, want codex_vscode", got)
+	if got := auth.Metadata["originator"]; got != "codex_cli_rs" {
+		t.Fatalf("auth originator = %v, want pinned codex_cli_rs", got)
 	}
-	if got := auth.Attributes["header:User-Agent"]; got != clientUA {
-		t.Fatalf("auth header:User-Agent = %q, want %q", got, clientUA)
+	if got := auth.Attributes["header:User-Agent"]; got != legacyDefaultUA {
+		t.Fatalf("auth header:User-Agent = %q, want pinned %q", got, legacyDefaultUA)
 	}
-	if got := auth.Attributes["header:Version"]; got != "0.144.1" {
-		t.Fatalf("auth header:Version = %q, want 0.144.1", got)
+	if got := auth.Attributes["header:Version"]; got != "0.133.0" {
+		t.Fatalf("auth header:Version = %q, want pinned 0.133.0", got)
 	}
 }
 

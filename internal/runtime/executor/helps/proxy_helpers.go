@@ -196,6 +196,7 @@ func newHTTPClient(transport http.RoundTripper, timeout time.Duration) *http.Cli
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
+		Jar:       SharedChatGPTCloudflareCookieJar(),
 	}
 }
 

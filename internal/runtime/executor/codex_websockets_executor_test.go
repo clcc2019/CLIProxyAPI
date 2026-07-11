@@ -1654,8 +1654,8 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
 	}
-	if got := headers.Get("Originator"); got != "" {
-		t.Fatalf("Originator = %q, want empty for default originator", got)
+	if got := headers.Get("Originator"); got != misc.CodexDefaultOriginator {
+		t.Fatalf("Originator = %q, want %q", got, misc.CodexDefaultOriginator)
 	}
 	assertGeneratedCodexTurnMetadata(t, headers.Get("X-Codex-Turn-Metadata"))
 	assertCodexTurnMetadataString(t, headers.Get("X-Codex-Turn-Metadata"), "window_id", headers.Get(codexHeaderWindowID))
@@ -1706,6 +1706,31 @@ func TestCodexWebsocketShouldSendResponseProcessedSkipsGenerateFalse(t *testing.
 	}
 	if !codexWebsocketShouldSendResponseProcessed(headers, []byte(`{"type":"response.create","generate":null}`)) {
 		t.Fatal("response.processed should be sent unless generate is explicitly false")
+	}
+}
+
+func TestCodexWebsocketSessionCapturesTurnStateFromMetadataEvent(t *testing.T) {
+	sess := &codexWebsocketSession{}
+	sess.setTurnStateScope(`{"turn_id":"turn-1"}`)
+	sess.rememberTurnStateEvent([]byte(`{
+		"type":"response.metadata",
+		"headers":{"x-CoDeX-tUrN-sTaTe":["turn-state-event"]}
+	}`))
+
+	if got := sess.currentTurnState(); got != "turn-state-event" {
+		t.Fatalf("currentTurnState() = %q, want turn-state-event", got)
+	}
+	headers := make(http.Header)
+	sess.applyTurnStateHeader(headers)
+	if got := headers.Get(codexHeaderTurnState); got != "turn-state-event" {
+		t.Fatalf("%s = %q, want turn-state-event", codexHeaderTurnState, got)
+	}
+}
+
+func TestCodexWebsocketTurnStateIgnoresNonMetadataEvent(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","headers":{"x-codex-turn-state":"wrong-state"}}`)
+	if got := codexWebsocketTurnStateFromEvent(payload); got != "" {
+		t.Fatalf("codexWebsocketTurnStateFromEvent() = %q, want empty", got)
 	}
 }
 
@@ -1843,6 +1868,59 @@ func TestApplyCodexWebsocketHeadersNormalizesVersionAndPassesThroughClientIdenti
 	}
 	if got := headers.Get(codexHeaderOAIAttestation); got != "v1.attestation" {
 		t.Fatalf("%s = %s, want v1.attestation", codexHeaderOAIAttestation, got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersUpdatesPinnedClientVersionAndKeepsOtherProfileHeaders(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider:   "codex",
+		Metadata:   map[string]any{"access_token": "oauth-token"},
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+
+	first := applyCodexWebsocketHeaders(contextWithGinHeaders(map[string]string{
+		"User-Agent":              "codex_vscode/1.0.0",
+		"Originator":              "codex_vscode",
+		"Version":                 "1.0.0",
+		"X-Codex-Beta-Features":   "first-feature",
+		"X-OpenAI-Subagent":       "first-subagent",
+		codexHeaderOAIAttestation: "first-attestation",
+		codexHeaderResponsesAPIIncludeTimingMetrics: "false",
+	}), http.Header{}, auth, "oauth-token", nil)
+	if got := first.Get(codexHeaderOAIAttestation); got != "first-attestation" {
+		t.Fatalf("first %s = %q, want first-attestation", codexHeaderOAIAttestation, got)
+	}
+
+	var published *cliproxyauth.Auth
+	secondCtx := contextWithGinHeaders(map[string]string{
+		"User-Agent":              "codex_vscode/2.0.0",
+		"Originator":              "codex_desktop",
+		"Version":                 "2.0.0",
+		"X-Codex-Beta-Features":   "second-feature",
+		"X-OpenAI-Subagent":       "second-subagent",
+		codexHeaderOAIAttestation: "second-attestation",
+		codexHeaderResponsesAPIIncludeTimingMetrics: "true",
+	})
+	secondCtx = cliproxyauth.WithAuthUpdateCallback(secondCtx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	second := applyCodexWebsocketHeaders(secondCtx, http.Header{}, auth, "oauth-token", nil)
+
+	if published == nil {
+		t.Fatal("expected fixed websocket client version upgrade to publish auth update")
+	}
+	for header, want := range map[string]string{
+		"User-Agent":              "codex_vscode/2.0.0",
+		"Originator":              "codex_vscode",
+		"Version":                 "2.0.0",
+		"X-Codex-Beta-Features":   "first-feature",
+		"X-OpenAI-Subagent":       "first-subagent",
+		codexHeaderOAIAttestation: "first-attestation",
+		codexHeaderResponsesAPIIncludeTimingMetrics: "false",
+	} {
+		if got := second.Get(header); got != want {
+			t.Fatalf("second %s = %q, want %q", header, got, want)
+		}
 	}
 }
 
@@ -2028,8 +2106,8 @@ func TestApplyCodexWebsocketHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T
 	if got := headers.Get("x-codex-beta-features"); got != "config-beta" {
 		t.Fatalf("x-codex-beta-features = %q, want config-beta", got)
 	}
-	if got := headers.Get("Originator"); got != "" {
-		t.Fatalf("Originator = %q, want empty for default originator", got)
+	if got := headers.Get("Originator"); got != misc.CodexDefaultOriginator {
+		t.Fatalf("Originator = %q, want %q", got, misc.CodexDefaultOriginator)
 	}
 }
 
@@ -2263,8 +2341,8 @@ func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 	if got := req.Header.Get("x-codex-beta-features"); got != "config-beta" {
 		t.Fatalf("x-codex-beta-features = %q, want config-beta", got)
 	}
-	if got := req.Header.Get("Originator"); got != "" {
-		t.Fatalf("Originator = %q, want empty for default originator", got)
+	if got := req.Header.Get("Originator"); got != misc.CodexDefaultOriginator {
+		t.Fatalf("Originator = %q, want %q", got, misc.CodexDefaultOriginator)
 	}
 	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, misc.CodexCLIVersion)
@@ -2285,8 +2363,8 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 	if got := req.Header.Get("User-Agent"); got != misc.CodexCLIUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, misc.CodexCLIUserAgent)
 	}
-	if got := req.Header.Get("Originator"); got != "" {
-		t.Fatalf("Originator = %q, want empty for default originator", got)
+	if got := req.Header.Get("Originator"); got != misc.CodexDefaultOriginator {
+		t.Fatalf("Originator = %q, want %q", got, misc.CodexDefaultOriginator)
 	}
 	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, misc.CodexCLIVersion)
@@ -2347,8 +2425,8 @@ func TestApplyCodexHeadersCompactKeepsHeadersLeanByDefault(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != misc.CodexCLIUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, misc.CodexCLIUserAgent)
 	}
-	if got := req.Header.Get("Originator"); got != "" {
-		t.Fatalf("Originator = %q, want empty for default originator", got)
+	if got := req.Header.Get("Originator"); got != misc.CodexDefaultOriginator {
+		t.Fatalf("Originator = %q, want %q", got, misc.CodexDefaultOriginator)
 	}
 	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, misc.CodexCLIVersion)

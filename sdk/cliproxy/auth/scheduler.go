@@ -34,6 +34,24 @@ const (
 
 type authLoadFunc func(authID string) int64
 
+const (
+	codexQuotaSchedulingSnapshotTTL = 45 * time.Minute
+	codexQuotaSchedulingClockSkew   = 5 * time.Minute
+)
+
+type codexQuotaSchedulingRank uint8
+
+const (
+	codexQuotaSchedulingDepleted codexQuotaSchedulingRank = iota
+	codexQuotaSchedulingUnknown
+	codexQuotaSchedulingUsable
+)
+
+type codexQuotaSchedulingScore struct {
+	rank    codexQuotaSchedulingRank
+	urgency float64
+}
+
 // authScheduler keeps the incremental provider/model scheduling state used by Manager.
 type authScheduler struct {
 	mu            sync.RWMutex
@@ -1678,24 +1696,14 @@ func (v *readyView) pickRoundRobinWithLoad(filter authFilter, load authLoadFunc)
 	if len(v.flat) > 0 {
 		start = v.cursor % len(v.flat)
 	}
-	if load == nil {
-		for offset := 0; offset < len(v.flat); offset++ {
-			index := (start + offset) % len(v.flat)
-			entry := v.flat[index]
-			if !filter.matches(entry) {
-				continue
-			}
-			v.cursor = index + 1
-			return entry
-		}
-		return nil
-	}
 	var (
 		picked      *scheduledAuth
 		pickedIndex = -1
 		bestLoad    int64
+		bestQuota   codexQuotaSchedulingScore
 		found       bool
 	)
+	now := time.Now()
 	for offset := 0; offset < len(v.flat); offset++ {
 		index := (start + offset) % len(v.flat)
 		entry := v.flat[index]
@@ -1703,14 +1711,13 @@ func (v *readyView) pickRoundRobinWithLoad(filter authFilter, load authLoadFunc)
 			continue
 		}
 		entryLoad := loadAuthCount(load, entry.auth.ID)
-		if !found || entryLoad < bestLoad {
+		entryQuota := quotaSchedulingScore(entry.auth, now)
+		if !found || entryLoad < bestLoad || (entryLoad == bestLoad && quotaSchedulingScoreBetter(entryQuota, bestQuota)) {
 			picked = entry
 			pickedIndex = index
 			bestLoad = entryLoad
+			bestQuota = entryQuota
 			found = true
-			if entryLoad == 0 {
-				break
-			}
 		}
 	}
 	if picked != nil {
@@ -1741,21 +1748,13 @@ func (v *readyView) pickRoundRobinAtWithLoad(offset int, filter authFilter, load
 			start += len(v.flat)
 		}
 	}
-	if load == nil {
-		for step := 0; step < len(v.flat); step++ {
-			index := (start + step) % len(v.flat)
-			entry := v.flat[index]
-			if filter.matches(entry) {
-				return entry
-			}
-		}
-		return nil
-	}
 	var (
-		picked   *scheduledAuth
-		bestLoad int64
-		found    bool
+		picked    *scheduledAuth
+		bestLoad  int64
+		bestQuota codexQuotaSchedulingScore
+		found     bool
 	)
+	now := time.Now()
 	for step := 0; step < len(v.flat); step++ {
 		index := (start + step) % len(v.flat)
 		entry := v.flat[index]
@@ -1763,16 +1762,79 @@ func (v *readyView) pickRoundRobinAtWithLoad(offset int, filter authFilter, load
 			continue
 		}
 		entryLoad := loadAuthCount(load, entry.auth.ID)
-		if !found || entryLoad < bestLoad {
+		entryQuota := quotaSchedulingScore(entry.auth, now)
+		if !found || entryLoad < bestLoad || (entryLoad == bestLoad && quotaSchedulingScoreBetter(entryQuota, bestQuota)) {
 			picked = entry
 			bestLoad = entryLoad
+			bestQuota = entryQuota
 			found = true
-			if entryLoad == 0 {
-				break
-			}
 		}
 	}
 	return picked
+}
+
+// quotaSchedulingScore ranks Codex credentials by how urgently their remaining
+// quota should be consumed. The minimum remaining-percent-per-hour across all
+// active windows is used as the bottleneck, so a nearly exhausted weekly window
+// cannot be hidden by a healthy five-hour window. Unknown or stale snapshots
+// deliberately fall back to the existing round-robin order.
+func quotaSchedulingScore(auth *Auth, now time.Time) codexQuotaSchedulingScore {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || len(auth.RateLimits) == 0 {
+		return codexQuotaSchedulingScore{rank: codexQuotaSchedulingUnknown}
+	}
+
+	result := codexQuotaSchedulingScore{rank: codexQuotaSchedulingUnknown}
+	foundWindow := false
+	_, hasAccountSnapshot := auth.RateLimits["codex"]
+	for limitID, snapshot := range auth.RateLimits {
+		// The background usage poll publishes the account-wide limit as "codex".
+		// When it is available, model-specific meters must not penalize unrelated
+		// requests because the scheduler does not know whether they apply here.
+		if hasAccountSnapshot && limitID != "codex" {
+			continue
+		}
+		if snapshot.UpdatedAt.IsZero() || snapshot.UpdatedAt.After(now.Add(codexQuotaSchedulingClockSkew)) || now.Sub(snapshot.UpdatedAt) > codexQuotaSchedulingSnapshotTTL {
+			continue
+		}
+		for _, window := range []*RateLimitWindow{snapshot.Primary, snapshot.Secondary} {
+			if window == nil || window.ResetsAt == nil || window.UsedPercent < 0 || window.UsedPercent > 100 {
+				continue
+			}
+			resetAt := time.Unix(*window.ResetsAt, 0)
+			remainingDuration := resetAt.Sub(now)
+			if remainingDuration <= 0 {
+				continue
+			}
+			remainingPercent := 100 - window.UsedPercent
+			if remainingPercent <= 0.01 {
+				return codexQuotaSchedulingScore{rank: codexQuotaSchedulingDepleted}
+			}
+			urgency := remainingPercent / remainingDuration.Hours()
+			if !foundWindow || urgency < result.urgency {
+				result.urgency = urgency
+			}
+			foundWindow = true
+		}
+	}
+	if foundWindow {
+		result.rank = codexQuotaSchedulingUsable
+	}
+	return result
+}
+
+func quotaSchedulingScoreBetter(candidate, current codexQuotaSchedulingScore) bool {
+	if candidate.rank == codexQuotaSchedulingDepleted {
+		return false
+	}
+	if current.rank == codexQuotaSchedulingDepleted {
+		return true
+	}
+	// If either snapshot is unknown, retain the cursor order. This prevents a
+	// newly added credential or a temporarily failed poll from being starved.
+	if candidate.rank == codexQuotaSchedulingUnknown || current.rank == codexQuotaSchedulingUnknown {
+		return false
+	}
+	return candidate.urgency > current.urgency
 }
 
 func (v *readyView) pickRoundRobinAtNoFilter(offset int) *scheduledAuth {

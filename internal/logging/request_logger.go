@@ -31,7 +31,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
-var requestLogID atomic.Uint64
+var (
+	requestLogID          atomic.Uint64
+	requestLogRetentionMu sync.Mutex
+)
 
 type homeRequestLogClient interface {
 	HeartbeatOK() bool
@@ -50,6 +53,9 @@ const (
 const (
 	maxDecompressedLogBodyBytes    = 4 << 20
 	decompressedLogTruncatedMarker = "\n...[decompressed log body truncated]...\n"
+	// requestLogRetentionMaxFiles is the fixed number of successful request
+	// log files retained locally. Home-backed logs use the same limit in Redis.
+	requestLogRetentionMaxFiles = home.RequestLogRetentionLimit
 	// streamingLogChunkQueueSize bounds the in-flight chunk backlog for a
 	// single streaming response. Chunks are small (<= a few KiB) and the
 	// consumer is a dedicated goroutine, so a deeper queue absorbs bursty
@@ -63,6 +69,7 @@ const (
 var (
 	filenameUnsafeCharPattern = regexp.MustCompile(`[<>:"|?*\s]`)
 	filenameMultiDashPattern  = regexp.MustCompile(`-+`)
+	requestLogFilenamePattern = regexp.MustCompile(`^.+-\d{4}-\d{2}-\d{2}T\d{6}-.+\.log$`)
 )
 
 // FileBodySource stores large log sections as ordered temp-file parts.
@@ -654,10 +661,15 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		responseToWrite = response
 	}
 
-	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// Build the complete log under a temporary name. Only the atomic publish and
+	// retention scan need serialization; large request/response writes can run
+	// concurrently without being mistaken for completed retention candidates.
+	logFile, errOpen := os.CreateTemp(l.logsDir, ".request-log-*.tmp")
 	if errOpen != nil {
 		return fmt.Errorf("failed to create log file: %w", errOpen)
 	}
+	tempLogPath := logFile.Name()
+	defer os.Remove(tempLogPath)
 
 	writeErr := l.writeNonStreamingLog(
 		logFile,
@@ -688,9 +700,19 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		return fmt.Errorf("failed to write log file: %w", writeErr)
 	}
 
+	requestLogRetentionMu.Lock()
+	defer requestLogRetentionMu.Unlock()
+	if errRename := os.Rename(tempLogPath, filePath); errRename != nil {
+		return fmt.Errorf("failed to publish log file: %w", errRename)
+	}
+
 	if force && !enabled {
 		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
+		}
+	} else if enabled {
+		if errCleanup := cleanupOldRequestLogs(l.logsDir, requestLogRetentionMaxFiles); errCleanup != nil {
+			log.WithError(errCleanup).Warn("failed to clean up old request logs")
 		}
 	}
 
@@ -753,6 +775,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 	// Create streaming writer
 	writer := &FileStreamingLogWriter{
 		logFilePath:      filePath,
+		logsDir:          l.logsDir,
 		url:              url,
 		method:           method,
 		timestamp:        time.Now(),
@@ -905,6 +928,56 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		}
 	}
 
+	return nil
+}
+
+// cleanupOldRequestLogs keeps only the newest regular request logs. Forced
+// error logs and unrelated application log files are managed independently.
+func cleanupOldRequestLogs(logsDir string, maxFiles int) error {
+	if maxFiles <= 0 || strings.TrimSpace(logsDir) == "" {
+		return nil
+	}
+
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		return errRead
+	}
+
+	type requestLogFile struct {
+		name    string
+		modTime time.Time
+	}
+	files := make([]requestLogFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") || !requestLogFilenamePattern.MatchString(name) {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			log.WithError(errInfo).Warnf("failed to read request log info: %s", name)
+			continue
+		}
+		files = append(files, requestLogFile{name: name, modTime: info.ModTime()})
+	}
+
+	if len(files) <= maxFiles {
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].modTime.Equal(files[j].modTime) {
+			return files[i].name > files[j].name
+		}
+		return files[i].modTime.After(files[j].modTime)
+	})
+	for _, file := range files[maxFiles:] {
+		if errRemove := os.Remove(filepath.Join(logsDir, file.name)); errRemove != nil && !os.IsNotExist(errRemove) {
+			log.WithError(errRemove).Warnf("failed to remove old request log: %s", file.name)
+		}
+	}
 	return nil
 }
 
@@ -1583,6 +1656,8 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 type FileStreamingLogWriter struct {
 	// logFilePath is the final log file path.
 	logFilePath string
+	// logsDir is used to enforce request-log retention after finalization.
+	logsDir string
 
 	// url is the request URL (masked upstream in middleware).
 	url string
@@ -1802,11 +1877,13 @@ func (w *FileStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	logFile, errOpen := os.CreateTemp(w.logsDir, ".request-log-*.tmp")
 	if errOpen != nil {
 		w.cleanupTempFiles()
 		return fmt.Errorf("failed to create log file: %w", errOpen)
 	}
+	tempLogPath := logFile.Name()
+	defer os.Remove(tempLogPath)
 
 	writeErr := w.writeFinalLog(logFile)
 	if errClose := logFile.Close(); errClose != nil {
@@ -1817,6 +1894,16 @@ func (w *FileStreamingLogWriter) Close() error {
 	}
 
 	w.cleanupTempFiles()
+	if writeErr == nil {
+		requestLogRetentionMu.Lock()
+		defer requestLogRetentionMu.Unlock()
+		if errRename := os.Rename(tempLogPath, w.logFilePath); errRename != nil {
+			return fmt.Errorf("failed to publish log file: %w", errRename)
+		}
+		if errCleanup := cleanupOldRequestLogs(w.logsDir, requestLogRetentionMaxFiles); errCleanup != nil {
+			log.WithError(errCleanup).Warn("failed to clean up old request logs")
+		}
+	}
 	return writeErr
 }
 

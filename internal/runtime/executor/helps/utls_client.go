@@ -81,7 +81,7 @@ func newUtlsRoundTripper(proxyURL string, rootCAs *x509.CertPool, clientHello tl
 	}
 }
 
-func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
 	t.mu.Lock()
 	for {
 		now := time.Now()
@@ -98,7 +98,20 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 		}
 
 		if cond, ok := t.pending[host]; ok {
+			// sync.Cond cannot select on context cancellation. Wake waiters when
+			// this request is canceled so they do not remain pinned behind a slow
+			// proxy dial started by another request.
+			stop := context.AfterFunc(ctx, func() {
+				t.mu.Lock()
+				cond.Broadcast()
+				t.mu.Unlock()
+			})
 			cond.Wait()
+			stop()
+			if err := ctx.Err(); err != nil {
+				t.mu.Unlock()
+				return nil, err
+			}
 			continue
 		}
 
@@ -106,7 +119,7 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 		t.pending[host] = cond
 		t.mu.Unlock()
 
-		h2Conn, err := t.createConnection(host, addr)
+		h2Conn, err := t.createConnection(ctx, host, addr)
 
 		t.mu.Lock()
 		delete(t.pending, host)
@@ -218,8 +231,8 @@ func (t *utlsRoundTripper) removeConnection(host string, target *http2.ClientCon
 	t.connections[host] = kept
 }
 
-func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
-	conn, err := t.dialer.Dial("tcp", addr)
+func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
+	conn, err := proxyutil.DialContext(ctx, t.dialer, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +240,7 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	tlsConfig := &tls.Config{ServerName: host, RootCAs: t.rootCAs}
 	tlsConn := tls.UClient(conn, tlsConfig, t.clientHello)
 
-	if err := tlsConn.Handshake(); err != nil {
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -250,7 +263,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.getOrCreateConnection(hostname, addr)
+	h2Conn, err := t.getOrCreateConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +379,11 @@ func cachedFingerprintHTTPClient(
 		}
 	}
 
-	client := &http.Client{Transport: transport, Timeout: timeout}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		Jar:       SharedChatGPTCloudflareCookieJar(),
+	}
 	actual, _ := fingerprintHTTPClientCache.LoadOrStore(key, client)
 	if cached, ok := actual.(*http.Client); ok {
 		return cached

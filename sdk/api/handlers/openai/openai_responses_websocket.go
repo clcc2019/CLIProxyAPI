@@ -105,9 +105,10 @@ func responsesWebsocketTimelineLimit(h *OpenAIResponsesAPIHandler) int {
 }
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	WriteBufferPool: &responsesWebsocketWriteBufferPool,
+	ReadBufferSize:    1024,
+	WriteBufferSize:   1024,
+	WriteBufferPool:   &responsesWebsocketWriteBufferPool,
+	EnableCompression: true,
 	CheckOrigin: func(r *http.Request) bool {
 		return responsesWebsocketOriginAllowed(r)
 	},

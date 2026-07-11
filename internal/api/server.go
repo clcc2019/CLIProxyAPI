@@ -329,6 +329,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	s.mgmt.StartCodexQuotaMaintenance()
 	if optionState.managementCacheStore != nil {
 		s.mgmt.SetCacheStore(optionState.managementCacheStore)
 	}
@@ -791,7 +792,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 				return
 			}
 			models := handlers.FilterModelMapsForClient(c, openaiHandler.Models())
-			c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
+			openai.WriteCodexClientModelsResponse(c, models)
 			return
 		}
 
@@ -838,7 +839,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 		models = append(models, model)
 	}
 
-	c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
+	openai.WriteCodexClientModelsResponse(c, models)
 }
 
 type homeModelEntry struct {
@@ -1143,6 +1144,9 @@ func (s *Server) Stop(ctx context.Context) error {
 		case s.keepAliveStop <- struct{}{}:
 		default:
 		}
+	}
+	if s.mgmt != nil {
+		s.mgmt.Close()
 	}
 
 	if s.muxHTTPListener != nil {

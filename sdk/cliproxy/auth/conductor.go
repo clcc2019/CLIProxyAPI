@@ -240,6 +240,7 @@ type Manager struct {
 	persistCancel  context.CancelFunc
 	persistWG      sync.WaitGroup
 	persistIDs     map[string]struct{}
+	persistLocks   sync.Map
 
 	// Debounced proxy-pool reconciliation after auth changes.
 	proxyReconcileMu      sync.Mutex
@@ -505,9 +506,6 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				auth.Status = StatusActive
 			}
 			auth.UpdatedAt = now
-			if errPersist := m.persist(ctx, auth); errPersist != nil {
-				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
-			}
 			runtimeSnapshot = auth.Clone()
 			snapshot = auth.CloneForScheduler()
 		} else if schedulerRefresh {
@@ -517,6 +515,9 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	m.mu.Unlock()
 
 	if runtimeSnapshot != nil {
+		if errPersist := m.persist(ctx, runtimeSnapshot); errPersist != nil {
+			logEntryWithRequestID(ctx).WithField("auth_id", runtimeSnapshot.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
+		}
 		if errPersist := m.persistRuntimeState(ctx, runtimeSnapshot); errPersist != nil {
 			logEntryWithRequestID(ctx).WithField("auth_id", runtimeSnapshot.ID).Warnf("failed to persist auth runtime state during model state reconciliation: %v", errPersist)
 		}
@@ -2002,6 +2003,15 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if !ok && m.shouldSuppressRemovedAuthUpsertLocked(auth) {
 		m.mu.Unlock()
 		return nil, nil
+	}
+	if ok && existing != nil && isExecutionAuthProfileUpdate(ctx) {
+		var changed bool
+		auth, changed = mergeCodexExecutionAuthProfile(existing, auth)
+		if !changed {
+			existingClone := existing.Clone()
+			m.mu.Unlock()
+			return existingClone, nil
+		}
 	}
 	if ok && existing != nil {
 		if isRefreshUpdate(ctx) {
@@ -6474,20 +6484,49 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if shouldSkipPersist(ctx) {
 		return nil
 	}
-	if auth.Attributes != nil {
-		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
+	authID := strings.TrimSpace(auth.ID)
+	lock := m.persistLockForAuth(authID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Always resolve the snapshot after acquiring the per-auth write lock. A
+	// deferred persist may have captured an old token before a synchronous OAuth
+	// refresh; resolving here prevents that stale snapshot from being written
+	// after the newly rotated refresh token.
+	persistAuth := auth.Clone()
+	if authID != "" {
+		m.mu.RLock()
+		if current := m.auths[authID]; current != nil {
+			persistAuth = current.Clone()
+		}
+		m.mu.RUnlock()
+	}
+	if persistAuth.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(persistAuth.Attributes["runtime_only"])); v == "true" {
 			return nil
 		}
 	}
 	// Skip persistence when metadata is absent (e.g., runtime-only auths).
-	if auth.Metadata == nil {
+	if persistAuth.Metadata == nil {
 		return nil
 	}
-	persistAuth := auth.Clone()
 	stripProxyPoolLeaseForPersist(persistAuth)
 	persistAuth.SetRuntimeStateMetadata()
 	_, err := m.store.Save(ctx, persistAuth)
 	return err
+}
+
+func (m *Manager) persistLockForAuth(authID string) *sync.Mutex {
+	if m == nil {
+		return &sync.Mutex{}
+	}
+	key := strings.TrimSpace(authID)
+	if key == "" {
+		key = "<anonymous>"
+	}
+	lock := &sync.Mutex{}
+	actual, _ := m.persistLocks.LoadOrStore(key, lock)
+	return actual.(*sync.Mutex)
 }
 
 func (m *Manager) handleExecutionRefreshUpdate(ctx context.Context, updated *Auth) {
@@ -6510,6 +6549,9 @@ func (m *Manager) handleExecutionAuthUpdate(ctx context.Context, updated *Auth) 
 	updateCtx := context.Background()
 	if ctx != nil {
 		updateCtx = context.WithoutCancel(ctx)
+	}
+	if isExecutionAuthProfileUpdate(ctx) {
+		updateCtx = withExecutionAuthProfileUpdate(updateCtx)
 	}
 	if _, err := m.Update(updateCtx, updated); err != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", updated.ID).Warnf("failed to persist auth update: %v", err)
@@ -6695,6 +6737,9 @@ var refreshPreservedMetadataKeys = []string{
 	"user_agent",
 	"user-agent",
 	"userAgent",
+	"codex_client_profile_pinned",
+	"originator",
+	"Originator",
 	"websockets",
 	"websocket",
 	"service_tier_passthrough",

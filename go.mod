@@ -26,6 +26,7 @@ require (
 	github.com/tiktoken-go/tokenizer v0.7.0
 	go.uber.org/automaxprocs v1.6.0
 	golang.org/x/crypto v0.51.0
+	golang.org/x/mod v0.35.0
 	golang.org/x/net v0.55.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.20.0

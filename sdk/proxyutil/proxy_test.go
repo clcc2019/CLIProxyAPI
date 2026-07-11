@@ -3,6 +3,7 @@ package proxyutil
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -214,6 +215,94 @@ func TestBuildHTTPTransportSOCKS5DialContextHonorsCanceledContext(t *testing.T) 
 	}
 	if errDial != context.Canceled {
 		t.Fatalf("DialContext error = %v, want context.Canceled", errDial)
+	}
+}
+
+func TestBuildHTTPTransportSOCKS5DialContextCancelsStalledHandshake(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			return
+		}
+		close(accepted)
+		defer conn.Close()
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	transport, _, errBuild := BuildHTTPTransport("socks5://" + listener.Addr().String())
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	dialDone := make(chan error, 1)
+	go func() {
+		_, errDial := transport.DialContext(ctx, "tcp", "example.com:443")
+		dialDone <- errDial
+	}()
+	select {
+	case <-accepted:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not accept connection")
+	}
+	select {
+	case errDial := <-dialDone:
+		if !errors.Is(errDial, context.Canceled) {
+			t.Fatalf("DialContext error = %v, want context.Canceled", errDial)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DialContext did not return after cancellation")
+	}
+}
+
+func TestConnectProxyDialerCancelsStalledNegotiation(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			return
+		}
+		close(accepted)
+		defer conn.Close()
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	dialer, _, errBuild := BuildDialer("http://" + listener.Addr().String())
+	if errBuild != nil {
+		t.Fatalf("BuildDialer returned error: %v", errBuild)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	dialDone := make(chan error, 1)
+	go func() {
+		_, errDial := DialContext(ctx, dialer, "tcp", "example.com:443")
+		dialDone <- errDial
+	}()
+	select {
+	case <-accepted:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not accept connection")
+	}
+	select {
+	case errDial := <-dialDone:
+		if !errors.Is(errDial, context.Canceled) {
+			t.Fatalf("DialContext error = %v, want context.Canceled", errDial)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DialContext did not return after cancellation")
 	}
 }
 

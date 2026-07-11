@@ -483,6 +483,10 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
+	etag := rr.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected Codex model catalog ETag")
+	}
 
 	var resp struct {
 		Models []map[string]any `json:"models"`
@@ -531,7 +535,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["context_window"].(float64); got != 123456 {
 		t.Fatalf("custom context_window = %v, want 123456", custom["context_window"])
 	}
-	assertCodexSupportedReasoningLevels(t, custom, []string{"none", "low", "medium", "high", "xhigh"})
+	assertCodexSupportedReasoningLevels(t, custom, []string{"none", "minimal", "low", "medium", "unsupported", "high", "xhigh"})
 	if custom["base_instructions"] != gpt55["base_instructions"] {
 		t.Fatal("expected custom model to use gpt-5.5 base_instructions fallback")
 	}
@@ -572,6 +576,18 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
 		}
+	}
+
+	revalidationReq := httptest.NewRequest(http.MethodGet, "/v1/models?client_version", nil)
+	revalidationReq.Header.Set("Authorization", "Bearer test-key")
+	revalidationReq.Header.Set("If-None-Match", etag)
+	revalidationRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(revalidationRecorder, revalidationReq)
+	if revalidationRecorder.Code != http.StatusNotModified {
+		t.Fatalf("revalidation status = %d, want %d body=%s", revalidationRecorder.Code, http.StatusNotModified, revalidationRecorder.Body.String())
+	}
+	if revalidationRecorder.Body.Len() != 0 {
+		t.Fatalf("revalidation body = %q, want empty", revalidationRecorder.Body.String())
 	}
 }
 

@@ -505,8 +505,9 @@ func TestNormalizeCodexFinalUpstreamBody_PreservesCallerReasoningAndVerbosity(t 
 
 func TestNormalizeCodexFinalUpstreamReasoning_MapsUltraToOfficialRequestEffort(t *testing.T) {
 	capabilities := registry.CodexClientModelCapabilities{
-		SupportsReasoningSummaries: true,
-		DefaultReasoningLevel:      "ultra",
+		SupportsReasoningSummaries:        true,
+		SupportsReasoningSummaryParameter: true,
+		DefaultReasoningLevel:             "ultra",
 	}
 
 	t.Run("caller effort", func(t *testing.T) {
@@ -525,6 +526,28 @@ func TestNormalizeCodexFinalUpstreamReasoning_MapsUltraToOfficialRequestEffort(t
 			t.Fatalf("reasoning.effort = %q, want max; body=%s", got, gotBody)
 		}
 	})
+}
+
+func TestNormalizeCodexFinalUpstreamBodyPreservesCodexReasoningSummaryDelivery(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"input":[],
+		"stream_options":{
+			"reasoning_summary_delivery":"sequential_cutoff",
+			"include_usage":true
+		}
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+	if got := gjson.GetBytes(gotBody, "stream_options.reasoning_summary_delivery").String(); got != "sequential_cutoff" {
+		t.Fatalf("reasoning_summary_delivery = %q, want sequential_cutoff; body=%s", got, gotBody)
+	}
+	if gjson.GetBytes(gotBody, "stream_options.include_usage").Exists() {
+		t.Fatalf("generic include_usage should be removed; body=%s", gotBody)
+	}
 }
 
 func TestNormalizeCodexFinalUpstreamResponsesLiteWithCapabilities(t *testing.T) {
@@ -578,9 +601,10 @@ func TestNormalizeCodexFinalUpstreamBody_ResponsesLiteMovesDefaultInstructionsAf
 	codexClientModelCapabilitiesForModel = func(modelID string) (registry.CodexClientModelCapabilities, bool) {
 		if modelID == "lite-model" {
 			return registry.CodexClientModelCapabilities{
-				UseResponsesLite:           true,
-				SupportsReasoningSummaries: true,
-				DefaultReasoningLevel:      "medium",
+				UseResponsesLite:                  true,
+				SupportsReasoningSummaries:        true,
+				SupportsReasoningSummaryParameter: true,
+				DefaultReasoningLevel:             "medium",
 			}, true
 		}
 		return originalCapabilitiesForModel(modelID)
@@ -690,7 +714,7 @@ func TestNormalizeCodexFinalUpstreamResponsesLiteReplacesRemoteInputImages(t *te
 	}
 }
 
-func TestNormalizeCodexFinalUpstreamBody_RemovesUnsupportedReasoningAndVerbosity(t *testing.T) {
+func TestNormalizeCodexFinalUpstreamBody_UnknownModelKeepsReasoningAndRemovesUnsupportedVerbosity(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"parallel_tool_calls":null,"reasoning":{"effort":"high"},"include":["reasoning.encrypted_content"],"text":{"verbosity":"high"}}`), "unknown-model-for-codex", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,
 		streamMode:                  codexStreamFieldTrue,
@@ -701,14 +725,27 @@ func TestNormalizeCodexFinalUpstreamBody_RemovesUnsupportedReasoningAndVerbosity
 	if got := gjson.GetBytes(gotBody, "parallel_tool_calls"); got.Type != gjson.False {
 		t.Fatalf("unknown model should default parallel_tool_calls to false; got %s body=%s", got.Raw, gotBody)
 	}
-	if got := gjson.GetBytes(gotBody, "reasoning"); got.Exists() {
-		t.Fatalf("unsupported reasoning should be removed; body=%s", gotBody)
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("unknown model reasoning effort = %q, want high; body=%s", got, gotBody)
 	}
-	if got := gjson.GetBytes(gotBody, "include").Array(); len(got) != 0 {
-		t.Fatalf("reasoning include should be removed when reasoning is unsupported; body=%s", gotBody)
+	if got := gjson.GetBytes(gotBody, `include.#(=="reasoning.encrypted_content")`).String(); got != "reasoning.encrypted_content" {
+		t.Fatalf("unknown model should include reasoning encrypted content; body=%s", gotBody)
 	}
 	if got := gjson.GetBytes(gotBody, "text"); got.Exists() {
 		t.Fatalf("text with only unsupported verbosity should be removed; body=%s", gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamReasoningDropsUnsupportedSummaryParameterOnly(t *testing.T) {
+	body := []byte(`{"reasoning":{"effort":"high","summary":"auto"}}`)
+	gotBody := normalizeCodexFinalUpstreamReasoning(body, registry.CodexClientModelCapabilities{
+		SupportsReasoningSummaryParameter: false,
+	})
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("reasoning.effort = %q, want high; body=%s", got, gotBody)
+	}
+	if gjson.GetBytes(gotBody, "reasoning.summary").Exists() {
+		t.Fatalf("unsupported reasoning.summary should be removed; body=%s", gotBody)
 	}
 }
 

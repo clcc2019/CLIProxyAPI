@@ -29,6 +29,9 @@ const (
 	redisKeyUsage      = "usage"
 	redisKeyRequestLog = "request-log"
 	redisKeyAppLog     = "app-log"
+	// RequestLogRetentionLimit is the maximum number of request logs retained
+	// by both the Home queue and local file logger.
+	RequestLogRetentionLimit = 20
 
 	homeReconnectInterval          = time.Second
 	homeReconnectFailoverThreshold = 3
@@ -648,7 +651,11 @@ func (c *Client) RPushRequestLog(ctx context.Context, payload []byte) error {
 	if len(payload) == 0 {
 		return nil
 	}
-	return cmd.RPush(ctx, redisKeyRequestLog, payload).Err()
+	pipe := cmd.TxPipeline()
+	pipe.RPush(ctx, redisKeyRequestLog, payload)
+	pipe.LTrim(ctx, redisKeyRequestLog, -RequestLogRetentionLimit, -1)
+	_, errExec := pipe.Exec(ctx)
+	return errExec
 }
 
 func (c *Client) RPushAppLog(ctx context.Context, payload []byte) error {

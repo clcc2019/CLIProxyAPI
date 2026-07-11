@@ -188,6 +188,167 @@ func TestSchedulerPick_RoundRobinPrefersLeastInFlightWithinPriority(t *testing.T
 	}
 }
 
+func TestSchedulerPick_CodexQuotaPrefersCapacityThatResetsSooner(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		schedulerCodexQuotaAuth("slow-reset", now, 0, 4*time.Hour, nil),
+		schedulerCodexQuotaAuth("soon-reset", now, 20, time.Hour, nil),
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "soon-reset" {
+		t.Fatalf("pickSingle() auth = %#v, want soon-reset", got)
+	}
+}
+
+func TestSchedulerPick_CodexQuotaUsesSecondaryWindowAsBottleneck(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	secondaryUsed := 95.0
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		schedulerCodexQuotaAuth("weekly-constrained", now, 0, time.Hour, &schedulerQuotaWindow{usedPercent: secondaryUsed, resetsIn: 100 * time.Hour}),
+		schedulerCodexQuotaAuth("balanced", now, 50, 5*time.Hour, nil),
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "balanced" {
+		t.Fatalf("pickSingle() auth = %#v, want balanced", got)
+	}
+}
+
+func TestSchedulerPick_CodexQuotaAvoidsDepletedCredential(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		schedulerCodexQuotaAuth("depleted", now, 100, time.Hour, nil),
+		&Auth{ID: "unknown", Provider: "codex"},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "unknown" {
+		t.Fatalf("pickSingle() auth = %#v, want unknown", got)
+	}
+}
+
+func TestSchedulerPick_CodexQuotaStaleSnapshotFallsBackToRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	stale := schedulerCodexQuotaAuth("auth-a", now.Add(-codexQuotaSchedulingSnapshotTTL-time.Minute), 0, time.Minute, nil)
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		stale,
+		schedulerCodexQuotaAuth("auth-b", now, 50, 5*time.Hour, nil),
+	)
+
+	want := []string{"auth-a", "auth-b"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth = %#v, want %s", index, got, wantID)
+		}
+	}
+}
+
+func TestSchedulerPick_CodexQuotaDoesNotOverrideInFlightLoad(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		schedulerCodexQuotaAuth("busy-urgent", now, 0, time.Hour, nil),
+		schedulerCodexQuotaAuth("idle", now, 50, 5*time.Hour, nil),
+	)
+	scheduler.authLoad = func(authID string) int64 {
+		if authID == "busy-urgent" {
+			return 1
+		}
+		return 0
+	}
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "idle" {
+		t.Fatalf("pickSingle() auth = %#v, want idle", got)
+	}
+}
+
+func TestManagerUpdateRateLimitsImmediatelyReordersCodexScheduling(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	for _, authID := range []string{"auth-a", "auth-b"} {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex"}); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", authID, errRegister)
+		}
+	}
+	now := time.Now()
+	for _, quotaAuth := range []*Auth{
+		schedulerCodexQuotaAuth("auth-a", now, 80, 5*time.Hour, nil),
+		schedulerCodexQuotaAuth("auth-b", now, 0, 5*time.Hour, nil),
+	} {
+		manager.UpdateRateLimits(context.Background(), quotaAuth.ID, []RateLimitSnapshot{quotaAuth.RateLimits["codex"]})
+	}
+
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if got == nil || got.ID != "auth-b" {
+		t.Fatalf("pickNext() auth = %#v, want auth-b", got)
+	}
+}
+
+type schedulerQuotaWindow struct {
+	usedPercent float64
+	resetsIn    time.Duration
+}
+
+func schedulerCodexQuotaAuth(id string, updatedAt time.Time, primaryUsed float64, primaryResetsIn time.Duration, secondary *schedulerQuotaWindow) *Auth {
+	primaryReset := updatedAt.Add(primaryResetsIn).Unix()
+	snapshot := RateLimitSnapshot{
+		LimitID:   "codex",
+		UpdatedAt: updatedAt,
+		Primary: &RateLimitWindow{
+			UsedPercent: primaryUsed,
+			ResetsAt:    &primaryReset,
+		},
+	}
+	if secondary != nil {
+		secondaryReset := updatedAt.Add(secondary.resetsIn).Unix()
+		snapshot.Secondary = &RateLimitWindow{
+			UsedPercent: secondary.usedPercent,
+			ResetsAt:    &secondaryReset,
+		}
+	}
+	return &Auth{
+		ID:         id,
+		Provider:   "codex",
+		RateLimits: map[string]RateLimitSnapshot{"codex": snapshot},
+	}
+}
+
 func TestSchedulerPick_RoundRobinKeepsHigherPriorityAheadOfIdleLowerPriority(t *testing.T) {
 	t.Parallel()
 

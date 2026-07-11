@@ -61,6 +61,14 @@ type Handler struct {
 	// Lazily allocated under h.mu by codexUsageHandlerCache.
 	codexUsageCache *codexUsageCache
 
+	// Codex quota maintenance periodically refreshes /wham/usage and primes a
+	// pristine 5-hour window with one minimal client-shaped request.
+	codexQuotaMu     sync.Mutex
+	codexQuotaPrimed map[string]codexQuotaPrimeState
+	codexQuotaOnce   sync.Once
+	codexQuotaCancel context.CancelFunc
+	codexQuotaWG     sync.WaitGroup
+
 	// cleanupStop terminates the background attempt-cleanup goroutine on
 	// Close(). Without this, the goroutine and its ticker leak for the
 	// lifetime of the process even after the handler is replaced (e.g. in
@@ -100,7 +108,15 @@ func (h *Handler) Close() {
 		if h.cleanupStop != nil {
 			close(h.cleanupStop)
 		}
+		h.codexQuotaMu.Lock()
+		cancel := h.codexQuotaCancel
+		h.codexQuotaCancel = nil
+		h.codexQuotaMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 	})
+	h.codexQuotaWG.Wait()
 }
 
 // startAttemptCleanup launches a background goroutine that periodically
@@ -161,6 +177,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	h.mu.Lock()
 	h.authManager = manager
 	h.mu.Unlock()
+	if manager != nil {
+		h.StartCodexQuotaMaintenance()
+	}
 }
 
 // SetUsageStatistics overrides the usage statistics source used by management endpoints.

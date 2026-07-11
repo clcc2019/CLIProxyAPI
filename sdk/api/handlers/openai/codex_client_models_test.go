@@ -1,6 +1,48 @@
 package openai
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+)
+
+func TestWriteCodexClientModelsResponseProvidesStableETagAndSupportsRevalidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	models := []map[string]any{{"id": "gpt-5.4"}}
+
+	firstRecorder := httptest.NewRecorder()
+	firstContext, _ := gin.CreateTestContext(firstRecorder)
+	firstContext.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=1.0.0", nil)
+	WriteCodexClientModelsResponse(firstContext, models)
+
+	if firstRecorder.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200; body=%s", firstRecorder.Code, firstRecorder.Body.String())
+	}
+	etag := firstRecorder.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("first response did not include ETag")
+	}
+	if got := firstRecorder.Header().Get("Cache-Control"); got != "private, no-cache" {
+		t.Fatalf("Cache-Control = %q, want private, no-cache", got)
+	}
+	secondRecorder := httptest.NewRecorder()
+	secondContext, _ := gin.CreateTestContext(secondRecorder)
+	secondContext.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=1.0.0", nil)
+	secondContext.Request.Header.Set("If-None-Match", "W/"+etag)
+	WriteCodexClientModelsResponse(secondContext, models)
+
+	if secondRecorder.Code != http.StatusNotModified {
+		t.Fatalf("revalidation status = %d, want 304; body=%s", secondRecorder.Code, secondRecorder.Body.String())
+	}
+	if secondRecorder.Body.Len() != 0 {
+		t.Fatalf("304 response body = %q, want empty", secondRecorder.Body.String())
+	}
+	if got := secondRecorder.Header().Get("ETag"); got != etag {
+		t.Fatalf("revalidation ETag = %q, want %q", got, etag)
+	}
+}
 
 func TestCodexClientModelsResponsePreservesOfficialServiceTiers(t *testing.T) {
 	response := CodexClientModelsResponse([]map[string]any{{"id": "gpt-5.4"}})

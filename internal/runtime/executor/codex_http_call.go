@@ -122,12 +122,9 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	// every call.
 	ctx = contextWithCachedCodexGinHeaders(ctx)
 	requestKind := finalOpts.requestKind
-	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, finalOpts)
-	// Resolve gin headers once and reuse across subsequent helpers to avoid
-	// repeated context value lookups in the per-request hot path.
 	ginHeaders := codexGinHeadersFromContext(ctx)
-	codexPinClientProfileFromFirstRequest(ctx, auth, nil, ginHeaders, e.cfg)
-	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
+	finalOpts.preserveNativeFields = codexNativeClientRequestFromContext(ctx) || codexNativeClientRequest(from, ginHeaders, body)
+	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, finalOpts)
 	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	prepared, err := e.prepareCodexRequestWithKindBody(ctx, from, executionSessionID, url, requestKind, req, body, requestKind == codexFinalUpstreamCompact)
@@ -135,6 +132,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 		return codexPreparedHTTPCall{}, err
 	}
 	applyCodexHeadersForRequestKind(prepared.httpReq, auth, token, stream, e.cfg, requestKind)
+	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
 	codexApplyModelHeaderOverrides(prepared.httpReq.Header, baseModel)
 	codexApplyResponsesLiteHeader(prepared.httpReq.Header, baseModel)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)

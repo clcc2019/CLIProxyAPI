@@ -361,6 +361,7 @@ func hashCodexFinalUpstreamBodyMemoKey(baseModel string, authProvider string, op
 		byte(opts.streamMode),
 		boolToByte(opts.preservePreviousResponseID),
 		boolToByte(opts.preserveGenerate),
+		boolToByte(opts.preserveNativeFields),
 		boolToByte(opts.store),
 		boolToByte(opts.omitServiceTier),
 		boolToByte(opts.suppressDefaultInstructions),

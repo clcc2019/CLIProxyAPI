@@ -1,11 +1,15 @@
 package openai
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
@@ -38,6 +42,49 @@ func CodexClientModelsResponse(models []map[string]any) map[string]any {
 	return map[string]any{
 		"models": buildCodexClientModels(models),
 	}
+}
+
+// WriteCodexClientModelsResponse writes the Codex model catalog with a stable
+// content ETag. The official client stores this ETag and compares it with the
+// value advertised by Responses transports before refreshing its model cache.
+func WriteCodexClientModelsResponse(c *gin.Context, models []map[string]any) {
+	if c == nil {
+		return
+	}
+	payload, err := json.Marshal(CodexClientModelsResponse(models))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode Codex model catalog"})
+		return
+	}
+	sum := sha256.Sum256(payload)
+	etag := fmt.Sprintf(`"%x"`, sum)
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "private, no-cache")
+	if codexClientModelsETagMatches(c.GetHeader("If-None-Match"), etag) {
+		c.AbortWithStatus(http.StatusNotModified)
+		return
+	}
+	c.Data(http.StatusOK, "application/json; charset=utf-8", payload)
+}
+
+func codexClientModelsETagMatches(condition string, current string) bool {
+	current = strings.TrimSpace(current)
+	if current == "" {
+		return false
+	}
+	for value := range strings.SplitSeq(condition, ",") {
+		value = strings.TrimSpace(value)
+		if value == "*" {
+			return true
+		}
+		if strings.HasPrefix(value, "W/") {
+			value = strings.TrimSpace(strings.TrimPrefix(value, "W/"))
+		}
+		if value == current {
+			return true
+		}
+	}
+	return false
 }
 
 func buildCodexClientModels(models []map[string]any) []map[string]any {

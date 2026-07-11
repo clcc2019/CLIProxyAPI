@@ -3,18 +3,22 @@ package auth
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 type refreshUpdateCaptureStore struct {
+	mu   sync.Mutex
 	last *Auth
 }
 
 func (s *refreshUpdateCaptureStore) List(context.Context) ([]*Auth, error) { return nil, nil }
 
 func (s *refreshUpdateCaptureStore) Save(_ context.Context, auth *Auth) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if auth != nil {
 		s.last = auth.Clone()
 	}
@@ -22,6 +26,18 @@ func (s *refreshUpdateCaptureStore) Save(_ context.Context, auth *Auth) (string,
 }
 
 func (s *refreshUpdateCaptureStore) Delete(context.Context, string) error { return nil }
+
+func (s *refreshUpdateCaptureStore) reset() {
+	s.mu.Lock()
+	s.last = nil
+	s.mu.Unlock()
+}
+
+func (s *refreshUpdateCaptureStore) snapshot() *Auth {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last.Clone()
+}
 
 type refreshUpdateExecutor struct{}
 
@@ -90,15 +106,16 @@ func TestManagerPersistsExecutionRefreshUpdate(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	store.last = nil
+	store.reset()
 
 	if _, err := manager.Execute(context.Background(), []string{"oauth"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if store.last == nil {
+	last := store.snapshot()
+	if last == nil {
 		t.Fatal("expected refreshed auth to be persisted")
 	}
-	if got := store.last.Metadata["access_token"]; got != "new-token" {
+	if got := last.Metadata["access_token"]; got != "new-token" {
 		t.Fatalf("persisted access token = %v, want new-token", got)
 	}
 }
@@ -117,17 +134,18 @@ func TestManagerPersistsExecutionAuthUpdate(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	store.last = nil
+	store.reset()
 
 	if _, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if store.last == nil {
+	last := store.snapshot()
+	if last == nil {
 		t.Fatal("expected auth update to be persisted")
 	}
-	headers, ok := store.last.Metadata["headers"].(map[string]any)
+	headers, ok := last.Metadata["headers"].(map[string]any)
 	if !ok {
-		t.Fatalf("persisted headers = %T, want map[string]any", store.last.Metadata["headers"])
+		t.Fatalf("persisted headers = %T, want map[string]any", last.Metadata["headers"])
 	}
 	if got := headers["X-Codex-Beta-Features"]; got != "first-feature" {
 		t.Fatalf("persisted beta features = %v, want first-feature", got)
@@ -163,33 +181,86 @@ func TestManagerRefreshUpdatePreservesLatestEditableAuthFileFields(t *testing.T)
 	if _, err := manager.Update(context.Background(), edited); err != nil {
 		t.Fatalf("Update(edited) error = %v", err)
 	}
-	store.last = nil
+	store.reset()
 
 	if _, err := manager.Update(WithRefreshUpdate(context.Background()), staleRefresh); err != nil {
 		t.Fatalf("Update(refresh) error = %v", err)
 	}
-	if store.last == nil {
+	last := store.snapshot()
+	if last == nil {
 		t.Fatal("expected refresh update to be persisted")
 	}
-	if got := store.last.Metadata["access_token"]; got != "new-token" {
+	if got := last.Metadata["access_token"]; got != "new-token" {
 		t.Fatalf("access_token = %v, want new-token", got)
 	}
-	if got := store.last.Metadata["priority"]; got != 9 {
+	if got := last.Metadata["priority"]; got != 9 {
 		t.Fatalf("priority metadata = %v, want 9", got)
 	}
-	if got := store.last.Attributes["priority"]; got != "9" {
+	if got := last.Attributes["priority"]; got != "9" {
 		t.Fatalf("priority attribute = %q, want 9", got)
 	}
-	if got := store.last.Metadata["proxy_url"]; got != "http://127.0.0.1:7890" {
+	if got := last.Metadata["proxy_url"]; got != "http://127.0.0.1:7890" {
 		t.Fatalf("proxy_url metadata = %v, want proxy", got)
 	}
-	if got := store.last.ProxyURL; got != "http://127.0.0.1:7890" {
+	if got := last.ProxyURL; got != "http://127.0.0.1:7890" {
 		t.Fatalf("ProxyURL = %q, want proxy", got)
 	}
-	if got := store.last.Metadata["disable_cooling"]; got != true {
+	if got := last.Metadata["disable_cooling"]; got != true {
 		t.Fatalf("disable_cooling metadata = %v, want true", got)
 	}
-	if got := store.last.Attributes["header:X-Test"]; got != "1" {
+	if got := last.Attributes["header:X-Test"]; got != "1" {
 		t.Fatalf("header attribute = %q, want 1", got)
+	}
+}
+
+func TestManagerRefreshUpdatePreservesLatestCodexPinnedProfile(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	registered, err := manager.Register(context.Background(), &Auth{
+		ID:       "codex-refresh-profile",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":  "old-access",
+			"refresh_token": "old-refresh",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	staleRefresh := registered.Clone()
+	staleRefresh.Metadata["access_token"] = "new-access"
+	staleRefresh.Metadata["refresh_token"] = "new-refresh"
+
+	pinned := registered.Clone()
+	pinned.Metadata["codex_client_profile_pinned"] = true
+	pinned.Metadata["originator"] = "codex_vscode"
+	pinned.Metadata["user_agent"] = "codex_vscode/2.0.0"
+	pinned.Metadata["headers"] = map[string]any{
+		"Originator": "codex_vscode",
+		"User-Agent": "codex_vscode/2.0.0",
+		"Version":    "2.0.0",
+	}
+	ApplyCustomHeadersFromMetadata(pinned)
+	if _, err = manager.Update(context.Background(), pinned); err != nil {
+		t.Fatalf("Update(pinned) error = %v", err)
+	}
+
+	updated, err := manager.Update(WithRefreshUpdate(context.Background()), staleRefresh)
+	if err != nil {
+		t.Fatalf("Update(refresh) error = %v", err)
+	}
+	if got := updated.Metadata["access_token"]; got != "new-access" {
+		t.Fatalf("access_token = %v, want refreshed token", got)
+	}
+	if got := updated.Metadata["refresh_token"]; got != "new-refresh" {
+		t.Fatalf("refresh_token = %v, want rotated token", got)
+	}
+	if got := updated.Metadata["codex_client_profile_pinned"]; got != true {
+		t.Fatalf("codex_client_profile_pinned = %v, want true", got)
+	}
+	if got := updated.Metadata["originator"]; got != "codex_vscode" {
+		t.Fatalf("originator = %v, want codex_vscode", got)
+	}
+	if got := updated.Metadata["user_agent"]; got != "codex_vscode/2.0.0" {
+		t.Fatalf("user_agent = %v, want pinned profile", got)
 	}
 }
