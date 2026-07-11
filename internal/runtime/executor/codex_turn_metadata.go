@@ -33,6 +33,7 @@ var codexResponsesAPIClientMetadataReservedKeys = map[string]struct{}{
 	"session_id":                 {},
 	"thread_id":                  {},
 	"turn_id":                    {},
+	"installation_id":            {},
 	"turn_started_at_unix_ms":    {},
 	"forked_from_thread_id":      {},
 	"parent_thread_id":           {},
@@ -51,6 +52,7 @@ var codexResponsesAPIClientMetadataTransportKeys = map[string]struct{}{
 	codexWSClientMetadataTraceparent:          {},
 	codexWSClientMetadataTracestate:           {},
 	codexClientMetadataWSStreamRequestStartMS: {},
+	codexWSClientMetadataResponsesLite:        {},
 }
 
 type codexTurnMetadata struct {
@@ -68,6 +70,7 @@ type codexTurnMetadata struct {
 }
 
 type codexTurnMetadataDefaults struct {
+	installationID         string
 	requestKind            string
 	sessionID              string
 	threadID               string
@@ -88,10 +91,12 @@ func codexEnsureTurnMetadataHeader(target http.Header, source http.Header, defau
 	codexFillTurnMetadataLineageDefaults(target, source, &defaults)
 	codexFillTurnMetadataRequestKindDefault(target, source, &defaults)
 	if value := firstNonEmptyHeaderValue(target, source, codexHeaderTurnMetadata); value != "" {
-		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, codexAugmentTurnMetadataHeader(value, defaults))
+		updated := codexAugmentTurnMetadataHeader(value, defaults)
+		updated = codexApplyInstallationIDToTurnMetadata(updated, defaults.installationID)
+		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 		return
 	}
-	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, codexBuildTurnMetadataHeader(
+	updated := codexBuildTurnMetadataHeader(
 		defaults.requestKind,
 		defaults.sessionID,
 		defaults.threadID,
@@ -103,7 +108,9 @@ func codexEnsureTurnMetadataHeader(target http.Header, source http.Header, defau
 		defaults.sandbox,
 		defaults.windowID,
 		defaults.turnStartedAtUnixMilli,
-	))
+	)
+	updated = codexApplyInstallationIDToTurnMetadata(updated, defaults.installationID)
+	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 }
 
 func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header, defaults codexTurnMetadataDefaults) {
@@ -116,6 +123,7 @@ func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header
 		updated := codexAugmentTurnMetadataHeader(value, defaults)
 		updated = codexSetTurnMetadataString(updated, codexRequestKindMetadataPath, defaults.requestKind, true)
 		updated = codexSetTurnMetadataString(updated, codexWindowIDMetadataPath, defaults.windowID, true)
+		updated = codexApplyInstallationIDToTurnMetadata(updated, defaults.installationID)
 		updated = codexAugmentCompactionMetadata(updated, target, source)
 		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 		return
@@ -133,6 +141,7 @@ func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header
 		defaults.windowID,
 		defaults.turnStartedAtUnixMilli,
 	)
+	updated = codexApplyInstallationIDToTurnMetadata(updated, defaults.installationID)
 	updated = codexAugmentCompactionMetadata(updated, target, source)
 	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 }
@@ -461,6 +470,10 @@ func codexSetTurnMetadataString(raw string, path string, value string, overwrite
 		return updated
 	}
 	return raw
+}
+
+func codexApplyInstallationIDToTurnMetadata(raw string, installationID string) string {
+	return codexSetTurnMetadataString(raw, "installation_id", installationID, false)
 }
 
 func codexAugmentCompactionMetadata(raw string, target http.Header, source http.Header) string {

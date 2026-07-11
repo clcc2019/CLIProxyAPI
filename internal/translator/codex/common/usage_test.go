@@ -87,3 +87,44 @@ func TestReasoningOutputTokensRecognizesCanonicalAndFallbackFields(t *testing.T)
 		})
 	}
 }
+
+func TestCacheWriteInputTokensRecognizesCanonicalAndFallbackFields(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want int64
+	}{
+		{
+			name: "codex cache write field",
+			raw:  `{"input_tokens_details":{"cache_write_tokens":11,"cache_creation_tokens":22},"cache_creation_input_tokens":33}`,
+			want: 11,
+		},
+		{
+			name: "chat cache creation details",
+			raw:  `{"prompt_tokens_details":{"cache_creation_tokens":22},"cache_creation_input_tokens":33}`,
+			want: 22,
+		},
+		{
+			name: "responses cache creation details",
+			raw:  `{"input_tokens_details":{"cache_creation_tokens":33},"cache_creation_input_tokens":44}`,
+			want: 33,
+		},
+		{
+			name: "flat cache creation fallback",
+			raw:  `{"cache_creation_input_tokens":44}`,
+			want: 44,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CacheWriteInputTokens(gjson.Parse(tc.raw))
+			if !got.Exists() {
+				t.Fatalf("CacheWriteInputTokens() did not find a value")
+			}
+			if got.Int() != tc.want {
+				t.Fatalf("CacheWriteInputTokens() = %d, want %d", got.Int(), tc.want)
+			}
+		})
+	}
+}

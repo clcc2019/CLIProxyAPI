@@ -1,9 +1,11 @@
 package executor
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -12,6 +14,27 @@ import (
 const codexWebsocketConnectionLimitReachedCode = "websocket_connection_limit_reached"
 const codexPreviousResponseNotFoundCode = "previous_response_not_found"
 const codexNoToolCallFoundMessage = "no tool call found"
+
+func mapCodexWebsocketReadError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isCodexWebsocketMessageTooBigError(err) {
+		return statusErr{
+			code: http.StatusRequestEntityTooLarge,
+			msg:  `{"error":{"message":"upstream websocket message too big","type":"invalid_request_error","code":"message_too_big"}}`,
+		}
+	}
+	return err
+}
+
+func isCodexWebsocketMessageTooBigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var closeErr *websocket.CloseError
+	return errors.As(err, &closeErr) && closeErr.Code == websocket.CloseMessageTooBig
+}
 
 // statusErrWithHeaders decorates a statusErr with response headers that the
 // upstream websocket-level error carried. We keep the distinction because

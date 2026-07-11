@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,11 +32,14 @@ const (
 )
 
 const (
-	codexDefaultOutputSchemaTextFormatName  = "codex_output_schema"
-	codexDefaultImageGenerationOutputFormat = "png"
+	codexDefaultOutputSchemaTextFormatName   = "codex_output_schema"
+	codexDefaultImageGenerationOutputFormat  = "png"
+	codexResponsesLiteRemoteImageOmittedText = "image content omitted because remote image URLs are not supported"
 )
 
 const codexDefaultToolSearchDescription = "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\nNone currently enabled.\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`."
+
+var codexClientModelCapabilitiesForModel = registry.CodexClientModelCapabilitiesForModel
 
 func codexDefaultNamespaceDescription(namespaceName string) string {
 	return "Tools in the " + namespaceName + " namespace."
@@ -277,7 +281,11 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	body = normalizeCodexFinalUpstreamTools(body)
 	body = normalizeCodexFinalUpstreamText(body, baseModel)
 	body = normalizeCodexFinalUpstreamInputItems(body, opts)
+	body = normalizeCodexFinalUpstreamInputItemIDs(body, opts)
+	body = normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body, auth)
 	body = normalizeCodexFinalUpstreamModelControls(body, baseModel)
+	body = normalizeCodexFinalUpstreamToolOutputImageDetail(body, baseModel)
+	body = normalizeCodexFinalUpstreamServiceTier(body, baseModel, opts)
 
 	// Resolve all four inspected fields in a single payload traversal so
 	// downstream branches can reuse the decoded Result values rather than
@@ -347,6 +355,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	if len(edits) > 0 {
 		body = helps.EditJSONBytes(body, edits...)
 	}
+	body = normalizeCodexFinalUpstreamResponsesLite(body, baseModel)
 	body = pruneCodexFinalUpstreamBody(body, opts)
 	body = codexEnsureResponsesContextField(body, opts.requestKind)
 	body = codexEnsureReasoningEncryptedContentInclude(body, opts)
@@ -415,10 +424,218 @@ func normalizeCodexFinalUpstreamInputItems(body []byte, opts codexFinalUpstreamB
 	return codexcommon.NormalizeFullTranscriptResponseInputItems(body)
 }
 
+func normalizeCodexFinalUpstreamInputItemIDs(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
+	if opts.store {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() || !strings.Contains(input.Raw, `"id"`) {
+		return body
+	}
+
+	items := input.Array()
+	normalizedInput := make([]byte, 0, len(input.Raw))
+	normalizedInput = append(normalizedInput, '[')
+	changed := false
+	for idx, item := range items {
+		if idx > 0 {
+			normalizedInput = append(normalizedInput, ',')
+		}
+		itemRaw := []byte(item.Raw)
+		if item.IsObject() {
+			id := item.Get("id")
+			if id.Exists() {
+				itemRaw = codexDeleteJSONIfExists(itemRaw, id, "id")
+				changed = true
+			}
+		}
+		normalizedInput = append(normalizedInput, itemRaw...)
+	}
+	normalizedInput = append(normalizedInput, ']')
+	if !changed {
+		return body
+	}
+	if updated, err := helps.SetRawJSONBytes(body, "input", normalizedInput); err == nil {
+		return updated
+	}
+	return body
+}
+
+func normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body []byte, auth *cliproxyauth.Auth) []byte {
+	if codexPreservesInputItemPassthroughMetadata(auth) {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() || !strings.Contains(input.Raw, `"internal_chat_message_metadata_passthrough"`) {
+		return body
+	}
+
+	items := input.Array()
+	normalizedInput := make([]byte, 0, len(input.Raw))
+	normalizedInput = append(normalizedInput, '[')
+	changed := false
+	for idx, item := range items {
+		if idx > 0 {
+			normalizedInput = append(normalizedInput, ',')
+		}
+		itemRaw := []byte(item.Raw)
+		if item.IsObject() {
+			metadata := item.Get("internal_chat_message_metadata_passthrough")
+			if metadata.Exists() {
+				itemRaw = codexDeleteJSONIfExists(itemRaw, metadata, "internal_chat_message_metadata_passthrough")
+				changed = true
+			}
+		}
+		normalizedInput = append(normalizedInput, itemRaw...)
+	}
+	normalizedInput = append(normalizedInput, ']')
+	if !changed {
+		return body
+	}
+	if updated, err := helps.SetRawJSONBytes(body, "input", normalizedInput); err == nil {
+		return updated
+	}
+	return body
+}
+
+func codexPreservesInputItemPassthroughMetadata(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "codex", "openai":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeCodexFinalUpstreamModelControls(body []byte, baseModel string) []byte {
-	capabilities, _ := registry.CodexClientModelCapabilitiesForModel(baseModel)
+	capabilities, _ := codexClientModelCapabilitiesForModel(baseModel)
 	body = normalizeCodexFinalUpstreamReasoning(body, capabilities)
 	return normalizeCodexFinalUpstreamReasoningEffortForModel(body, baseModel)
+}
+
+func normalizeCodexFinalUpstreamToolOutputImageDetail(body []byte, baseModel string) []byte {
+	capabilities, ok := codexClientModelCapabilitiesForModel(baseModel)
+	if !ok || capabilities.SupportsImageDetailOriginal {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() || !strings.Contains(input.Raw, `"detail"`) || !strings.Contains(input.Raw, `"original"`) {
+		return body
+	}
+	var items []any
+	if err := json.Unmarshal([]byte(input.Raw), &items); err != nil {
+		return body
+	}
+	if !codexSanitizeOriginalToolOutputImageDetail(items) {
+		return body
+	}
+	rawInput, err := json.Marshal(items)
+	if err != nil {
+		return body
+	}
+	if updated, err := helps.SetRawJSONBytes(body, "input", rawInput); err == nil {
+		return updated
+	}
+	return body
+}
+
+func codexSanitizeOriginalToolOutputImageDetail(items []any) bool {
+	changed := false
+	for _, item := range items {
+		itemObject, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemType, _ := itemObject["type"].(string)
+		if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
+			continue
+		}
+		if output, ok := itemObject["output"].([]any); ok {
+			if codexSanitizeOriginalInputImageDetail(output) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func codexSanitizeOriginalInputImageDetail(value any) bool {
+	changed := false
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if codexSanitizeOriginalInputImageDetail(item) {
+				changed = true
+			}
+		}
+	case map[string]any:
+		if itemType, _ := typed["type"].(string); itemType == "input_image" {
+			if detail, _ := typed["detail"].(string); strings.EqualFold(strings.TrimSpace(detail), "original") {
+				typed["detail"] = "high"
+				changed = true
+			}
+		}
+		for _, item := range typed {
+			if codexSanitizeOriginalInputImageDetail(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func normalizeCodexFinalUpstreamServiceTier(body []byte, baseModel string, opts codexFinalUpstreamBodyOptions) []byte {
+	serviceTier := gjson.GetBytes(body, "service_tier")
+	if !serviceTier.Exists() {
+		return body
+	}
+	if opts.omitServiceTier || serviceTier.Type != gjson.String {
+		return helps.EditJSONBytes(body, helps.DeleteJSONEdit("service_tier"))
+	}
+
+	value := codexServiceTierRequestValue(serviceTier.String())
+	if value == "" || value == "default" {
+		return helps.EditJSONBytes(body, helps.DeleteJSONEdit("service_tier"))
+	}
+
+	if capabilities, ok := codexClientModelCapabilitiesForModel(baseModel); ok && !codexClientModelSupportsServiceTier(capabilities, value) {
+		return helps.EditJSONBytes(body, helps.DeleteJSONEdit("service_tier"))
+	}
+
+	if value != serviceTier.String() {
+		return helps.EditJSONBytes(body, helps.SetJSONEdit("service_tier", value))
+	}
+	return body
+}
+
+func codexServiceTierRequestValue(value string) string {
+	value = strings.TrimSpace(value)
+	switch strings.ToLower(value) {
+	case "fast", "priority":
+		return "priority"
+	case "flex":
+		return "flex"
+	case "default":
+		return "default"
+	default:
+		return value
+	}
+}
+
+func codexClientModelSupportsServiceTier(capabilities registry.CodexClientModelCapabilities, serviceTier string) bool {
+	serviceTier = strings.TrimSpace(serviceTier)
+	if serviceTier == "" {
+		return false
+	}
+	for _, tier := range capabilities.ServiceTiers {
+		if tier == serviceTier {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.CodexClientModelCapabilities) []byte {
@@ -434,14 +651,20 @@ func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.Cod
 	if !reasoning.Exists() || reasoning.Type == gjson.Null || !reasoning.IsObject() {
 		rawReasoning := []byte("{}")
 		if defaultReasoningLevel != "" {
-			rawReasoning = []byte(`{"effort":` + strconv.Quote(defaultReasoningLevel) + `}`)
+			rawReasoning = []byte(`{"effort":` + strconv.Quote(codexReasoningEffortForRequest(defaultReasoningLevel)) + `}`)
 		}
 		return helps.EditJSONBytes(body, helps.SetRawJSONEdit("reasoning", rawReasoning))
 	}
 
 	effort := reasoning.Get("effort")
 	if defaultReasoningLevel != "" && (!effort.Exists() || effort.Type == gjson.Null || (effort.Type == gjson.String && strings.TrimSpace(effort.String()) == "")) {
-		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", defaultReasoningLevel))
+		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", codexReasoningEffortForRequest(defaultReasoningLevel)))
+	}
+	if effort.Type == gjson.String {
+		requestEffort := codexReasoningEffortForRequest(effort.String())
+		if requestEffort != effort.String() {
+			return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", requestEffort))
+		}
 	}
 	return body
 }
@@ -463,8 +686,16 @@ func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel s
 	return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
 }
 
+func codexReasoningEffortForRequest(effort string) string {
+	effort = strings.TrimSpace(effort)
+	if strings.EqualFold(effort, "ultra") {
+		return "max"
+	}
+	return effort
+}
+
 func normalizeCodexFinalUpstreamTextVerbosity(body []byte, baseModel string) []byte {
-	capabilities, _ := registry.CodexClientModelCapabilitiesForModel(baseModel)
+	capabilities, _ := codexClientModelCapabilitiesForModel(baseModel)
 	verbosity := gjson.GetBytes(body, "text.verbosity")
 	if !capabilities.SupportsVerbosity {
 		if !verbosity.Exists() {
@@ -484,6 +715,124 @@ func normalizeCodexFinalUpstreamTextVerbosity(body []byte, baseModel string) []b
 		return helps.EditJSONBytes(body, helps.SetJSONEdit("text.verbosity", defaultVerbosity))
 	}
 	return body
+}
+
+func normalizeCodexFinalUpstreamResponsesLite(body []byte, baseModel string) []byte {
+	capabilities, ok := codexClientModelCapabilitiesForModel(baseModel)
+	if !ok || !capabilities.UseResponsesLite {
+		return body
+	}
+	return normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, capabilities)
+}
+
+func normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body []byte, capabilities registry.CodexClientModelCapabilities) []byte {
+	if !capabilities.UseResponsesLite {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	body = normalizeCodexFinalUpstreamResponsesLiteInputImages(body, input)
+	input = gjson.GetBytes(body, "input")
+
+	prefixItems := make([][]byte, 0, 2)
+	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
+		prefixItems = append(prefixItems, []byte(`{"type":"additional_tools","role":"developer","tools":`+tools.Raw+`}`))
+	}
+	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) != "" {
+		prefixItems = append(prefixItems, []byte(`{"type":"message","role":"developer","content":[{"type":"input_text","text":`+strconv.Quote(instructions.String())+`}]}`))
+	}
+
+	edits := make([]helps.JSONEdit, 0, 4)
+	if len(prefixItems) > 0 {
+		items := make([][]byte, 0, len(prefixItems)+len(input.Array()))
+		items = append(items, prefixItems...)
+		input.ForEach(func(_, item gjson.Result) bool {
+			items = append(items, []byte(item.Raw))
+			return true
+		})
+		edits = append(edits, helps.SetRawJSONEdit("input", codexRawJSONArray(items)))
+	}
+	if gjson.GetBytes(body, "tools").Exists() {
+		edits = append(edits, helps.DeleteJSONEdit("tools"))
+	}
+	if gjson.GetBytes(body, "instructions").Exists() {
+		edits = append(edits, helps.DeleteJSONEdit("instructions"))
+	}
+	if parallel := gjson.GetBytes(body, "parallel_tool_calls"); parallel.Type != gjson.False {
+		edits = append(edits, helps.SetRawJSONEdit("parallel_tool_calls", []byte("false")))
+	}
+	if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.IsObject() {
+		context := reasoning.Get("context")
+		if context.Type != gjson.String || context.String() != "all_turns" {
+			edits = append(edits, helps.SetJSONEdit("reasoning.context", "all_turns"))
+		}
+	}
+	if len(edits) == 0 {
+		return body
+	}
+	return helps.EditJSONBytes(body, edits...)
+}
+
+func normalizeCodexFinalUpstreamResponsesLiteInputImages(body []byte, input gjson.Result) []byte {
+	if !input.IsArray() || !strings.Contains(input.Raw, `"input_image"`) {
+		return body
+	}
+	var items []any
+	if err := json.Unmarshal([]byte(input.Raw), &items); err != nil {
+		return body
+	}
+	if !codexPrepareResponsesLiteInputImages(items) {
+		return body
+	}
+	rawInput, err := json.Marshal(items)
+	if err != nil {
+		return body
+	}
+	if updated, err := helps.SetRawJSONBytes(body, "input", rawInput); err == nil {
+		return updated
+	}
+	return body
+}
+
+func codexPrepareResponsesLiteInputImages(value any) bool {
+	changed := false
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if codexPrepareResponsesLiteInputImages(item) {
+				changed = true
+			}
+		}
+	case map[string]any:
+		if itemType, _ := typed["type"].(string); itemType == "input_image" {
+			imageURL, _ := typed["image_url"].(string)
+			if codexIsRemoteImageURL(imageURL) {
+				for key := range typed {
+					delete(typed, key)
+				}
+				typed["type"] = "input_text"
+				typed["text"] = codexResponsesLiteRemoteImageOmittedText
+				return true
+			}
+			if _, ok := typed["detail"]; ok {
+				delete(typed, "detail")
+				changed = true
+			}
+		}
+		for _, item := range typed {
+			if codexPrepareResponsesLiteInputImages(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func codexIsRemoteImageURL(imageURL string) bool {
+	imageURL = strings.TrimSpace(imageURL)
+	return strings.HasPrefix(strings.ToLower(imageURL), "http://") || strings.HasPrefix(strings.ToLower(imageURL), "https://")
 }
 
 func codexEnsureReasoningEncryptedContentInclude(body []byte, opts codexFinalUpstreamBodyOptions) []byte {

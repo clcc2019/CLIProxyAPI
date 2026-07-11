@@ -15,6 +15,7 @@ import (
 
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -38,6 +39,9 @@ const (
 	xaiNamespaceToolType        = "namespace"
 	xaiToolSearchType           = "tool_search"
 	xaiWebSearchToolType        = "web_search"
+	xaiCodexAppNamespaceName    = "codex_app"
+	xaiAutomationUpdateToolName = "automation_update"
+	xaiSafeFunctionParameters   = `{"type":"object","properties":{},"additionalProperties":true}`
 	xaiImagesGenerationsPath    = "/images/generations"
 	xaiImagesEditsPath          = "/images/edits"
 	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
@@ -46,6 +50,10 @@ const (
 	xaiVideosExtensionsPath     = "/videos/extensions"
 	xaiVideosPath               = "/videos"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
+	xaiTokenAuthHeader          = "X-XAI-Token-Auth"
+	xaiTokenAuthValue           = "xai-grok-cli"
+	xaiClientVersionHeader      = "x-grok-client-version"
+	xaiClientVersionValue       = "0.2.93"
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -104,10 +112,8 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return e.executeVideos(ctx, auth, req, opts)
 	}
 
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, _ := xaiCreds(auth)
+	baseURL := xaiChatBaseURL(auth)
 
 	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
 	if err != nil {
@@ -123,7 +129,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -147,7 +153,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	data, err := io.ReadAll(httpResp.Body)
@@ -227,7 +233,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
@@ -292,17 +298,15 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
 func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, _ := xaiCreds(auth)
+	baseURL := xaiChatBaseURL(auth)
 
 	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
 	if err != nil {
@@ -318,7 +322,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return nil, err
 	}
-	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -340,7 +344,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return nil, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk, cliproxyexecutor.StreamChunkBufferSize)
@@ -571,7 +575,35 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 	return token, baseURL
 }
 
+// xaiChatBaseURL returns the base URL for non-media xAI HTTP chat requests.
+// Empty or official-default OAuth base URLs use the CLI chat-proxy endpoint;
+// explicit custom gateways remain untouched.
+func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
+	_, baseURL := xaiCreds(auth)
+	if baseURL != "" && !xaiIsDefaultAPIBaseURL(baseURL) {
+		return baseURL
+	}
+	return xaiauth.CLIChatProxyBaseURL
+}
+
+func xaiNormalizeBaseURL(baseURL string) string {
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/")
+}
+
+func xaiIsDefaultAPIBaseURL(baseURL string) bool {
+	return xaiNormalizeBaseURL(baseURL) == xaiNormalizeBaseURL(xaiauth.DefaultAPIBaseURL)
+}
+
+func xaiIsCLIChatProxyBaseURL(baseURL string) bool {
+	return xaiNormalizeBaseURL(baseURL) == xaiNormalizeBaseURL(xaiauth.CLIChatProxyBaseURL)
+}
+
 func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+	applyXAIDefaultHeaders(r, token, stream, sessionID)
+	applyXAICustomHeaders(r, auth)
+}
+
+func applyXAIDefaultHeaders(r *http.Request, token string, stream bool, sessionID string) {
 	r.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -585,11 +617,24 @@ func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, str
 	if sessionID != "" {
 		r.Header.Set("x-grok-conv-id", sessionID)
 	}
+}
+
+func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+	applyXAIDefaultHeaders(r, token, stream, sessionID)
+	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
+		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
+		r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
+	}
+	// User-configured headers intentionally win over the defaults above.
+	applyXAICustomHeaders(r, auth)
 }
 
 func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
@@ -662,7 +707,13 @@ func xaiMetadataString(meta map[string]any, key string) string {
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
-		body, _ = sjson.DeleteBytes(body, "reasoning")
+		if gjson.GetBytes(body, "reasoning.effort").Exists() {
+			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
+		}
+		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
+		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "reasoning")
+		}
 	}
 	return body
 }
@@ -679,9 +730,10 @@ func normalizeXAITools(body []byte) []byte {
 		toolType := tool.Get("type").String()
 		if toolType == xaiNamespaceToolType {
 			changed = true
+			namespaceName := tool.Get("name").String()
 			if namespaceTools := tool.Get("tools"); namespaceTools.IsArray() {
 				for _, nestedTool := range namespaceTools.Array() {
-					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool)
+					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool, namespaceName)
 					if !ok {
 						return body
 					}
@@ -698,7 +750,7 @@ func normalizeXAITools(body []byte) []byte {
 			}
 			continue
 		}
-		raw, toolChanged, ok := normalizeXAITool(tool)
+		raw, toolChanged, ok := normalizeXAITool(tool, "")
 		if !ok {
 			return body
 		}
@@ -722,7 +774,7 @@ func normalizeXAITools(body []byte) []byte {
 	return updated
 }
 
-func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
+func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {
 	toolType := tool.Get("type").String()
 	changed := false
 	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
@@ -756,6 +808,24 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 		}
 		raw = updatedTool
 		changed = true
+	}
+	if toolType == xaiFunctionToolType &&
+		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
+		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName) {
+		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		if strict := tool.Get("strict"); strict.Exists() && strict.Bool() {
+			updatedTool, errSet = sjson.SetBytes(raw, "strict", false)
+			if errSet != nil {
+				return nil, false, false
+			}
+			raw = updatedTool
+		}
+		changed = true
+		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream hang", namespaceName, tool.Get("name").String())
 	}
 	return raw, changed, true
 }
@@ -879,39 +949,18 @@ func removeXAIEncryptedReasoningInclude(body []byte) []byte {
 }
 
 func xaiSupportsReasoningEffort(model string) bool {
-	name := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
 	if idx := strings.LastIndex(name, "/"); idx >= 0 {
 		name = name[idx+1:]
 	}
-	switch {
-	case xaiHasPrefixFold(name, "grok-3-mini"):
-		return true
-	case xaiHasPrefixFold(name, "grok-4.20-multi-agent"):
-		return true
-	case xaiHasPrefixFold(name, "grok-4.3"):
-		return true
-	default:
+	if name == "" {
 		return false
 	}
-}
-
-func xaiHasPrefixFold(s, prefix string) bool {
-	if len(prefix) > len(s) {
+	info := registry.LookupModelInfo(name, "xai")
+	if info == nil || info.Thinking == nil {
 		return false
 	}
-	for i := 0; i < len(prefix); i++ {
-		if xaiASCIILower(s[i]) != xaiASCIILower(prefix[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func xaiASCIILower(c byte) byte {
-	if c >= 'A' && c <= 'Z' {
-		return c + ('a' - 'A')
-	}
-	return c
+	return len(info.Thinking.Levels) > 0
 }
 
 func xaiCollectOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
@@ -967,4 +1016,27 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 
 	patched, _ := sjson.SetRawBytes(eventData, "response.output", outputArray)
 	return patched
+}
+
+const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
+
+// xaiStatusErr attaches the rolling free-tier reset window to quota errors so
+// the auth scheduler can rotate credentials without repeatedly retrying them.
+func xaiStatusErr(code int, body []byte) statusErr {
+	err := statusErr{code: code, msg: string(body)}
+	if code != http.StatusTooManyRequests || len(body) == 0 {
+		return err
+	}
+	codeText := strings.ToLower(gjson.GetBytes(body, "code").String())
+	message := strings.ToLower(gjson.GetBytes(body, "error").String())
+	if message == "" {
+		message = strings.ToLower(string(body))
+	}
+	if strings.Contains(codeText, "free-usage-exhausted") ||
+		strings.Contains(message, "free-usage-exhausted") ||
+		strings.Contains(message, "included free usage") {
+		cooldown := xaiFreeUsageExhaustedCooldown
+		err.retryAfter = &cooldown
+	}
+	return err
 }

@@ -867,6 +867,86 @@ func TestConvertCodexResponseToClaude_StreamCustomToolCallUsesDoneInput(t *testi
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamTerminalOutputEmitsPendingUnnamedFunctionCall(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object"}}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1"},"output_index":1}`),
+		[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"query\":\"example\"}","output_index":1}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"query\":\"example\"}"}]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	joined := string(bytes.Join(outputs, nil))
+	if strings.Count(joined, `"type":"tool_use"`) != 1 {
+		t.Fatalf("expected one tool_use block, got output:\n%s", joined)
+	}
+	if !strings.Contains(joined, `"name":"lookup"`) || !strings.Contains(joined, `"partial_json":"{\"query\":\"example\"}"`) {
+		t.Fatalf("missing terminal tool name or arguments:\n%s", joined)
+	}
+	if reason, ok := findClaudeStreamStopReason(outputs); !ok || reason != "tool_use" {
+		t.Fatalf("stop reason = %q ok=%v, want tool_use; outputs=%q", reason, ok, outputs)
+	}
+	if strings.Index(joined, `"type":"tool_use"`) > strings.Index(joined, `"type":"message_delta"`) {
+		t.Fatalf("tool_use must precede message_delta:\n%s", joined)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamTerminalHydratesAndClosesOpenFunctionCall(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object"}}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"lookup"},"output_index":0}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"id\":1}"}]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	joined := string(bytes.Join(outputs, nil))
+	argsPosition := strings.Index(joined, `"partial_json":"{\"id\":1}"`)
+	stopPosition := strings.Index(joined, `"type":"content_block_stop"`)
+	messagePosition := strings.Index(joined, `"type":"message_delta"`)
+	if argsPosition < 0 || stopPosition < 0 || messagePosition < 0 || !(argsPosition < stopPosition && stopPosition < messagePosition) {
+		t.Fatalf("unexpected terminal event order args=%d stop=%d message=%d:\n%s", argsPosition, stopPosition, messagePosition, joined)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamUnresolvedPendingFunctionCallDoesNotForceToolUse(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object"}}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_hidden"},"output_index":1}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"function_call","usage":{"input_tokens":1,"output_tokens":1},"output":[]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	joined := string(bytes.Join(outputs, nil))
+	if strings.Contains(joined, `"type":"tool_use"`) {
+		t.Fatalf("unresolved pending call emitted tool_use:\n%s", joined)
+	}
+	if reason, ok := findClaudeStreamStopReason(outputs); !ok || reason != "end_turn" {
+		t.Fatalf("stop reason = %q ok=%v, want end_turn", reason, ok)
+	}
+	params := param.(*ConvertCodexResponseToClaudeParams)
+	if len(params.PendingFunctionCalls) != 0 || params.LastPendingFunctionCallKey != "" {
+		t.Fatalf("pending function calls not cleared: %#v", params)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {
 	tests := []struct {
 		name       string

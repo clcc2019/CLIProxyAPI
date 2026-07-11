@@ -297,6 +297,7 @@ func buildStaticModelLookup(data *staticModelsJSON) map[string]*ModelInfo {
 		data.Claude,
 		data.CodexPro,
 		data.Kimi,
+		data.XAI,
 	}
 	total := 0
 	for _, models := range allModels {

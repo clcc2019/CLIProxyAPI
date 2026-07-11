@@ -878,7 +878,7 @@ func TestPrepareCodexWebsocketRequestDropsServiceTierByDefault(t *testing.T) {
 		parked:   make(map[string]*codexWebsocketSession),
 	}
 	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
-	req := cliproxyexecutor.Request{Model: "gpt-5-codex"}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4"}
 
 	prepared, err := executor.prepareCodexWebsocketRequest(
 		context.Background(),
@@ -908,7 +908,7 @@ func TestPrepareCodexWebsocketRequestMarksGenerateFalseAsPrewarm(t *testing.T) {
 		parked:   make(map[string]*codexWebsocketSession),
 	}
 	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
-	req := cliproxyexecutor.Request{Model: "gpt-5-codex"}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4"}
 
 	prepared, err := executor.prepareCodexWebsocketRequest(
 		context.Background(),
@@ -996,14 +996,14 @@ func TestPrepareCodexWebsocketRequestPreservesServiceTierWhenAuthOptedIn(t *test
 		Provider: "codex",
 		Metadata: map[string]any{cliproxyauth.AuthFileServiceTierPassthroughKey: true},
 	}
-	req := cliproxyexecutor.Request{Model: "gpt-5-codex"}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4"}
 
 	prepared, err := executor.prepareCodexWebsocketRequest(
 		context.Background(),
 		auth,
 		req,
 		cliproxyexecutor.Options{SourceFormat: "openai-response"},
-		[]byte(`{"model":"gpt-5-codex","input":"hello","service_tier":"flex"}`),
+		[]byte(`{"model":"gpt-5.4","input":"hello","service_tier":"priority"}`),
 		"oauth-token",
 		"https://chatgpt.com/backend-api/codex/responses",
 	)
@@ -1011,11 +1011,11 @@ func TestPrepareCodexWebsocketRequestPreservesServiceTierWhenAuthOptedIn(t *test
 		t.Fatalf("prepareCodexWebsocketRequest() error = %v", err)
 	}
 	defer prepared.unlockSession()
-	if got := gjson.GetBytes(prepared.body, "service_tier").String(); got != "flex" {
-		t.Fatalf("service_tier = %q, want flex; body=%s", got, prepared.body)
+	if got := gjson.GetBytes(prepared.body, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority; body=%s", got, prepared.body)
 	}
-	if got := gjson.GetBytes(prepared.wsReqBody, "service_tier").String(); got != "flex" {
-		t.Fatalf("websocket request service_tier = %q, want flex; body=%s", got, prepared.wsReqBody)
+	if got := gjson.GetBytes(prepared.wsReqBody, "service_tier").String(); got != "priority" {
+		t.Fatalf("websocket request service_tier = %q, want priority; body=%s", got, prepared.wsReqBody)
 	}
 }
 
@@ -1654,8 +1654,8 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
 	}
-	if got := headers.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	if got := headers.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %q, want empty for default originator", got)
 	}
 	assertGeneratedCodexTurnMetadata(t, headers.Get("X-Codex-Turn-Metadata"))
 	assertCodexTurnMetadataString(t, headers.Get("X-Codex-Turn-Metadata"), "window_id", headers.Get(codexHeaderWindowID))
@@ -2028,8 +2028,8 @@ func TestApplyCodexWebsocketHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T
 	if got := headers.Get("x-codex-beta-features"); got != "config-beta" {
 		t.Fatalf("x-codex-beta-features = %q, want config-beta", got)
 	}
-	if got := headers.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
+	if got := headers.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %q, want empty for default originator", got)
 	}
 }
 
@@ -2263,8 +2263,8 @@ func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 	if got := req.Header.Get("x-codex-beta-features"); got != "config-beta" {
 		t.Fatalf("x-codex-beta-features = %q, want config-beta", got)
 	}
-	if got := req.Header.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	if got := req.Header.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %q, want empty for default originator", got)
 	}
 	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, misc.CodexCLIVersion)
@@ -2285,8 +2285,8 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 	if got := req.Header.Get("User-Agent"); got != misc.CodexCLIUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, misc.CodexCLIUserAgent)
 	}
-	if got := req.Header.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	if got := req.Header.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %q, want empty for default originator", got)
 	}
 	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, misc.CodexCLIVersion)
@@ -2347,8 +2347,8 @@ func TestApplyCodexHeadersCompactKeepsHeadersLeanByDefault(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != misc.CodexCLIUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, misc.CodexCLIUserAgent)
 	}
-	if got := req.Header.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	if got := req.Header.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %q, want empty for default originator", got)
 	}
 	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, misc.CodexCLIVersion)

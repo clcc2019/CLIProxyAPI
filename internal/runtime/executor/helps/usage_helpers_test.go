@@ -137,6 +137,23 @@ func TestParseCodexUsageOfficialTokenUsageShapeWithoutTotal(t *testing.T) {
 	}
 }
 
+func TestParseCodexUsageRetainsResponseTierWithoutTokenUsage(t *testing.T) {
+	detail, ok := ParseCodexUsage([]byte(`{"response":{"service_tier":"priority"}}`))
+	if !ok {
+		t.Fatal("expected response tier to be parsed without token usage")
+	}
+	if detail.ResponseServiceTier != "priority" {
+		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
+}
+
+func TestParseOpenAIUsageIncludesResponseTier(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"service_tier":"default","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}`))
+	if detail.ResponseServiceTier != "default" {
+		t.Fatalf("response service tier = %q, want default", detail.ResponseServiceTier)
+	}
+}
+
 func TestParseOpenAIStreamUsageChatCompletions(t *testing.T) {
 	line := []byte(`data: {"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail, ok := ParseOpenAIStreamUsage(line)
@@ -262,11 +279,39 @@ func TestParseOpenAIStreamUsageEmptyUsageObjectIgnored(t *testing.T) {
 	}
 }
 
-func TestParseOpenAIStreamUsageZeroUsageObjectIgnored(t *testing.T) {
+func TestParseOpenAIStreamUsageZeroUsageObjectRetained(t *testing.T) {
 	line := []byte(`data: {"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`)
 	_, ok := ParseOpenAIStreamUsage(line)
-	if ok {
-		t.Fatal("expected all-zero usage chunk to be ignored")
+	if !ok {
+		t.Fatal("expected explicit all-zero usage chunk to be retained")
+	}
+}
+
+func TestStreamUsageBufferPreservesTierAndKeepsFinalUsage(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"default"}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"priority","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`))
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("buffer detail ok = false, want true")
+	}
+	if detail.InputTokens != 10 || detail.OutputTokens != 5 || detail.TotalTokens != 15 {
+		t.Fatalf("detail = %+v, want final usage", detail)
+	}
+	if detail.ResponseServiceTier != "priority" {
+		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
+}
+
+func TestStreamUsageBufferIgnoresIrrelevantAndInvalidChunks(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.ObserveOpenAIStream([]byte(`data: {"content":"the word \"usage\" appears here"}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"usage":`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"usage":null}`))
+	if detail, ok := buffer.Detail(); ok {
+		t.Fatalf("detail = %+v ok=true, want empty buffer", detail)
 	}
 }
 
@@ -314,6 +359,23 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesRequestAndResponseServiceTiers(t *testing.T) {
+	reporter := &UsageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		serviceTier: "priority",
+		requestedAt: time.Now(),
+	}
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
+	if record.ServiceTier != "priority" || record.RequestServiceTier != "priority" {
+		t.Fatalf("request service tiers = (%q, %q), want priority", record.ServiceTier, record.RequestServiceTier)
+	}
+	if record.ResponseServiceTier != "default" {
+		t.Fatalf("response service tier = %q, want default", record.ResponseServiceTier)
 	}
 }
 

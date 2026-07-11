@@ -136,6 +136,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	}
 	applyCodexHeadersForRequestKind(prepared.httpReq, auth, token, stream, e.cfg, requestKind)
 	codexApplyModelHeaderOverrides(prepared.httpReq.Header, baseModel)
+	codexApplyResponsesLiteHeader(prepared.httpReq.Header, baseModel)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)
 	if requestKind != codexFinalUpstreamCompact {
 		prepared.body = codexApplyHTTPClientMetadataWithSource(prepared.body, prepared.httpReq.Header, profileHeaders, auth, e.cfg)

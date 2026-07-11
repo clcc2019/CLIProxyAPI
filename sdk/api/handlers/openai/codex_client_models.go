@@ -149,6 +149,16 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	if plans, ok := model["available_in_plans"]; ok {
 		entry["available_in_plans"] = cloneCodexClientModelValue(plans)
 	}
+	if serviceTiers, ok := model["service_tiers"]; ok {
+		entry["service_tiers"] = cloneCodexClientModelValue(serviceTiers)
+	} else {
+		delete(entry, "service_tiers")
+	}
+	if defaultServiceTier, ok := model["default_service_tier"]; ok {
+		entry["default_service_tier"] = cloneCodexClientModelValue(defaultServiceTier)
+	} else {
+		delete(entry, "default_service_tier")
+	}
 }
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
@@ -236,6 +246,8 @@ func normalizeCodexClientReasoningLevel(rawLevel string) string {
 	switch {
 	case strings.EqualFold(level, "none"):
 		return "none"
+	case strings.EqualFold(level, "minimal"):
+		return "minimal"
 	case strings.EqualFold(level, "low"):
 		return "low"
 	case strings.EqualFold(level, "medium"):
@@ -249,7 +261,10 @@ func normalizeCodexClientReasoningLevel(rawLevel string) string {
 	case strings.EqualFold(level, "ultra"):
 		return "ultra"
 	default:
-		return ""
+		if level == "" {
+			return ""
+		}
+		return level
 	}
 }
 
@@ -257,6 +272,8 @@ func codexClientReasoningDescription(level string) string {
 	switch level {
 	case "none":
 		return "No reasoning"
+	case "minimal":
+		return "Minimal reasoning"
 	case "low":
 		return "Fast responses with lighter reasoning"
 	case "medium":

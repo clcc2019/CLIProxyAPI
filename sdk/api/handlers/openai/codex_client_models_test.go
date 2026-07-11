@@ -2,6 +2,69 @@ package openai
 
 import "testing"
 
+func TestCodexClientModelsResponsePreservesOfficialServiceTiers(t *testing.T) {
+	response := CodexClientModelsResponse([]map[string]any{{"id": "gpt-5.4"}})
+	models, ok := response["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", response["models"])
+	}
+	serviceTiers, ok := models[0]["service_tiers"].([]any)
+	if !ok || len(serviceTiers) != 1 {
+		t.Fatalf("service_tiers = %#v, want one official tier", models[0]["service_tiers"])
+	}
+	tier, ok := serviceTiers[0].(map[string]any)
+	if !ok {
+		t.Fatalf("service_tiers[0] = %#v, want object", serviceTiers[0])
+	}
+	if got := stringModelValue(tier, "id"); got != "priority" {
+		t.Fatalf("service tier id = %q, want priority", got)
+	}
+}
+
+func TestCodexClientModelsResponseDoesNotLeakDefaultServiceTiersToCustomModels(t *testing.T) {
+	response := CodexClientModelsResponse([]map[string]any{{"id": "custom-model"}})
+	models, ok := response["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", response["models"])
+	}
+	if _, ok := models[0]["service_tiers"]; ok {
+		t.Fatalf("custom model should not inherit default template service_tiers: %#v", models[0])
+	}
+	if _, ok := models[0]["default_service_tier"]; ok {
+		t.Fatalf("custom model should not inherit default template default_service_tier: %#v", models[0])
+	}
+}
+
+func TestCodexClientModelsResponseCopiesCustomServiceTiers(t *testing.T) {
+	response := CodexClientModelsResponse([]map[string]any{{
+		"id": "custom-model",
+		"service_tiers": []any{map[string]any{
+			"id":          "flex",
+			"name":        "Flex",
+			"description": "Lower priority processing",
+		}},
+		"default_service_tier": "flex",
+	}})
+	models, ok := response["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", response["models"])
+	}
+	serviceTiers, ok := models[0]["service_tiers"].([]any)
+	if !ok || len(serviceTiers) != 1 {
+		t.Fatalf("service_tiers = %#v, want custom tier", models[0]["service_tiers"])
+	}
+	tier, ok := serviceTiers[0].(map[string]any)
+	if !ok {
+		t.Fatalf("service_tiers[0] = %#v, want object", serviceTiers[0])
+	}
+	if got := stringModelValue(tier, "id"); got != "flex" {
+		t.Fatalf("service tier id = %q, want flex", got)
+	}
+	if got := stringModelValue(models[0], "default_service_tier"); got != "flex" {
+		t.Fatalf("default_service_tier = %q, want flex", got)
+	}
+}
+
 func TestNormalizeCodexClientReasoningLevel(t *testing.T) {
 	tests := []struct {
 		name string
@@ -9,11 +72,12 @@ func TestNormalizeCodexClientReasoningLevel(t *testing.T) {
 		want string
 	}{
 		{name: "mixed case", raw: " Medium ", want: "medium"},
+		{name: "minimal", raw: "MINIMAL", want: "minimal"},
 		{name: "xhigh", raw: "XHIGH", want: "xhigh"},
 		{name: "max", raw: "MAX", want: "max"},
 		{name: "ultra", raw: "ULTRA", want: "ultra"},
 		{name: "none", raw: "none", want: "none"},
-		{name: "unknown", raw: "extreme", want: ""},
+		{name: "custom", raw: "extreme", want: "extreme"},
 		{name: "empty", raw: " ", want: ""},
 	}
 

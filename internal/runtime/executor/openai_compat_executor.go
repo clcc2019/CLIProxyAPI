@@ -324,12 +324,11 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 		defer close(out)
 		defer closeOpenAICompatResponseBody(state.resp)
 		var param any
+		var streamUsage helps.StreamUsageBuffer
 		passthroughOpenAI := state.from == state.to
 		errRead := helps.ReadStreamLines(state.resp.Body, func(line []byte) error {
 			helps.AppendAPIResponseChunk(state.ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				state.reporter.Publish(state.ctx, detail)
-			}
+			streamUsage.ObserveOpenAIStream(line)
 			if len(line) == 0 {
 				return nil
 			}
@@ -367,7 +366,8 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
-		// Ensure we record the request if no usage chunk was ever seen
+		streamUsage.Publish(state.ctx, state.reporter)
+		// Ensure we record the request if no usage chunk was ever seen.
 		state.reporter.EnsurePublished(state.ctx)
 	}()
 	return out
@@ -379,11 +379,10 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 		defer close(out)
 		defer closeOpenAICompatResponseBody(resp)
 		currentEvent := ""
+		var streamUsage helps.StreamUsageBuffer
 		errRead := helps.ReadStreamLines(resp.Body, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok && reporter != nil {
-				reporter.Publish(ctx, detail)
-			}
+			streamUsage.ObserveOpenAIStream(line)
 			trimmed := bytes.TrimSpace(line)
 			if len(trimmed) == 0 {
 				currentEvent = ""
@@ -415,6 +414,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 			}
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 		} else if reporter != nil {
+			streamUsage.Publish(ctx, reporter)
 			reporter.EnsurePublished(ctx)
 		}
 	}()

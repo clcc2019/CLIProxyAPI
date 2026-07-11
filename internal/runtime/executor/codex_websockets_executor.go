@@ -558,7 +558,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -665,9 +665,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 		if errRead != nil {
-			if sess != nil && !readRetryUsed && (ctx == nil || ctx.Err() == nil) {
+			mappedErr := mapCodexWebsocketReadError(errRead)
+			if sess != nil && !readRetryUsed && (ctx == nil || ctx.Err() == nil) && !isCodexWebsocketMessageTooBigError(errRead) {
 				readRetryUsed = true
-				connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "read_error", errRead)
+				connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "read_error", mappedErr)
 				if errRetry == nil {
 					conn = connRetry
 					wsReqBody = wsReqBodyRetry
@@ -680,10 +681,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			}
 			if sess != nil {
 				sess.clearIncrementalState()
-				e.invalidateUpstreamConn(sess, conn, "read_error", errRead)
+				e.invalidateUpstreamConn(sess, conn, "read_error", mappedErr)
 			}
-			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
-			return resp, errRead
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
+			return resp, mappedErr
 		}
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
@@ -855,7 +856,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -1003,9 +1004,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 					return
 				}
-				if sess != nil && !readRetryUsed && !emittedPayload {
+				mappedErr := mapCodexWebsocketReadError(errRead)
+				if sess != nil && !readRetryUsed && !emittedPayload && !isCodexWebsocketMessageTooBigError(errRead) {
 					readRetryUsed = true
-					connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "read_error", errRead)
+					connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBody, "read_error", mappedErr)
 					if errRetry == nil {
 						conn = connRetry
 						wsReqBody = wsReqBodyRetry
@@ -1021,14 +1023,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 				terminateReason = "read_error"
-				terminateErr = errRead
+				terminateErr = mappedErr
 				if sess != nil {
 					sess.clearIncrementalState()
-					e.invalidateUpstreamConn(sess, conn, "read_error", errRead)
+					e.invalidateUpstreamConn(sess, conn, "read_error", mappedErr)
 				}
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
-				reporter.PublishFailureWithError(ctx, errRead)
-				_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
+				reporter.PublishFailureWithError(ctx, mappedErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: mappedErr})
 				return
 			}
 			if msgType != websocket.TextMessage {
@@ -1239,6 +1241,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	codexEnsureExecutionSessionHeader(wsHeaders, codexGinHeadersFromContext(ctx), executionSessionID)
 	wsHeaders = applyCodexWebsocketHeadersForRequestKind(ctx, wsHeaders, auth, apiKey, e.cfg, codexWebsocketTurnMetadataRequestKind(body))
 	codexApplyModelHeaderOverrides(wsHeaders, baseModel)
+	codexApplyResponsesLiteHeader(wsHeaders, baseModel)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(wsHeaders, responsesAPIClientMetadata)
 	turnStateScope := trimHeaderValue(wsHeaders, codexHeaderTurnMetadata)
 	if explicitTurnMetadata != "" {
@@ -2537,16 +2540,18 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 		includeRequestID: true,
 	})
 	codexEnsureResponsesIdentityHeaders(headers, ginHeaders)
+	installationID := codexResolvedInstallationID(headers, ginHeaders, auth, cfg)
 	codexEnsureTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
-		requestKind: strings.TrimSpace(requestKind),
-		sessionID:   sessionID,
-		threadID:    trimHeaderValue(headers, codexHeaderThreadID),
-		turnID:      uuid.NewString(),
-		sandbox:     codexDefaultSandboxTag,
-		windowID:    trimHeaderValue(headers, codexHeaderWindowID),
+		installationID: installationID,
+		requestKind:    strings.TrimSpace(requestKind),
+		sessionID:      sessionID,
+		threadID:       trimHeaderValue(headers, codexHeaderThreadID),
+		turnID:         uuid.NewString(),
+		sandbox:        codexDefaultSandboxTag,
+		windowID:       trimHeaderValue(headers, codexHeaderWindowID),
 	})
 	codexEnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
-	codexSetSingleHeaderValue(headers, "Originator", identity.originator)
+	codexSetOriginatorHeader(headers, identity.originator)
 	apiKeyAuth := codexIsAPIKeyAuth(auth)
 	if accountID := codexAccountID(auth, apiKeyAuth); accountID != "" {
 		codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, accountID)

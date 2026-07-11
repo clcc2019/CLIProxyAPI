@@ -57,6 +57,15 @@ func TestShouldSkipMethodForRequestLogging(t *testing.T) {
 			skip: false,
 		},
 		{
+			name: "codex backend websocket upgrade should not skip",
+			req: &http.Request{
+				Method: http.MethodGet,
+				URL:    &url.URL{Path: "/backend-api/codex/responses"},
+				Header: http.Header{"Upgrade": []string{"websocket"}},
+			},
+			skip: false,
+		},
+		{
 			name: "responses get without upgrade should skip",
 			req: &http.Request{
 				Method: http.MethodGet,

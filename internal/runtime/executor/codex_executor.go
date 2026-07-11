@@ -128,7 +128,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	bodyWithoutReplay := body
 	body, replayScope, reasoningReplayApplied := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
@@ -304,7 +304,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	bodyWithoutReplay := body
 	body, replayScope, reasoningReplayApplied := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
@@ -481,7 +481,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	bodyWithoutReplay := body
 	body, replayScope, reasoningReplayApplied := applyCodexReasoningReplayCache(upstreamCtx, from, req, opts, body)
@@ -1132,7 +1132,33 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
 }
 
-func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) []byte {
+func isCodexResponsesLiteRequest(body []byte, baseModel string, headers http.Header) bool {
+	if capabilities, ok := codexClientModelCapabilitiesForModel(baseModel); ok && capabilities.UseResponsesLite {
+		return true
+	}
+	if headers != nil {
+		if value, ok := codexParseBoolLike(firstNonEmptyHeaderValue(headers, nil, codexWireHeaderOpenAIInternalCodexResponsesLite)); ok && value {
+			return true
+		}
+	}
+	value := gjson.GetBytes(body, "client_metadata."+codexWSClientMetadataResponsesLite)
+	if !value.Exists() {
+		return false
+	}
+	if value.Type == gjson.True {
+		return true
+	}
+	if value.Type == gjson.String {
+		parsed, ok := codexParseBoolLike(value.String())
+		return ok && parsed
+	}
+	return false
+}
+
+func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
+	if isCodexResponsesLiteRequest(body, baseModel, headers) {
+		return body
+	}
 	if strings.HasSuffix(baseModel, "spark") {
 		return body
 	}

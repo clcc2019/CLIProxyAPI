@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -203,7 +205,8 @@ func TestXAISupportsReasoningEffort(t *testing.T) {
 	}{
 		{model: "GROK-4.3(low)", want: true},
 		{model: "xai/Grok-3-Mini-fast", want: true},
-		{model: "xai/grok-4.20-multi-agent", want: true},
+		{model: "xai/grok-4.20-multi-agent-0309", want: true},
+		{model: "grok-build-0.1", want: false},
 		{model: "grok-4", want: false},
 	}
 
@@ -213,6 +216,73 @@ func TestXAISupportsReasoningEffort(t *testing.T) {
 				t.Fatalf("xaiSupportsReasoningEffort(%q) = %v, want %v", tt.model, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeXAIToolSimplifiesOnlyCodexAutomationUpdate(t *testing.T) {
+	raw := `{"type":"function","name":"automation_update","strict":true,"parameters":{"type":"object","oneOf":[{"$ref":"#/$defs/item"}],"$defs":{"item":{"type":"object"}}}}`
+	tool := gjson.Parse(raw)
+
+	got, changed, ok := normalizeXAITool(tool, "codex_app")
+	if !ok || !changed {
+		t.Fatalf("normalizeXAITool() = ok:%v changed:%v, want true/true", ok, changed)
+	}
+	if !gjson.GetBytes(got, "parameters.additionalProperties").Bool() {
+		t.Fatalf("safe parameters missing additionalProperties=true: %s", got)
+	}
+	if gjson.GetBytes(got, "strict").Bool() {
+		t.Fatalf("strict = true, want false: %s", got)
+	}
+	if gjson.GetBytes(got, "parameters.oneOf").Exists() || gjson.GetBytes(got, "parameters.$defs").Exists() {
+		t.Fatalf("complex schema was not removed: %s", got)
+	}
+
+	other, otherChanged, otherOK := normalizeXAITool(tool, "other_namespace")
+	if !otherOK || otherChanged || string(other) != raw {
+		t.Fatalf("unrelated namespace changed: ok=%v changed=%v body=%s", otherOK, otherChanged, other)
+	}
+}
+
+func TestXAIStatusErrFreeUsageExhaustedIncludesCooldown(t *testing.T) {
+	err := xaiStatusErr(http.StatusTooManyRequests, []byte(`{"code":"subscription:free-usage-exhausted","error":"included free usage exhausted"}`))
+	if err.RetryAfter() == nil || *err.RetryAfter() != 24*time.Hour {
+		t.Fatalf("RetryAfter() = %v, want 24h", err.RetryAfter())
+	}
+
+	generic := xaiStatusErr(http.StatusTooManyRequests, []byte(`{"error":"rate limited"}`))
+	if generic.RetryAfter() != nil {
+		t.Fatalf("generic RetryAfter() = %v, want nil", generic.RetryAfter())
+	}
+}
+
+func TestXAIChatBaseURLAndHeaders(t *testing.T) {
+	defaultAuth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":                     xaiauth.DefaultAPIBaseURL + "/",
+			"header:X-Grok-Client-Version": "custom-version",
+		},
+	}
+	if got := xaiChatBaseURL(defaultAuth); got != xaiauth.CLIChatProxyBaseURL {
+		t.Fatalf("xaiChatBaseURL(default) = %q, want %q", got, xaiauth.CLIChatProxyBaseURL)
+	}
+	req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+	applyXAIChatHeaders(req, defaultAuth, "token", true, "session-1")
+	if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
+		t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)
+	}
+	if got := req.Header.Get(xaiClientVersionHeader); got != "custom-version" {
+		t.Fatalf("custom client version = %q, want custom-version", got)
+	}
+
+	customAuth := &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"base_url": "https://gateway.example/v1"}}
+	if got := xaiChatBaseURL(customAuth); got != "https://gateway.example/v1" {
+		t.Fatalf("xaiChatBaseURL(custom) = %q", got)
+	}
+	customReq := httptest.NewRequest(http.MethodPost, "https://gateway.example/v1/responses", nil)
+	applyXAIChatHeaders(customReq, customAuth, "token", true, "")
+	if got := customReq.Header.Get(xaiTokenAuthHeader); got != "" {
+		t.Fatalf("custom gateway received CLI identity header %q", got)
 	}
 }
 

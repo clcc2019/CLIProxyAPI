@@ -68,12 +68,13 @@ func popFrontHash(l *list.List) (uint64, bool) {
 }
 
 type codexFinalUpstreamBodyMemoEntry struct {
-	baseModel string
-	opts      codexFinalUpstreamBodyOptions
-	input     []byte
-	output    []byte
-	size      int
-	elem      *list.Element
+	baseModel    string
+	authProvider string
+	opts         codexFinalUpstreamBodyOptions
+	input        []byte
+	output       []byte
+	size         int
+	elem         *list.Element
 }
 
 type codexFinalUpstreamBodyMemo struct {
@@ -83,7 +84,7 @@ type codexFinalUpstreamBodyMemo struct {
 	bytes   int
 }
 
-func (m *codexFinalUpstreamBodyMemo) get(baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
+func (m *codexFinalUpstreamBodyMemo) get(baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
 	if m == nil || len(input) == 0 {
 		return nil
 	}
@@ -94,12 +95,12 @@ func (m *codexFinalUpstreamBodyMemo) get(baseModel string, opts codexFinalUpstre
 		codexMetrics.memoBodyMiss.Add(1)
 		return nil
 	}
-	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, input)
-	return m.getWithHash(hash, baseModel, opts, input)
+	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, authProvider, opts, input)
+	return m.getWithHash(hash, baseModel, authProvider, opts, input)
 }
 
-func (m *codexFinalUpstreamBodyMemo) getWithHash(hash uint64, baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
-	output := m.getSharedWithHash(hash, baseModel, opts, input)
+func (m *codexFinalUpstreamBodyMemo) getWithHash(hash uint64, baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
+	output := m.getSharedWithHash(hash, baseModel, authProvider, opts, input)
 	if output == nil {
 		return nil
 	}
@@ -109,14 +110,14 @@ func (m *codexFinalUpstreamBodyMemo) getWithHash(hash uint64, baseModel string, 
 // getSharedWithHash returns the memo-owned immutable output. It is reserved for
 // the final request preparation path, whose downstream JSON edits always
 // allocate a new buffer and never write through the returned slice.
-func (m *codexFinalUpstreamBodyMemo) getSharedWithHash(hash uint64, baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
+func (m *codexFinalUpstreamBodyMemo) getSharedWithHash(hash uint64, baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
 	if m == nil || len(input) == 0 {
 		return nil
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	entry, ok := m.entries[hash]
-	if !ok || entry.baseModel != baseModel || entry.opts != opts || !bytes.Equal(entry.input, input) {
+	if !ok || entry.baseModel != baseModel || entry.authProvider != authProvider || entry.opts != opts || !bytes.Equal(entry.input, input) {
 		codexMetrics.memoBodyMiss.Add(1)
 		return nil
 	}
@@ -124,7 +125,7 @@ func (m *codexFinalUpstreamBodyMemo) getSharedWithHash(hash uint64, baseModel st
 	return entry.output
 }
 
-func (m *codexFinalUpstreamBodyMemo) set(baseModel string, opts codexFinalUpstreamBodyOptions, input []byte, output []byte) {
+func (m *codexFinalUpstreamBodyMemo) set(baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte, output []byte) {
 	if m == nil || len(input) == 0 || len(output) == 0 {
 		return
 	}
@@ -132,11 +133,11 @@ func (m *codexFinalUpstreamBodyMemo) set(baseModel string, opts codexFinalUpstre
 	if size > codexFinalUpstreamBodyMemoMaxItem || size > codexFinalUpstreamBodyMemoMaxBytes {
 		return
 	}
-	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, input)
-	m.setWithHash(hash, baseModel, opts, input, output)
+	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, authProvider, opts, input)
+	m.setWithHash(hash, baseModel, authProvider, opts, input, output)
 }
 
-func (m *codexFinalUpstreamBodyMemo) setWithHash(hash uint64, baseModel string, opts codexFinalUpstreamBodyOptions, input []byte, output []byte) {
+func (m *codexFinalUpstreamBodyMemo) setWithHash(hash uint64, baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte, output []byte) {
 	if m == nil || len(input) == 0 || len(output) == 0 {
 		return
 	}
@@ -176,11 +177,12 @@ func (m *codexFinalUpstreamBodyMemo) setWithHash(hash uint64, baseModel string, 
 	}
 
 	entry := &codexFinalUpstreamBodyMemoEntry{
-		baseModel: baseModel,
-		opts:      opts,
-		input:     bytes.Clone(input),
-		output:    bytes.Clone(output),
-		size:      size,
+		baseModel:    baseModel,
+		authProvider: authProvider,
+		opts:         opts,
+		input:        bytes.Clone(input),
+		output:       bytes.Clone(output),
+		size:         size,
 	}
 	entry.elem = pushBackHash(m.order, hash)
 	m.entries[hash] = entry
@@ -326,8 +328,9 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 		codexMetrics.memoBodyMiss.Add(1)
 		return normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
 	}
-	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, opts, body)
-	if cached := globalCodexFinalUpstreamBodyMemo.getSharedWithHash(hash, baseModel, opts, body); cached != nil {
+	authProvider := codexFinalUpstreamBodyMemoAuthProvider(auth)
+	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, authProvider, opts, body)
+	if cached := globalCodexFinalUpstreamBodyMemo.getSharedWithHash(hash, baseModel, authProvider, opts, body); cached != nil {
 		return cached
 	}
 
@@ -337,14 +340,22 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 	// singleflight channel/goroutine hop keeps per-request latency lower for
 	// the common case where each request's body is unique.
 	out := normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
-	globalCodexFinalUpstreamBodyMemo.setWithHash(hash, baseModel, opts, body, out)
+	globalCodexFinalUpstreamBodyMemo.setWithHash(hash, baseModel, authProvider, opts, body, out)
 	return out
 }
 
-func hashCodexFinalUpstreamBodyMemoKey(baseModel string, opts codexFinalUpstreamBodyOptions, input []byte) uint64 {
+func codexFinalUpstreamBodyMemoAuthProvider(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(auth.Provider))
+}
+
+func hashCodexFinalUpstreamBodyMemoKey(baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) uint64 {
 	var h maphash.Hash
 	h.SetSeed(codexMemoHashSeed)
 	_, _ = h.WriteString(baseModel)
+	_, _ = h.WriteString(authProvider)
 	_, _ = h.Write([]byte{
 		byte(opts.requestKind),
 		byte(opts.streamMode),

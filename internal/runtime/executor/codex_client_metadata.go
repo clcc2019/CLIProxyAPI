@@ -25,16 +25,17 @@ const (
 	codexHeaderMemgenRequest     = "X-OpenAI-Memgen-Request"
 	codexWireHeaderMemgenRequest = "X-Openai-Memgen-Request"
 
-	codexClientMetadataInstallationID = "x-codex-installation-id"
-	codexClientMetadataSessionID      = "session_id"
-	codexClientMetadataThreadID       = "thread_id"
-	codexClientMetadataTurnID         = "turn_id"
-	codexClientMetadataWindowID       = "x-codex-window-id"
-	codexClientMetadataParentThreadID = "x-codex-parent-thread-id"
-	codexClientMetadataSubagent       = "x-openai-subagent"
-	codexClientMetadataTurnMetadata   = "x-codex-turn-metadata"
-	codexWSClientMetadataTraceparent  = "ws_request_header_traceparent"
-	codexWSClientMetadataTracestate   = "ws_request_header_tracestate"
+	codexClientMetadataInstallationID  = "x-codex-installation-id"
+	codexClientMetadataSessionID       = "session_id"
+	codexClientMetadataThreadID        = "thread_id"
+	codexClientMetadataTurnID          = "turn_id"
+	codexClientMetadataWindowID        = "x-codex-window-id"
+	codexClientMetadataParentThreadID  = "x-codex-parent-thread-id"
+	codexClientMetadataSubagent        = "x-openai-subagent"
+	codexClientMetadataTurnMetadata    = "x-codex-turn-metadata"
+	codexWSClientMetadataTraceparent   = "ws_request_header_traceparent"
+	codexWSClientMetadataTracestate    = "ws_request_header_tracestate"
+	codexWSClientMetadataResponsesLite = "ws_request_header_x_openai_internal_codex_responses_lite"
 )
 
 var (
@@ -161,6 +162,7 @@ func codexResponsesClientMetadataEntries(dst []codexClientMetadataEntry, target 
 			codexClientMetadataEntry{key: codexWSClientMetadataTraceparent, value: firstNonEmptyHeaderValue(target, source, "Traceparent")},
 			codexClientMetadataEntry{key: codexWSClientMetadataTracestate, value: firstNonEmptyHeaderValue(target, source, "Tracestate")},
 			codexClientMetadataEntry{key: codexClientMetadataWSStreamRequestStartMS, value: streamStartMS},
+			codexClientMetadataEntry{key: codexWSClientMetadataResponsesLite, value: firstNonEmptyHeaderValue(target, source, codexWireHeaderOpenAIInternalCodexResponsesLite)},
 		)
 	}
 	return dst

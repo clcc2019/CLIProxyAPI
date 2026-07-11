@@ -47,23 +47,26 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 		includeRequestID: requestKind != codexFinalUpstreamCompact,
 	})
 	codexEnsureResponsesIdentityHeaders(headers, ginHeaders)
+	installationID := codexResolvedInstallationID(headers, ginHeaders, auth, cfg)
 	if requestKind == codexFinalUpstreamCompact {
 		codexEnsureCompactTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
-			sessionID: sessionID,
-			threadID:  trimHeaderValue(headers, codexHeaderThreadID),
-			turnID:    uuid.NewString(),
-			sandbox:   codexDefaultSandboxTag,
-			windowID:  trimHeaderValue(headers, codexHeaderWindowID),
+			installationID: installationID,
+			sessionID:      sessionID,
+			threadID:       trimHeaderValue(headers, codexHeaderThreadID),
+			turnID:         uuid.NewString(),
+			sandbox:        codexDefaultSandboxTag,
+			windowID:       trimHeaderValue(headers, codexHeaderWindowID),
 		})
 		codexEnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	} else {
 		codexEnsureTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
-			requestKind: codexTurnRequestKind,
-			sessionID:   sessionID,
-			threadID:    trimHeaderValue(headers, codexHeaderThreadID),
-			turnID:      uuid.NewString(),
-			sandbox:     codexDefaultSandboxTag,
-			windowID:    trimHeaderValue(headers, codexHeaderWindowID),
+			installationID: installationID,
+			requestKind:    codexTurnRequestKind,
+			sessionID:      sessionID,
+			threadID:       trimHeaderValue(headers, codexHeaderThreadID),
+			turnID:         uuid.NewString(),
+			sandbox:        codexDefaultSandboxTag,
+			windowID:       trimHeaderValue(headers, codexHeaderWindowID),
 		})
 		codexEnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	}
@@ -74,7 +77,7 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 		codexSetSingleHeaderValue(headers, "Accept", "application/json")
 	}
 
-	codexSetSingleHeaderValue(headers, "Originator", identity.originator)
+	codexSetOriginatorHeader(headers, identity.originator)
 	// Residency precedence: inbound gin header > cfg default. Avoid the
 	// unnecessary target re-check from the previous implementation; we always
 	// enter this block with a freshly applied `Originator` and never set the
@@ -109,6 +112,30 @@ func trimHeaderValue(h http.Header, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(codexHeaderGet(h, key))
+}
+
+func codexSetOriginatorHeader(headers http.Header, originator string) {
+	if headers == nil {
+		return
+	}
+	originator = strings.TrimSpace(originator)
+	if originator == "" || originator == codexOriginator {
+		headers.Del("Originator")
+		return
+	}
+	headers.Set("Originator", originator)
+}
+
+func codexApplyResponsesLiteHeader(headers http.Header, baseModel string) {
+	if headers == nil {
+		return
+	}
+	capabilities, ok := codexClientModelCapabilitiesForModel(baseModel)
+	if ok && capabilities.UseResponsesLite {
+		headers.Set(codexWireHeaderOpenAIInternalCodexResponsesLite, "true")
+		return
+	}
+	headers.Del(codexWireHeaderOpenAIInternalCodexResponsesLite)
 }
 
 func codexSetHeaderCasePreserved(headers http.Header, key string, value string) {

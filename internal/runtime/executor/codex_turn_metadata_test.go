@@ -86,6 +86,7 @@ func TestCodexEnsureTurnMetadataHeaderAugmentsClientHeader(t *testing.T) {
 	source.Set(codexHeaderTurnMetadata, `{"turn_id":"turn-client","sandbox":"danger-full-access"}`)
 
 	codexEnsureTurnMetadataHeader(headers, source, codexTurnMetadataDefaults{
+		installationID:         "install-1",
 		requestKind:            codexTurnRequestKind,
 		sessionID:              "session-1",
 		threadID:               "thread-1",
@@ -106,6 +107,7 @@ func TestCodexEnsureTurnMetadataHeaderAugmentsClientHeader(t *testing.T) {
 		"request_kind":          codexTurnRequestKind,
 		"session_id":            "session-1",
 		"thread_id":             "thread-1",
+		"installation_id":       "install-1",
 		"forked_from_thread_id": "fork-1",
 		"parent_thread_id":      "parent-1",
 		"subagent_kind":         "review",
@@ -193,6 +195,7 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 		"session_id":                              "client-session",
 		"thread_id":                               "client-thread",
 		"turn_id":                                 "client-turn",
+		"installation_id":                         "client-install",
 		"turn_started_at_unix_ms":                 "client-start",
 		"forked_from_thread_id":                   "client-fork",
 		"parent_thread_id":                        "client-parent",
@@ -202,6 +205,7 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 		codexWindowIDMetadataPath:                 "client-window",
 		codexClientMetadataInstallationID:         "install-1",
 		codexWSClientMetadataTraceparent:          "trace-1",
+		codexWSClientMetadataResponsesLite:        "true",
 		codexClientMetadataWSStreamRequestStartMS: "1234",
 	})
 
@@ -231,8 +235,10 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 	}
 	for _, key := range []string{
 		codexCompactionMetadataPath,
+		"installation_id",
 		codexClientMetadataInstallationID,
 		codexWSClientMetadataTraceparent,
+		codexWSClientMetadataResponsesLite,
 		codexClientMetadataWSStreamRequestStartMS,
 	} {
 		if _, ok := parsed[key]; ok {
@@ -316,6 +322,7 @@ func TestCodexEnsureCompactTurnMetadataHeaderAddsCompactionMetadata(t *testing.T
 	source.Set(codexHeaderCompactionPhase, "standalone turn")
 
 	codexEnsureCompactTurnMetadataHeader(headers, source, codexTurnMetadataDefaults{
+		installationID:         "install-1",
 		sessionID:              "session-1",
 		threadID:               "thread-1",
 		turnID:                 "turn-1",
@@ -331,6 +338,9 @@ func TestCodexEnsureCompactTurnMetadataHeaderAddsCompactionMetadata(t *testing.T
 	compaction, ok := parsed["compaction"].(map[string]any)
 	if !ok {
 		t.Fatalf("compaction metadata missing or wrong type in %s", headers.Get(codexHeaderTurnMetadata))
+	}
+	if got, _ := parsed["installation_id"].(string); got != "install-1" {
+		t.Fatalf("installation_id = %q, want install-1 in %s", got, headers.Get(codexHeaderTurnMetadata))
 	}
 	for key, want := range map[string]string{
 		"trigger":        "manual",

@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -122,6 +123,39 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsIncompatibleReasoningSignatu
 	}
 	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "user" {
 		t.Fatalf("first message role = %q, want user. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_FunctionCallOutputPreservesStructuredContent(t *testing.T) {
+	const imageB64 = "iVBORw0KGgo="
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"function_call","call_id":"call_view_1","name":"view_image","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_view_1","output":[
+				{"type":"output_text","text":"preview"},
+				{"type":"input_image","image_url":"data:image/png;base64,` + imageB64 + `"},
+				{"type":"input_file","file_data":"data:application/pdf;base64,JVBERi0="}
+			]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	toolResult := gjson.GetBytes(out, "messages.1.content.0")
+	if got := toolResult.Get("content.0.text").String(); got != "preview" {
+		t.Fatalf("text content = %q, want preview. Output: %s", got, out)
+	}
+	if got := toolResult.Get("content.1.source.media_type").String(); got != "image/png" {
+		t.Fatalf("image media_type = %q, want image/png. Output: %s", got, out)
+	}
+	if got := toolResult.Get("content.1.source.data").String(); got != imageB64 {
+		t.Fatalf("image data = %q, want raw base64", got)
+	}
+	if got := toolResult.Get("content.2.type").String(); got != "document" {
+		t.Fatalf("file content type = %q, want document. Output: %s", got, out)
+	}
+	if strings.Contains(toolResult.Get("content").Raw, "data:image") {
+		t.Fatalf("tool_result content must not embed image data URL as text. Output: %s", out)
 	}
 }
 

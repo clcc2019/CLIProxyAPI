@@ -33,6 +33,19 @@ func TestCodexApplyHTTPClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	}
 }
 
+func TestCodexApplyWebsocketClientMetadataIncludesResponsesLiteHeader(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
+	headers := http.Header{
+		codexWireHeaderOpenAIInternalCodexResponsesLite: []string{"true"},
+	}
+
+	got := codexApplyWebsocketClientMetadataWithStreamStartMS(context.Background(), body, headers, nil, nil, "123")
+
+	if value := gjson.GetBytes(got, "client_metadata."+codexWSClientMetadataResponsesLite).String(); value != "true" {
+		t.Fatalf("%s = %q, want true; body=%s", codexWSClientMetadataResponsesLite, value, got)
+	}
+}
+
 func TestCodexApplyHTTPClientMetadataKeepsOAuthDefault(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(body))

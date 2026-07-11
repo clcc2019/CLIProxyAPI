@@ -13,9 +13,9 @@ func TestCodexFinalUpstreamBodyMemoSkipsOversizedEntry(t *testing.T) {
 	opts := codexFinalUpstreamBodyOptions{requestKind: codexFinalUpstreamResponses, streamMode: codexStreamFieldTrue}
 	input := bytes.Repeat([]byte("x"), codexFinalUpstreamBodyMemoMaxItem+1)
 
-	memo.set("gpt-5", opts, input, []byte(`{"ok":true}`))
+	memo.set("gpt-5", "codex", opts, input, []byte(`{"ok":true}`))
 
-	if got := memo.get("gpt-5", opts, input); got != nil {
+	if got := memo.get("gpt-5", "codex", opts, input); got != nil {
 		t.Fatalf("oversized memo entry was cached: %d bytes", len(got))
 	}
 	if memo.bytes != 0 || len(memo.entries) != 0 || memo.orderLen() != 0 {
@@ -28,11 +28,11 @@ func TestCodexFinalUpstreamBodyMemoPublicGetReturnsClone(t *testing.T) {
 	opts := codexFinalUpstreamBodyOptions{requestKind: codexFinalUpstreamResponses, streamMode: codexStreamFieldTrue}
 	input := []byte(`{"model":"gpt-5.4"}`)
 	output := []byte(`{"model":"gpt-5.4","stream":true}`)
-	memo.set("gpt-5.4", opts, input, output)
+	memo.set("gpt-5.4", "codex", opts, input, output)
 
-	first := memo.get("gpt-5.4", opts, input)
+	first := memo.get("gpt-5.4", "codex", opts, input)
 	first[0] = '['
-	second := memo.get("gpt-5.4", opts, input)
+	second := memo.get("gpt-5.4", "codex", opts, input)
 	if !bytes.Equal(second, output) {
 		t.Fatalf("memo get exposed internal output: %s", second)
 	}
@@ -117,13 +117,13 @@ func TestCodexFinalUpstreamBodyMemoIncrementalEviction(t *testing.T) {
 		if i == totalEntries-1 {
 			lastInput = bytes.Clone(in)
 		}
-		memo.set("gpt-5", opts, in, payload)
+		memo.set("gpt-5", "codex", opts, in, payload)
 	}
 
-	if got := memo.get("gpt-5", opts, lastInput); got == nil {
+	if got := memo.get("gpt-5", "codex", opts, lastInput); got == nil {
 		t.Fatal("most recent entry was evicted — incremental eviction broken")
 	}
-	if got := memo.get("gpt-5", opts, firstInput); got != nil {
+	if got := memo.get("gpt-5", "codex", opts, firstInput); got != nil {
 		t.Fatal("expected the oldest entry to be evicted once the byte budget was exceeded")
 	}
 	if memo.orderLen() == 0 {

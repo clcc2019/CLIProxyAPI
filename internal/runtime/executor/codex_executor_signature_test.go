@@ -38,7 +38,7 @@ func TestCodexExecutorNormalizesGPT56SolReasoningForUpstream(t *testing.T) {
 	}{
 		{effort: "xhigh", want: "high"},
 		{effort: "max", want: "high"},
-		{effort: "ultra", want: "ultra"},
+		{effort: "ultra", want: "high"},
 	} {
 		t.Run(tt.effort, func(t *testing.T) {
 			var gotBody []byte

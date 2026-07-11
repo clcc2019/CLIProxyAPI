@@ -20,12 +20,12 @@ func TestCodexMetricsBodyAndPromptHitsMiss(t *testing.T) {
 	input := []byte(`{"model":"gpt-5"}`)
 	output := []byte(`{"model":"gpt-5","normalized":true}`)
 	// First lookup misses (entry not yet inserted).
-	if got := m.get("gpt-5", opts, input); got != nil {
+	if got := m.get("gpt-5", "codex", opts, input); got != nil {
 		t.Fatalf("initial get should miss, got %q", got)
 	}
 	// Populate the entry and confirm the next get is a hit.
-	m.set("gpt-5", opts, input, output)
-	if got := m.get("gpt-5", opts, input); !bytes.Equal(got, output) {
+	m.set("gpt-5", "codex", opts, input, output)
+	if got := m.get("gpt-5", "codex", opts, input); !bytes.Equal(got, output) {
 		t.Fatalf("memo get returned %q, want %q", got, output)
 	}
 

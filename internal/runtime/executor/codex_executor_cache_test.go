@@ -181,38 +181,42 @@ func TestHashCodexFinalUpstreamBodyMemoKeyIsDeterministicAndDistinguishing(t *te
 		streamMode:  codexStreamFieldTrue,
 	}
 
-	key := hashCodexFinalUpstreamBodyMemoKey("gpt-5", opts, payload)
-	if keyAgain := hashCodexFinalUpstreamBodyMemoKey("gpt-5", opts, payload); keyAgain != key {
+	key := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", opts, payload)
+	if keyAgain := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", opts, payload); keyAgain != key {
 		t.Fatalf("same payload produced different memo keys")
 	}
 
 	otherPayload := bytes.Clone(payload)
 	otherPayload[len(otherPayload)-3] = 'x'
-	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", opts, otherPayload); otherKey == key {
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", opts, otherPayload); otherKey == key {
 		t.Fatalf("different payloads produced same memo key")
+	}
+
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "openai-compatibility", opts, payload); otherKey == key {
+		t.Fatalf("different auth providers produced same memo key")
 	}
 
 	otherOpts := opts
 	otherOpts.streamMode = codexStreamFieldDelete
-	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", otherOpts, payload); otherKey == key {
 		t.Fatalf("different options produced same memo key")
 	}
 
 	otherOpts = opts
 	otherOpts.preserveGenerate = true
-	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", otherOpts, payload); otherKey == key {
 		t.Fatalf("different preserveGenerate option produced same memo key")
 	}
 
 	otherOpts = opts
 	otherOpts.omitServiceTier = true
-	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", otherOpts, payload); otherKey == key {
 		t.Fatalf("different omitServiceTier option produced same memo key")
 	}
 
 	otherOpts = opts
 	otherOpts.suppressDefaultInstructions = true
-	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", otherOpts, payload); otherKey == key {
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", otherOpts, payload); otherKey == key {
 		t.Fatalf("different suppressDefaultInstructions option produced same memo key")
 	}
 }
@@ -227,7 +231,7 @@ func BenchmarkHashCodexFinalUpstreamBodyMemoKeyLargePayload(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = hashCodexFinalUpstreamBodyMemoKey("gpt-5", opts, payload)
+		_ = hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", opts, payload)
 	}
 }
 
@@ -1151,15 +1155,15 @@ func TestPrepareCodexHTTPCallPreservesServiceTierWhenAuthOptedIn(t *testing.T) {
 		"",
 		"https://example.com/responses",
 		req,
-		[]byte(`{"model":"gpt-5.4","input":"hello","service_tier":"flex"}`),
+		[]byte(`{"model":"gpt-5.4","input":"hello","service_tier":"fast"}`),
 		"oauth-token",
 		true,
 	)
 	if err != nil {
 		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
 	}
-	if got := gjson.GetBytes(call.prepared.body, "service_tier").String(); got != "flex" {
-		t.Fatalf("service_tier = %q, want flex; body=%s", got, call.prepared.body)
+	if got := gjson.GetBytes(call.prepared.body, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority; body=%s", got, call.prepared.body)
 	}
 }
 

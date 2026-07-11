@@ -11,20 +11,30 @@ type codexClientModelCapabilityPayload struct {
 }
 
 type codexClientModelCapability struct {
-	Slug                       string  `json:"slug"`
-	SupportsParallelToolCalls  *bool   `json:"supports_parallel_tool_calls"`
-	SupportsReasoningSummaries *bool   `json:"supports_reasoning_summaries"`
-	DefaultReasoningLevel      *string `json:"default_reasoning_level"`
-	SupportVerbosity           *bool   `json:"support_verbosity"`
-	DefaultVerbosity           *string `json:"default_verbosity"`
+	Slug                        string  `json:"slug"`
+	SupportsParallelToolCalls   *bool   `json:"supports_parallel_tool_calls"`
+	SupportsReasoningSummaries  *bool   `json:"supports_reasoning_summaries"`
+	DefaultReasoningLevel       *string `json:"default_reasoning_level"`
+	SupportVerbosity            *bool   `json:"support_verbosity"`
+	DefaultVerbosity            *string `json:"default_verbosity"`
+	UseResponsesLite            *bool   `json:"use_responses_lite"`
+	SupportsImageDetailOriginal *bool   `json:"supports_image_detail_original"`
+	ServiceTiers                []struct {
+		ID string `json:"id"`
+	} `json:"service_tiers"`
+	DefaultServiceTier *string `json:"default_service_tier"`
 }
 
 type CodexClientModelCapabilities struct {
-	SupportsParallelToolCalls  bool
-	SupportsReasoningSummaries bool
-	DefaultReasoningLevel      string
-	SupportsVerbosity          bool
-	DefaultVerbosity           string
+	SupportsParallelToolCalls   bool
+	SupportsReasoningSummaries  bool
+	DefaultReasoningLevel       string
+	SupportsVerbosity           bool
+	DefaultVerbosity            string
+	UseResponsesLite            bool
+	SupportsImageDetailOriginal bool
+	ServiceTiers                []string
+	DefaultServiceTier          string
 }
 
 var (
@@ -78,12 +88,23 @@ func loadCodexClientModelCapabilities() {
 			if slug == "" {
 				continue
 			}
+			serviceTiers := make([]string, 0, len(model.ServiceTiers))
+			for _, tier := range model.ServiceTiers {
+				id := strings.TrimSpace(tier.ID)
+				if id != "" {
+					serviceTiers = append(serviceTiers, id)
+				}
+			}
 			codexClientModelCapabilityMap[slug] = CodexClientModelCapabilities{
-				SupportsParallelToolCalls:  boolPtrValue(model.SupportsParallelToolCalls),
-				SupportsReasoningSummaries: boolPtrValue(model.SupportsReasoningSummaries),
-				DefaultReasoningLevel:      stringPtrValue(model.DefaultReasoningLevel),
-				SupportsVerbosity:          boolPtrValue(model.SupportVerbosity),
-				DefaultVerbosity:           stringPtrValue(model.DefaultVerbosity),
+				SupportsParallelToolCalls:   boolPtrValue(model.SupportsParallelToolCalls),
+				SupportsReasoningSummaries:  boolPtrValue(model.SupportsReasoningSummaries),
+				DefaultReasoningLevel:       stringPtrValue(model.DefaultReasoningLevel),
+				SupportsVerbosity:           boolPtrValue(model.SupportVerbosity),
+				DefaultVerbosity:            stringPtrValue(model.DefaultVerbosity),
+				UseResponsesLite:            boolPtrValue(model.UseResponsesLite),
+				SupportsImageDetailOriginal: boolPtrValue(model.SupportsImageDetailOriginal),
+				ServiceTiers:                serviceTiers,
+				DefaultServiceTier:          stringPtrValue(model.DefaultServiceTier),
 			}
 		}
 	})

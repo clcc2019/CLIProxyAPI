@@ -366,10 +366,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				flushPendingReasoning()
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
-				outputStr := item.Get("output").String()
+				output := item.Get("output")
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
+				toolResult = applyResponsesToolResultContent(toolResult, output)
 
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
@@ -494,6 +494,94 @@ func responsesReasoningSummaryText(item gjson.Result) string {
 		})
 	}
 	return builder.String()
+}
+
+func applyResponsesToolResultContent(toolResult []byte, output gjson.Result) []byte {
+	if output.Exists() && output.IsArray() {
+		partsJSON := make([][]byte, 0)
+		output.ForEach(func(_, part gjson.Result) bool {
+			if partJSON := convertResponsesContentPartToClaude(part); len(partJSON) > 0 {
+				partsJSON = append(partsJSON, partJSON)
+			}
+			return true
+		})
+		if len(partsJSON) == 0 {
+			toolResult, _ = sjson.SetBytes(toolResult, "content", output.Raw)
+			return toolResult
+		}
+		if len(partsJSON) == 1 && gjson.GetBytes(partsJSON[0], "type").String() == "text" {
+			toolResult, _ = sjson.SetBytes(toolResult, "content", gjson.GetBytes(partsJSON[0], "text").String())
+			return toolResult
+		}
+		contentJSON := []byte("[]")
+		for _, partJSON := range partsJSON {
+			contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", partJSON)
+		}
+		toolResult, _ = sjson.SetRawBytes(toolResult, "content", contentJSON)
+		return toolResult
+	}
+	toolResult, _ = sjson.SetBytes(toolResult, "content", output.String())
+	return toolResult
+}
+
+func convertResponsesContentPartToClaude(part gjson.Result) []byte {
+	switch part.Get("type").String() {
+	case "input_text", "output_text":
+		if text := part.Get("text"); text.Exists() {
+			contentPart := []byte(`{"type":"text","text":""}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "text", text.String())
+			return contentPart
+		}
+	case "input_image":
+		url := part.Get("image_url").String()
+		if url == "" {
+			url = part.Get("url").String()
+		}
+		if url == "" {
+			return nil
+		}
+		if strings.HasPrefix(url, "data:") {
+			mediaAndData := strings.SplitN(strings.TrimPrefix(url, "data:"), ";base64,", 2)
+			if len(mediaAndData) != 2 || mediaAndData[1] == "" {
+				return nil
+			}
+			mediaType := mediaAndData[0]
+			if mediaType == "" {
+				mediaType = "application/octet-stream"
+			}
+			contentPart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+			contentPart, _ = sjson.SetBytes(contentPart, "source.data", mediaAndData[1])
+			return contentPart
+		}
+		contentPart := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
+		return contentPart
+	case "input_file":
+		fileData := part.Get("file_data").String()
+		if fileData == "" {
+			return nil
+		}
+		mediaType := "application/octet-stream"
+		data := fileData
+		if strings.HasPrefix(fileData, "data:") {
+			mediaAndData := strings.SplitN(strings.TrimPrefix(fileData, "data:"), ";base64,", 2)
+			if len(mediaAndData) == 2 {
+				if mediaAndData[0] != "" {
+					mediaType = mediaAndData[0]
+				}
+				data = mediaAndData[1]
+			}
+		}
+		if data == "" {
+			return nil
+		}
+		contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+		return contentPart
+	}
+	return nil
 }
 
 func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string]string) [][]byte {

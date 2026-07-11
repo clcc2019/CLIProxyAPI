@@ -27,6 +27,9 @@ type ConvertCodexResponseToClaudeParams struct {
 	HasToolCall               bool
 	BlockIndex                int
 	HasReceivedArgumentsDelta bool
+	FunctionCallBlockOpen     bool
+	FunctionCallBlockCallID   string
+	FunctionCallBlockIndex    int
 	HasTextDelta              bool
 	TextBlockOpen             bool
 	ThinkingBlockOpen         bool
@@ -38,8 +41,16 @@ type ConvertCodexResponseToClaudeParams struct {
 	// the original Claude request. It is lazily built once per stream and
 	// reused across every tool-call event so the tools array is only parsed
 	// once per conversation instead of once per event.
-	reverseNameMap    map[string]string
-	reverseNameMapSet bool
+	reverseNameMap             map[string]string
+	reverseNameMapSet          bool
+	PendingFunctionCalls       map[string]*pendingCodexFunctionCall
+	LastPendingFunctionCallKey string
+}
+
+type pendingCodexFunctionCall struct {
+	CallID                    string
+	Arguments                 string
+	HasReceivedArgumentsDelta bool
 }
 
 // reverseToolNameMap returns the short→original tool name mapping for the
@@ -154,6 +165,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
 	} else if typeStr == "response.completed" || typeStr == "response.incomplete" {
 		responseData := rootResult.Get("response")
+		output = hydrateOpenCodexFunctionCallFromTerminal(output, params, responseData)
+		output = append(output, finalizeCodexOpenContentBlocks(params)...)
+		output = appendPendingCodexFunctionCallsFromTerminal(output, params, originalRequestRawJSON, responseData)
 		stopReason := mapCodexStopReasonToClaude(codexStopReason(responseData), params.HasToolCall)
 		stopSeqRaw := codexStopSequenceRaw(responseData)
 		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
@@ -179,6 +193,14 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			template = buildClaudeInputJSONDelta(params.BlockIndex, "")
 
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+			if itemType == "function_call" {
+				params.FunctionCallBlockOpen = true
+				params.FunctionCallBlockCallID = itemResult.Get("call_id").String()
+				params.FunctionCallBlockIndex = params.BlockIndex
+			}
+		} else if itemType == "function_call" {
+			output = append(output, finalizeCodexThinkingBlock(params)...)
+			recordPendingCodexFunctionCall(params, rootResult, itemResult)
 		} else if itemType == "reasoning" {
 			params.ThinkingSummarySeen = false
 			params.ThinkingContentSeen = false
@@ -225,13 +247,38 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.BlockIndex++
 			params.HasTextDelta = true
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
-		} else if _, _, inputRaw, ok := codexClaudeToolUseFields(itemResult, params.reverseToolNameMap(originalRequestRawJSON)); ok {
+		} else if id, name, inputRaw, ok := codexClaudeToolUseFields(itemResult, params.reverseToolNameMap(originalRequestRawJSON)); ok {
+			if itemType == "function_call" {
+				if pending, pendingKeys := pendingCodexFunctionCallForItem(params, rootResult, itemResult); pending != nil {
+					blockIndex := params.BlockIndex
+					template = buildClaudeToolUseStart(blockIndex, id, name)
+					output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
+					params.HasToolCall = true
+					if pending.Arguments != "" {
+						inputRaw = pending.Arguments
+					}
+					if inputRaw != "{}" && inputRaw != "" {
+						template = buildClaudeInputJSONDelta(blockIndex, inputRaw)
+						output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+					}
+					template = buildClaudeContentBlockStop(blockIndex)
+					output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
+					params.BlockIndex++
+					deletePendingCodexFunctionCallAliases(params, pendingKeys)
+					return [][]byte{output}
+				}
+			}
 			if !params.HasReceivedArgumentsDelta && inputRaw != "{}" {
 				template = buildClaudeInputJSONDelta(params.BlockIndex, inputRaw)
 				output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 			}
 			template = buildClaudeContentBlockStop(params.BlockIndex)
 			params.BlockIndex++
+			if itemType == "function_call" {
+				params.FunctionCallBlockOpen = false
+				params.FunctionCallBlockCallID = ""
+				params.FunctionCallBlockIndex = 0
+			}
 
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
 		} else if itemType == "reasoning" {
@@ -255,11 +302,22 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.ThinkingContentSeen = false
 		}
 	} else if typeStr == "response.function_call_arguments.delta" {
+		if pending, _ := pendingCodexFunctionCallForKey(params, codexArgumentsFunctionCallKey(params, rootResult)); pending != nil {
+			pending.HasReceivedArgumentsDelta = true
+			pending.Arguments += rootResult.Get("delta").String()
+			return [][]byte{output}
+		}
 		params.HasReceivedArgumentsDelta = true
 		template = buildClaudeInputJSONDelta(params.BlockIndex, rootResult.Get("delta").String())
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 	} else if typeStr == "response.function_call_arguments.done" {
+		if pending, _ := pendingCodexFunctionCallForKey(params, codexArgumentsFunctionCallKey(params, rootResult)); pending != nil {
+			if !pending.HasReceivedArgumentsDelta {
+				pending.Arguments = rootResult.Get("arguments").String()
+			}
+			return [][]byte{output}
+		}
 		if !params.HasReceivedArgumentsDelta {
 			if args := rootResult.Get("arguments").String(); args != "" {
 				template = buildClaudeInputJSONDelta(params.BlockIndex, args)
@@ -434,6 +492,182 @@ func codexClaudeToolUseFields(item gjson.Result, revNames map[string]string) (id
 	return id, name, inputRaw, true
 }
 
+func codexFunctionCallKey(rootResult, itemResult gjson.Result) string {
+	if outputIndex := rootResult.Get("output_index"); outputIndex.Exists() {
+		return "output:" + outputIndex.Raw
+	}
+	if callID := itemResult.Get("call_id").String(); callID != "" {
+		return "call:" + callID
+	}
+	return "last"
+}
+
+func codexArgumentsFunctionCallKey(params *ConvertCodexResponseToClaudeParams, rootResult gjson.Result) string {
+	if outputIndex := rootResult.Get("output_index"); outputIndex.Exists() {
+		return "output:" + outputIndex.Raw
+	}
+	if params == nil {
+		return ""
+	}
+	return params.LastPendingFunctionCallKey
+}
+
+func recordPendingCodexFunctionCall(params *ConvertCodexResponseToClaudeParams, rootResult, itemResult gjson.Result) {
+	if params == nil {
+		return
+	}
+	if params.PendingFunctionCalls == nil {
+		params.PendingFunctionCalls = make(map[string]*pendingCodexFunctionCall)
+	}
+	pending := &pendingCodexFunctionCall{CallID: itemResult.Get("call_id").String()}
+	key := codexFunctionCallKey(rootResult, itemResult)
+	params.PendingFunctionCalls[key] = pending
+	if pending.CallID != "" {
+		params.PendingFunctionCalls["call:"+pending.CallID] = pending
+	}
+	params.LastPendingFunctionCallKey = key
+}
+
+func pendingCodexFunctionCallForKey(params *ConvertCodexResponseToClaudeParams, key string) (*pendingCodexFunctionCall, string) {
+	if params == nil || params.PendingFunctionCalls == nil || key == "" {
+		return nil, ""
+	}
+	pending, ok := params.PendingFunctionCalls[key]
+	if !ok {
+		return nil, ""
+	}
+	return pending, key
+}
+
+func pendingCodexFunctionCallForItem(params *ConvertCodexResponseToClaudeParams, rootResult, itemResult gjson.Result) (*pendingCodexFunctionCall, []string) {
+	if params == nil || params.PendingFunctionCalls == nil {
+		return nil, nil
+	}
+	keys := []string{codexFunctionCallKey(rootResult, itemResult)}
+	if callID := itemResult.Get("call_id").String(); callID != "" {
+		keys = append(keys, "call:"+callID)
+	}
+	if !rootResult.Get("output_index").Exists() && params.LastPendingFunctionCallKey != "" {
+		keys = append(keys, params.LastPendingFunctionCallKey)
+	}
+	for _, key := range keys {
+		if pending, ok := params.PendingFunctionCalls[key]; ok {
+			return pending, pendingCodexFunctionCallAliases(params, pending)
+		}
+	}
+	return nil, nil
+}
+
+func pendingCodexFunctionCallAliases(params *ConvertCodexResponseToClaudeParams, pending *pendingCodexFunctionCall) []string {
+	if params == nil || pending == nil {
+		return nil
+	}
+	keys := make([]string, 0, 2)
+	for key, candidate := range params.PendingFunctionCalls {
+		if candidate == pending {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func deletePendingCodexFunctionCallAliases(params *ConvertCodexResponseToClaudeParams, keys []string) {
+	if params == nil {
+		return
+	}
+	for _, key := range keys {
+		delete(params.PendingFunctionCalls, key)
+		if params.LastPendingFunctionCallKey == key {
+			params.LastPendingFunctionCallKey = ""
+		}
+	}
+}
+
+func hydrateOpenCodexFunctionCallFromTerminal(output []byte, params *ConvertCodexResponseToClaudeParams, responseData gjson.Result) []byte {
+	if params == nil || !params.FunctionCallBlockOpen || params.HasReceivedArgumentsDelta {
+		return output
+	}
+	responseData.Get("output").ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() != "function_call" || item.Get("call_id").String() != params.FunctionCallBlockCallID {
+			return true
+		}
+		if args := item.Get("arguments").String(); args != "" {
+			template := buildClaudeInputJSONDelta(params.FunctionCallBlockIndex, args)
+			output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+			params.HasReceivedArgumentsDelta = true
+		}
+		return false
+	})
+	return output
+}
+
+func finalizeCodexOpenContentBlocks(params *ConvertCodexResponseToClaudeParams) []byte {
+	if params == nil {
+		return nil
+	}
+	output := make([]byte, 0, 256)
+	output = append(output, finalizeCodexThinkingBlock(params)...)
+	if params.TextBlockOpen {
+		template := buildClaudeContentBlockStop(params.BlockIndex)
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
+		params.TextBlockOpen = false
+		params.BlockIndex++
+	}
+	if params.FunctionCallBlockOpen {
+		template := buildClaudeContentBlockStop(params.FunctionCallBlockIndex)
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
+		if params.BlockIndex <= params.FunctionCallBlockIndex {
+			params.BlockIndex = params.FunctionCallBlockIndex + 1
+		}
+		params.FunctionCallBlockOpen = false
+		params.FunctionCallBlockCallID = ""
+		params.FunctionCallBlockIndex = 0
+	}
+	return output
+}
+
+func appendPendingCodexFunctionCallsFromTerminal(output []byte, params *ConvertCodexResponseToClaudeParams, originalRequestRawJSON []byte, responseData gjson.Result) []byte {
+	if params == nil || len(params.PendingFunctionCalls) == 0 {
+		return output
+	}
+	responseData.Get("output").ForEach(func(index, item gjson.Result) bool {
+		if item.Get("type").String() != "function_call" {
+			return true
+		}
+		root := gjson.Parse(`{"output_index":` + index.Raw + `}`)
+		pending, keys := pendingCodexFunctionCallForItem(params, root, item)
+		if pending == nil {
+			return true
+		}
+		id, name, inputRaw, ok := codexClaudeToolUseFields(item, params.reverseToolNameMap(originalRequestRawJSON))
+		if !ok {
+			deletePendingCodexFunctionCallAliases(params, keys)
+			return true
+		}
+		if pending.Arguments != "" {
+			inputRaw = pending.Arguments
+		}
+		blockIndex := params.BlockIndex
+		template := buildClaudeToolUseStart(blockIndex, id, name)
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
+		params.HasToolCall = true
+		if inputRaw != "" && inputRaw != "{}" {
+			template = buildClaudeInputJSONDelta(blockIndex, inputRaw)
+			output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+		}
+		template = buildClaudeContentBlockStop(blockIndex)
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
+		params.BlockIndex++
+		deletePendingCodexFunctionCallAliases(params, keys)
+		return true
+	})
+	for key := range params.PendingFunctionCalls {
+		delete(params.PendingFunctionCalls, key)
+	}
+	params.LastPendingFunctionCallKey = ""
+	return output
+}
+
 func codexClaudeReasoningText(item gjson.Result) string {
 	var builder strings.Builder
 	if summary := item.Get("summary"); summary.Exists() {
@@ -511,7 +745,7 @@ func mapCodexStopReasonToClaude(stopReason string, hasToolCall bool) string {
 	case "max_tokens", "max_output_tokens":
 		return "max_tokens"
 	case "tool_use", "tool_calls", "function_call":
-		return "tool_use"
+		return "end_turn"
 	case "end_turn", "stop_sequence", "pause_turn", "refusal", "model_context_window_exceeded":
 		return stopReason
 	case "content_filter":

@@ -13,6 +13,7 @@ const (
 	codexHeaderOpenAIBeta                       = "OpenAI-Beta"
 	codexHeaderOpenAISubagent                   = "X-OpenAI-Subagent"
 	codexHeaderOpenAIFedramp                    = "X-OpenAI-Fedramp"
+	codexHeaderOpenAIInternalCodexResponsesLite = "X-OpenAI-Internal-Codex-Responses-Lite"
 	codexHeaderResponsesAPIIncludeTimingMetrics = "x-responsesapi-include-timing-metrics"
 	codexHeaderCompactionTrigger                = "X-Codex-Compaction-Trigger"
 	codexHeaderCompactionReason                 = "X-Codex-Compaction-Reason"
@@ -26,6 +27,7 @@ const (
 	codexWireHeaderOpenAIBeta                       = "Openai-Beta"
 	codexWireHeaderOpenAISubagent                   = "X-Openai-Subagent"
 	codexWireHeaderOpenAIFedramp                    = "X-Openai-Fedramp"
+	codexWireHeaderOpenAIInternalCodexResponsesLite = "X-Openai-Internal-Codex-Responses-Lite"
 	codexWireHeaderResponsesAPIIncludeTimingMetrics = "X-Responsesapi-Include-Timing-Metrics"
 	codexWireHeaderOAIAttestation                   = "X-Oai-Attestation"
 )

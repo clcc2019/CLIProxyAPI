@@ -150,6 +150,7 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	if got := gotHeaders.Get(codexHeaderInstallationID); got == "" {
 		t.Fatalf("%s should be present on responses/compact", codexHeaderInstallationID)
 	}
+	assertCodexTurnMetadataString(t, gotHeaders.Get(codexHeaderTurnMetadata), "installation_id", gotHeaders.Get(codexHeaderInstallationID))
 }
 
 func TestCodexExecutorCompactPrunesOldContextAfterContextLengthError(t *testing.T) {

@@ -156,14 +156,34 @@ func TestCodexClientModelCapabilitiesForModelUsesEmbeddedCatalog(t *testing.T) {
 	if !capabilities.SupportsReasoningSummaries {
 		t.Fatal("gpt-5.4 should support reasoning summaries")
 	}
-	if capabilities.DefaultReasoningLevel != "xhigh" {
-		t.Fatalf("default reasoning level = %q, want xhigh", capabilities.DefaultReasoningLevel)
+	if capabilities.DefaultReasoningLevel != "medium" {
+		t.Fatalf("default reasoning level = %q, want medium", capabilities.DefaultReasoningLevel)
 	}
 	if !capabilities.SupportsVerbosity {
 		t.Fatal("gpt-5.4 should support verbosity")
 	}
 	if capabilities.DefaultVerbosity != "low" {
 		t.Fatalf("default verbosity = %q, want low", capabilities.DefaultVerbosity)
+	}
+	if capabilities.UseResponsesLite {
+		t.Fatal("gpt-5.4 should not use responses_lite in the current official catalog")
+	}
+	if !capabilities.SupportsImageDetailOriginal {
+		t.Fatal("gpt-5.4 should support original image detail")
+	}
+	if len(capabilities.ServiceTiers) != 1 || capabilities.ServiceTiers[0] != "priority" {
+		t.Fatalf("service tiers = %#v, want [priority]", capabilities.ServiceTiers)
+	}
+	if capabilities.DefaultServiceTier != "" {
+		t.Fatalf("default service tier = %q, want empty", capabilities.DefaultServiceTier)
+	}
+
+	gpt52Capabilities, ok := CodexClientModelCapabilitiesForModel("gpt-5.2")
+	if !ok {
+		t.Fatal("expected gpt-5.2 in embedded Codex client model catalog")
+	}
+	if gpt52Capabilities.SupportsImageDetailOriginal {
+		t.Fatal("gpt-5.2 should not support original image detail")
 	}
 
 	if _, ok := CodexClientModelCapabilitiesForModel("unknown-model"); ok {
@@ -264,4 +284,14 @@ func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	}
 
 	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
+}
+
+func TestLookupStaticModelInfoIncludesXAIModels(t *testing.T) {
+	info := LookupStaticModelInfo("grok-4.3")
+	if info == nil {
+		t.Fatal("LookupStaticModelInfo did not find grok-4.3")
+	}
+	if info.Thinking == nil || len(info.Thinking.Levels) == 0 {
+		t.Fatalf("grok-4.3 thinking metadata = %#v, want levels", info.Thinking)
+	}
 }

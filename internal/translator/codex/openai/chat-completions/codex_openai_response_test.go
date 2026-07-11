@@ -319,12 +319,15 @@ func TestConvertCodexResponseToOpenAI_StreamUsageMapsOfficialCacheAndReasoningFi
 	ctx := context.Background()
 	var param any
 
-	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150}}}`), &param)
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":100,"cached_input_tokens":40,"input_tokens_details":{"cache_write_tokens":12},"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150}}}`), &param)
 	if len(out) != 1 {
 		t.Fatalf("expected completed chunk, got %d", len(out))
 	}
 	if got := gjson.GetBytes(out[0], "usage.prompt_tokens_details.cached_tokens").Int(); got != 40 {
 		t.Fatalf("cached_tokens = %d, want 40; chunk=%s", got, out[0])
+	}
+	if got := gjson.GetBytes(out[0], "usage.prompt_tokens_details.cache_creation_tokens").Int(); got != 12 {
+		t.Fatalf("cache_creation_tokens = %d, want 12; chunk=%s", got, out[0])
 	}
 	if got := gjson.GetBytes(out[0], "usage.completion_tokens_details.reasoning_tokens").Int(); got != 15 {
 		t.Fatalf("reasoning_tokens = %d, want 15; chunk=%s", got, out[0])
@@ -334,10 +337,13 @@ func TestConvertCodexResponseToOpenAI_StreamUsageMapsOfficialCacheAndReasoningFi
 func TestConvertCodexResponseToOpenAINonStream_UsageMapsOfficialCacheAndReasoningFields(t *testing.T) {
 	ctx := context.Background()
 
-	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","status":"completed","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`)
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","status":"completed","usage":{"input_tokens":100,"cached_input_tokens":40,"input_tokens_details":{"cache_write_tokens":12},"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":150},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`)
 	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
 	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); got != 40 {
 		t.Fatalf("cached_tokens = %d, want 40; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cache_creation_tokens").Int(); got != 12 {
+		t.Fatalf("cache_creation_tokens = %d, want 12; output=%s", got, out)
 	}
 	if got := gjson.GetBytes(out, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 15 {
 		t.Fatalf("reasoning_tokens = %d, want 15; output=%s", got, out)

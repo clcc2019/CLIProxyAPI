@@ -3,6 +3,7 @@ package executor
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
@@ -165,6 +166,110 @@ func TestNormalizeCodexFinalUpstreamBody_PreservesIncrementalPreviousResponseInp
 	}
 }
 
+func TestNormalizeCodexFinalUpstreamBody_StripsInputItemIDsUnlessStoreEnabled(t *testing.T) {
+	body := []byte(`{
+		"model":"client-alias",
+		"input":[
+			{"type":"message","id":"msg_1","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"function_call","id":"call_item_1","call_id":"call_1","name":"tool","arguments":"{}"},
+			{"type":"function_call_output","id":"out_1","call_id":"call_1","output":"ok"}
+		]
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+
+	if got := gjson.GetBytes(gotBody, "input.0.id"); got.Exists() {
+		t.Fatalf("input.0.id should be stripped when store=false; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.1.id"); got.Exists() {
+		t.Fatalf("input.1.id should be stripped when store=false; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.2.id"); got.Exists() {
+		t.Fatalf("input.2.id should be stripped when store=false; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.2.call_id").String(); got != "call_1" {
+		t.Fatalf("call_id = %q, want call_1; body=%s", got, gotBody)
+	}
+
+	gotStoreBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "azure"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       true,
+		suppressDefaultInstructions: true,
+	})
+
+	if got := gjson.GetBytes(gotStoreBody, "input.0.id").String(); got != "msg_1" {
+		t.Fatalf("input.0.id = %q, want msg_1 when store=true; body=%s", got, gotStoreBody)
+	}
+	if got := gjson.GetBytes(gotStoreBody, "input.1.id").String(); got != "call_item_1" {
+		t.Fatalf("input.1.id = %q, want call_item_1 when store=true; body=%s", got, gotStoreBody)
+	}
+	if got := gjson.GetBytes(gotStoreBody, "input.2.id").String(); got != "out_1" {
+		t.Fatalf("input.2.id = %q, want out_1 when store=true; body=%s", got, gotStoreBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBody_StripsItemPassthroughMetadataForNonOpenAIProviders(t *testing.T) {
+	body := []byte(`{
+		"model":"client-alias",
+		"input":[
+			{"type":"message","id":"msg_1","role":"user","content":[{"type":"input_text","text":"hi"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn_1"}},
+			{"type":"function_call","id":"call_item_1","call_id":"call_1","name":"tool","arguments":"{}","internal_chat_message_metadata_passthrough":{"turn_id":"turn_1"}}
+		]
+	}`)
+
+	gotCodexBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+	if got := gjson.GetBytes(gotCodexBody, "input.0.internal_chat_message_metadata_passthrough.turn_id").String(); got != "turn_1" {
+		t.Fatalf("codex provider should preserve item passthrough metadata, got %q; body=%s", got, gotCodexBody)
+	}
+
+	gotOpenAIBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "openai"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+	if got := gjson.GetBytes(gotOpenAIBody, "input.1.internal_chat_message_metadata_passthrough.turn_id").String(); got != "turn_1" {
+		t.Fatalf("openai provider should preserve item passthrough metadata, got %q; body=%s", got, gotOpenAIBody)
+	}
+
+	gotOtherBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "openai-compatibility"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+	if got := gjson.GetBytes(gotOtherBody, "input.0.internal_chat_message_metadata_passthrough"); got.Exists() {
+		t.Fatalf("non-openai provider should strip item passthrough metadata; body=%s", gotOtherBody)
+	}
+	if got := gjson.GetBytes(gotOtherBody, "input.1.internal_chat_message_metadata_passthrough"); got.Exists() {
+		t.Fatalf("non-openai provider should strip function call passthrough metadata; body=%s", gotOtherBody)
+	}
+
+	gotAzureBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "azure"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       true,
+		suppressDefaultInstructions: true,
+	})
+	if got := gjson.GetBytes(gotAzureBody, "input.0.id").String(); got != "msg_1" {
+		t.Fatalf("azure store=true should preserve item id, got %q; body=%s", got, gotAzureBody)
+	}
+	if got := gjson.GetBytes(gotAzureBody, "input.0.internal_chat_message_metadata_passthrough"); got.Exists() {
+		t.Fatalf("azure provider should strip item passthrough metadata; body=%s", gotAzureBody)
+	}
+}
+
 func TestNormalizeCodexFinalUpstreamBody_DefaultsNullCompactInputToArray(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":null}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamCompact,
@@ -195,6 +300,119 @@ func TestNormalizeCodexFinalUpstreamBody_ParsesParallelToolCallString(t *testing
 	}
 }
 
+func TestNormalizeCodexFinalUpstreamBody_NormalizesOfficialServiceTier(t *testing.T) {
+	t.Run("fast alias", func(t *testing.T) {
+		gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"service_tier":"fast"}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+			requestKind:                 codexFinalUpstreamResponses,
+			streamMode:                  codexStreamFieldTrue,
+			store:                       false,
+			suppressDefaultInstructions: true,
+		})
+
+		if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "priority" {
+			t.Fatalf("service_tier = %q, want priority; body=%s", got, gotBody)
+		}
+	})
+
+	t.Run("default sentinel", func(t *testing.T) {
+		gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"service_tier":"default"}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+			requestKind:                 codexFinalUpstreamResponses,
+			streamMode:                  codexStreamFieldTrue,
+			store:                       false,
+			suppressDefaultInstructions: true,
+		})
+
+		if got := gjson.GetBytes(gotBody, "service_tier"); got.Exists() {
+			t.Fatalf("default service_tier should be omitted; body=%s", gotBody)
+		}
+	})
+
+	t.Run("unsupported known model tier", func(t *testing.T) {
+		gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"service_tier":"flex"}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+			requestKind:                 codexFinalUpstreamResponses,
+			streamMode:                  codexStreamFieldTrue,
+			store:                       false,
+			suppressDefaultInstructions: true,
+		})
+
+		if got := gjson.GetBytes(gotBody, "service_tier"); got.Exists() {
+			t.Fatalf("unsupported service_tier should be omitted for known model; body=%s", gotBody)
+		}
+	})
+
+	t.Run("unknown model explicit passthrough", func(t *testing.T) {
+		gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"service_tier":"flex"}`), "custom-model", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+			requestKind:                 codexFinalUpstreamResponses,
+			streamMode:                  codexStreamFieldTrue,
+			store:                       false,
+			suppressDefaultInstructions: true,
+		})
+
+		if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "flex" {
+			t.Fatalf("unknown model service_tier = %q, want flex passthrough; body=%s", got, gotBody)
+		}
+	})
+}
+
+func TestNormalizeCodexFinalUpstreamBody_SanitizesUnsupportedOriginalToolOutputImageDetail(t *testing.T) {
+	body := []byte(`{
+		"model":"client-alias",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,user","detail":"original"}]},
+			{"type":"function_call","call_id":"function-call","name":"tool","arguments":"{}"},
+			{"type":"function_call_output","call_id":"function-call","output":[
+				{"type":"input_image","image_url":"data:image/png;base64,function","detail":"original"},
+				{"type":"input_image","image_url":"data:image/png;base64,function-low","detail":"low"}
+			]},
+			{"type":"custom_tool_call","call_id":"custom-call","name":"custom","input":"{}"},
+			{"type":"custom_tool_call_output","call_id":"custom-call","output":[
+				{"type":"input_image","image_url":"data:image/png;base64,custom","detail":"Original"}
+			]}
+		]
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.2", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+
+	if got := gjson.GetBytes(gotBody, "input.0.content.0.detail").String(); got != "original" {
+		t.Fatalf("user image detail = %q, want original; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.2.output.0.detail").String(); got != "high" {
+		t.Fatalf("function output image detail = %q, want high; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.2.output.1.detail").String(); got != "low" {
+		t.Fatalf("function low image detail = %q, want low; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.4.output.0.detail").String(); got != "high" {
+		t.Fatalf("custom output image detail = %q, want high; body=%s", got, gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBody_PreservesSupportedOriginalToolOutputImageDetail(t *testing.T) {
+	body := []byte(`{
+		"model":"client-alias",
+		"input":[
+			{"type":"function_call","call_id":"function-call","name":"tool","arguments":"{}"},
+			{"type":"function_call_output","call_id":"function-call","output":[{"type":"input_image","image_url":"data:image/png;base64,function","detail":"original"}]}
+		]
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+
+	if got := gjson.GetBytes(gotBody, "input.1.output.0.detail").String(); got != "original" {
+		t.Fatalf("supported model image detail = %q, want original; body=%s", got, gotBody)
+	}
+}
+
 func TestNormalizeCodexFinalUpstreamBody_DefaultsOfficialReasoningAndVerbosity(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[]}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,
@@ -203,8 +421,8 @@ func TestNormalizeCodexFinalUpstreamBody_DefaultsOfficialReasoningAndVerbosity(t
 		suppressDefaultInstructions: true,
 	})
 
-	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "xhigh" {
-		t.Fatalf("reasoning.effort = %q, want xhigh; body=%s", got, gotBody)
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "medium" {
+		t.Fatalf("reasoning.effort = %q, want medium; body=%s", got, gotBody)
 	}
 	if got := gjson.GetBytes(gotBody, "include").Array(); len(got) != 1 || got[0].String() != "reasoning.encrypted_content" {
 		t.Fatalf("include should contain reasoning.encrypted_content; body=%s", gotBody)
@@ -241,7 +459,7 @@ func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT56SolExpensiveReasoningFor
 		{name: "sol max", model: "gpt-5.6-sol", effort: "max", wantEffort: "high"},
 		{name: "sol high unchanged", model: "gpt-5.6-sol", effort: "high", wantEffort: "high"},
 		{name: "sol medium unchanged", model: "gpt-5.6-sol", effort: "medium", wantEffort: "medium"},
-		{name: "sol ultra unchanged", model: "gpt-5.6-sol", effort: "ultra", wantEffort: "ultra"},
+		{name: "sol ultra alias downgraded", model: "gpt-5.6-sol", effort: "ultra", wantEffort: "high"},
 		{name: "terra max unchanged", model: "gpt-5.6-terra", effort: "max", wantEffort: "max"},
 		{name: "luna xhigh unchanged", model: "gpt-5.6-luna", effort: "xhigh", wantEffort: "xhigh"},
 	}
@@ -282,6 +500,193 @@ func TestNormalizeCodexFinalUpstreamBody_PreservesCallerReasoningAndVerbosity(t 
 	}
 	if got := gjson.GetBytes(gotBody, "text.verbosity").String(); got != "high" {
 		t.Fatalf("text.verbosity = %q, want high; body=%s", got, gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamReasoning_MapsUltraToOfficialRequestEffort(t *testing.T) {
+	capabilities := registry.CodexClientModelCapabilities{
+		SupportsReasoningSummaries: true,
+		DefaultReasoningLevel:      "ultra",
+	}
+
+	t.Run("caller effort", func(t *testing.T) {
+		gotBody := normalizeCodexFinalUpstreamReasoning([]byte(`{"reasoning":{"effort":"ultra","summary":"auto"}}`), capabilities)
+		if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "max" {
+			t.Fatalf("reasoning.effort = %q, want max; body=%s", got, gotBody)
+		}
+		if got := gjson.GetBytes(gotBody, "reasoning.summary").String(); got != "auto" {
+			t.Fatalf("reasoning.summary = %q, want auto; body=%s", got, gotBody)
+		}
+	})
+
+	t.Run("default effort", func(t *testing.T) {
+		gotBody := normalizeCodexFinalUpstreamReasoning([]byte(`{}`), capabilities)
+		if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "max" {
+			t.Fatalf("reasoning.effort = %q, want max; body=%s", got, gotBody)
+		}
+	})
+}
+
+func TestNormalizeCodexFinalUpstreamResponsesLiteWithCapabilities(t *testing.T) {
+	body := []byte(`{
+		"model":"lite-model",
+		"instructions":"test instructions",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"tool","parameters":{"type":"object"}}],
+		"parallel_tool_calls":true,
+		"reasoning":{"effort":"medium"}
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, registry.CodexClientModelCapabilities{
+		UseResponsesLite: true,
+	})
+
+	if gjson.GetBytes(gotBody, "instructions").Exists() {
+		t.Fatalf("instructions should move into input for responses_lite; body=%s", gotBody)
+	}
+	if gjson.GetBytes(gotBody, "tools").Exists() {
+		t.Fatalf("tools should move into additional_tools for responses_lite; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "parallel_tool_calls"); got.Type != gjson.False {
+		t.Fatalf("parallel_tool_calls = %s, want false; body=%s", got.Raw, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "reasoning.context").String(); got != "all_turns" {
+		t.Fatalf("reasoning.context = %q, want all_turns; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.type").String(); got != "additional_tools" {
+		t.Fatalf("input.0.type = %q, want additional_tools; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.role").String(); got != "developer" {
+		t.Fatalf("input.0.role = %q, want developer; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.tools.0.name").String(); got != "tool" {
+		t.Fatalf("input.0.tools.0.name = %q, want tool; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.1.role").String(); got != "developer" {
+		t.Fatalf("input.1.role = %q, want developer instruction message; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.1.content.0.text").String(); got != "test instructions" {
+		t.Fatalf("instruction text = %q, want test instructions; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.2.role").String(); got != "user" {
+		t.Fatalf("input.2.role = %q, want original user message; body=%s", got, gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBody_ResponsesLiteMovesDefaultInstructionsAfterDefaults(t *testing.T) {
+	originalCapabilitiesForModel := codexClientModelCapabilitiesForModel
+	codexClientModelCapabilitiesForModel = func(modelID string) (registry.CodexClientModelCapabilities, bool) {
+		if modelID == "lite-model" {
+			return registry.CodexClientModelCapabilities{
+				UseResponsesLite:           true,
+				SupportsReasoningSummaries: true,
+				DefaultReasoningLevel:      "medium",
+			}, true
+		}
+		return originalCapabilitiesForModel(modelID)
+	}
+	defer func() {
+		codexClientModelCapabilitiesForModel = originalCapabilitiesForModel
+	}()
+
+	body := []byte(`{
+		"model":"client-alias",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"tool","parameters":{"type":"object"}}]
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamBody(body, "lite-model", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+		store:       false,
+	})
+
+	if got := gjson.GetBytes(gotBody, "instructions"); got.Exists() {
+		t.Fatalf("responses_lite should not keep top-level instructions after defaulting; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "tools"); got.Exists() {
+		t.Fatalf("responses_lite should move tools into input; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.type").String(); got != "additional_tools" {
+		t.Fatalf("input.0.type = %q, want additional_tools; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.1.role").String(); got != "developer" {
+		t.Fatalf("input.1.role = %q, want developer default instructions; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.1.content.0.text").String(); got != "You are a helpful assistant." {
+		t.Fatalf("default instruction text = %q, want helpful assistant default; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.2.role").String(); got != "user" {
+		t.Fatalf("input.2.role = %q, want original user message; body=%s", got, gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamResponsesLiteStripsInputImageDetails(t *testing.T) {
+	body := []byte(`{
+		"model":"lite-model",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,user","detail":"high"}]},
+			{"type":"function_call_output","call_id":"function-call","output":[{"type":"input_image","image_url":"data:image/png;base64,function","detail":"low"}]},
+			{"type":"custom_tool_call_output","call_id":"custom-call","output":[{"type":"input_image","image_url":"data:image/png;base64,custom","detail":"auto"}]}
+		]
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, registry.CodexClientModelCapabilities{
+		UseResponsesLite: true,
+	})
+
+	for _, path := range []string{
+		"input.0.content.0.detail",
+		"input.1.output.0.detail",
+		"input.2.output.0.detail",
+	} {
+		if got := gjson.GetBytes(gotBody, path); got.Exists() {
+			t.Fatalf("%s should be stripped for responses_lite; body=%s", path, gotBody)
+		}
+	}
+	for path, want := range map[string]string{
+		"input.0.content.0.image_url": "data:image/png;base64,user",
+		"input.1.output.0.image_url":  "data:image/png;base64,function",
+		"input.2.output.0.image_url":  "data:image/png;base64,custom",
+	} {
+		if got := gjson.GetBytes(gotBody, path).String(); got != want {
+			t.Fatalf("%s = %q, want %q; body=%s", path, got, want, gotBody)
+		}
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamResponsesLiteReplacesRemoteInputImages(t *testing.T) {
+	body := []byte(`{
+		"model":"lite-model",
+		"input":[
+			{"type":"message","role":"user","content":[
+				{"type":"input_image","image_url":"data:image/png;base64,local","detail":"high"},
+				{"type":"input_image","image_url":"https://example.com/image.png","detail":"high"}
+			]}
+		]
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, registry.CodexClientModelCapabilities{
+		UseResponsesLite: true,
+	})
+
+	if got := gjson.GetBytes(gotBody, "input.0.content.0.type").String(); got != "input_image" {
+		t.Fatalf("local image type = %q, want input_image; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.content.0.detail"); got.Exists() {
+		t.Fatalf("local image detail should be stripped; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.content.0.image_url").String(); got != "data:image/png;base64,local" {
+		t.Fatalf("local image_url = %q, want data URL; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.content.1.type").String(); got != "input_text" {
+		t.Fatalf("remote image replacement type = %q, want input_text; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.content.1.text").String(); got != codexResponsesLiteRemoteImageOmittedText {
+		t.Fatalf("remote image replacement text = %q, want %q; body=%s", got, codexResponsesLiteRemoteImageOmittedText, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.content.1.image_url"); got.Exists() {
+		t.Fatalf("remote image_url should be omitted; body=%s", gotBody)
 	}
 }
 
