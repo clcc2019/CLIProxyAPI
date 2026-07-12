@@ -19,8 +19,13 @@ type oauthCallbackRequest struct {
 }
 
 func (h *Handler) PostOAuthCallback(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
+		return
+	}
+	authDir := h.authDirSnapshot()
+	if authDir == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "auth directory is not configured"})
 		return
 	}
 
@@ -92,7 +97,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	if _, errWrite := WriteOAuthCallbackFileForPendingSession(h.cfg.AuthDir, canonicalProvider, state, code, errMsg); errWrite != nil {
+	if _, errWrite := WriteOAuthCallbackFileForPendingSession(authDir, canonicalProvider, state, code, errMsg); errWrite != nil {
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
 			_, status, okSession := GetOAuthSession(state)
 			if okSession && status != "" {

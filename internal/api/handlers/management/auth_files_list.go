@@ -28,10 +28,11 @@ type authFilesListQuery struct {
 }
 
 type authFileEntryBuildOptions struct {
-	Summary   bool
-	AuthDir   string
-	AuthRoot  *os.Root
-	StatCache map[string]authFileStatResult
+	Summary                  bool
+	AuthDir                  string
+	AuthRoot                 *os.Root
+	StatCache                map[string]authFileStatResult
+	RecentRequestSnapshotter *coreauth.RecentRequestSnapshotter
 }
 
 type authFileStatResult struct {

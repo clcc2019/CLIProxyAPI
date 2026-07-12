@@ -246,10 +246,9 @@ func (h *Handler) applyAPICallDefaultHeaders(headers map[string]string, auth *co
 
 	switch resolveAPICallProvider(auth, providerHint) {
 	case "codex":
-		userAgent := ""
-		if h != nil && h.cfg != nil {
-			userAgent = strings.TrimSpace(h.cfg.CodexHeaderDefaults.UserAgent)
-		}
+		userAgent := strings.TrimSpace(readConfigValue(h, func(cfg *config.Config) string {
+			return cfg.CodexHeaderDefaults.UserAgent
+		}))
 		if userAgent == "" {
 			userAgent = authFileUserAgent(auth)
 		}
@@ -257,10 +256,10 @@ func (h *Handler) applyAPICallDefaultHeaders(headers map[string]string, auth *co
 			headers["User-Agent"] = userAgent
 		}
 	case "claude":
-		if h == nil || h.cfg == nil {
-			return
-		}
-		if userAgent := strings.TrimSpace(h.cfg.ClaudeHeaderDefaults.UserAgent); userAgent != "" {
+		userAgent := strings.TrimSpace(readConfigValue(h, func(cfg *config.Config) string {
+			return cfg.ClaudeHeaderDefaults.UserAgent
+		}))
+		if userAgent != "" {
 			headers["User-Agent"] = userAgent
 		}
 	}
@@ -336,18 +335,15 @@ func tokenValueFromMetadata(metadata map[string]any) string {
 
 func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	authIndex = strings.TrimSpace(authIndex)
-	if authIndex == "" || h == nil || h.authManager == nil {
+	if authIndex == "" || h == nil {
 		return nil
 	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		auth.EnsureIndex()
-		if auth.Index == authIndex {
-			return auth
-		}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
+		return nil
+	}
+	if auth, ok := manager.GetByIndex(authIndex); ok {
+		return auth
 	}
 	return nil
 }
@@ -358,16 +354,13 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
-		if h != nil && h.cfg != nil {
-			if proxyStr := strings.TrimSpace(proxyURLFromAPIKeyConfig(h.cfg, auth)); proxyStr != "" {
-				proxyCandidates = append(proxyCandidates, proxyStr)
-			}
-		}
 	}
-	if h != nil && h.cfg != nil {
-		if proxyStr := strings.TrimSpace(h.cfg.ProxyURL); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
-		}
+	configProxy, globalProxy := h.apiCallProxyURLs(auth)
+	if configProxy != "" {
+		proxyCandidates = append(proxyCandidates, configProxy)
+	}
+	if globalProxy != "" {
+		proxyCandidates = append(proxyCandidates, globalProxy)
 	}
 
 	for _, proxyStr := range proxyCandidates {
@@ -388,6 +381,22 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 		return cached
 	}
 	return direct
+}
+
+func (h *Handler) apiCallProxyURLs(auth *coreauth.Auth) (configProxy, globalProxy string) {
+	if h == nil {
+		return "", ""
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.cfg == nil {
+		return "", ""
+	}
+	if auth != nil {
+		configProxy = strings.TrimSpace(proxyURLFromAPIKeyConfig(h.cfg, auth))
+	}
+	globalProxy = strings.TrimSpace(h.cfg.ProxyURL)
+	return configProxy, globalProxy
 }
 
 func buildDirectAPICallTransport() http.RoundTripper {

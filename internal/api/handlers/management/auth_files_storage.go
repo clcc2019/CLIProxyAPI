@@ -24,14 +24,18 @@ func isUnsafeAuthFileName(name string) bool {
 }
 
 func (h *Handler) readAuthDirFile(name string) ([]byte, error) {
-	if h == nil || h.cfg == nil {
+	if h == nil {
 		return nil, fmt.Errorf("auth directory is unavailable")
 	}
+	return readAuthDirFileAt(h.authDirSnapshot(), name)
+}
+
+func readAuthDirFileAt(authDir, name string) ([]byte, error) {
 	name = strings.TrimSpace(name)
 	if isUnsafeAuthFileName(name) {
 		return nil, fmt.Errorf("invalid auth file name")
 	}
-	authDir := strings.TrimSpace(h.cfg.AuthDir)
+	authDir = strings.TrimSpace(authDir)
 	if authDir == "" {
 		return nil, fmt.Errorf("auth directory is empty")
 	}
@@ -167,6 +171,13 @@ func normalizeOptionalAuthFileName(name string) (string, error) {
 }
 
 func (h *Handler) readAuthFileByName(name string) ([]byte, string, int, string) {
+	if h == nil {
+		return nil, "", http.StatusInternalServerError, "auth directory is unavailable"
+	}
+	return readAuthFileByNameAt(h.authDirSnapshot(), name)
+}
+
+func readAuthFileByNameAt(authDir, name string) ([]byte, string, int, string) {
 	name = strings.TrimSpace(name)
 	if isUnsafeAuthFileName(name) {
 		return nil, "", http.StatusBadRequest, "invalid name"
@@ -174,7 +185,7 @@ func (h *Handler) readAuthFileByName(name string) ([]byte, string, int, string) 
 	if !util.HasJSONFileName(name) {
 		return nil, "", http.StatusBadRequest, "name must end with .json"
 	}
-	data, err := h.readAuthDirFile(name)
+	data, err := readAuthDirFileAt(authDir, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, "", http.StatusNotFound, "file not found"

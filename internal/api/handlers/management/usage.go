@@ -182,7 +182,8 @@ func (h *Handler) GetUsageQueue(c *gin.Context) {
 
 // ImportUsageStatistics merges a previously exported usage snapshot into memory.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
-	if h == nil || h.usageStats == nil {
+	stats := h.usageStatisticsSnapshot()
+	if stats == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
 		return
 	}
@@ -210,14 +211,14 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	case sourceID != "" && hasDetails:
 		// Detailed exports with source_id must replace the prior snapshot from
 		// the same source instead of being merged into live in-memory counters.
-		result = h.usageStats.UpsertImportedDetailedSnapshot(sourceID, payload.Usage)
+		result = stats.UpsertImportedDetailedSnapshot(sourceID, payload.Usage)
 	case sourceID != "" && !hasDetails:
-		result = h.usageStats.UpsertImportedSummarySnapshot(sourceID, payload.Usage)
+		result = stats.UpsertImportedSummarySnapshot(sourceID, payload.Usage)
 		if payload.Aggregated != nil {
-			h.usageStats.UpsertImportedAggregatedSnapshot(sourceID, *payload.Aggregated)
+			stats.UpsertImportedAggregatedSnapshot(sourceID, *payload.Aggregated)
 		}
 	default:
-		result = h.usageStats.MergeSnapshot(payload.Usage)
+		result = stats.MergeSnapshot(payload.Usage)
 		if hasDetails {
 			// Detailed exports may be trimmed by retention settings, so restore
 			// any history not represented by Details via summary/all-window deltas.
@@ -226,9 +227,9 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 				residualSourceID := usageResidualSourceID(sourceID)
 				var residualResult usage.MergeResult
 				if residualSourceID != "" {
-					residualResult = h.usageStats.UpsertImportedSummarySnapshot(residualSourceID, residual)
+					residualResult = stats.UpsertImportedSummarySnapshot(residualSourceID, residual)
 				} else {
-					residualResult = h.usageStats.MergeSnapshot(residual)
+					residualResult = stats.MergeSnapshot(residual)
 				}
 				result.Added += residualResult.Added
 				result.Skipped += residualResult.Skipped
@@ -237,17 +238,17 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 				residualAggregated := aggregatedAllWindowSnapshotFromSummary(residual, time.Now().UTC())
 				if len(residualAggregated.Windows) > 0 {
 					if residualSourceID != "" {
-						h.usageStats.UpsertImportedAggregatedSnapshot(residualSourceID, residualAggregated)
+						stats.UpsertImportedAggregatedSnapshot(residualSourceID, residualAggregated)
 					} else {
-						h.usageStats.MergeImportedAggregatedSnapshot(residualAggregated)
+						stats.MergeImportedAggregatedSnapshot(residualAggregated)
 					}
 				}
 			}
 		} else if payload.Aggregated != nil {
-			h.usageStats.MergeImportedAggregatedSnapshot(*payload.Aggregated)
+			stats.MergeImportedAggregatedSnapshot(*payload.Aggregated)
 		}
 	}
-	snapshot := h.usageStats.SnapshotSummary()
+	snapshot := stats.SnapshotSummary()
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,
@@ -304,39 +305,44 @@ func usageSnapshotContainsDetails(snapshot usage.StatisticsSnapshot) bool {
 }
 
 func (h *Handler) summaryUsageSnapshot() usage.StatisticsSnapshot {
-	if h == nil || h.usageStats == nil {
+	stats := h.usageStatisticsSnapshot()
+	if stats == nil {
 		return usage.StatisticsSnapshot{}
 	}
-	return h.usageStats.SnapshotSummary()
+	return stats.SnapshotSummary()
 }
 
 func (h *Handler) detailedUsageSnapshot() usage.StatisticsSnapshot {
-	if h == nil || h.usageStats == nil {
+	stats := h.usageStatisticsSnapshot()
+	if stats == nil {
 		return usage.StatisticsSnapshot{}
 	}
-	return h.usageStats.Snapshot()
+	return stats.Snapshot()
 }
 
 func (h *Handler) recentDetailedUsageSnapshot(limit int) usage.StatisticsSnapshot {
-	if h == nil || h.usageStats == nil {
+	stats := h.usageStatisticsSnapshot()
+	if stats == nil {
 		return usage.StatisticsSnapshot{}
 	}
-	return h.usageStats.SnapshotRecentDetails(limit)
+	return stats.SnapshotRecentDetails(limit)
 }
 
 func (h *Handler) recentCompactUsageSnapshot(limit int) usage.StatisticsSnapshot {
-	if h == nil || h.usageStats == nil {
+	stats := h.usageStatisticsSnapshot()
+	if stats == nil {
 		return usage.StatisticsSnapshot{}
 	}
-	return h.usageStats.SnapshotRecentDetailsCompact(limit)
+	return stats.SnapshotRecentDetailsCompact(limit)
 }
 
 func (h *Handler) aggregatedUsageSnapshot(now time.Time) usage.AggregatedUsageSnapshot {
-	if h == nil || h.usageStats == nil {
+	stats := h.usageStatisticsSnapshot()
+	if stats == nil {
 		return usage.AggregatedUsageSnapshot{
 			GeneratedAt: now.UTC(),
 			Windows:     map[string]usage.AggregatedUsageWindow{},
 		}
 	}
-	return h.usageStats.AggregatedUsageSnapshot(now)
+	return stats.AggregatedUsageSnapshot(now)
 }

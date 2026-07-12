@@ -855,26 +855,16 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	if !homeEnabled {
-		tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
+		_, err := s.tokenProvider.Load(ctx, s.cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
-		}
-		if tokenResult == nil {
-			tokenResult = &TokenClientResult{}
 		}
 
-		apiKeyResult, err := s.apiKeyProvider.Load(ctx, s.cfg)
+		_, err = s.apiKeyProvider.Load(ctx, s.cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
-		}
-		if apiKeyResult == nil {
-			apiKeyResult = &APIKeyClientResult{}
 		}
 	}
-
-	// legacy clients removed; no caches to refresh
-
-	// handlers no longer depend on legacy clients; pass nil slice initially
 	serverOptions := append([]api.ServerOption(nil), s.serverOptions...)
 	if s.redisState != nil {
 		serverOptions = append(serverOptions, api.WithManagementCacheStore(s.redisState))
@@ -929,27 +919,22 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 
-		providerSet := make(map[string]bool, len(changedProviders))
+		providerSet := make(map[string]struct{}, len(changedProviders))
 		for _, p := range changedProviders {
-			providerSet[strings.ToLower(strings.TrimSpace(p))] = true
+			if provider := strings.ToLower(strings.TrimSpace(p)); provider != "" {
+				providerSet[provider] = struct{}{}
+			}
 		}
 
-		auths := s.coreManager.List()
 		refreshed := 0
-		for _, item := range auths {
-			if item == nil || item.ID == "" {
-				continue
-			}
-			auth, ok := s.coreManager.GetByID(item.ID)
-			if !ok || auth == nil || auth.Disabled {
-				continue
-			}
-			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-			if !providerSet[provider] {
-				continue
-			}
-			if s.refreshModelRegistrationForAuth(auth) {
-				refreshed++
+		for provider := range providerSet {
+			for _, auth := range s.coreManager.ListByProvider(provider) {
+				if auth == nil || auth.ID == "" || auth.Disabled {
+					continue
+				}
+				if s.refreshModelRegistrationForAuth(auth) {
+					refreshed++
+				}
 			}
 		}
 
@@ -1042,8 +1027,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.server.SetReady(false)
 		}
 
-		// legacy refresh loop removed; only stopping core auth manager below
-
 		if s.watcherCancel != nil {
 			s.watcherCancel()
 		}
@@ -1089,8 +1072,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				shutdownErr = errShutdownPprof
 			}
 		}
-
-		// no legacy clients to persist
 
 		if s.server != nil {
 			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

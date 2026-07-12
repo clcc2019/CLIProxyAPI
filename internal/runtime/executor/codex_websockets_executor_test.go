@@ -3812,6 +3812,15 @@ func TestCodexWebsocketsExecuteRetriesReadDisconnectBeforeCompletion(t *testing.
 }
 
 func TestCodexWebsocketsExecuteStreamRetriesFullRequestWhenPreviousResponseMissing(t *testing.T) {
+	testCodexWebsocketsExecuteStreamRetriesFullRequestWhenPreviousResponseMissing(t, false)
+}
+
+func TestCodexWebsocketsExecuteStreamRetriesFullRequestWhenPreviousResponseFailed(t *testing.T) {
+	testCodexWebsocketsExecuteStreamRetriesFullRequestWhenPreviousResponseMissing(t, true)
+}
+
+func testCodexWebsocketsExecuteStreamRetriesFullRequestWhenPreviousResponseMissing(t *testing.T, responseFailed bool) {
+	t.Helper()
 	const (
 		userItem1     = `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`
 		assistantItem = `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}`
@@ -3898,7 +3907,25 @@ func TestCodexWebsocketsExecuteStreamRetriesFullRequestWhenPreviousResponseMissi
 					serverErr <- fmt.Errorf("WriteJSON(response.created before previous_response_not_found) error: %w", errWrite)
 					return
 				}
-				if errWrite := conn.WriteJSON(map[string]any{
+				if responseFailed {
+					if errWrite := conn.WriteJSON(map[string]any{
+						"type": "response.failed",
+						"response": map[string]any{
+							"id":     "resp_retry_probe",
+							"status": "failed",
+							"error": map[string]any{
+								"code":    codexPreviousResponseNotFoundCode,
+								"message": "Previous response with id 'resp_1' not found.",
+								"param":   "previous_response_id",
+								"type":    "invalid_request_error",
+								"status":  http.StatusBadRequest,
+							},
+						},
+					}); errWrite != nil {
+						serverErr <- fmt.Errorf("WriteJSON(response.failed previous_response_not_found) error: %w", errWrite)
+						return
+					}
+				} else if errWrite := conn.WriteJSON(map[string]any{
 					"type":   "error",
 					"status": http.StatusBadRequest,
 					"error": map[string]any{
@@ -4299,6 +4326,15 @@ func TestCodexWebsocketsExecuteStreamClearsIncrementalStateAfterUpstreamError(t 
 }
 
 func TestCodexWebsocketsExecuteRetriesFullRequestWhenPreviousResponseMissing(t *testing.T) {
+	testCodexWebsocketsExecuteRetriesFullRequestWhenPreviousResponseMissing(t, false)
+}
+
+func TestCodexWebsocketsExecuteRetriesFullRequestWhenPreviousResponseFailed(t *testing.T) {
+	testCodexWebsocketsExecuteRetriesFullRequestWhenPreviousResponseMissing(t, true)
+}
+
+func testCodexWebsocketsExecuteRetriesFullRequestWhenPreviousResponseMissing(t *testing.T, responseFailed bool) {
+	t.Helper()
 	const (
 		userItem1     = `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`
 		assistantItem = `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}`
@@ -4371,7 +4407,36 @@ func TestCodexWebsocketsExecuteRetriesFullRequestWhenPreviousResponseMissing(t *
 					return
 				}
 			case 1:
-				if errWrite := conn.WriteJSON(map[string]any{
+				if responseFailed {
+					if errWrite := conn.WriteJSON(map[string]any{
+						"type": "response.created",
+						"response": map[string]any{
+							"id":     "resp_retry_probe",
+							"object": "response",
+							"status": "in_progress",
+						},
+					}); errWrite != nil {
+						serverErr <- fmt.Errorf("WriteJSON(response.created before response.failed) error: %w", errWrite)
+						return
+					}
+					if errWrite := conn.WriteJSON(map[string]any{
+						"type": "response.failed",
+						"response": map[string]any{
+							"id":     "resp_retry_probe",
+							"status": "failed",
+							"error": map[string]any{
+								"code":    codexPreviousResponseNotFoundCode,
+								"message": "Previous response with id 'resp_1' not found.",
+								"param":   "previous_response_id",
+								"type":    "invalid_request_error",
+								"status":  http.StatusBadRequest,
+							},
+						},
+					}); errWrite != nil {
+						serverErr <- fmt.Errorf("WriteJSON(response.failed previous_response_not_found) error: %w", errWrite)
+						return
+					}
+				} else if errWrite := conn.WriteJSON(map[string]any{
 					"type":   "error",
 					"status": http.StatusBadRequest,
 					"error": map[string]any{

@@ -37,35 +37,14 @@ type openAICompatibilityWithAuthIndex struct {
 }
 
 func (h *Handler) liveAuthIndexByID() map[string]string {
-	out := map[string]string{}
 	if h == nil {
-		return out
+		return map[string]string{}
 	}
-	h.mu.Lock()
-	manager := h.authManager
-	h.mu.Unlock()
+	manager := h.authManagerSnapshot()
 	if manager == nil {
-		return out
+		return map[string]string{}
 	}
-	// authManager.List() returns clones, so EnsureIndex only affects these copies.
-	for _, auth := range manager.List() {
-		if auth == nil {
-			continue
-		}
-		id := strings.TrimSpace(auth.ID)
-		if id == "" {
-			continue
-		}
-		idx := strings.TrimSpace(auth.Index)
-		if idx == "" {
-			idx = auth.EnsureIndex()
-		}
-		if idx == "" {
-			continue
-		}
-		out[id] = idx
-	}
-	return out
+	return manager.AuthIndexesByID()
 }
 
 func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
@@ -74,8 +53,8 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	if h.cfg == nil {
 		return nil
 	}
@@ -103,8 +82,8 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	if h.cfg == nil {
 		return nil
 	}
@@ -132,8 +111,8 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	if h.cfg == nil {
 		return nil
 	}

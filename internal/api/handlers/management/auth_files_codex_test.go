@@ -889,9 +889,9 @@ func TestGetCodexRateLimitResetCreditsUsesUsagePayload(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
-	var sawRequest bool
+	var sawUsageRequest bool
+	var sawDetailsRequest bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawRequest = true
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %s, want GET", r.Method)
 		}
@@ -905,12 +905,23 @@ func TestGetCodexRateLimitResetCreditsUsesUsagePayload(t *testing.T) {
 			t.Fatalf("User-Agent = %q, want %q", got, "codex-profile/1.0")
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/details" {
+			sawDetailsRequest = true
+			_, _ = w.Write([]byte(`{"available_count":3,"credits":[{"id":"credit-1","reset_type":"codex_rate_limits","status":"available","granted_at":"2026-07-01T00:00:00Z","expires_at":"2026-08-01T00:00:00Z","title":"Full reset"}]}`))
+			return
+		}
+		sawUsageRequest = true
 		_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":3},"rate_limit":null}`))
 	}))
 	t.Cleanup(server.Close)
 	originalURL := codexUsageURL
+	originalDetailsURL := codexRateLimitResetCreditsURL
 	codexUsageURL = server.URL
-	t.Cleanup(func() { codexUsageURL = originalURL })
+	codexRateLimitResetCreditsURL = server.URL + "/details"
+	t.Cleanup(func() {
+		codexUsageURL = originalURL
+		codexRateLimitResetCreditsURL = originalDetailsURL
+	})
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{
@@ -938,8 +949,11 @@ func TestGetCodexRateLimitResetCreditsUsesUsagePayload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if !sawRequest {
+	if !sawUsageRequest {
 		t.Fatal("usage endpoint was not called")
+	}
+	if !sawDetailsRequest {
+		t.Fatal("reset credit details endpoint was not called")
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -955,8 +969,51 @@ func TestGetCodexRateLimitResetCreditsUsesUsagePayload(t *testing.T) {
 	if got := credits["available_count"]; got != float64(3) {
 		t.Fatalf("credits.available_count = %#v, want 3", got)
 	}
+	details, ok := credits["credits"].([]any)
+	if !ok || len(details) != 1 {
+		t.Fatalf("credits.credits = %#v, want one detail", credits["credits"])
+	}
+	detail, ok := details[0].(map[string]any)
+	if !ok || detail["expires_at"] != "2026-08-01T00:00:00Z" {
+		t.Fatalf("credit detail = %#v, want expires_at", details[0])
+	}
 	if _, ok := payload["auth_file"].(map[string]any); !ok {
 		t.Fatalf("auth_file missing: %#v", payload)
+	}
+}
+
+func TestMergeCodexRateLimitResetCreditDetailsPreservesUsageBalance(t *testing.T) {
+	usage := gin.H{"rate_limit_reset_credits": gin.H{
+		"available_count": float64(3),
+		"source":          "usage",
+	}}
+	mergeCodexRateLimitResetCreditDetails(usage, gin.H{
+		"credits": []any{gin.H{"id": "credit-1", "expires_at": "2026-08-01T00:00:00Z"}},
+	})
+
+	credits, ok := usage["rate_limit_reset_credits"].(gin.H)
+	if !ok {
+		t.Fatalf("rate_limit_reset_credits = %#v, want gin.H", usage["rate_limit_reset_credits"])
+	}
+	if got := credits["available_count"]; got != float64(3) {
+		t.Fatalf("available_count = %#v, want usage balance 3", got)
+	}
+	if got := credits["source"]; got != "usage" {
+		t.Fatalf("source = %#v, want existing usage field", got)
+	}
+	if details, ok := credits["credits"].([]any); !ok || len(details) != 1 {
+		t.Fatalf("credits = %#v, want one merged detail", credits["credits"])
+	}
+
+	mergeCodexRateLimitResetCreditDetails(usage, gin.H{"available_count": "invalid"})
+	credits, _ = usage["rate_limit_reset_credits"].(gin.H)
+	if got := credits["available_count"]; got != float64(3) {
+		t.Fatalf("available_count after invalid detail = %#v, want usage balance 3", got)
+	}
+	mergeCodexRateLimitResetCreditDetails(usage, gin.H{"available_count": float64(2)})
+	credits, _ = usage["rate_limit_reset_credits"].(gin.H)
+	if got := credits["available_count"]; got != float64(2) {
+		t.Fatalf("available_count after valid detail = %#v, want detail balance 2", got)
 	}
 }
 

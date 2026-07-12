@@ -459,7 +459,8 @@ func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT56SolExpensiveReasoningFor
 		{name: "sol max", model: "gpt-5.6-sol", effort: "max", wantEffort: "high"},
 		{name: "sol high unchanged", model: "gpt-5.6-sol", effort: "high", wantEffort: "high"},
 		{name: "sol medium unchanged", model: "gpt-5.6-sol", effort: "medium", wantEffort: "medium"},
-		{name: "sol ultra alias downgraded", model: "gpt-5.6-sol", effort: "ultra", wantEffort: "high"},
+		{name: "sol Ultra alias", model: "gpt-5.6-sol", effort: "Ultra", wantEffort: "high"},
+		{name: "sol uppercase model and effort", model: "GPT-5.6-SOL", effort: "XHIGH", wantEffort: "high"},
 		{name: "terra max unchanged", model: "gpt-5.6-terra", effort: "max", wantEffort: "max"},
 		{name: "luna xhigh unchanged", model: "gpt-5.6-luna", effort: "xhigh", wantEffort: "xhigh"},
 	}

@@ -14,9 +14,9 @@ func (h *Handler) cacheStoreSnapshot() CacheStore {
 	if h == nil {
 		return nil
 	}
-	h.mu.Lock()
+	h.mu.RLock()
 	store := h.cacheStore
-	h.mu.Unlock()
+	h.mu.RUnlock()
 	return store
 }
 

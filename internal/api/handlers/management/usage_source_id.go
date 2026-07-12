@@ -18,7 +18,7 @@ func (h *Handler) usageExportSourceID() string {
 		return ""
 	}
 
-	baseDir := h.usageExportSourceBaseDir()
+	baseDir, configPath := h.usageExportSourcePaths()
 	if baseDir == "" {
 		return ""
 	}
@@ -47,23 +47,28 @@ func (h *Handler) usageExportSourceID() string {
 		}
 	}
 
-	return fallbackUsageExportSourceID(baseDir, h.configFilePath)
+	return fallbackUsageExportSourceID(baseDir, configPath)
 }
 
-func (h *Handler) usageExportSourceBaseDir() string {
+func (h *Handler) usageExportSourcePaths() (baseDir, configPath string) {
 	if h == nil {
-		return ""
+		return "", ""
 	}
+	h.mu.RLock()
+	authDir := ""
 	if h.cfg != nil {
-		if authDir, err := util.ResolveAuthDir(strings.TrimSpace(h.cfg.AuthDir)); err == nil && authDir != "" {
-			return authDir
-		}
+		authDir = strings.TrimSpace(h.cfg.AuthDir)
 	}
-	configPath := strings.TrimSpace(h.configFilePath)
+	configPath = strings.TrimSpace(h.configFilePath)
+	h.mu.RUnlock()
+
+	if resolvedAuthDir, err := util.ResolveAuthDir(authDir); err == nil && resolvedAuthDir != "" {
+		return resolvedAuthDir, configPath
+	}
 	if configPath != "" {
-		return filepath.Dir(configPath)
+		return filepath.Dir(configPath), configPath
 	}
-	return ""
+	return "", configPath
 }
 
 func fallbackUsageExportSourceID(baseDir, configPath string) string {

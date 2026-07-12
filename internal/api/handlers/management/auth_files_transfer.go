@@ -45,7 +45,7 @@ func (h *Handler) PreviewAuthFile(c *gin.Context) {
 
 // UploadAuthFile stores a multipart upload or raw JSON body with ?name=.
 func (h *Handler) UploadAuthFile(c *gin.Context) {
-	if h.authManager == nil {
+	if h.authManagerSnapshot() == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -187,7 +187,11 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 }
 
 func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) error {
-	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	authDir := h.authDirSnapshot()
+	if authDir == "" {
+		return fmt.Errorf("auth directory is not configured")
+	}
+	dst := filepath.Join(authDir, filepath.Base(name))
 	if !filepath.IsAbs(dst) {
 		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
 			dst = abs
@@ -201,7 +205,7 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if errNormalize != nil {
 		return fmt.Errorf("invalid auth file: %w", errNormalize)
 	}
-	if errWrite := writeManagedAuthPathFile(dst, h.cfg.AuthDir, dataToWrite, 0o600); errWrite != nil {
+	if errWrite := writeManagedAuthPathFile(dst, authDir, dataToWrite, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
@@ -221,9 +225,8 @@ func (h *Handler) authIDForPath(path string) string {
 			path = abs
 		}
 	}
-	authDir := ""
-	if h != nil && h.cfg != nil {
-		authDir = strings.TrimSpace(h.cfg.AuthDir)
+	authDir := h.authDirSnapshot()
+	if authDir != "" {
 		if resolvedAuthDir, errResolve := util.ResolveAuthDir(authDir); errResolve == nil && resolvedAuthDir != "" {
 			authDir = resolvedAuthDir
 		}
@@ -240,7 +243,7 @@ func (h *Handler) authIDForPath(path string) string {
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
-	if h.authManager == nil {
+	if h.authManagerSnapshot() == nil {
 		return nil
 	}
 	auth, err := h.buildAuthFromFileData(path, data)
@@ -256,10 +259,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	}
 	if data == nil {
 		var err error
-		authDir := ""
-		if h != nil && h.cfg != nil {
-			authDir = h.cfg.AuthDir
-		}
+		authDir := h.authDirSnapshot()
 		data, err = readManagedAuthPathFile(path, authDir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read auth file: %w", err)
@@ -293,8 +293,8 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
 	}
-	if h != nil && h.authManager != nil {
-		if existing, ok := h.authManager.GetByID(authID); ok {
+	if manager := h.authManagerSnapshot(); manager != nil {
+		if existing, ok := manager.GetByID(authID); ok {
 			auth.CreatedAt = existing.CreatedAt
 			if !hasLastRefresh {
 				auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -324,14 +324,18 @@ func normalizeImportedAuthJSON(data []byte) ([]byte, bool, error) {
 }
 
 func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) error {
-	if h == nil || h.authManager == nil || auth == nil {
+	if h == nil || auth == nil {
 		return nil
 	}
-	if existing, ok := h.authManager.GetByID(auth.ID); ok {
+	manager := h.authManagerSnapshot()
+	if manager == nil {
+		return nil
+	}
+	if existing, ok := manager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
-		_, err := h.authManager.Update(ctx, auth)
+		_, err := manager.Update(ctx, auth)
 		return err
 	}
-	_, err := h.authManager.Register(ctx, auth)
+	_, err := manager.Register(ctx, auth)
 	return err
 }

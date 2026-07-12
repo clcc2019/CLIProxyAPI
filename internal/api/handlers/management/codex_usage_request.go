@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -48,33 +49,28 @@ func (h *Handler) resolveCodexUsageAuth(c *gin.Context) (*coreauth.Auth, int, st
 
 func (h *Handler) authByName(name string) *coreauth.Auth {
 	name = strings.TrimSpace(name)
-	if name == "" || h == nil || h.authManager == nil {
+	if name == "" || h == nil {
 		return nil
 	}
-	if auth, ok := h.authManager.GetByID(name); ok && auth != nil {
-		return auth
+	manager := h.authManagerSnapshot()
+	if manager == nil {
+		return nil
 	}
-	lookup := authFileListKey(name)
-	lookupBase := authFileListKey(filepath.Base(name))
-	for _, auth := range h.authManager.List() {
-		if auth == nil {
-			continue
-		}
-		for _, candidate := range []string{auth.ID, auth.FileName, filepath.Base(auth.FileName)} {
-			key := authFileListKey(candidate)
-			if key != "" && (key == lookup || key == lookupBase) {
-				return auth
-			}
-		}
+	if auth, ok := manager.GetByName(name); ok {
+		return auth
 	}
 	return nil
 }
 
 func (h *Handler) codexUsageAuthFromDisk(name string) (*coreauth.Auth, int, string) {
-	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+	if h == nil {
 		return nil, http.StatusNotFound, "auth file not found"
 	}
-	data, normalizedName, status, message := h.readAuthFileByName(name)
+	authDir := h.authDirSnapshot()
+	if authDir == "" {
+		return nil, http.StatusNotFound, "auth file not found"
+	}
+	data, normalizedName, status, message := readAuthFileByNameAt(authDir, name)
 	if status != http.StatusOK {
 		return nil, status, message
 	}
@@ -86,7 +82,7 @@ func (h *Handler) codexUsageAuthFromDisk(name string) (*coreauth.Auth, int, stri
 	if provider == "" {
 		provider = strings.TrimSpace(valueAsString(metadata["provider"]))
 	}
-	path := filepath.Join(h.cfg.AuthDir, normalizedName)
+	path := filepath.Join(authDir, normalizedName)
 	return &coreauth.Auth{
 		ID:       normalizedName,
 		Provider: provider,
@@ -100,7 +96,11 @@ func (h *Handler) codexUsageAuthFromDisk(name string) (*coreauth.Auth, int, stri
 }
 
 func (h *Handler) refreshCodexUsageAuthIfNeeded(ctx context.Context, auth *coreauth.Auth) *coreauth.Auth {
-	if h == nil || h.authManager == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+	if h == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return auth
+	}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		return auth
 	}
 	if !authFileHasRefreshToken(auth) {
@@ -116,7 +116,7 @@ func (h *Handler) refreshCodexUsageAuthIfNeeded(ctx context.Context, auth *corea
 	if !shouldRefresh {
 		return auth
 	}
-	updated, err := h.authManager.RefreshAuth(ctx, auth)
+	updated, err := manager.RefreshAuth(ctx, auth)
 	if err != nil {
 		log.WithError(err).WithField("auth_id", auth.ID).Debug("failed to refresh codex auth before usage request")
 		return auth
@@ -166,14 +166,18 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 }
 
 func (h *Handler) syncCodexUsageQuotaCooldown(ctx context.Context, auth *coreauth.Auth, payload gin.H) {
-	if h == nil || h.authManager == nil || auth == nil || strings.TrimSpace(auth.ID) == "" || len(payload) == 0 {
+	if h == nil || auth == nil || strings.TrimSpace(auth.ID) == "" || len(payload) == 0 {
+		return
+	}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		return
 	}
 	recoverAt, exhausted := codexUsageQuotaRecoverAt(payload, time.Now())
 	if !exhausted {
 		return
 	}
-	h.authManager.MarkAuthQuotaCooldown(ctx, auth.ID, recoverAt)
+	manager.MarkAuthQuotaCooldown(ctx, auth.ID, recoverAt)
 }
 
 func codexUsageQuotaRecoverAt(payload gin.H, now time.Time) (time.Time, bool) {
@@ -352,10 +356,11 @@ func resolveCodexUsageAccountID(auth *coreauth.Auth, accessToken string) string 
 }
 
 func codexUsageRequestUserAgent(h *Handler, auth *coreauth.Auth) string {
-	if h != nil && h.cfg != nil {
-		if userAgent := strings.TrimSpace(h.cfg.CodexHeaderDefaults.UserAgent); userAgent != "" {
-			return userAgent
-		}
+	userAgent := strings.TrimSpace(readConfigValue(h, func(cfg *config.Config) string {
+		return cfg.CodexHeaderDefaults.UserAgent
+	}))
+	if userAgent != "" {
+		return userAgent
 	}
 	if userAgent := authFileUserAgent(auth); userAgent != "" {
 		return userAgent

@@ -351,10 +351,7 @@ func (h *Handler) persistPatchedAuthFile(
 		return nil
 	}
 
-	authDir := ""
-	if h.cfg != nil {
-		authDir = h.cfg.AuthDir
-	}
+	authDir := h.authDirSnapshot()
 	path := resolvePatchAuthFilePath(targetAuth, authDir, req.Name)
 	if path == "" {
 		return nil
@@ -398,7 +395,8 @@ func (h *Handler) persistPatchedAuthFile(
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
 func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
-	if h.authManager == nil {
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -425,18 +423,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// Find auth by name or ID
-	var targetAuth *coreauth.Auth
-	if auth, ok := h.authManager.GetByID(name); ok {
-		targetAuth = auth
-	} else {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name {
-				targetAuth = auth
-				break
-			}
-		}
-	}
+	targetAuth := authManagerAuthByIDOrFileName(manager, name)
 
 	if targetAuth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
@@ -454,7 +441,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	if _, err := manager.Update(ctx, targetAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
@@ -464,7 +451,8 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 // PatchAuthFileFields updates editable fields on an auth file without re-uploading the whole JSON file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
-	if h.authManager == nil {
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -484,18 +472,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// Find auth by name or ID
-	var targetAuth *coreauth.Auth
-	if auth, ok := h.authManager.GetByID(name); ok {
-		targetAuth = auth
-	} else {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name {
-				targetAuth = auth
-				break
-			}
-		}
-	}
+	targetAuth := authManagerAuthByIDOrFileName(manager, name)
 
 	if targetAuth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
@@ -731,7 +708,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			targetAuth.Metadata["excluded_models"] = normalizedExcludedModels
 		}
 		resetExcludedModelsAttributes(targetAuth)
+		h.mu.RLock()
 		synthesizer.ApplyAuthExcludedModelsMeta(targetAuth, h.cfg, extractExcludedModelsFromMetadata(targetAuth.Metadata), "oauth")
+		h.mu.RUnlock()
 		changed = true
 	}
 
@@ -755,12 +734,25 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
-	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	updatedAuth, err := manager.Update(ctx, targetAuth)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "file": h.buildAuthFileEntry(updatedAuth)})
+}
+
+func authManagerAuthByIDOrFileName(manager *coreauth.Manager, name string) *coreauth.Auth {
+	if manager == nil {
+		return nil
+	}
+	if auth, ok := manager.GetByID(name); ok {
+		return auth
+	}
+	if auth, ok := manager.GetByFileName(name); ok {
+		return auth
+	}
+	return nil
 }
 
 func parseOptionalJSONIntField(raw json.RawMessage) (present bool, set bool, value int, err error) {

@@ -375,6 +375,25 @@ func TestDeleteAuthFile_LegacyOAuthRecordWithoutPathDeletesJSONFile(t *testing.T
 	assertAuthRemoved(t, manager, legacyName)
 }
 
+func TestFindAuthForDeleteMatchesLegacySourceBaseName(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "legacy-source-auth",
+		Provider: "oauth",
+		Attributes: map[string]string{
+			"source": filepath.Join(t.TempDir(), "legacy-source.json"),
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	h := newAuthDeleteTestHandler(t.TempDir(), manager, &memoryAuthStore{})
+	got := h.findAuthForDelete("legacy-source.json")
+	if got == nil || got.ID != auth.ID {
+		t.Fatalf("findAuthForDelete() = %#v, want %q", got, auth.ID)
+	}
+}
+
 func TestListAuthFiles_HidesFileBackedAuthMissingOnDisk(t *testing.T) {
 	setupManagementDeleteTest(t)
 

@@ -22,6 +22,7 @@ func (h *Handler) refreshAuthFileEntryPageFromManager(ctx context.Context, files
 		index int
 		auth  *coreauth.Auth
 	}
+	manager := h.authManagerSnapshot()
 	authsByKey := make(map[string]*coreauth.Auth, len(auths)*3)
 	for _, auth := range auths {
 		for _, key := range authFileListAuthKeys(auth) {
@@ -46,8 +47,8 @@ func (h *Handler) refreshAuthFileEntryPageFromManager(ctx context.Context, files
 	runAuthFilePageRefreshTasks(len(tasks), func(taskIndex int) {
 		task := tasks[taskIndex]
 		refreshAuth := task.auth
-		if h.authManager != nil && task.auth != nil && strings.TrimSpace(task.auth.ID) != "" {
-			if current, ok := h.authManager.GetByID(task.auth.ID); ok && current != nil {
+		if manager != nil && task.auth != nil && strings.TrimSpace(task.auth.ID) != "" {
+			if current, ok := manager.GetByID(task.auth.ID); ok && current != nil {
 				refreshAuth = current
 			}
 		}
@@ -60,10 +61,14 @@ func (h *Handler) refreshAuthFileEntryPageFromManager(ctx context.Context, files
 }
 
 func (h *Handler) refreshAuthFileEntryPageFromDisk(ctx context.Context, files []gin.H) []gin.H {
-	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" || len(files) == 0 {
+	if h == nil || len(files) == 0 {
 		return files
 	}
-	root, err := os.OpenRoot(strings.TrimSpace(h.cfg.AuthDir))
+	authDir := h.authDirSnapshot()
+	if authDir == "" {
+		return files
+	}
+	root, err := os.OpenRoot(authDir)
 	if err != nil {
 		return files
 	}
@@ -84,7 +89,7 @@ func (h *Handler) refreshAuthFileEntryPageFromDisk(ctx context.Context, files []
 	}
 	runAuthFilePageRefreshTasks(len(tasks), func(taskIndex int) {
 		task := tasks[taskIndex]
-		if updatedEntry := h.refreshAuthFileEntryFromDiskWithRoot(ctx, root, task.entry); updatedEntry != nil {
+		if updatedEntry := h.refreshAuthFileEntryFromDiskWithRoot(ctx, root, authDir, task.entry); updatedEntry != nil {
 			refreshed[task.index] = updatedEntry
 		}
 	})
@@ -121,23 +126,27 @@ func runAuthFilePageRefreshTasks(total int, run func(index int)) {
 }
 
 func (h *Handler) refreshAuthFileEntryFromDisk(ctx context.Context, entry gin.H) gin.H {
-	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+	if h == nil {
 		return nil
 	}
-	root, err := os.OpenRoot(strings.TrimSpace(h.cfg.AuthDir))
+	authDir := h.authDirSnapshot()
+	if authDir == "" {
+		return nil
+	}
+	root, err := os.OpenRoot(authDir)
 	if err != nil {
 		return nil
 	}
 	defer func() { _ = root.Close() }()
-	return h.refreshAuthFileEntryFromDiskWithRoot(ctx, root, entry)
+	return h.refreshAuthFileEntryFromDiskWithRoot(ctx, root, authDir, entry)
 }
 
-func (h *Handler) refreshAuthFileEntryFromDiskWithRoot(ctx context.Context, root *os.Root, entry gin.H) gin.H {
+func (h *Handler) refreshAuthFileEntryFromDiskWithRoot(ctx context.Context, root *os.Root, authDir string, entry gin.H) gin.H {
 	name := strings.TrimSpace(valueAsString(entry["name"]))
-	if name == "" || h == nil || h.cfg == nil || root == nil {
+	if name == "" || h == nil || root == nil {
 		return nil
 	}
-	path := filepath.Join(h.cfg.AuthDir, name)
+	path := filepath.Join(authDir, name)
 	data, err := readAuthRootFile(root, name)
 	if err != nil {
 		return nil

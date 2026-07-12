@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -572,20 +573,17 @@ func (h *Handler) persistCodexSubscriptionBackfill(ctx context.Context, auth *co
 	if ctx != nil {
 		persistCtx = context.WithoutCancel(ctx)
 	}
-	if h.authManager != nil && strings.TrimSpace(auth.ID) != "" {
-		if updated, err := h.authManager.Update(persistCtx, auth); err != nil {
+	if manager := h.authManagerSnapshot(); manager != nil && strings.TrimSpace(auth.ID) != "" {
+		if updated, err := manager.Update(persistCtx, auth); err != nil {
 			log.WithError(err).WithField("auth_id", auth.ID).Warn("failed to persist codex subscription info")
 		} else if updated != nil {
 			auth = updated
 		}
 	}
-	path := resolveCodexSubscriptionBackfillPath(h, auth)
+	authDir := h.authDirSnapshot()
+	path := resolveCodexSubscriptionBackfillPath(auth, authDir)
 	if path == "" {
 		return
-	}
-	authDir := ""
-	if h.cfg != nil {
-		authDir = strings.TrimSpace(h.cfg.AuthDir)
 	}
 	if err := persistCodexSubscriptionBackfillFile(path, authDir, auth.Metadata); err != nil {
 		log.WithError(err).WithField("path", path).Warn("failed to persist codex subscription info")
@@ -610,14 +608,11 @@ func codexSubscriptionBackfillHasPersistableData(metadata map[string]any) bool {
 	return false
 }
 
-func resolveCodexSubscriptionBackfillPath(h *Handler, auth *coreauth.Auth) string {
+func resolveCodexSubscriptionBackfillPath(auth *coreauth.Auth, authDir string) string {
 	if auth == nil {
 		return ""
 	}
-	authDir := ""
-	if h != nil && h.cfg != nil {
-		authDir = strings.TrimSpace(h.cfg.AuthDir)
-	}
+	authDir = strings.TrimSpace(authDir)
 	if auth.Attributes != nil {
 		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
 			if authDir == "" || authFilePathWithinDir(path, authDir) {
@@ -765,10 +760,7 @@ func codexSubscriptionCacheKey(accessToken, proxyURL string) string {
 }
 
 func (h *Handler) codexSubscriptionProxyURL(auth *coreauth.Auth) string {
-	globalProxy := ""
-	if h != nil && h.cfg != nil {
-		globalProxy = strings.TrimSpace(h.cfg.ProxyURL)
-	}
+	globalProxy := strings.TrimSpace(readConfigValue(h, func(cfg *config.Config) string { return cfg.ProxyURL }))
 	if auth != nil {
 		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
 			if codexProxySettingIsDirect(proxyURL) && globalProxy != "" {
@@ -931,8 +923,8 @@ func (h *Handler) fetchCodexAccountSubscriptionInfo(ctx context.Context, accessT
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 
 	client := &http.Client{Timeout: 15 * time.Second}
-	if h != nil && h.cfg != nil {
-		sdkCfg := h.cfg.SDKConfig
+	if h != nil {
+		sdkCfg := readConfigValue(h, func(cfg *config.Config) config.SDKConfig { return cfg.SDKConfig })
 		sdkCfg.ProxyURL = strings.TrimSpace(proxyURL)
 		client = util.SetProxy(&sdkCfg, client)
 	}

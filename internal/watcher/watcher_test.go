@@ -678,7 +678,7 @@ func TestAuthFileUnchangedEmptyAndMissing(t *testing.T) {
 func TestReloadClientsCachesAuthHashes(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "one.json")
-	if err := os.WriteFile(authFile, []byte(`{"type":"demo"}`), 0o644); err != nil {
+	if err := os.WriteFile(authFile, []byte(`{"type":"codex","email":"one@example.com","access_token":"token"}`), 0o644); err != nil {
 		t.Fatalf("failed to write auth file: %v", err)
 	}
 	w := &Watcher{
@@ -692,6 +692,12 @@ func TestReloadClientsCachesAuthHashes(t *testing.T) {
 	defer w.clientsMutex.RUnlock()
 	if len(w.lastAuthHashes) != 1 {
 		t.Fatalf("expected hash cache for one auth file, got %d", len(w.lastAuthHashes))
+	}
+	if len(w.fileAuthsByPath) != 1 {
+		t.Fatalf("expected path cache for one auth file, got %d", len(w.fileAuthsByPath))
+	}
+	if len(w.currentAuths) != 1 {
+		t.Fatalf("expected the scan result to initialize one auth, got %d", len(w.currentAuths))
 	}
 }
 
@@ -712,6 +718,82 @@ func TestReloadClientsLogsConfigDiffs(t *testing.T) {
 	w.clientsMutex.Unlock()
 
 	w.reloadClients(false, nil, false)
+}
+
+func TestReloadClientsReusesCachedFileAuthsForOrdinaryConfigChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	authFile := filepath.Join(tmpDir, "codex.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"codex","email":"cached@example.com","access_token":"token"}`), 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+	w := &Watcher{authDir: tmpDir, config: &config.Config{AuthDir: tmpDir}}
+	w.reloadClients(true, nil, false)
+
+	w.clientsMutex.RLock()
+	if len(w.currentAuths) != 1 {
+		w.clientsMutex.RUnlock()
+		t.Fatalf("expected initial file auth, got %d", len(w.currentAuths))
+	}
+	w.clientsMutex.RUnlock()
+
+	origSnapshot := snapshotCoreAuthsFunc
+	var snapshotCalls int32
+	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string) []*coreauth.Auth {
+		atomic.AddInt32(&snapshotCalls, 1)
+		return origSnapshot(cfg, authDir)
+	}
+	defer func() { snapshotCoreAuthsFunc = origSnapshot }()
+
+	// Removing the file proves this reload did not touch the directory. The
+	// fsnotify removal path is responsible for applying actual file changes.
+	if err := os.Remove(authFile); err != nil {
+		t.Fatalf("failed to remove auth file: %v", err)
+	}
+	w.clientsMutex.Lock()
+	w.config = &config.Config{AuthDir: tmpDir, Port: 9000}
+	w.clientsMutex.Unlock()
+	w.reloadClients(false, nil, false)
+
+	if got := atomic.LoadInt32(&snapshotCalls); got != 0 {
+		t.Fatalf("expected ordinary config reload to reuse cached file auths, got %d full snapshots", got)
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if len(w.currentAuths) != 1 {
+		t.Fatalf("expected cached file auth to be retained, got %d", len(w.currentAuths))
+	}
+}
+
+func TestReloadClientsForceRefreshRescansFileAuths(t *testing.T) {
+	tmpDir := t.TempDir()
+	w := &Watcher{
+		authDir: tmpDir,
+		config:  &config.Config{AuthDir: tmpDir},
+		fileAuthsByPath: map[string]map[string]*coreauth.Auth{
+			"cached.json": {"cached": nil},
+		},
+		currentAuths: map[string]*coreauth.Auth{
+			"cached": {ID: "cached", Provider: "codex"},
+		},
+	}
+
+	origSnapshot := snapshotCoreAuthsFunc
+	var snapshotCalls int32
+	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string) []*coreauth.Auth {
+		atomic.AddInt32(&snapshotCalls, 1)
+		return origSnapshot(cfg, authDir)
+	}
+	defer func() { snapshotCoreAuthsFunc = origSnapshot }()
+
+	w.reloadClients(false, nil, true)
+	if got := atomic.LoadInt32(&snapshotCalls); got != 1 {
+		t.Fatalf("expected force refresh to perform one full snapshot, got %d", got)
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if len(w.currentAuths) != 0 {
+		t.Fatalf("expected removed file auth to be discarded after rescan, got %d", len(w.currentAuths))
+	}
 }
 
 func TestReloadClientsHandlesNilConfig(t *testing.T) {
@@ -1329,9 +1411,9 @@ func TestLoadFileClientsWalkError(t *testing.T) {
 	w := &Watcher{}
 	w.SetConfig(cfg)
 
-	count := w.loadFileClients(cfg)
-	if count != 0 {
-		t.Fatalf("expected count 0 due to walk error, got %d", count)
+	scan := w.scanFileClients(cfg)
+	if scan.fileCount != 0 {
+		t.Fatalf("expected count 0 due to walk error, got %d", scan.fileCount)
 	}
 }
 
@@ -1681,16 +1763,14 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	w.scheduleConfigReload()
 
 	waitForCondition(t, time.Second, func() bool {
-		return atomic.LoadInt32(&reloads) == 1
+		if atomic.LoadInt32(&reloads) != 1 {
+			return false
+		}
+		w.clientsMutex.RLock()
+		hashCommitted := w.lastConfigHash != ""
+		w.clientsMutex.RUnlock()
+		return hashCommitted
 	})
-	// reloadConfigIfChanged writes lastConfigHash under clientsMutex; mirror
-	// that here so -race doesn't flag a benign read.
-	w.clientsMutex.RLock()
-	hash := w.lastConfigHash
-	w.clientsMutex.RUnlock()
-	if hash == "" {
-		t.Fatal("expected lastConfigHash to be set after reload")
-	}
 }
 
 func TestPrepareAuthUpdatesLockedForceAndDelete(t *testing.T) {

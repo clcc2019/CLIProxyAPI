@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -173,15 +174,22 @@ func stopForwarderInstance(port int, forwarder *callbackForwarder) {
 }
 
 func (h *Handler) managementCallbackURL(path string) (string, error) {
-	if h == nil || h.cfg == nil || h.cfg.Port <= 0 {
+	type callbackServerConfig struct {
+		port       int
+		tlsEnabled bool
+	}
+	snapshot := readConfigValue(h, func(cfg *config.Config) callbackServerConfig {
+		return callbackServerConfig{port: cfg.Port, tlsEnabled: cfg.TLS.Enable}
+	})
+	if snapshot.port <= 0 {
 		return "", fmt.Errorf("server port is not configured")
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
 	scheme := "http"
-	if h.cfg.TLS.Enable {
+	if snapshot.tlsEnabled {
 		scheme = "https"
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, snapshot.port, path), nil
 }

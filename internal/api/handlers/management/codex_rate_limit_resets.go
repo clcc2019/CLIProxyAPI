@@ -13,9 +13,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 var codexRateLimitResetCreditsConsumeURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+var codexRateLimitResetCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 
 type codexRateLimitResetConsumeResponse struct {
 	Code         string `json:"code"`
@@ -32,6 +34,15 @@ func (h *Handler) GetCodexRateLimitResetCredits(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	auth = h.refreshCodexUsageAuthIfNeeded(ctx, auth)
+	type detailsResult struct {
+		payload gin.H
+		err     error
+	}
+	detailsCh := make(chan detailsResult, 1)
+	go func(authSnapshot *coreauth.Auth) {
+		details, _, detailsErr := h.fetchCodexRateLimitResetCreditDetails(ctx, authSnapshot)
+		detailsCh <- detailsResult{payload: details, err: detailsErr}
+	}(auth)
 	usageOpts := parseCodexUsageRequestOptions(c)
 	payload, upstreamStatus, err := h.fetchCodexUsageWithCache(ctx, auth, usageOpts)
 	if err != nil {
@@ -42,7 +53,89 @@ func (h *Handler) GetCodexRateLimitResetCredits(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
+	// /wham/usage only contains the balance. The official client additionally
+	// reads the detail endpoint to obtain each reset credit's expires_at value.
+	// Keep this best-effort so a detail outage does not hide the known balance.
+	details := <-detailsCh
+	if details.err == nil {
+		mergeCodexRateLimitResetCreditDetails(payload, details.payload)
+	} else {
+		log.WithError(details.err).WithField("auth_id", auth.ID).Debug("failed to fetch codex rate limit reset credit details")
+	}
 	c.JSON(http.StatusOK, h.codexRateLimitResetCreditsPayload(auth, payload))
+}
+
+func mergeCodexRateLimitResetCreditDetails(usage gin.H, details gin.H) {
+	if usage == nil || len(details) == 0 {
+		return
+	}
+	merged := gin.H{}
+	if existing, ok := codexUsageWindowMap(usage["rate_limit_reset_credits"]); ok {
+		for key, value := range existing {
+			merged[key] = value
+		}
+	}
+	for key, value := range details {
+		if key == "available_count" {
+			if _, ok := numberFromAny(value); !ok {
+				continue
+			}
+		}
+		merged[key] = value
+	}
+	if len(merged) > 0 {
+		usage["rate_limit_reset_credits"] = merged
+	}
+}
+
+func (h *Handler) fetchCodexRateLimitResetCreditDetails(ctx context.Context, auth *coreauth.Auth) (gin.H, int, error) {
+	accessToken := codexUsageAccessToken(auth)
+	if accessToken == "" {
+		return nil, 0, fmt.Errorf("codex access_token missing")
+	}
+	accountID := resolveCodexUsageAccountID(auth, accessToken)
+	if accountID == "" {
+		return nil, 0, fmt.Errorf("codex chatgpt account id missing")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, codexRateLimitResetCreditsURL, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("ChatGPT-Account-ID", accountID)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", codexUsageRequestUserAgent(h, auth))
+	if codexUsageFedramp(auth) {
+		req.Header.Set("X-OpenAI-Fedramp", "true")
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	if h != nil {
+		client.Transport = h.codexUsageTransport(auth)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, resp.StatusCode, fmt.Errorf("codex reset credit details request failed with status %d: %s", resp.StatusCode, truncateForLog(string(body), 200))
+	}
+	details := gin.H{}
+	if err = json.Unmarshal(body, &details); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to decode codex reset credit details response: %w", err)
+	}
+	return details, resp.StatusCode, nil
 }
 
 // ConsumeCodexRateLimitResetCredit redeems one Codex reset credit through the
@@ -76,8 +169,8 @@ func (h *Handler) ConsumeCodexRateLimitResetCredit(c *gin.Context) {
 		"windows_reset":     consume.WindowsReset,
 		"redeem_request_id": redeemRequestID,
 	}
-	if codexRateLimitResetConsumeClearsCooldown(consume.Code) && h != nil && h.authManager != nil {
-		response["local_quota_cooldown_cleared"] = h.authManager.ClearAuthQuotaCooldown(ctx, auth.ID)
+	if manager := h.authManagerSnapshot(); codexRateLimitResetConsumeClearsCooldown(consume.Code) && manager != nil {
+		response["local_quota_cooldown_cleared"] = manager.ClearAuthQuotaCooldown(ctx, auth.ID)
 	}
 
 	if codexRateLimitResetConsumeRefreshesUsage(consume.Code) {
@@ -121,8 +214,8 @@ func (h *Handler) codexRateLimitResetCreditsPayload(auth *coreauth.Auth, usage g
 		"rate_limit_reset_credits": credits,
 		"available_count":          available,
 	}
-	if h != nil && h.authManager != nil && auth != nil {
-		if latest, ok := h.authManager.GetByID(auth.ID); ok && latest != nil {
+	if manager := h.authManagerSnapshot(); manager != nil && auth != nil {
+		if latest, ok := manager.GetByID(auth.ID); ok && latest != nil {
 			auth = latest
 		}
 	}

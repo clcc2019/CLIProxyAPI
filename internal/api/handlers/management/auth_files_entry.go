@@ -58,7 +58,11 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
-	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
+	if opts.RecentRequestSnapshotter != nil {
+		entry["recent_requests"] = opts.RecentRequestSnapshotter.Snapshot(auth)
+	} else {
+		entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}

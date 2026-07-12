@@ -35,8 +35,9 @@ type codexUsageCache struct {
 }
 
 type codexUsageRequestOptions struct {
-	force bool
-	ttl   time.Duration
+	force        bool
+	requireFresh bool
+	ttl          time.Duration
 }
 
 func (c *codexUsageCache) load(key string, now time.Time, allowStale bool) (gin.H, bool, bool) {
@@ -138,6 +139,9 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 	if opts.force {
 		flightKey += "|force"
 	}
+	if opts.requireFresh {
+		flightKey += "|fresh"
+	}
 	type result struct {
 		payload gin.H
 		status  int
@@ -154,7 +158,7 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 			h.storeCodexUsageCache(ctx, cache, cacheKey, payload, opts.ttl)
 			return result{payload: payload, status: status}, nil
 		}
-		if codexUsageTransientFailure(status, fetchErr) {
+		if !opts.requireFresh && codexUsageTransientFailure(status, fetchErr) {
 			if stale, _, ok := h.loadCodexUsageCache(ctx, cache, cacheKey, time.Now(), true); ok {
 				return result{payload: markCodexUsageStale(stale, fetchErr, status), status: http.StatusOK}, nil
 			}

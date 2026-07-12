@@ -19,10 +19,10 @@ import (
 
 func (h *Handler) isManagedAuthFilePath(path string) bool {
 	path = strings.TrimSpace(path)
-	if h == nil || h.cfg == nil || path == "" {
+	if h == nil || path == "" {
 		return false
 	}
-	authDir := strings.TrimSpace(h.cfg.AuthDir)
+	authDir := h.authDirSnapshot()
 	if authDir == "" {
 		return false
 	}
@@ -216,13 +216,18 @@ func cleanAbsPathForCompare(path string) string {
 
 // DeleteAuthFile deletes a single auth file, a batch of auth files, or all auth files.
 func (h *Handler) DeleteAuthFile(c *gin.Context) {
-	if h.authManager == nil {
+	if h.authManagerSnapshot() == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
 	ctx := c.Request.Context()
+	authDir := h.authDirSnapshot()
+	if authDir == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "auth directory is not configured"})
+		return
+	}
 	if all := c.Query("all"); all == "true" || all == "1" || all == "*" {
-		entries, err := os.ReadDir(h.cfg.AuthDir)
+		entries, err := os.ReadDir(authDir)
 		if err != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 			return
@@ -236,7 +241,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			if !util.HasJSONFileName(name) {
 				continue
 			}
-			full := filepath.Join(h.cfg.AuthDir, name)
+			full := filepath.Join(authDir, name)
 			if !filepath.IsAbs(full) {
 				if abs, errAbs := filepath.Abs(full); errAbs == nil {
 					full = abs
@@ -273,7 +278,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		return
 	}
 	if len(names) == 1 {
-		if _, status, errDelete := h.deleteAuthFileByName(ctx, names[0]); errDelete != nil {
+		if _, status, errDelete := h.deleteAuthFileByName(ctx, authDir, names[0]); errDelete != nil {
 			c.JSON(status, gin.H{"error": errDelete.Error()})
 			return
 		}
@@ -284,7 +289,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	deletedFiles := make([]string, 0, len(names))
 	failed := make([]gin.H, 0)
 	for _, name := range names {
-		deletedName, _, errDelete := h.deleteAuthFileByName(ctx, name)
+		deletedName, _, errDelete := h.deleteAuthFileByName(ctx, authDir, name)
 		if errDelete != nil {
 			failed = append(failed, gin.H{"name": name, "error": errDelete.Error()})
 			continue
@@ -303,7 +308,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "deleted": len(deletedFiles), "files": deletedFiles})
 }
 
-func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string, int, error) {
+func (h *Handler) deleteAuthFileByName(ctx context.Context, authDir, name string) (string, int, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
@@ -324,9 +329,9 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
 	}
 
-	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(resolvedName))
+	targetPath := filepath.Join(authDir, filepath.Base(resolvedName))
 	if !util.HasJSONFileName(resolvedName) && !isUnsafeAuthFileName(resolvedName) {
-		jsonPath := filepath.Join(h.cfg.AuthDir, filepath.Base(resolvedName)+".json")
+		jsonPath := filepath.Join(authDir, filepath.Base(resolvedName)+".json")
 		if _, errStat := os.Stat(jsonPath); errStat == nil {
 			targetPath = jsonPath
 		}
@@ -385,7 +390,11 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 }
 
 func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
-	if h == nil || h.authManager == nil {
+	if h == nil {
+		return nil
+	}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		return nil
 	}
 	matcher := newAuthDeleteMatcher(name)
@@ -393,31 +402,25 @@ func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
 		return nil
 	}
 	for _, variant := range matcher.variants {
-		if auth, ok := h.authManager.GetByID(variant); ok {
+		if auth, ok := manager.GetByID(variant); ok {
 			return auth
 		}
 	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
-		if auth == nil {
+	if auth, ok := manager.GetByIndex(matcher.name); ok {
+		return auth
+	}
+	for _, snapshot := range manager.AuthLookupSnapshots() {
+		path := strings.TrimSpace(snapshot.Path)
+		matches := strings.TrimSpace(snapshot.Index) == matcher.name ||
+			matcher.matchesVariant(snapshot.FileName) ||
+			matcher.matchesVariant(snapshot.ID) ||
+			matcher.matchesBase(path) ||
+			matcher.matchesPath(path) ||
+			matcher.matchesBase(snapshot.Source)
+		if !matches {
 			continue
 		}
-		auth.EnsureIndex()
-		if strings.TrimSpace(auth.Index) == matcher.name {
-			return auth
-		}
-		if matcher.matchesVariant(auth.FileName) || matcher.matchesVariant(auth.ID) {
-			return auth
-		}
-		path := strings.TrimSpace(authAttribute(auth, "path"))
-		if matcher.matchesBase(path) || matcher.matchesPath(path) {
-			return auth
-		}
-		if matcher.matchesBase(authAttribute(auth, "source")) {
-			return auth
-		}
-		// Match by stable auth index (16-char sha256 hex sent from the UI).
-		if auth.EnsureIndex() == matcher.name {
+		if auth, ok := manager.GetByID(snapshot.ID); ok {
 			return auth
 		}
 	}
@@ -425,7 +428,11 @@ func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) (string, *coreauth.Auth) {
-	if h == nil || h.authManager == nil {
+	if h == nil {
+		return "", nil
+	}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		return "", nil
 	}
 	id = strings.TrimSpace(id)
@@ -433,9 +440,9 @@ func (h *Handler) disableAuth(ctx context.Context, id string) (string, *coreauth
 		return "", nil
 	}
 	for _, variant := range authDeleteNameVariants(id) {
-		if auth, ok := h.authManager.GetByID(variant); ok {
+		if auth, ok := manager.GetByID(variant); ok {
 			original := auth.Clone()
-			h.markAuthRemoved(ctx, auth)
+			markAuthRemoved(ctx, manager, auth)
 			return auth.ID, original
 		}
 	}
@@ -444,35 +451,43 @@ func (h *Handler) disableAuth(ctx context.Context, id string) (string, *coreauth
 		return "", nil
 	}
 	for _, variant := range authDeleteNameVariants(authID) {
-		if auth, ok := h.authManager.GetByID(variant); ok {
+		if auth, ok := manager.GetByID(variant); ok {
 			original := auth.Clone()
-			h.markAuthRemoved(ctx, auth)
+			markAuthRemoved(ctx, manager, auth)
 			return auth.ID, original
 		}
 	}
 	return "", nil
 }
 
-func (h *Handler) markAuthRemoved(ctx context.Context, auth *coreauth.Auth) {
-	if h == nil || h.authManager == nil || auth == nil {
+func markAuthRemoved(ctx context.Context, manager *coreauth.Manager, auth *coreauth.Auth) {
+	if manager == nil || auth == nil {
 		return
 	}
 	auth.Disabled = true
 	auth.Status = coreauth.StatusDisabled
 	auth.StatusMessage = "removed via management API"
 	auth.UpdatedAt = time.Now()
-	_, _ = h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
+	_, _ = manager.Update(coreauth.WithSkipPersist(ctx), auth)
 }
 
 func (h *Handler) restoreAuth(ctx context.Context, auth *coreauth.Auth) {
-	if h == nil || h.authManager == nil || auth == nil {
+	if h == nil || auth == nil {
 		return
 	}
-	_, _ = h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
+	manager := h.authManagerSnapshot()
+	if manager == nil {
+		return
+	}
+	_, _ = manager.Update(coreauth.WithSkipPersist(ctx), auth)
 }
 
 func (h *Handler) removeAuth(ctx context.Context, id string) {
-	if h == nil || h.authManager == nil {
+	if h == nil {
+		return
+	}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		return
 	}
 	id = strings.TrimSpace(id)
@@ -480,8 +495,8 @@ func (h *Handler) removeAuth(ctx context.Context, id string) {
 		return
 	}
 	for _, variant := range authDeleteNameVariants(id) {
-		if auth, ok := h.authManager.GetByID(variant); ok {
-			_, _ = h.authManager.Remove(ctx, auth.ID)
+		if auth, ok := manager.GetByID(variant); ok {
+			_, _ = manager.Remove(ctx, auth.ID)
 			return
 		}
 	}
@@ -490,8 +505,8 @@ func (h *Handler) removeAuth(ctx context.Context, id string) {
 		return
 	}
 	for _, variant := range authDeleteNameVariants(authID) {
-		if auth, ok := h.authManager.GetByID(variant); ok {
-			_, _ = h.authManager.Remove(ctx, auth.ID)
+		if auth, ok := manager.GetByID(variant); ok {
+			_, _ = manager.Remove(ctx, auth.ID)
 			return
 		}
 	}

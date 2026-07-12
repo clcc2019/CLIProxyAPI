@@ -2883,7 +2883,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if shouldStopCredentialFailover(homeMode, maxRetryCredentials, attempted, lastErr, opts) {
 			return cliproxyexecutor.Response{}, m.credentialRetryLimitReachedError(ctx, "execute", providers, routeModel, opts, maxRetryCredentials, attempted, lastErr)
 		}
 		pickOpts := opts
@@ -3025,7 +3025,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if shouldStopCredentialFailover(homeMode, maxRetryCredentials, attempted, lastErr, opts) {
 			return cliproxyexecutor.Response{}, m.credentialRetryLimitReachedError(ctx, "execute_count", providers, routeModel, opts, maxRetryCredentials, attempted, lastErr)
 		}
 		pickOpts := opts
@@ -3148,7 +3148,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if shouldStopCredentialFailover(homeMode, maxRetryCredentials, attempted, lastErr, opts) {
 			return nil, m.credentialRetryLimitReachedError(ctx, "execute_stream", providers, routeModel, opts, maxRetryCredentials, attempted, lastErr)
 		}
 		pickOpts := opts
@@ -5152,6 +5152,29 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+// ListByProvider returns cloned auth entries matching provider. Filtering is
+// performed before cloning so callers that only need one provider avoid
+// copying token-bearing metadata for every auth managed by the process.
+func (m *Manager) ListByProvider(provider string) []*Auth {
+	if m == nil {
+		return nil
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var list []*Auth
+	for _, auth := range m.auths {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), provider) {
+			continue
+		}
+		list = append(list, auth.Clone())
+	}
+	return list
+}
+
 // ListManagementSummary returns lightweight auth snapshots for management list
 // views. It intentionally avoids copying full token-bearing metadata for every
 // credential while preserving the fields needed for filtering, sorting, and cards.
@@ -5163,6 +5186,114 @@ func (m *Manager) ListManagementSummary() []*Auth {
 		list = append(list, auth.CloneForManagementSummary())
 	}
 	return list
+}
+
+// GetByFileName returns a defensive copy of the first auth whose FileName
+// exactly matches name. Filtering under the manager lock avoids cloning every
+// token-bearing auth merely to locate one management target.
+func (m *Manager) GetByFileName(name string) (*Auth, bool) {
+	if m == nil {
+		return nil, false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth != nil && auth.FileName == name {
+			return auth.Clone(), true
+		}
+	}
+	return nil, false
+}
+
+// GetByName performs the relaxed lookup used by management endpoints: an
+// exact ID lookup first, followed by case-insensitive ID, file-name, and base-
+// name matching. Only the matching auth is cloned.
+func (m *Manager) GetByName(name string) (*Auth, bool) {
+	if m == nil {
+		return nil, false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false
+	}
+	lookupBase := strings.TrimSpace(filepath.Base(name))
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if auth := m.auths[name]; auth != nil {
+		return auth.Clone(), true
+	}
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		for _, candidate := range []string{auth.ID, auth.FileName, filepath.Base(auth.FileName)} {
+			candidate = strings.TrimSpace(candidate)
+			if candidate != "" && (strings.EqualFold(candidate, name) || strings.EqualFold(candidate, lookupBase)) {
+				return auth.Clone(), true
+			}
+		}
+	}
+	return nil, false
+}
+
+// GetByIndex returns a defensive copy of the auth with the stable management
+// index. Registered and updated auths already have their index assigned, so
+// the common path compares a short string without cloning unrelated entries.
+func (m *Manager) GetByIndex(index string) (*Auth, bool) {
+	if m == nil {
+		return nil, false
+	}
+	index = strings.TrimSpace(index)
+	if index == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		candidate := strings.TrimSpace(auth.Index)
+		if candidate == "" {
+			// Preserve compatibility with legacy/injected manager entries without
+			// mutating shared state while holding a read lock.
+			candidate = auth.Clone().EnsureIndex()
+		}
+		if candidate == index {
+			return auth.Clone(), true
+		}
+	}
+	return nil, false
+}
+
+// AuthIndexesByID returns the stable management index for each auth without
+// cloning token-bearing metadata. The returned map is owned by the caller.
+func (m *Manager) AuthIndexesByID() map[string]string {
+	indexes := make(map[string]string)
+	if m == nil {
+		return indexes
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	indexes = make(map[string]string, len(m.auths))
+	for id, auth := range m.auths {
+		id = strings.TrimSpace(id)
+		if id == "" || auth == nil {
+			continue
+		}
+		index := strings.TrimSpace(auth.Index)
+		if index == "" {
+			index = auth.Clone().EnsureIndex()
+		}
+		if index != "" {
+			indexes[id] = index
+		}
+	}
+	return indexes
 }
 
 // AnyAvailableAuthForModel reports whether any matching auth is currently usable.
@@ -6131,6 +6262,20 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 		return true
 	}
 	return isHomeRequestRetryExceededError(errPick)
+}
+
+// shouldStopCredentialFailover applies the configured credential-attempt cap
+// while allowing credential-scoped failures (for example, an exhausted quota)
+// to move immediately to every other eligible credential. Explicitly pinned
+// requests must never escape their selected credential.
+func shouldStopCredentialFailover(homeMode bool, maxRetryCredentials int, attempted map[string]struct{}, lastErr error, opts cliproxyexecutor.Options) bool {
+	if homeMode || maxRetryCredentials <= 0 || len(attempted) < maxRetryCredentials {
+		return false
+	}
+	if pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+		return true
+	}
+	return !isCredentialFailoverFailure(lastErr)
 }
 
 func homeAuthAlreadyTried(tried map[string]struct{}, authID string) bool {

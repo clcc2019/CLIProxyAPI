@@ -48,9 +48,7 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	manager := h.authManager
-	h.mu.Unlock()
+	manager := h.authManagerSnapshot()
 	if manager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
@@ -58,48 +56,29 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 
 	now := time.Now()
 	out := make(map[string]map[string]apiKeyUsageEntry)
-	for _, auth := range manager.List() {
-		if auth == nil {
-			continue
-		}
-		kind, apiKey := auth.AccountInfo()
-		if !strings.EqualFold(strings.TrimSpace(kind), "api_key") {
-			continue
-		}
-		apiKey = strings.TrimSpace(apiKey)
-		if apiKey == "" {
-			continue
-		}
-		baseURL := ""
-		if auth.Attributes != nil {
-			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
-			if baseURL == "" {
-				baseURL = strings.TrimSpace(auth.Attributes["base-url"])
-			}
-		}
-		compositeKey := baseURL + "|" + apiKey
-		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	for _, snapshot := range manager.APIKeyUsageSnapshots(now) {
+		compositeKey := snapshot.BaseURL + "|" + snapshot.APIKey
+		provider := strings.ToLower(strings.TrimSpace(snapshot.Provider))
 		if provider == "" {
 			provider = "unknown"
 		}
 
-		recent := auth.RecentRequestsSnapshot(now)
 		providerBucket, ok := out[provider]
 		if !ok {
 			providerBucket = make(map[string]apiKeyUsageEntry)
 			out[provider] = providerBucket
 		}
 		if existing, exists := providerBucket[compositeKey]; exists {
-			existing.Success += auth.Success
-			existing.Failed += auth.Failed
-			existing.RecentRequests = mergeRecentRequestBuckets(existing.RecentRequests, recent)
+			existing.Success += snapshot.Success
+			existing.Failed += snapshot.Failed
+			existing.RecentRequests = mergeRecentRequestBuckets(existing.RecentRequests, snapshot.RecentRequests)
 			providerBucket[compositeKey] = existing
 			continue
 		}
 		providerBucket[compositeKey] = apiKeyUsageEntry{
-			Success:        auth.Success,
-			Failed:         auth.Failed,
-			RecentRequests: recent,
+			Success:        snapshot.Success,
+			Failed:         snapshot.Failed,
+			RecentRequests: snapshot.RecentRequests,
 		}
 	}
 

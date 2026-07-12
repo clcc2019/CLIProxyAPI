@@ -28,15 +28,20 @@ func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 	if h == nil {
 		return nil
 	}
+	h.mu.Lock()
 	store := h.tokenStore
 	if store == nil {
 		store = sdkAuth.GetTokenStore()
 		h.tokenStore = store
 	}
+	authDir := ""
 	if h.cfg != nil {
-		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
-			dirSetter.SetBaseDir(h.cfg.AuthDir)
-		}
+		authDir = h.cfg.AuthDir
+	}
+	h.mu.Unlock()
+
+	if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
+		dirSetter.SetBaseDir(authDir)
 	}
 	return store
 }
@@ -49,8 +54,8 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
-	if h.postAuthHook != nil {
-		if err := h.postAuthHook(ctx, record); err != nil {
+	if hook := h.postAuthHookSnapshot(); hook != nil {
+		if err := hook(ctx, record); err != nil {
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
@@ -66,11 +71,12 @@ func (h *Handler) waitForOAuthCallbackFile(provider, state, fileName string, tim
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("timeout waiting for OAuth callback")
 		}
-		data, errRead := h.readAuthDirFile(fileName)
+		authDir := h.authDirSnapshot()
+		data, errRead := readAuthDirFileAt(authDir, fileName)
 		if errRead == nil {
 			var payload map[string]string
 			_ = json.Unmarshal(data, &payload)
-			_ = os.Remove(filepath.Join(h.cfg.AuthDir, fileName))
+			_ = os.Remove(filepath.Join(authDir, fileName))
 			return payload, nil
 		}
 		time.Sleep(500 * time.Millisecond)

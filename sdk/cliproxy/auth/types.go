@@ -237,6 +237,40 @@ func formatRecentRequestBucketLabel(bucketID int64) string {
 	return start.Format("15:04") + "-" + end.Format("15:04")
 }
 
+func recentRequestBucketLabels(now time.Time) [recentRequestBucketCount]string {
+	var labels [recentRequestBucketCount]string
+	currentBucketID := recentRequestBucketID(now)
+	for outputIndex := range labels {
+		bucketID := currentBucketID - int64(recentRequestBucketCount-1-outputIndex)
+		labels[outputIndex] = formatRecentRequestBucketLabel(bucketID)
+	}
+	return labels
+}
+
+// RecentRequestSnapshotter reuses the formatted time-window labels for a batch
+// of auth snapshots captured at the same instant.
+type RecentRequestSnapshotter struct {
+	now    time.Time
+	labels [recentRequestBucketCount]string
+}
+
+// NewRecentRequestSnapshotter creates an immutable batch snapshot helper.
+func NewRecentRequestSnapshotter(now time.Time) *RecentRequestSnapshotter {
+	return &RecentRequestSnapshotter{
+		now:    now,
+		labels: recentRequestBucketLabels(now),
+	}
+}
+
+// Snapshot returns the recent request buckets for auth using the batch's
+// shared time labels.
+func (s *RecentRequestSnapshotter) Snapshot(auth *Auth) []RecentRequestBucket {
+	if s == nil {
+		return auth.RecentRequestsSnapshot(time.Now())
+	}
+	return auth.recentRequestsSnapshotWithLabels(s.now, &s.labels)
+}
+
 func (a *Auth) recordRecentRequest(now time.Time, success bool) {
 	if a == nil {
 		return
@@ -283,6 +317,14 @@ func (a *Auth) recordRuntimeResult(now time.Time, success bool) {
 }
 
 func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
+	if a == nil {
+		return make([]RecentRequestBucket, 0, recentRequestBucketCount)
+	}
+	labels := recentRequestBucketLabels(now)
+	return a.recentRequestsSnapshotWithLabels(now, &labels)
+}
+
+func (a *Auth) recentRequestsSnapshotWithLabels(now time.Time, labels *[recentRequestBucketCount]string) []RecentRequestBucket {
 	out := make([]RecentRequestBucket, 0, recentRequestBucketCount)
 	if a == nil {
 		return out
@@ -292,16 +334,20 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 	defer mu.Unlock()
 
 	currentBucketID := recentRequestBucketID(now)
-	for i := recentRequestBucketCount - 1; i >= 0; i-- {
-		bucketID := currentBucketID - int64(i)
+	for outputIndex := 0; outputIndex < recentRequestBucketCount; outputIndex++ {
+		bucketID := currentBucketID - int64(recentRequestBucketCount-1-outputIndex)
 		idx := recentRequestBucketIndex(bucketID)
 		var bucket recentRequestBucket
 		if a.recentRequests != nil {
 			bucket = a.recentRequests.buckets[idx]
 		}
-		entry := RecentRequestBucket{
-			Time: formatRecentRequestBucketLabel(bucketID),
+		label := ""
+		if labels != nil {
+			label = labels[outputIndex]
+		} else {
+			label = formatRecentRequestBucketLabel(bucketID)
 		}
+		entry := RecentRequestBucket{Time: label}
 		if bucket.bucketID == bucketID {
 			entry.Success = bucket.success
 			entry.Failed = bucket.failed

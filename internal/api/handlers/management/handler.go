@@ -44,7 +44,7 @@ const attemptMaxIdleTime = 2 * time.Hour
 type Handler struct {
 	cfg                 *config.Config
 	configFilePath      string
-	mu                  sync.Mutex
+	mu                  sync.RWMutex
 	attemptsMu          sync.Mutex
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
@@ -182,6 +182,21 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	}
 }
 
+func (h *Handler) authManagerSnapshot() *coreauth.Manager {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.authManager
+}
+
+func (h *Handler) authDirSnapshot() string {
+	return strings.TrimSpace(readConfigValue(h, func(cfg *config.Config) string {
+		return cfg.AuthDir
+	}))
+}
+
 // SetUsageStatistics overrides the usage statistics source used by management endpoints.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) {
 	if h == nil || stats == nil {
@@ -190,6 +205,15 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) {
 	h.mu.Lock()
 	h.usageStats = stats
 	h.mu.Unlock()
+}
+
+func (h *Handler) usageStatisticsSnapshot() *usage.RequestStatistics {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.usageStats
 }
 
 func (h *Handler) SetCacheStore(store CacheStore) {
@@ -202,7 +226,14 @@ func (h *Handler) SetCacheStore(store CacheStore) {
 }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
-func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
+func (h *Handler) SetLocalPassword(password string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.localPassword = password
+	h.mu.Unlock()
+}
 
 // SetLogDirectory updates the directory where main.log should be looked up.
 func (h *Handler) SetLogDirectory(dir string) {
@@ -214,12 +245,28 @@ func (h *Handler) SetLogDirectory(dir string) {
 			dir = abs
 		}
 	}
+	h.mu.Lock()
 	h.logDir = dir
+	h.mu.Unlock()
 }
 
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
 	h.postAuthHook = hook
+	h.mu.Unlock()
+}
+
+func (h *Handler) postAuthHookSnapshot() coreauth.PostAuthHook {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.postAuthHook
 }
 
 // Middleware enforces access control for management endpoints.
@@ -267,11 +314,13 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
-	cfg := h.cfg
 	var (
-		allowRemote bool
-		secretHash  string
+		allowRemote   bool
+		secretHash    string
+		localPassword string
 	)
+	h.mu.RLock()
+	cfg := h.cfg
 	if cfg != nil {
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
@@ -280,6 +329,8 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		allowRemote = true
 	}
 	envSecret := h.envSecret
+	localPassword = h.localPassword
+	h.mu.RUnlock()
 
 	now := time.Now()
 	h.attemptsMu.Lock()
@@ -325,7 +376,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		h.attemptsMu.Unlock()
 	}
 
-	if secretHash == "" && envSecret == "" && h.localPassword == "" {
+	if secretHash == "" && envSecret == "" && localPassword == "" {
 		return false, http.StatusForbidden, "remote management key not set"
 	}
 
@@ -335,8 +386,8 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	if localClient {
-		if lp := h.localPassword; lp != "" {
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+		if localPassword != "" {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(localPassword)) == 1 {
 				reset()
 				return true, 0, ""
 			}

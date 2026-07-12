@@ -699,6 +699,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	usageWarningFilter := newCodexUsageWarningStreamFilter()
 	previousResponseRetryUsed := false
 	readRetryUsed := false
+readLoop:
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -713,7 +714,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					conn = connRetry
 					wsReqBody = wsReqBodyRetry
 					streamState = newCodexStreamCompletionState()
-					continue
+					continue readLoop
 				}
 				sess.clearIncrementalState()
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read_retry", errRetry)
@@ -770,26 +771,16 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, payload) {
 				previousResponseRetryUsed = true
 				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: retrying without previous_response_id after upstream rejected incremental context")
-				wsReqBodyRetry := buildCodexWebsocketRetryWithoutPreviousResponse(body, wsHeaders.Get(codexHeaderTurnMetadata), time.Now())
-				wsReqLog.Body = wsReqBodyRetry
-				helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
-				if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
+				connRetry, wsReqBodyRetry, errRetry := e.retryCodexWebsocketWithoutPreviousResponse(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, &wsReqLog, body)
+				if errRetry != nil {
 					if sess != nil {
-						connRetry, wsReqBodyRetry2, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBodyRetry, "previous_response_not_found", errSendRetry)
-						if errRetry == nil {
-							conn = connRetry
-							wsReqBody = wsReqBodyRetry2
-							streamState = newCodexStreamCompletionState()
-							continue
-						}
 						sess.clearIncrementalState()
 						e.invalidateUpstreamConn(sess, conn, "upstream_error", errRetry)
-						helps.RecordAPIWebsocketError(ctx, e.cfg, "previous_response_not_found_retry", errRetry)
-						return resp, errRetry
 					}
-					helps.RecordAPIWebsocketError(ctx, e.cfg, "previous_response_not_found_retry", errSendRetry)
-					return resp, errSendRetry
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "previous_response_not_found_retry", errRetry)
+					return resp, errRetry
 				}
+				conn = connRetry
 				wsReqBody = wsReqBodyRetry
 				streamState = newCodexStreamCompletionState()
 				continue
@@ -823,6 +814,27 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			}
 			if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
 				codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
+				retryErrorPayload := payload
+				if eventType == "response.failed" {
+					retryErrorPayload = normalizeCodexResponseFailedErrorBody(payload)
+				}
+				if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, retryErrorPayload) {
+					previousResponseRetryUsed = true
+					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: retrying without previous_response_id after upstream terminal event rejected incremental context")
+					connRetry, wsReqBodyRetry, errRetry := e.retryCodexWebsocketWithoutPreviousResponse(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, &wsReqLog, body)
+					if errRetry != nil {
+						if sess != nil {
+							sess.clearIncrementalState()
+							e.invalidateUpstreamConn(sess, conn, "upstream_error", errRetry)
+						}
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "previous_response_not_found_retry", errRetry)
+						return resp, errRetry
+					}
+					conn = connRetry
+					wsReqBody = wsReqBodyRetry
+					streamState = newCodexStreamCompletionState()
+					continue readLoop
+				}
 				if sess != nil {
 					sess.clearIncrementalState()
 					e.invalidateUpstreamConn(sess, conn, "upstream_terminal", terminalErr)
@@ -1032,6 +1044,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		emittedPayload := false
 		previousResponseRetryUsed := false
 		readRetryUsed := false
+	streamReadLoop:
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				terminateReason = "context_done"
@@ -1125,33 +1138,19 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, payload) {
 					previousResponseRetryUsed = true
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: retrying without previous_response_id after upstream rejected incremental context")
-					wsReqBodyRetry := buildCodexWebsocketRetryWithoutPreviousResponse(body, wsHeaders.Get(codexHeaderTurnMetadata), time.Now())
-					wsReqLog.Body = wsReqBodyRetry
-					helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
-					if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
+					connRetry, wsReqBodyRetry, errRetry := e.retryCodexWebsocketWithoutPreviousResponse(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, &wsReqLog, body)
+					if errRetry != nil {
 						if sess != nil {
-							connRetry, wsReqBodyRetry2, errRetry := e.retrySessionWebsocketRequestWithReason(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, wsReqLog, wsReqBodyRetry, "previous_response_not_found", errSendRetry)
-							if errRetry == nil {
-								conn = connRetry
-								wsReqBody = wsReqBodyRetry2
-								streamState = newCodexStreamCompletionState()
-								continue
-							}
 							sess.clearIncrementalState()
-							terminateReason = "previous_response_not_found_retry_error"
-							terminateErr = errRetry
-							helps.RecordAPIWebsocketError(ctx, e.cfg, "previous_response_not_found_retry", errRetry)
-							reporter.PublishFailureWithError(ctx, errRetry)
-							_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
-							return
 						}
 						terminateReason = "previous_response_not_found_retry_error"
-						terminateErr = errSendRetry
-						helps.RecordAPIWebsocketError(ctx, e.cfg, "previous_response_not_found_retry", errSendRetry)
-						reporter.PublishFailureWithError(ctx, errSendRetry)
-						_ = send(cliproxyexecutor.StreamChunk{Err: errSendRetry})
+						terminateErr = errRetry
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "previous_response_not_found_retry", errRetry)
+						reporter.PublishFailureWithError(ctx, errRetry)
+						_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
 						return
 					}
+					conn = connRetry
 					wsReqBody = wsReqBodyRetry
 					streamState = newCodexStreamCompletionState()
 					continue
@@ -1192,6 +1191,30 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				} else if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
 					codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
+					retryErrorPayload := payload
+					if eventType == "response.failed" {
+						retryErrorPayload = normalizeCodexResponseFailedErrorBody(payload)
+					}
+					if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, retryErrorPayload) {
+						previousResponseRetryUsed = true
+						helps.LogWithRequestID(ctx).Debugf("codex websockets executor: retrying without previous_response_id after upstream terminal event rejected incremental context")
+						connRetry, wsReqBodyRetry, errRetry := e.retryCodexWebsocketWithoutPreviousResponse(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, &wsReqLog, body)
+						if errRetry != nil {
+							if sess != nil {
+								sess.clearIncrementalState()
+							}
+							terminateReason = "previous_response_not_found_retry_error"
+							terminateErr = errRetry
+							helps.RecordAPIWebsocketError(ctx, e.cfg, "previous_response_not_found_retry", errRetry)
+							reporter.PublishFailureWithError(ctx, errRetry)
+							_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
+							return
+						}
+						conn = connRetry
+						wsReqBody = wsReqBodyRetry
+						streamState = newCodexStreamCompletionState()
+						continue streamReadLoop
+					}
 					if sess != nil {
 						sess.clearIncrementalState()
 						e.invalidateUpstreamConn(sess, conn, "upstream_terminal", terminalErr)
@@ -1401,6 +1424,50 @@ func codexWebsocketReusableKeyFromParts(authID string, wsURL string, promptCache
 		return authID + "|" + wsURL + "|" + promptCacheID
 	}
 	return authID + "|" + wsURL + "|" + promptCacheID + "|" + windowID
+}
+
+func (e *CodexWebsocketsExecutor) retryCodexWebsocketWithoutPreviousResponse(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	sess *codexWebsocketSession,
+	conn *websocket.Conn,
+	readCh *chan codexWebsocketRead,
+	authID string,
+	wsURL string,
+	wsHeaders http.Header,
+	wsReqLog *helps.UpstreamRequestLog,
+	body []byte,
+) (*websocket.Conn, []byte, error) {
+	retryBody := buildCodexWebsocketRetryWithoutPreviousResponse(body, wsHeaders.Get(codexHeaderTurnMetadata), time.Now())
+	if wsReqLog != nil {
+		wsReqLog.Body = retryBody
+		helps.RecordAPIWebsocketRequest(ctx, e.cfg, *wsReqLog)
+	}
+	errSend := writeCodexWebsocketMessage(sess, conn, retryBody)
+	if errSend == nil {
+		return conn, retryBody, nil
+	}
+	if sess == nil {
+		return nil, nil, errSend
+	}
+	requestLog := helps.UpstreamRequestLog{}
+	if wsReqLog != nil {
+		requestLog = *wsReqLog
+	}
+	return e.retrySessionWebsocketRequestWithReason(
+		ctx,
+		auth,
+		sess,
+		conn,
+		readCh,
+		authID,
+		wsURL,
+		wsHeaders,
+		requestLog,
+		retryBody,
+		"previous_response_not_found",
+		errSend,
+	)
 }
 
 func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequest(

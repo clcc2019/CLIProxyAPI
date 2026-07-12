@@ -83,6 +83,24 @@ func (w *Watcher) refreshAuthState(force bool) {
 	authDir := w.authDir
 	w.clientsMutex.RUnlock()
 	auths := snapshotCoreAuthsFunc(cfg, authDir)
+	w.refreshAuthStateFromSnapshot(force, auths)
+}
+
+// refreshAuthStateFromFileAuths combines config-backed auths with a file
+// snapshot already produced by scanFileClients. This keeps a full reload to a
+// single auth-directory pass instead of asking FileSynthesizer to read every
+// file again.
+func (w *Watcher) refreshAuthStateFromFileAuths(force bool, fileAuths []*coreauth.Auth) {
+	w.clientsMutex.RLock()
+	cfg := w.config
+	authDir := w.authDir
+	w.clientsMutex.RUnlock()
+	auths := snapshotConfigAuths(cfg, authDir)
+	auths = append(auths, fileAuths...)
+	w.refreshAuthStateFromSnapshot(force, auths)
+}
+
+func (w *Watcher) refreshAuthStateFromSnapshot(force bool, auths []*coreauth.Auth) {
 	w.clientsMutex.Lock()
 	if len(w.runtimeAuths) > 0 {
 		for _, a := range w.runtimeAuths {
@@ -263,18 +281,12 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 }
 
 func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
+	out := snapshotConfigAuths(cfg, authDir)
 	ctx := &synthesizer.SynthesisContext{
 		Config:      cfg,
 		AuthDir:     authDir,
 		Now:         time.Now(),
 		IDGenerator: synthesizer.NewStableIDGenerator(),
-	}
-
-	var out []*coreauth.Auth
-
-	configSynth := synthesizer.NewConfigSynthesizer()
-	if auths, err := configSynth.Synthesize(ctx); err == nil {
-		out = append(out, auths...)
 	}
 
 	fileSynth := synthesizer.NewFileSynthesizer()
@@ -283,4 +295,19 @@ func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
 	}
 
 	return out
+}
+
+func snapshotConfigAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
+	ctx := &synthesizer.SynthesisContext{
+		Config:      cfg,
+		AuthDir:     authDir,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	}
+	configSynth := synthesizer.NewConfigSynthesizer()
+	auths, err := configSynth.Synthesize(ctx)
+	if err != nil {
+		return nil
+	}
+	return auths
 }

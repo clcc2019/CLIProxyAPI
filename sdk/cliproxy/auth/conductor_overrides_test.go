@@ -270,8 +270,10 @@ type authFallbackExecutor struct {
 
 	mu                sync.Mutex
 	executeCalls      []string
+	countCalls        []string
 	streamCalls       []string
 	executeErrors     map[string]error
+	countErrors       map[string]error
 	streamErrors      map[string]error
 	streamFirstErrors map[string]error
 	streamNilResults  map[string]bool
@@ -326,8 +328,15 @@ func (e *authFallbackExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, er
 	return auth, nil
 }
 
-func (e *authFallbackExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "not implemented"}
+func (e *authFallbackExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.countCalls = append(e.countCalls, auth.ID)
+	err := e.countErrors[auth.ID]
+	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
 }
 
 func (e *authFallbackExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
@@ -347,6 +356,14 @@ func (e *authFallbackExecutor) StreamCalls() []string {
 	defer e.mu.Unlock()
 	out := make([]string, len(e.streamCalls))
 	copy(out, e.streamCalls)
+	return out
+}
+
+func (e *authFallbackExecutor) CountCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.countCalls))
+	copy(out, e.countCalls)
 	return out
 }
 
@@ -531,6 +548,27 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 	}
 
 	return m, executor
+}
+
+func registerFallbackTestAuths(t *testing.T, m *Manager, provider, model string, authIDs ...string) []*Auth {
+	t.Helper()
+	auths := make([]*Auth, 0, len(authIDs))
+	reg := registry.GetGlobalRegistry()
+	for _, authID := range authIDs {
+		auth := &Auth{ID: authID, Provider: provider, Metadata: map[string]any{"type": provider}}
+		reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			reg.UnregisterClient(auth.ID)
+			t.Fatalf("register auth %q: %v", auth.ID, errRegister)
+		}
+		auths = append(auths, auth)
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+	return auths
 }
 
 func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) {
@@ -985,7 +1023,7 @@ func TestManager_Execute_CodexUsageLimitDoesNotLeakWhenCredentialsExhausted(t *t
 	}
 }
 
-func TestManager_Execute_CodexUsageLimitDoesNotLeakWhenMaxRetryCredentialsStopsFailover(t *testing.T) {
+func TestManager_Execute_CodexUsageLimitBypassesMaxRetryCredentials(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(0, 0, 1)
 	executor := &authFallbackExecutor{
@@ -1018,23 +1056,119 @@ func TestManager_Execute_CodexUsageLimitDoesNotLeakWhenMaxRetryCredentialsStopsF
 		t.Fatalf("register auth2: %v", errRegister)
 	}
 
+	resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want credential failover success", errExecute)
+	}
+	if string(resp.Payload) != auth2.ID {
+		t.Fatalf("payload = %q, want backup auth %q", string(resp.Payload), auth2.ID)
+	}
+	if calls := executor.ExecuteCalls(); len(calls) != 2 {
+		t.Fatalf("execute calls = %v, want both credentials attempted", calls)
+	}
+}
+
+func TestManager_ExecuteCount_CodexUsageLimitBypassesMaxRetryCredentials(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 1)
+	model := "test-model-codex-count-usage-limit-max-retry"
+	auths := registerFallbackTestAuths(t, m, "codex", model,
+		"aa-codex-count-usage-limit-max-retry",
+		"bb-codex-count-backup-max-retry",
+	)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		countErrors: map[string]error{
+			auths[0].ID: &credentialFailoverStatusError{
+				status:  http.StatusTooManyRequests,
+				message: "HTTP 429: The usage limit has been reached",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	resp, errExecute := m.ExecuteCount(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute count error = %v, want credential failover success", errExecute)
+	}
+	if string(resp.Payload) != auths[1].ID {
+		t.Fatalf("payload = %q, want backup auth %q", string(resp.Payload), auths[1].ID)
+	}
+	if calls := executor.CountCalls(); len(calls) != 2 {
+		t.Fatalf("count calls = %v, want both credentials attempted", calls)
+	}
+}
+
+func TestManager_Execute_CodexUsageLimitExhaustsAllCredentialsDespiteMaxRetryCredentials(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 1)
+	model := "test-model-codex-usage-limit-exhaust-max-retry"
+	auths := registerFallbackTestAuths(t, m, "codex", model,
+		"aa-codex-usage-limit-exhaust-max-retry",
+		"bb-codex-usage-limit-exhaust-max-retry",
+	)
+	usageLimitErr := &credentialFailoverStatusError{
+		status:  http.StatusTooManyRequests,
+		message: "HTTP 429: The usage limit has been reached",
+	}
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			auths[0].ID: usageLimitErr,
+			auths[1].ID: usageLimitErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
 	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if errExecute == nil {
-		t.Fatalf("expected max-retry credentials error")
+		t.Fatal("expected exhausted credentials error")
 	}
-	if strings.Contains(errExecute.Error(), "The usage limit has been reached") {
-		t.Fatalf("max-retry credential error leaked upstream usage-limit message: %v", errExecute)
+	for _, forbidden := range []string{"The usage limit has been reached", "exceeded retry limit"} {
+		if strings.Contains(errExecute.Error(), forbidden) {
+			t.Fatalf("exhausted credential error leaked %q: %v", forbidden, errExecute)
+		}
 	}
-	if !strings.Contains(errExecute.Error(), "max-retry-credentials=1") {
-		t.Fatalf("max-retry credential error = %v, want max-retry diagnostic", errExecute)
+	if calls := executor.ExecuteCalls(); len(calls) != 2 {
+		t.Fatalf("execute calls = %v, want every eligible credential attempted", calls)
 	}
-	if calls := executor.ExecuteCalls(); len(calls) != 1 {
-		t.Fatalf("execute calls = %v, want one credential attempted", calls)
+}
+
+func TestManager_Execute_PinnedCodexUsageLimitDoesNotSwitchCredential(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 1)
+	model := "test-model-codex-pinned-usage-limit"
+	auths := registerFallbackTestAuths(t, m, "codex", model,
+		"aa-codex-pinned-usage-limit",
+		"bb-codex-pinned-backup",
+	)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			auths[0].ID: &credentialFailoverStatusError{
+				status:  http.StatusTooManyRequests,
+				message: "HTTP 429: The usage limit has been reached",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.PinnedAuthMetadataKey:          auths[0].ID,
+		cliproxyexecutor.MaxRetryCredentialsMetadataKey: 1,
+	}}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts)
+	if errExecute == nil {
+		t.Fatal("expected pinned credential error")
+	}
+	if calls := executor.ExecuteCalls(); len(calls) != 1 || calls[0] != auths[0].ID {
+		t.Fatalf("execute calls = %v, want only pinned auth %q", calls, auths[0].ID)
 	}
 }
 
 func TestManager_ExecuteStream_CodexUsageLimitBootstrapFailsOverCredential(t *testing.T) {
 	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 1)
 	executor := &authFallbackExecutor{
 		id: "codex",
 		streamFirstErrors: map[string]error{

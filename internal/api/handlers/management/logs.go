@@ -357,6 +357,8 @@ func (h *Handler) logDirectory() string {
 	if h == nil {
 		return ""
 	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	if h.logDir != "" {
 		return h.logDir
 	}

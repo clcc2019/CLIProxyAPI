@@ -24,11 +24,29 @@ const (
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil {
+		c.JSON(200, gin.H{})
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.cfg == nil {
 		c.JSON(200, gin.H{})
 		return
 	}
 	c.JSON(200, new(*h.cfg))
+}
+
+func readConfigValue[T any](h *Handler, read func(*config.Config) T) (value T) {
+	if h == nil || read == nil {
+		return value
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.cfg == nil {
+		return value
+	}
+	return read(h.cfg)
 }
 
 type releaseInfo struct {
@@ -39,10 +57,7 @@ type releaseInfo struct {
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	proxyURL := ""
-	if h != nil && h.cfg != nil {
-		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
-	}
+	proxyURL := strings.TrimSpace(readConfigValue(h, func(cfg *config.Config) string { return cfg.ProxyURL }))
 	if proxyURL != "" {
 		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
 		util.SetProxy(sdkCfg, client)
@@ -188,12 +203,15 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 }
 
 // Debug
-func (h *Handler) GetDebug(c *gin.Context) { c.JSON(200, gin.H{"debug": h.cfg.Debug}) }
+func (h *Handler) GetDebug(c *gin.Context) {
+	c.JSON(200, gin.H{"debug": readConfigValue(h, func(cfg *config.Config) bool { return cfg.Debug })})
+}
 func (h *Handler) PutDebug(c *gin.Context) { h.updateBoolField(c, func(v bool) { h.cfg.Debug = v }) }
 
 // UsageStatisticsEnabled
 func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
-	c.JSON(200, gin.H{"usage-statistics-enabled": h.cfg.UsageStatisticsEnabled})
+	value := readConfigValue(h, func(cfg *config.Config) bool { return cfg.UsageStatisticsEnabled })
+	c.JSON(200, gin.H{"usage-statistics-enabled": value})
 }
 func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
@@ -201,7 +219,8 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 
 // UsageDetailRetentionLimit
 func (h *Handler) GetUsageDetailRetentionLimit(c *gin.Context) {
-	c.JSON(200, gin.H{"usage-detail-retention-limit": h.cfg.UsageDetailRetentionLimit})
+	value := readConfigValue(h, func(cfg *config.Config) int { return cfg.UsageDetailRetentionLimit })
+	c.JSON(200, gin.H{"usage-detail-retention-limit": value})
 }
 func (h *Handler) PutUsageDetailRetentionLimit(c *gin.Context) {
 	h.updateIntField(c, func(v int) {
@@ -214,7 +233,8 @@ func (h *Handler) PutUsageDetailRetentionLimit(c *gin.Context) {
 
 // LoggingToFile
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
-	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
+	value := readConfigValue(h, func(cfg *config.Config) bool { return cfg.LoggingToFile })
+	c.JSON(200, gin.H{"logging-to-file": value})
 }
 func (h *Handler) PutLoggingToFile(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.LoggingToFile = v })
@@ -222,7 +242,8 @@ func (h *Handler) PutLoggingToFile(c *gin.Context) {
 
 // LogsMaxTotalSizeMB
 func (h *Handler) GetLogsMaxTotalSizeMB(c *gin.Context) {
-	c.JSON(200, gin.H{"logs-max-total-size-mb": h.cfg.LogsMaxTotalSizeMB})
+	value := readConfigValue(h, func(cfg *config.Config) int { return cfg.LogsMaxTotalSizeMB })
+	c.JSON(200, gin.H{"logs-max-total-size-mb": value})
 }
 func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 	var body struct {
@@ -236,13 +257,16 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 	if value < 0 {
 		value = 0
 	}
+	h.mu.Lock()
 	h.cfg.LogsMaxTotalSizeMB = value
-	h.persist(c)
+	h.persistLocked(c)
+	h.mu.Unlock()
 }
 
 // ErrorLogsMaxFiles
 func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
-	c.JSON(200, gin.H{"error-logs-max-files": h.cfg.ErrorLogsMaxFiles})
+	value := readConfigValue(h, func(cfg *config.Config) int { return cfg.ErrorLogsMaxFiles })
+	c.JSON(200, gin.H{"error-logs-max-files": value})
 }
 func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	var body struct {
@@ -256,19 +280,23 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	if value < 0 {
 		value = 10
 	}
+	h.mu.Lock()
 	h.cfg.ErrorLogsMaxFiles = value
-	h.persist(c)
+	h.persistLocked(c)
+	h.mu.Unlock()
 }
 
 // Request log
-func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
+func (h *Handler) GetRequestLog(c *gin.Context) {
+	c.JSON(200, gin.H{"request-log": readConfigValue(h, func(cfg *config.Config) bool { return cfg.RequestLog })})
+}
 func (h *Handler) PutRequestLog(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
 }
 
 // Websocket auth
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
-	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
+	c.JSON(200, gin.H{"ws-auth": readConfigValue(h, func(cfg *config.Config) bool { return cfg.WebsocketAuth })})
 }
 func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.WebsocketAuth = v })
@@ -276,7 +304,7 @@ func (h *Handler) PutWebsocketAuth(c *gin.Context) {
 
 // Request retry
 func (h *Handler) GetRequestRetry(c *gin.Context) {
-	c.JSON(200, gin.H{"request-retry": h.cfg.RequestRetry})
+	c.JSON(200, gin.H{"request-retry": readConfigValue(h, func(cfg *config.Config) int { return cfg.RequestRetry })})
 }
 func (h *Handler) PutRequestRetry(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.RequestRetry = v })
@@ -284,7 +312,7 @@ func (h *Handler) PutRequestRetry(c *gin.Context) {
 
 // Max retry interval
 func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
-	c.JSON(200, gin.H{"max-retry-interval": h.cfg.MaxRetryInterval})
+	c.JSON(200, gin.H{"max-retry-interval": readConfigValue(h, func(cfg *config.Config) int { return cfg.MaxRetryInterval })})
 }
 func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
@@ -292,7 +320,7 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 
 // ForceModelPrefix
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
-	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})
+	c.JSON(200, gin.H{"force-model-prefix": readConfigValue(h, func(cfg *config.Config) bool { return cfg.ForceModelPrefix })})
 }
 func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.ForceModelPrefix = v })
@@ -322,9 +350,10 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 
 // RoutingStrategy
 func (h *Handler) GetRoutingStrategy(c *gin.Context) {
-	strategy, ok := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
+	raw := readConfigValue(h, func(cfg *config.Config) string { return cfg.Routing.Strategy })
+	strategy, ok := normalizeRoutingStrategy(raw)
 	if !ok {
-		c.JSON(200, gin.H{"strategy": strings.TrimSpace(h.cfg.Routing.Strategy)})
+		c.JSON(200, gin.H{"strategy": strings.TrimSpace(raw)})
 		return
 	}
 	c.JSON(200, gin.H{"strategy": strategy})
@@ -342,16 +371,22 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid strategy"})
 		return
 	}
+	h.mu.Lock()
 	h.cfg.Routing.Strategy = normalized
-	h.persist(c)
+	h.persistLocked(c)
+	h.mu.Unlock()
 }
 
 // Proxy URL
-func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
+func (h *Handler) GetProxyURL(c *gin.Context) {
+	c.JSON(200, gin.H{"proxy-url": readConfigValue(h, func(cfg *config.Config) string { return cfg.ProxyURL })})
+}
 func (h *Handler) PutProxyURL(c *gin.Context) {
 	h.updateStringField(c, func(v string) { h.cfg.ProxyURL = v })
 }
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
+	h.mu.Lock()
 	h.cfg.ProxyURL = ""
-	h.persist(c)
+	h.persistLocked(c)
+	h.mu.Unlock()
 }

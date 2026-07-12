@@ -10,11 +10,19 @@ import (
 )
 
 func (h *Handler) GetModelPrices(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil {
 		c.JSON(http.StatusOK, gin.H{"model-prices": config.DefaultModelPrices()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"model-prices": config.EffectiveModelPrices(h.cfg.ModelPrices)})
+	h.mu.RLock()
+	if h.cfg == nil {
+		h.mu.RUnlock()
+		c.JSON(http.StatusOK, gin.H{"model-prices": config.DefaultModelPrices()})
+		return
+	}
+	prices := config.EffectiveModelPrices(h.cfg.ModelPrices)
+	h.mu.RUnlock()
+	c.JSON(http.StatusOK, gin.H{"model-prices": prices})
 }
 
 func (h *Handler) PutModelPrices(c *gin.Context) {

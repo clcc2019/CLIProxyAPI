@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -156,7 +155,8 @@ func runApplication(flags runtimeFlags, state startupState) error {
 	if flags.tuiMode {
 		return runTUI(flags, state)
 	}
-	startSupportServices(state.configFilePath, flags.localModel)
+	stopSupportServices := startSupportServices(flags.localModel)
+	defer stopSupportServices()
 	return cmd.StartService(state.cfg, state.configFilePath, flags.password)
 }
 
@@ -171,28 +171,23 @@ func runTUI(flags runtimeFlags, state startupState) error {
 	return nil
 }
 
-func startSupportServices(configFilePath string, localModel bool) {
+func startSupportServices(localModel bool) context.CancelFunc {
 	// Tie background updaters to a SIGINT/SIGTERM-bound context so they exit
 	// promptly on shutdown. Previously each updater used context.Background()
 	// and could outlive the main service, leaking goroutines and (for the
 	// management asset auto-updater) keeping a polling http.Client alive past
 	// process drain in k8s rolling restarts.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	supportServicesShutdown.Store(&cancel)
 
 	if !localModel {
 		registry.StartModelsUpdater(ctx)
 	}
+	return cancel
 }
 
-// supportServicesShutdown holds the cancel func for the support-services
-// context so test harnesses (or future graceful-shutdown wiring) can stop
-// background updaters explicitly. Stored as a pointer so swapping in a no-op
-// is race-free via atomic.Pointer.
-var supportServicesShutdown atomic.Pointer[context.CancelFunc]
-
 func runStandaloneTUI(state startupState, password string, localModel bool) error {
-	startSupportServices(state.configFilePath, localModel)
+	stopSupportServices := startSupportServices(localModel)
+	defer stopSupportServices()
 
 	hook := tui.NewLogHook(2000)
 	hook.SetFormatter(&logging.LogFormatter{})

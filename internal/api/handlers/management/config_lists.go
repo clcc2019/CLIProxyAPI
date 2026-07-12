@@ -105,7 +105,12 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 }
 
 // api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	h.mu.RLock()
+	keys := config.NormalizeClientAPIKeys(h.cfg.APIKeys)
+	h.mu.RUnlock()
+	c.JSON(200, gin.H{"api-keys": keys})
+}
 
 func parseClientAPIKeysBody(data []byte) (config.ClientAPIKeys, error) {
 	var arr config.ClientAPIKeys
@@ -135,8 +140,8 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	h.cfg.APIKeys = arr
+	h.persistLocked(c)
 	h.mu.Unlock()
-	h.persist(c)
 }
 
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
@@ -551,7 +556,10 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 
 // oauth-excluded-models: map[string][]string
 func (h *Handler) GetOAuthExcludedModels(c *gin.Context) {
-	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(h.cfg.OAuthExcludedModels)})
+	h.mu.RLock()
+	models := config.NormalizeOAuthExcludedModels(h.cfg.OAuthExcludedModels)
+	h.mu.RUnlock()
+	c.JSON(200, gin.H{"oauth-excluded-models": models})
 }
 
 func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
@@ -571,8 +579,10 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
+	h.mu.Lock()
 	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
-	h.persist(c)
+	h.persistLocked(c)
+	h.mu.Unlock()
 }
 
 func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
@@ -590,6 +600,8 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		return
 	}
 	normalized := config.NormalizeExcludedModels(body.Models)
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if len(normalized) == 0 {
 		if h.cfg.OAuthExcludedModels == nil {
 			c.JSON(404, gin.H{"error": "provider not found"})
@@ -603,14 +615,14 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		if len(h.cfg.OAuthExcludedModels) == 0 {
 			h.cfg.OAuthExcludedModels = nil
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	if h.cfg.OAuthExcludedModels == nil {
 		h.cfg.OAuthExcludedModels = make(map[string][]string)
 	}
 	h.cfg.OAuthExcludedModels[provider] = normalized
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
@@ -619,6 +631,8 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing provider"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.cfg.OAuthExcludedModels == nil {
 		c.JSON(404, gin.H{"error": "provider not found"})
 		return
@@ -631,12 +645,15 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 	if len(h.cfg.OAuthExcludedModels) == 0 {
 		h.cfg.OAuthExcludedModels = nil
 	}
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // oauth-model-alias: map[string][]OAuthModelAlias
 func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
-	c.JSON(200, gin.H{"oauth-model-alias": sanitizedOAuthModelAlias(h.cfg.OAuthModelAlias)})
+	h.mu.RLock()
+	aliases := sanitizedOAuthModelAlias(h.cfg.OAuthModelAlias)
+	h.mu.RUnlock()
+	c.JSON(200, gin.H{"oauth-model-alias": aliases})
 }
 
 func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
@@ -656,8 +673,10 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
+	h.mu.Lock()
 	h.cfg.OAuthModelAlias = sanitizedOAuthModelAlias(entries)
-	h.persist(c)
+	h.persistLocked(c)
+	h.mu.Unlock()
 }
 
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
@@ -684,6 +703,8 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 
 	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
 	normalized := normalizedMap[channel]
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if len(normalized) == 0 {
 		if h.cfg.OAuthModelAlias == nil {
 			c.JSON(404, gin.H{"error": "channel not found"})
@@ -697,14 +718,14 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 		if len(h.cfg.OAuthModelAlias) == 0 {
 			h.cfg.OAuthModelAlias = nil
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	if h.cfg.OAuthModelAlias == nil {
 		h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
 	}
 	h.cfg.OAuthModelAlias[channel] = normalized
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -716,6 +737,8 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.cfg.OAuthModelAlias == nil {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
@@ -728,7 +751,7 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	if len(h.cfg.OAuthModelAlias) == 0 {
 		h.cfg.OAuthModelAlias = nil
 	}
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // codex-api-key: []CodexKey

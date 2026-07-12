@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -24,7 +25,8 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	}
 	codexSubscriptionMode := codexSubscriptionListModeFromRequest(c)
 	listQuery := authFilesListQueryFromRequest(c)
-	if h.authManager == nil {
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		h.listAuthFilesFromDisk(c, codexSubscriptionMode, listQuery)
 		return
 	}
@@ -32,11 +34,12 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		h.listAuthFilesFromManager(c, codexSubscriptionMode, listQuery)
 		return
 	}
-	auths := h.authManager.List()
+	auths := manager.List()
 	files := make([]gin.H, 0, len(auths))
+	entryOpts := authFileEntryBuildOptions{RecentRequestSnapshotter: coreauth.NewRecentRequestSnapshotter(time.Now())}
 	for _, auth := range auths {
 		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth, codexSubscriptionMode)
-		if entry := h.buildAuthFileEntryWithOptions(auth, authFileEntryBuildOptions{}); entry != nil {
+		if entry := h.buildAuthFileEntryWithOptions(auth, entryOpts); entry != nil {
 			files = append(files, entry)
 		}
 	}
@@ -45,13 +48,17 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 }
 
 func (h *Handler) listAuthsForManagement(summary bool) []*coreauth.Auth {
-	if h == nil || h.authManager == nil {
+	if h == nil {
+		return nil
+	}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
 		return nil
 	}
 	if summary {
-		return h.authManager.ListManagementSummary()
+		return manager.ListManagementSummary()
 	}
-	return h.authManager.List()
+	return manager.List()
 }
 
 func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode, q authFilesListQuery) {
@@ -61,9 +68,12 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 	if deferRefreshToPage {
 		entrySubscriptionMode = codexSubscriptionListCache
 	}
-	entryOpts := authFileEntryBuildOptions{Summary: q.Summary}
-	if !q.Summary && h != nil && h.cfg != nil {
-		entryOpts.AuthDir = strings.TrimSpace(h.cfg.AuthDir)
+	entryOpts := authFileEntryBuildOptions{
+		Summary:                  q.Summary,
+		RecentRequestSnapshotter: coreauth.NewRecentRequestSnapshotter(time.Now()),
+	}
+	if !q.Summary {
+		entryOpts.AuthDir = h.authDirSnapshot()
 		if entryOpts.AuthDir != "" {
 			if root, err := os.OpenRoot(entryOpts.AuthDir); err == nil {
 				entryOpts.AuthRoot = root
@@ -104,7 +114,10 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 	q = clampAuthFilesListPage(q, total)
 	pageFiles := authFileEntryPageSlice(filtered, q)
 	if deferRefreshToPage {
-		pageFiles = h.refreshAuthFileEntryPageFromManager(c.Request.Context(), pageFiles, auths, authFileEntryBuildOptions{Summary: q.Summary})
+		pageFiles = h.refreshAuthFileEntryPageFromManager(c.Request.Context(), pageFiles, auths, authFileEntryBuildOptions{
+			Summary:                  q.Summary,
+			RecentRequestSnapshotter: entryOpts.RecentRequestSnapshotter,
+		})
 	}
 	c.JSON(200, authFilesListPayload(pageFiles, total, q, typeCounts))
 }
@@ -119,13 +132,11 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 	// Try to find auth ID via authManager
 	var authID string
-	if h.authManager != nil {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
-				authID = auth.ID
-				break
-			}
+	if manager := h.authManagerSnapshot(); manager != nil {
+		if auth, ok := manager.GetByID(name); ok {
+			authID = auth.ID
+		} else if auth, ok := manager.GetByFileName(name); ok {
+			authID = auth.ID
 		}
 	}
 
@@ -209,8 +220,8 @@ func (h *Handler) GetCodexUsage(c *gin.Context) {
 			auth = updated
 		}
 	}
-	if h.authManager != nil {
-		if latest, ok := h.authManager.GetByID(auth.ID); ok && latest != nil {
+	if manager := h.authManagerSnapshot(); manager != nil {
+		if latest, ok := manager.GetByID(auth.ID); ok && latest != nil {
 			auth = latest
 		}
 	}
@@ -224,7 +235,11 @@ func (h *Handler) GetCodexUsage(c *gin.Context) {
 
 // List auth files from disk when the auth manager is unavailable.
 func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode, q authFilesListQuery) {
-	authDir := strings.TrimSpace(h.cfg.AuthDir)
+	authDir := h.authDirSnapshot()
+	if authDir == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "auth directory is not configured"})
+		return
+	}
 	root, err := os.OpenRoot(authDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to open auth dir: %v", err)})
