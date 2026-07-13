@@ -448,19 +448,19 @@ func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT55XHighReasoningForUpstrea
 	}
 }
 
-func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT56SolExpensiveReasoningForUpstream(t *testing.T) {
+func TestNormalizeCodexFinalUpstreamBody_NormalizesGPT56SolExpensiveReasoningForUpstream(t *testing.T) {
 	tests := []struct {
 		name       string
 		model      string
 		effort     string
 		wantEffort string
 	}{
-		{name: "sol xhigh", model: "gpt-5.6-sol", effort: "xhigh", wantEffort: "high"},
-		{name: "sol max", model: "gpt-5.6-sol", effort: "max", wantEffort: "high"},
+		{name: "sol xhigh", model: "gpt-5.6-sol", effort: "xhigh", wantEffort: "xhigh"},
+		{name: "sol max", model: "gpt-5.6-sol", effort: "max", wantEffort: "xhigh"},
 		{name: "sol high unchanged", model: "gpt-5.6-sol", effort: "high", wantEffort: "high"},
 		{name: "sol medium unchanged", model: "gpt-5.6-sol", effort: "medium", wantEffort: "medium"},
-		{name: "sol Ultra alias", model: "gpt-5.6-sol", effort: "Ultra", wantEffort: "high"},
-		{name: "sol uppercase model and effort", model: "GPT-5.6-SOL", effort: "XHIGH", wantEffort: "high"},
+		{name: "sol Ultra alias", model: "gpt-5.6-sol", effort: "Ultra", wantEffort: "xhigh"},
+		{name: "sol uppercase model and effort", model: "GPT-5.6-SOL", effort: "XHIGH", wantEffort: "xhigh"},
 		{name: "terra max unchanged", model: "gpt-5.6-terra", effort: "max", wantEffort: "max"},
 		{name: "luna xhigh unchanged", model: "gpt-5.6-luna", effort: "xhigh", wantEffort: "xhigh"},
 	}

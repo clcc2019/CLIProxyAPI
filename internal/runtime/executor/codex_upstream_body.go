@@ -727,8 +727,8 @@ func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel s
 
 	model := strings.TrimSpace(baseModel)
 	effortValue := strings.TrimSpace(effort.String())
-	if strings.EqualFold(model, "gpt-5.6-sol") && isCodexReasoningEffortAboveHigh(effortValue) {
-		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
+	if strings.EqualFold(model, "gpt-5.6-sol") && isCodexReasoningEffortAtLeastXHigh(effortValue) {
+		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "xhigh"))
 	}
 	if strings.EqualFold(model, "gpt-5.5") && strings.EqualFold(effortValue, "xhigh") {
 		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
@@ -736,7 +736,7 @@ func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel s
 	return body
 }
 
-func isCodexReasoningEffortAboveHigh(effort string) bool {
+func isCodexReasoningEffortAtLeastXHigh(effort string) bool {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "xhigh", "max", "ultra":
 		return true

@@ -1885,6 +1885,106 @@ func TestIsRequestInvalidError_BadRequestDoesNotBlockCredentialFailover(t *testi
 	}
 }
 
+func TestIsRequestInvalidError_MissingResponsesRequestAnchorStopsRetry(t *testing.T) {
+	message := `{"error":{"message":"One of \"input\" or \"previous_response_id\" or 'prompt' or 'conversation_id' must be provided.","type":"invalid_request_error"}}`
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "manager error",
+			err: &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    message,
+			},
+		},
+		{
+			name: "executor status error",
+			err: &retryAfterStatusError{
+				status:  http.StatusBadRequest,
+				message: message,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !isRequestInvalidError(tt.err) {
+				t.Fatal("missing Responses request anchor should stop retries")
+			}
+		})
+	}
+}
+
+func TestManager_MissingResponsesRequestAnchorDoesNotRetryCredentials(t *testing.T) {
+	const message = `{"error":{"message":"One of \"input\" or \"previous_response_id\" or 'prompt' or 'conversation_id' must be provided.","type":"invalid_request_error"}}`
+
+	tests := []struct {
+		name     string
+		execute  func(context.Context, *Manager, string) error
+		calls    func(*authFallbackExecutor) []string
+		setError func(*authFallbackExecutor, string, error)
+	}{
+		{
+			name: "non-stream",
+			execute: func(ctx context.Context, m *Manager, model string) error {
+				_, err := m.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				return err
+			},
+			calls: (*authFallbackExecutor).ExecuteCalls,
+			setError: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.executeErrors = map[string]error{authID: err}
+			},
+		},
+		{
+			name: "stream",
+			execute: func(ctx context.Context, m *Manager, model string) error {
+				_, err := m.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				return err
+			},
+			calls: (*authFallbackExecutor).StreamCalls,
+			setError: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.streamErrors = map[string]error{authID: err}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			executor := &authFallbackExecutor{id: "codex"}
+			m.RegisterExecutor(executor)
+
+			badAuthID := "aa-missing-responses-anchor-" + tt.name
+			goodAuthID := "bb-missing-responses-anchor-" + tt.name
+			model := "gpt-5-missing-responses-anchor-" + tt.name
+			upstreamErr := &retryAfterStatusError{status: http.StatusBadRequest, message: message}
+			tt.setError(executor, badAuthID, upstreamErr)
+
+			reg := registry.GetGlobalRegistry()
+			for _, authID := range []string{badAuthID, goodAuthID} {
+				auth := &Auth{ID: authID, Provider: "codex", Status: StatusActive}
+				if _, err := m.Register(context.Background(), auth); err != nil {
+					t.Fatalf("register auth %s: %v", authID, err)
+				}
+				reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+			}
+			t.Cleanup(func() {
+				reg.UnregisterClient(badAuthID)
+				reg.UnregisterClient(goodAuthID)
+			})
+
+			err := tt.execute(context.Background(), m, model)
+			if err == nil || err.Error() != message {
+				t.Fatalf("execute error = %v, want original 400 body", err)
+			}
+			if got := tt.calls(executor); len(got) != 1 || got[0] != badAuthID {
+				t.Fatalf("credential calls = %v, want only %q", got, badAuthID)
+			}
+		})
+	}
+}
+
 func TestManagerMarkResult_SessionContextBadRequestDoesNotSuspendAuth(t *testing.T) {
 	tests := []struct {
 		name    string

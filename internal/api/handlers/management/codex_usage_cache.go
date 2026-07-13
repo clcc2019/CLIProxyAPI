@@ -298,7 +298,7 @@ func markCodexUsageStale(payload gin.H, err error, upstreamStatus int) gin.H {
 		payload["codex_usage_upstream_status"] = upstreamStatus
 	}
 	if err != nil {
-		payload["codex_usage_error"] = err.Error()
+		payload["codex_usage_error"] = codexUsageFailureMessage(upstreamStatus)
 	}
 	return payload
 }
@@ -313,7 +313,18 @@ func codexUsageUnavailablePayload(err error, upstreamStatus int) gin.H {
 		payload["codex_usage_upstream_status"] = upstreamStatus
 	}
 	if err != nil {
-		payload["error"] = err.Error()
+		// Keep transient upstream failures out of the top-level error field.
+		// Management clients treat that field as a failed refresh even though this
+		// is an HTTP 200 degradation payload, and may otherwise expose an nginx HTML
+		// error page directly to the user.
+		payload["codex_usage_error"] = codexUsageFailureMessage(upstreamStatus)
 	}
 	return payload
+}
+
+func codexUsageFailureMessage(upstreamStatus int) string {
+	if upstreamStatus > 0 {
+		return fmt.Sprintf("codex usage upstream temporarily unavailable (status %d)", upstreamStatus)
+	}
+	return "codex usage upstream temporarily unavailable"
 }

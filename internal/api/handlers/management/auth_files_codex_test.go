@@ -1321,7 +1321,8 @@ func TestGetCodexUsageReturnsUnavailablePayloadForPersistent502(t *testing.T) {
 	withFastCodexUsageRetry(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "temporary gateway failure", http.StatusBadGateway)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>`))
 	}))
 	t.Cleanup(server.Close)
 	originalURL := codexUsageURL
@@ -1361,6 +1362,15 @@ func TestGetCodexUsageReturnsUnavailablePayloadForPersistent502(t *testing.T) {
 	}
 	if got := payload["codex_usage_upstream_status"]; got != float64(http.StatusBadGateway) {
 		t.Fatalf("codex_usage_upstream_status = %#v, want %d", got, http.StatusBadGateway)
+	}
+	if _, ok := payload["error"]; ok {
+		t.Fatalf("transient degradation must not expose top-level error: %#v", payload)
+	}
+	if got := payload["codex_usage_error"]; got != "codex usage upstream temporarily unavailable (status 502)" {
+		t.Fatalf("codex_usage_error = %#v, want sanitized transient failure", got)
+	}
+	if strings.Contains(rec.Body.String(), "<html>") || strings.Contains(rec.Body.String(), "nginx") {
+		t.Fatalf("response leaked upstream HTML: %s", rec.Body.String())
 	}
 }
 

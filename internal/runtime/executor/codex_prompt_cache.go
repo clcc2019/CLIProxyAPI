@@ -74,13 +74,18 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 		}
 	}
 
-	scope := codexPromptCacheScope(ctx)
-
 	// Path 2: Claude path retains legacy behaviour (model + user_id) so
-	// existing deployments keep warming the same cache entry. We only fall
-	// back to the generic fingerprinting logic when user_id is missing.
+	// existing deployments keep warming the same cache entry. Claude Code's
+	// structured session metadata gets a deterministic tenant-scoped key,
+	// matching sub2api's metadata-session strategy without rotating after the
+	// old one-hour process-local TTL. Unrecognised legacy user_id values keep
+	// their historical mapping.
 	if from == "claude" {
 		if userID := strings.TrimSpace(codexGJSONGetImmutableBytes(req.Payload, "metadata.user_id").String()); userID != "" {
+			if sessionID := extractClaudeCodeSessionIDForCodexReplay(req.Payload); sessionID != "" {
+				cache := deterministicCodexPromptCache(stableCodexPromptCacheScope(ctx), req.Model, "claude-session:"+sessionID)
+				return codexPromptCacheResolution{cache: cache}
+			}
 			key := fmt.Sprintf("%s-%s", req.Model, userID)
 			return codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
 		}
@@ -143,8 +148,12 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 	// singleflight key that cannot lead to a memo hit.
 	if len(req.Payload) > codexPromptResolutionMemoMaxPayload {
 		codexMetrics.memoPromptMiss.Add(1)
-		return resolveCodexPromptCacheResolutionUncached(ctx, from, scope, req)
+		return resolveCodexPromptCacheResolutionUncached(ctx, from, req)
 	}
+
+	// Only the small-payload memo needs the fast process-local caller scope.
+	// Explicit session paths and oversized requests have already returned.
+	scope := codexPromptCacheScope(ctx)
 
 	// Reuse one precomputed hash across the optimistic lookup, the in-flight
 	// key, the post-singleflight lookup, and insertion. A cold small request
@@ -168,7 +177,7 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 		if cached, ok := globalCodexPromptResolutionMemo.getWithHash(memoHash, from, req.Model, scope, executionSessionID, req.Payload); ok {
 			return cached, nil
 		}
-		resolution := resolveCodexPromptCacheResolutionUncached(ctx, from, scope, req)
+		resolution := resolveCodexPromptCacheResolutionUncached(ctx, from, req)
 		globalCodexPromptResolutionMemo.setWithHash(memoHash, from, req.Model, scope, executionSessionID, req.Payload, resolution)
 		return resolution, nil
 	})
@@ -178,29 +187,20 @@ func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from s
 	return resolution
 }
 
-func resolveCodexPromptCacheResolutionUncached(ctx context.Context, from sdktranslator.Format, scope string, req cliproxyexecutor.Request) codexPromptCacheResolution {
+func resolveCodexPromptCacheResolutionUncached(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request) codexPromptCacheResolution {
 	resolution := codexPromptCacheResolution{}
-	// Path 7: derive a conversation fingerprint from whatever
-	// conversation-scoped fields the caller happened to include. The
-	// fingerprint goes through codexCacheStore, so repeated requests with
-	// the same fingerprint map to the same stable UUID even after the
-	// translator re-renders the payload.
-	if fp := conversationIdentifierFingerprint(req); fp != "" {
-		key := "fp:" + scope + ":" + req.Model + ":" + fp
-		cache := loadOrCreateCodexCache(key)
-		return codexPromptCacheResolution{
-			cache:            cache,
-			headerEligibleID: cache.ID,
-		}
-	}
-	// Path 8: final structured fallback for clients without explicit session
-	// signals. This preserves the existing content-based reuse.
+	// Path 7: final structured fallback for clients without explicit session
+	// signals. The stable prefix fingerprint mirrors sub2api's compatibility
+	// strategy: system/instructions, tools, tool choice, reasoning settings, and
+	// the first user turn identify a logical cache bucket while later appended
+	// turns do not churn it. Use a deterministic upstream key so a process
+	// restart or the legacy one-hour local UUID expiry cannot discard a still
+	// useful upstream prompt cache.
 	if fp := conversationContentFingerprint(req); fp != "" {
-		key := "fp:" + scope + ":" + req.Model + ":" + fp
-		return codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
+		return codexPromptCacheResolution{cache: deterministicCodexPromptCache(stableCodexPromptCacheScope(ctx), req.Model, fp)}
 	}
 
-	// Path 9 (fallback): api_key-level stable UUID. This is strictly less
+	// Path 8 (fallback): api_key-level stable UUID. This is strictly less
 	// precise than a real conversation id but preserves backwards-compatible
 	// behaviour for callers that send neither prompt_cache_key nor any
 	// identifiable content (e.g. the upstream smoke tests that post just
@@ -404,115 +404,175 @@ func codexPromptCacheTurnMetadataValue(headers http.Header, path string) string 
 	return strings.TrimSpace(gjson.Get(raw, path).String())
 }
 
-// codexConversationIdentifierFields lists the JSON paths that may carry an
-// explicit conversation identifier, ordered from most-specific to least.
-// Declared at package scope so gjson.GetManyBytes can resolve the whole set in
-// a single payload traversal instead of re-parsing the body once per field.
-var codexConversationIdentifierFields = []string{
-	"metadata.conversation_id",
-	"metadata.conversationId",
-	"metadata.thread_id",
-	"metadata.threadId",
-	"metadata.session_id",
-	"metadata.sessionId",
-	"conversation_id",
-	"conversationId",
-	"thread_id",
-	"threadId",
-}
-
-// conversationFingerprint extracts a conversation-scoped hint out of req.Payload.
-// It intentionally inspects many candidate fields because we serve several
-// provider schemas (Claude, OpenAI Chat, OpenAI Responses) and each encodes
-// conversation identity differently. Returns an empty string when no stable
-// hint can be found.
-func conversationIdentifierFingerprint(req cliproxyexecutor.Request) string {
-	payload := req.Payload
-	if len(payload) == 0 {
-		return ""
-	}
-
-	// Prefer explicit conversation identifiers before falling back to a
-	// content hash. Order matters: more-specific wins.
-	//
-	// gjson.GetManyBytes parses the payload once and resolves all paths in
-	// that single traversal, so the 11-field scan costs one parse instead of
-	// eleven.
-	results := gjson.GetManyBytes(payload, codexConversationIdentifierFields...)
-	for i, result := range results {
-		if !result.Exists() {
-			continue
-		}
-		if v := strings.TrimSpace(result.String()); v != "" {
-			return "id:" + shortHashString(codexConversationIdentifierFields[i]+"="+v)
-		}
-	}
-	return ""
-}
-
 func conversationContentFingerprint(req cliproxyexecutor.Request) string {
 	payload := req.Payload
 	if len(payload) == 0 {
 		return ""
 	}
-
-	// Content-derived fingerprint: hash the first user turn. Same first user
-	// message + same model ⇒ same conversation, which is the assumption
-	// prompt caching is built on anyway.
-	if content := firstUserContent(payload); content != "" {
-		if user := strings.TrimSpace(codexGJSONGetImmutableBytes(payload, "user").String()); user != "" {
-			return "c:" + shortHashString("user="+user+"\x00content="+content)
-		}
-		return "c:" + shortHashString(content)
+	root := codexGJSONParseImmutableBytes(payload)
+	if !root.IsObject() {
+		return ""
 	}
 
-	return ""
+	// Build the key from the stable request prefix rather than the entire body.
+	// Appended assistant/user turns therefore keep the same key, while requests
+	// that happen to share a first user message no longer collide when their
+	// instructions, tools, tool choice, or reasoning configuration differ.
+	var seed strings.Builder
+	appendField := func(name, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || value == "null" {
+			return
+		}
+		seed.WriteString(name)
+		seed.WriteByte('=')
+		// Hash each component before composing the seed. This keeps the builder
+		// bounded even when tools or the first user turn are very large.
+		seed.WriteString(stableCodexPromptCacheFingerprint(value))
+		seed.WriteByte('\x00')
+	}
+	appendResult := func(name string, result gjson.Result) {
+		if !result.Exists() {
+			return
+		}
+		appendField(name, result.Raw)
+	}
+
+	var instructions, system, tools, functions, toolChoice, functionCall gjson.Result
+	var reasoning, reasoningEffort, verbosity, messages, input, user, prompt gjson.Result
+	root.ForEach(func(key, value gjson.Result) bool {
+		switch key.String() {
+		case "instructions":
+			instructions = value
+		case "system":
+			system = value
+		case "tools":
+			tools = value
+		case "functions":
+			functions = value
+		case "tool_choice":
+			toolChoice = value
+		case "function_call":
+			functionCall = value
+		case "reasoning":
+			reasoning = value
+		case "reasoning_effort":
+			reasoningEffort = value
+		case "verbosity":
+			verbosity = value
+		case "messages":
+			messages = value
+		case "input":
+			input = value
+		case "user":
+			user = value
+		case "prompt":
+			prompt = value
+		}
+		return true
+	})
+
+	appendResult("instructions", instructions)
+	appendResult("system", system)
+	appendResult("tools", tools)
+	appendResult("functions", functions)
+	appendResult("tool_choice", toolChoice)
+	appendResult("function_call", functionCall)
+	appendResult("reasoning", reasoning)
+	appendResult("reasoning_effort", reasoningEffort)
+	appendResult("verbosity", verbosity)
+
+	// Chat Completions and Anthropic messages may encode system/developer
+	// instructions inside messages rather than in a top-level field.
+	if messages.IsArray() {
+		messages.ForEach(func(_, message gjson.Result) bool {
+			role := strings.TrimSpace(message.Get("role").String())
+			if strings.EqualFold(role, "system") || strings.EqualFold(role, "developer") {
+				appendResult("message_"+strings.ToLower(role), message.Get("content"))
+			}
+			return true
+		})
+	}
+	// Responses input can also carry developer/system messages in-band.
+	if input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			role := strings.TrimSpace(item.Get("role").String())
+			if strings.EqualFold(role, "system") || strings.EqualFold(role, "developer") {
+				appendResult("input_"+strings.ToLower(role), item.Get("content"))
+			}
+			return true
+		})
+	}
+
+	if userValue := strings.TrimSpace(user.String()); userValue != "" {
+		appendField("user", userValue)
+	}
+	if content := firstUserContent(messages, input, prompt); content != "" {
+		appendField("first_user", content)
+	}
+	if seed.Len() == 0 {
+		return ""
+	}
+	return "c:" + stableCodexPromptCacheFingerprint(seed.String())
 }
 
 // firstUserContent returns a normalized string representation of the first
 // user message, looking under the common field names used by the provider
 // schemas this proxy accepts.
-func firstUserContent(payload []byte) string {
+func firstUserContent(messages, input, prompt gjson.Result) string {
 	// OpenAI Chat Completions: messages[*].role == "user"
-	if msgs := codexGJSONGetImmutableBytes(payload, "messages"); msgs.IsArray() {
-		for _, m := range msgs.Array() {
-			if strings.EqualFold(strings.TrimSpace(m.Get("role").String()), "user") {
-				if c := strings.TrimSpace(m.Get("content").Raw); c != "" && c != "null" {
-					return c
+	if messages.IsArray() {
+		var content string
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "user") {
+				content = strings.TrimSpace(message.Get("content").Raw)
+				if content != "" && content != "null" {
+					return false
 				}
+				content = ""
 			}
+			return true
+		})
+		if content != "" {
+			return content
 		}
 	}
 	// OpenAI Responses: input[*].role == "user"
-	if inputs := codexGJSONGetImmutableBytes(payload, "input"); inputs.IsArray() {
-		for _, m := range inputs.Array() {
-			if strings.EqualFold(strings.TrimSpace(m.Get("role").String()), "user") {
-				if c := strings.TrimSpace(m.Get("content").Raw); c != "" && c != "null" {
-					return c
-				}
+	if input.IsArray() {
+		var content, first string
+		input.ForEach(func(_, item gjson.Result) bool {
+			if first == "" {
+				first = strings.TrimSpace(item.Raw)
 			}
+			if strings.EqualFold(strings.TrimSpace(item.Get("role").String()), "user") {
+				content = strings.TrimSpace(item.Get("content").Raw)
+				if content != "" && content != "null" {
+					return false
+				}
+				content = ""
+			}
+			return true
+		})
+		if content != "" {
+			return content
 		}
 		// If "input" is a flat array of strings/objects with no explicit role,
 		// hash the whole first element.
-		if first := inputs.Array(); len(first) > 0 {
-			if c := strings.TrimSpace(first[0].Raw); c != "" && c != "null" {
-				return c
-			}
+		if first != "" && first != "null" {
+			return first
 		}
 	}
 	// Anthropic Messages API: messages[*].role == "user"; same field name as
 	// OpenAI chat so the first branch already handles it. Fall back to
 	// top-level "prompt" for older / non-standard clients.
-	if p := strings.TrimSpace(codexGJSONGetImmutableBytes(payload, "prompt").Raw); p != "" && p != "null" {
+	if p := strings.TrimSpace(prompt.Raw); p != "" && p != "null" {
 		return p
 	}
 	return ""
 }
 
-// codexPromptCacheScope produces a stable per-caller scope string. Scoping by
-// api key (or gin client identity when available) keeps fingerprints from
-// colliding across tenants — two different users asking "hello" should not
-// share a prompt_cache_key even though their first-user-message hashes match.
+// codexPromptCacheScope produces a cheap process-local caller scope for memo
+// keys. Upstream synthetic keys use stableCodexPromptCacheScope instead.
 func codexPromptCacheScope(ctx context.Context) string {
 	if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
 		return "api:" + shortHashString(apiKey)
@@ -520,9 +580,36 @@ func codexPromptCacheScope(ctx context.Context) string {
 	return "anon"
 }
 
-// loadOrCreateCodexCache returns the cached UUID for key, creating a new
-// entry with a 1-hour TTL when absent. Centralising this logic keeps the
-// derivation paths consistent and avoids drift between Claude/OpenAI.
+func stableCodexPromptCacheScope(ctx context.Context) string {
+	if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+		return "api:" + stableCodexPromptCacheFingerprint(apiKey)
+	}
+	return "anon"
+}
+
+// stableCodexPromptCacheFingerprint is intentionally process-independent.
+// maphash is ideal for local memo/dedupe tables but is randomly seeded at
+// startup, which would rotate synthetic prompt_cache_key values after every
+// restart and throw away reusable upstream cache state.
+var codexPromptCacheFingerprintNamespace = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache-fingerprint"))
+var codexSyntheticPromptCacheNamespace = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:synthetic-prompt-cache"))
+
+func stableCodexPromptCacheFingerprint(value string) string {
+	return uuid.NewSHA1(codexPromptCacheFingerprintNamespace, []byte(value)).String()
+}
+
+func deterministicCodexPromptCache(scope, model, fingerprint string) helps.CodexCache {
+	seed := strings.Join([]string{
+		strings.TrimSpace(scope),
+		strings.TrimSpace(model),
+		fingerprint,
+	}, "\x00")
+	return helps.CodexCache{ID: "pc-" + uuid.NewSHA1(codexSyntheticPromptCacheNamespace, []byte(seed)).String()}
+}
+
+// loadOrCreateCodexCache preserves the legacy model+metadata.user_id mapping
+// used by Claude callers. Synthetic content fallbacks use deterministic keys
+// instead, so their lifetime is governed only by the upstream prompt cache.
 func loadOrCreateCodexCache(key string) helps.CodexCache {
 	if cache, ok := helps.GetCodexCache(key); ok {
 		return cache

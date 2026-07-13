@@ -4987,6 +4987,8 @@ func isRequestInvalidResultError(err *Error) bool {
 		return false
 	}
 	switch statusCodeFromResult(err) {
+	case http.StatusBadRequest:
+		return isMissingResponsesRequestAnchorErrorMessage(err.Error())
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
@@ -5002,10 +5004,11 @@ func isRequestInvalidResultError(err *Error) bool {
 
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats request-scoped 404
-// item misses caused by `store=false` and all 422 responses as request-shape
-// failures, where switching auths or pooled upstream models will not help. 400s
-// deliberately fall through to credential failover so the next auth starts with
-// a fresh upstream session instead of reusing polluted provider state.
+// item misses caused by `store=false`, all 422 responses, and Responses requests
+// missing every valid request anchor as request-shape failures, where switching
+// auths or pooled upstream models will not help. Other 400s deliberately fall
+// through to credential failover so the next auth starts with a fresh upstream
+// session instead of reusing polluted provider state.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -5019,6 +5022,8 @@ func isRequestInvalidError(err error) bool {
 	}
 	status := statusCodeFromError(err)
 	switch status {
+	case http.StatusBadRequest:
+		return isMissingResponsesRequestAnchorErrorMessage(err.Error())
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
@@ -5030,6 +5035,23 @@ func isRequestInvalidError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// isMissingResponsesRequestAnchorErrorMessage identifies the Responses API
+// validation error returned when a request has neither new input nor a valid
+// continuation/template/conversation reference. This is a request-shape error;
+// replaying it with another model or credential cannot make it valid.
+func isMissingResponsesRequestAnchorErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" || !strings.Contains(lower, "one of") || !strings.Contains(lower, "must be provided") {
+		return false
+	}
+	for _, field := range [...]string{"input", "previous_response_id", "prompt", "conversation_id"} {
+		if !strings.Contains(lower, field) {
+			return false
+		}
+	}
+	return true
 }
 
 func isMalformedRequestErrorMessage(message string) bool {
