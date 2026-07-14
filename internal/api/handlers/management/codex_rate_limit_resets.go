@@ -46,12 +46,16 @@ func (h *Handler) GetCodexRateLimitResetCredits(c *gin.Context) {
 	usageOpts := parseCodexUsageRequestOptions(c)
 	payload, upstreamStatus, err := h.fetchCodexUsageWithCache(ctx, auth, usageOpts)
 	if err != nil {
-		if upstreamStatus > 0 {
-			c.JSON(upstreamStatus, gin.H{"error": err.Error()})
+		if codexUsageTransientFailure(upstreamStatus, err) {
+			payload = codexUsageUnavailablePayload(err, upstreamStatus)
+		} else {
+			if upstreamStatus > 0 {
+				c.JSON(upstreamStatus, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
 	}
 	// /wham/usage only contains the balance. The official client additionally
 	// reads the detail endpoint to obtain each reset credit's expires_at value.
@@ -100,6 +104,12 @@ func (h *Handler) fetchCodexRateLimitResetCreditDetails(ctx context.Context, aut
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	release, err := h.acquireCodexUpstreamSlot(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
+
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -174,14 +184,21 @@ func (h *Handler) ConsumeCodexRateLimitResetCredit(c *gin.Context) {
 	}
 
 	if codexRateLimitResetConsumeRefreshesUsage(consume.Code) {
-		if usage, _, refreshErr := h.fetchCodexUsageWithCache(ctx, auth, codexUsageRequestOptions{force: true, ttl: codexUsageCacheDefaultTTL}); refreshErr == nil {
+		if usage, refreshStatus, refreshErr := h.fetchCodexUsageWithCache(ctx, auth, codexUsageRequestOptions{force: true, ttl: codexUsageCacheDefaultTTL}); refreshErr == nil {
 			creditsPayload := h.codexRateLimitResetCreditsPayload(auth, usage)
 			response["rate_limit_reset_credits"] = creditsPayload["rate_limit_reset_credits"]
 			response["available_count"] = creditsPayload["available_count"]
 			response["auth_file"] = creditsPayload["auth_file"]
 			response["authFile"] = creditsPayload["authFile"]
 		} else {
-			response["usage_refresh_error"] = refreshErr.Error()
+			if codexUsageTransientFailure(refreshStatus, refreshErr) {
+				response["usage_refresh_error"] = codexUsageFailureMessage(refreshStatus)
+				if refreshStatus > 0 {
+					response["codex_usage_upstream_status"] = refreshStatus
+				}
+			} else {
+				response["usage_refresh_error"] = refreshErr.Error()
+			}
 		}
 	}
 	c.JSON(http.StatusOK, response)
@@ -223,6 +240,17 @@ func (h *Handler) codexRateLimitResetCreditsPayload(auth *coreauth.Auth, usage g
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
 			payload["auth_file"] = entry
 			payload["authFile"] = entry
+		}
+	}
+	for _, key := range []string{
+		"codex_usage_unavailable",
+		"codex_usage_stale",
+		"codex_usage_cache",
+		"codex_usage_upstream_status",
+		"codex_usage_error",
+	} {
+		if value, ok := usage[key]; ok {
+			payload[key] = value
 		}
 	}
 	return payload
@@ -287,6 +315,12 @@ func (h *Handler) consumeCodexRateLimitResetCredit(ctx context.Context, auth *co
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	release, err := h.acquireCodexUpstreamSlot(ctx)
+	if err != nil {
+		return codexRateLimitResetConsumeResponse{}, 0, err
+	}
+	defer release()
+
 	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 

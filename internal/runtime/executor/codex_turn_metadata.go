@@ -96,7 +96,7 @@ func codexEnsureTurnMetadataHeader(target http.Header, source http.Header, defau
 		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 		return
 	}
-	updated := codexBuildTurnMetadataHeader(
+	updated := codexBuildTurnMetadataHeaderWithInstallationID(
 		defaults.requestKind,
 		defaults.sessionID,
 		defaults.threadID,
@@ -107,9 +107,9 @@ func codexEnsureTurnMetadataHeader(target http.Header, source http.Header, defau
 		defaults.turnID,
 		defaults.sandbox,
 		defaults.windowID,
+		defaults.installationID,
 		defaults.turnStartedAtUnixMilli,
 	)
-	updated = codexApplyInstallationIDToTurnMetadata(updated, defaults.installationID)
 	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 }
 
@@ -128,7 +128,7 @@ func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header
 		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 		return
 	}
-	updated := codexBuildTurnMetadataHeader(
+	updated := codexBuildTurnMetadataHeaderWithInstallationID(
 		defaults.requestKind,
 		defaults.sessionID,
 		defaults.threadID,
@@ -139,9 +139,9 @@ func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header
 		defaults.turnID,
 		defaults.sandbox,
 		defaults.windowID,
+		defaults.installationID,
 		defaults.turnStartedAtUnixMilli,
 	)
-	updated = codexApplyInstallationIDToTurnMetadata(updated, defaults.installationID)
 	updated = codexAugmentCompactionMetadata(updated, target, source)
 	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 }
@@ -192,6 +192,10 @@ func codexDefaultTurnMetadataHeader(sessionID string) string {
 }
 
 func codexBuildTurnMetadataHeader(requestKind string, sessionID string, threadID string, forkedFromThreadID string, parentThreadID string, subagentKind string, threadSource string, turnID string, sandbox string, windowID string, turnStartedAtUnixMilli int64) string {
+	return codexBuildTurnMetadataHeaderWithInstallationID(requestKind, sessionID, threadID, forkedFromThreadID, parentThreadID, subagentKind, threadSource, turnID, sandbox, windowID, "", turnStartedAtUnixMilli)
+}
+
+func codexBuildTurnMetadataHeaderWithInstallationID(requestKind string, sessionID string, threadID string, forkedFromThreadID string, parentThreadID string, subagentKind string, threadSource string, turnID string, sandbox string, windowID string, installationID string, turnStartedAtUnixMilli int64) string {
 	requestKind = strings.TrimSpace(requestKind)
 	sessionID = strings.TrimSpace(sessionID)
 	threadID = strings.TrimSpace(threadID)
@@ -202,12 +206,13 @@ func codexBuildTurnMetadataHeader(requestKind string, sessionID string, threadID
 	turnID = strings.TrimSpace(turnID)
 	sandbox = strings.TrimSpace(sandbox)
 	windowID = strings.TrimSpace(windowID)
+	installationID = strings.TrimSpace(installationID)
 	if turnStartedAtUnixMilli <= 0 {
 		turnStartedAtUnixMilli = time.Now().UnixMilli()
 	}
 
 	var builder strings.Builder
-	builder.Grow(len(requestKind) + len(sessionID) + len(threadID) + len(threadSource) + len(turnID) + len(sandbox) + len(windowID) + 128)
+	builder.Grow(len(requestKind) + len(sessionID) + len(threadID) + len(forkedFromThreadID) + len(parentThreadID) + len(subagentKind) + len(threadSource) + len(turnID) + len(sandbox) + len(windowID) + len(installationID) + 148)
 	builder.WriteByte('{')
 	first := true
 	appendQuotedJSONField := func(name string, value string) {
@@ -249,6 +254,7 @@ func codexBuildTurnMetadataHeader(requestKind string, sessionID string, threadID
 	appendQuotedJSONField("sandbox", sandbox)
 	appendQuotedJSONField("window_id", windowID)
 	appendInt64JSONField("turn_started_at_unix_ms", turnStartedAtUnixMilli)
+	appendQuotedJSONField("installation_id", installationID)
 	builder.WriteByte('}')
 	return builder.String()
 }
@@ -305,7 +311,7 @@ func codexWriteJSONString(builder *strings.Builder, value string) {
 func codexAugmentTurnMetadataHeader(raw string, defaults codexTurnMetadataDefaults) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
-		return codexBuildTurnMetadataHeader(
+		return codexBuildTurnMetadataHeaderWithInstallationID(
 			defaults.requestKind,
 			defaults.sessionID,
 			defaults.threadID,
@@ -316,6 +322,7 @@ func codexAugmentTurnMetadataHeader(raw string, defaults codexTurnMetadataDefaul
 			defaults.turnID,
 			defaults.sandbox,
 			defaults.windowID,
+			defaults.installationID,
 			defaults.turnStartedAtUnixMilli,
 		)
 	}
@@ -356,6 +363,9 @@ func codexAugmentTurnMetadataHeader(raw string, defaults codexTurnMetadataDefaul
 }
 
 func codexResponsesAPIClientMetadataFromBody(body []byte) map[string]string {
+	if !codexBodyMayContainClientMetadata(body) {
+		return nil
+	}
 	metadata := codexGJSONGetImmutableBytes(body, "client_metadata")
 	if !metadata.IsObject() {
 		return nil

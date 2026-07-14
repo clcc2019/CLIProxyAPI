@@ -210,15 +210,10 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 			sessionID = uuid.NewString()
 		}
 	}
-	codexSetSingleHeaderValue(target, "Session_id", sessionID)
-	codexSetSingleHeaderValue(target, codexHeaderOfficialSessionID, sessionID)
 	if threadID == "" {
 		threadID = sessionID
 	}
-	if threadID != "" {
-		codexSetSingleHeaderValue(target, codexHeaderThreadID, threadID)
-		codexSetSingleHeaderValue(target, codexHeaderOfficialThreadID, threadID)
-	}
+	codexSetSessionIdentityHeaders(target, sessionID, threadID)
 
 	requestID := firstNonEmptyHeaderValue(target, source, "X-Client-Request-Id")
 	if opts.includeRequestID && requestID == "" {
@@ -237,6 +232,11 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 	}
 	target.Del("Conversation_id")
 	return sessionID
+}
+
+func codexSetSessionIdentityHeaders(target http.Header, sessionID string, threadID string) {
+	codexSetPairedSingleHeaderValues(target, codexHeaderSessionID, sessionID, codexHeaderThreadID, threadID)
+	codexSetPairedSingleHeaderValues(target, codexHeaderOfficialSessionID, sessionID, codexHeaderOfficialThreadID, threadID)
 }
 
 func firstNonEmptyHeaderValue(target http.Header, source http.Header, key string) string {

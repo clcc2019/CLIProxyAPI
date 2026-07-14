@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -982,6 +983,70 @@ func TestGetCodexRateLimitResetCreditsUsesUsagePayload(t *testing.T) {
 	}
 }
 
+func TestGetCodexRateLimitResetCreditsDegradesPersistent502(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	withFastCodexUsageRetry(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>`))
+	}))
+	t.Cleanup(server.Close)
+	originalUsageURL := codexUsageURL
+	originalDetailsURL := codexRateLimitResetCreditsURL
+	codexUsageURL = server.URL + "/usage"
+	codexRateLimitResetCreditsURL = server.URL + "/details"
+	t.Cleanup(func() {
+		codexUsageURL = originalUsageURL
+		codexRateLimitResetCreditsURL = originalDetailsURL
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestRetry: 1, AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-rate-limit-reset-credits?name=codex.json", nil)
+
+	h.GetCodexRateLimitResetCredits(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got := payload["codex_usage_unavailable"]; got != true {
+		t.Fatalf("codex_usage_unavailable = %#v, want true", got)
+	}
+	if got := payload["codex_usage_upstream_status"]; got != float64(http.StatusBadGateway) {
+		t.Fatalf("codex_usage_upstream_status = %#v, want %d", got, http.StatusBadGateway)
+	}
+	if got := payload["codex_usage_error"]; got != "codex usage upstream temporarily unavailable (status 502)" {
+		t.Fatalf("codex_usage_error = %#v, want sanitized transient failure", got)
+	}
+	if _, ok := payload["error"]; ok {
+		t.Fatalf("transient degradation must not expose top-level error: %#v", payload)
+	}
+	if strings.Contains(rec.Body.String(), "<html>") || strings.Contains(rec.Body.String(), "nginx") {
+		t.Fatalf("response leaked upstream HTML: %s", rec.Body.String())
+	}
+}
+
 func TestMergeCodexRateLimitResetCreditDetailsPreservesUsageBalance(t *testing.T) {
 	usage := gin.H{"rate_limit_reset_credits": gin.H{
 		"available_count": float64(3),
@@ -1195,6 +1260,71 @@ func TestConsumeCodexRateLimitResetCreditNoCreditDoesNotClearCooldown(t *testing
 	}
 }
 
+func TestConsumeCodexRateLimitResetCreditSanitizesUsageRefresh502(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	withFastCodexUsageRetry(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/consume", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"reset","windows_reset":1}`))
+	})
+	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`<html><body>nginx 502</body></html>`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	originalUsageURL := codexUsageURL
+	originalConsumeURL := codexRateLimitResetCreditsConsumeURL
+	codexUsageURL = server.URL + "/usage"
+	codexRateLimitResetCreditsConsumeURL = server.URL + "/consume"
+	t.Cleanup(func() {
+		codexUsageURL = originalUsageURL
+		codexRateLimitResetCreditsConsumeURL = originalConsumeURL
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestRetry: 1, AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/codex-rate-limit-reset-credits/consume?name=codex.json", strings.NewReader(`{"redeem_request_id":"redeem-502"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.ConsumeCodexRateLimitResetCredit(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got := payload["usage_refresh_error"]; got != "codex usage upstream temporarily unavailable (status 502)" {
+		t.Fatalf("usage_refresh_error = %#v, want sanitized transient failure", got)
+	}
+	if got := payload["codex_usage_upstream_status"]; got != float64(http.StatusBadGateway) {
+		t.Fatalf("codex_usage_upstream_status = %#v, want %d", got, http.StatusBadGateway)
+	}
+	if strings.Contains(rec.Body.String(), "<html>") || strings.Contains(rec.Body.String(), "nginx") {
+		t.Fatalf("response leaked upstream HTML: %s", rec.Body.String())
+	}
+}
+
 func TestGetCodexUsageRetriesTransient502(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -1228,7 +1358,7 @@ func TestGetCodexUsageRetriesTransient502(t *testing.T) {
 		t.Fatalf("register auth: %v", err)
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestRetry: 1, AuthDir: t.TempDir()}, manager)
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=codex.json", nil)
@@ -1284,7 +1414,7 @@ func TestGetCodexUsageUsesStaleCacheOnPersistent502(t *testing.T) {
 		t.Fatalf("register auth: %v", err)
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestRetry: 1, AuthDir: t.TempDir()}, manager)
 	first := httptest.NewRecorder()
 	firstCtx, _ := gin.CreateTestContext(first)
 	firstCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=codex.json", nil)
@@ -1343,7 +1473,7 @@ func TestGetCodexUsageReturnsUnavailablePayloadForPersistent502(t *testing.T) {
 		t.Fatalf("register auth: %v", err)
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestRetry: 1, AuthDir: t.TempDir()}, manager)
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=codex.json", nil)
@@ -1371,6 +1501,108 @@ func TestGetCodexUsageReturnsUnavailablePayloadForPersistent502(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "<html>") || strings.Contains(rec.Body.String(), "nginx") {
 		t.Fatalf("response leaked upstream HTML: %s", rec.Body.String())
+	}
+}
+
+func TestGetCodexRateLimitResetCreditsBatchPersistent502IsThrottledAndSanitized(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	withFastCodexUsageRetry(t)
+
+	var active atomic.Int32
+	var peak atomic.Int32
+	var usageCalls atomic.Int32
+	var detailCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/usage":
+			usageCalls.Add(1)
+		case "/details":
+			detailCalls.Add(1)
+		}
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			observed := peak.Load()
+			if current <= observed || peak.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>`))
+	}))
+	t.Cleanup(server.Close)
+	originalUsageURL := codexUsageURL
+	originalDetailsURL := codexRateLimitResetCreditsURL
+	codexUsageURL = server.URL + "/usage"
+	codexRateLimitResetCreditsURL = server.URL + "/details"
+	t.Cleanup(func() {
+		codexUsageURL = originalUsageURL
+		codexRateLimitResetCreditsURL = originalDetailsURL
+	})
+
+	const authCount = 12
+	manager := coreauth.NewManager(nil, nil, nil)
+	for i := 0; i < authCount; i++ {
+		name := fmt.Sprintf("codex-%02d.json", i)
+		if _, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID:       name,
+			FileName: name,
+			Provider: "codex",
+			Metadata: map[string]any{
+				"type":         "codex",
+				"access_token": fmt.Sprintf("usage-token-%02d", i),
+				"account_id":   fmt.Sprintf("acct_%02d", i),
+			},
+		}); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{RequestRetry: 1, AuthDir: t.TempDir()}, manager)
+	recorders := make([]*httptest.ResponseRecorder, authCount)
+	var wg sync.WaitGroup
+	for i := 0; i < authCount; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			name := fmt.Sprintf("codex-%02d.json", index)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-rate-limit-reset-credits?name="+name+"&force=true", nil)
+			h.GetCodexRateLimitResetCredits(ctx)
+			recorders[index] = recorder
+		}(i)
+	}
+	wg.Wait()
+
+	if got := peak.Load(); got != codexManagementUpstreamConcurrency {
+		t.Fatalf("peak upstream concurrency = %d, want exactly %d", got, codexManagementUpstreamConcurrency)
+	}
+	if got := detailCalls.Load(); got != authCount {
+		t.Fatalf("reset-credit detail calls = %d, want %d", got, authCount)
+	}
+	if got := usageCalls.Load(); got <= 0 || got > codexManagementUpstreamConcurrency*2 {
+		t.Fatalf("usage calls = %d, want 1..%d before shared outage cooldown", got, codexManagementUpstreamConcurrency*2)
+	}
+	for i, recorder := range recorders {
+		if recorder == nil {
+			t.Fatalf("response %d is nil", i)
+		}
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("response %d status = %d, want %d body=%s", i, recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response %d: %v", i, err)
+		}
+		if got := payload["codex_usage_unavailable"]; got != true {
+			t.Fatalf("response %d unavailable = %#v, want true", i, got)
+		}
+		if body := recorder.Body.String(); strings.Contains(body, "<html>") || strings.Contains(body, "nginx") {
+			t.Fatalf("response %d leaked upstream HTML: %s", i, body)
+		}
 	}
 }
 

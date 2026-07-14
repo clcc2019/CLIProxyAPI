@@ -1,10 +1,37 @@
 package executor
 
 import (
+	"net/http"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestCodexSetPairedSingleHeaderValuesKeepsSlicesIndependent(t *testing.T) {
+	headers := http.Header{}
+	codexSetPairedSingleHeaderValues(headers, "First", "one", "Second", "two")
+
+	headers["First"] = append(headers["First"], "extra")
+	if got := headers.Get("Second"); got != "two" {
+		t.Fatalf("Second = %q after appending First, want two", got)
+	}
+	if got := len(headers["Second"]); got != 1 {
+		t.Fatalf("len(Second) = %d, want 1", got)
+	}
+}
+
+func TestCodexSetTripleSingleHeaderValuesKeepsSlicesIndependent(t *testing.T) {
+	headers := http.Header{}
+	codexSetTripleSingleHeaderValues(headers, "First", "one", "Second", "two", "Third", "three")
+
+	headers["Second"] = append(headers["Second"], "extra")
+	if got := headers.Get("First"); got != "one" {
+		t.Fatalf("First = %q after appending Second, want one", got)
+	}
+	if got := headers.Get("Third"); got != "three" {
+		t.Fatalf("Third = %q after appending Second, want three", got)
+	}
+}
 
 func TestCodexIsAPIKeyAuthTreatsMirroredAccessTokenAsOAuth(t *testing.T) {
 	auth := &cliproxyauth.Auth{

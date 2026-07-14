@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	codexcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
@@ -562,7 +563,13 @@ func normalizeCodexFinalUpstreamModelControls(body []byte, baseModel string) []b
 		// catalog entry omits it.
 		capabilities.SupportsReasoningSummaryParameter = true
 	}
+	requestedEffort := gjson.GetBytes(body, "reasoning.effort")
+	preserveRequestedEffort := strings.EqualFold(strings.TrimSpace(baseModel), "gpt-5.6-sol") &&
+		requestedEffort.Type == gjson.String && strings.TrimSpace(requestedEffort.String()) != ""
 	body = normalizeCodexFinalUpstreamReasoning(body, capabilities)
+	if preserveRequestedEffort && gjson.GetBytes(body, "reasoning.effort").String() != requestedEffort.String() {
+		body = helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", requestedEffort.String()))
+	}
 	return normalizeCodexFinalUpstreamReasoningEffortForModel(body, baseModel)
 }
 
@@ -727,22 +734,18 @@ func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel s
 
 	model := strings.TrimSpace(baseModel)
 	effortValue := strings.TrimSpace(effort.String())
-	if strings.EqualFold(model, "gpt-5.6-sol") && isCodexReasoningEffortAtLeastXHigh(effortValue) {
-		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
-	}
 	if strings.EqualFold(model, "gpt-5.5") && strings.EqualFold(effortValue, "xhigh") {
 		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
 	}
-	return body
-}
-
-func isCodexReasoningEffortAtLeastXHigh(effort string) bool {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "xhigh", "max", "ultra":
-		return true
-	default:
-		return false
+	if strings.EqualFold(model, "gpt-5.6-sol") {
+		switch {
+		case strings.EqualFold(effortValue, "xhigh"),
+			strings.EqualFold(effortValue, "max"),
+			strings.EqualFold(effortValue, "ultra"):
+			return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
+		}
 	}
+	return body
 }
 
 func codexReasoningEffortForRequest(effort string) string {
@@ -1418,9 +1421,7 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 		if name == "" {
 			return []byte(`"auto"`), true
 		}
-		raw := []byte(`{"type":"function"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("function", name), true
 	case codexIsFinalUpstreamWebSearchToolType(choiceType):
 		return []byte(`{"type":"web_search"}`), true
 	case strings.EqualFold(choiceType, "image_generation"):
@@ -1433,9 +1434,7 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 		if name == "" {
 			return []byte(`"auto"`), true
 		}
-		raw := []byte(`{"type":"custom"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("custom", name), true
 	case strings.EqualFold(choiceType, "allowed_tools"):
 		return normalizeCodexFinalUpstreamAllowedToolsChoice(toolChoice), true
 	default:
@@ -1458,21 +1457,30 @@ func normalizeCodexFinalUpstreamAllowedToolsChoice(toolChoice gjson.Result) []by
 		rawTools = normalizeCodexFinalUpstreamAllowedToolRefsArray(tools)
 	}
 
-	raw := []byte(`{"type":"allowed_tools"}`)
-	raw, _ = helps.SetJSONBytes(raw, "mode", mode)
-	raw, _ = helps.SetRawJSONBytes(raw, "tools", rawTools)
+	raw := make([]byte, 0, len(rawTools)+64)
+	raw = append(raw, `{"type":"allowed_tools","mode":`...)
+	raw = util.AppendJSONString(raw, mode)
+	raw = append(raw, `,"tools":`...)
+	raw = append(raw, rawTools...)
+	raw = append(raw, '}')
 	return raw
 }
 
 func normalizeCodexFinalUpstreamAllowedToolRefsArray(tools gjson.Result) []byte {
-	items := make([][]byte, 0)
+	raw := make([]byte, 0, len(tools.Raw))
+	raw = append(raw, '[')
+	first := true
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if rawTool, keep := normalizeCodexFinalUpstreamAllowedToolRef(tool); keep {
-			items = append(items, rawTool)
+			if !first {
+				raw = append(raw, ',')
+			}
+			raw = append(raw, rawTool...)
+			first = false
 		}
 		return true
 	})
-	return codexRawJSONArray(items)
+	return append(raw, ']')
 }
 
 func normalizeCodexFinalUpstreamAllowedToolRef(tool gjson.Result) ([]byte, bool) {
@@ -1489,9 +1497,7 @@ func normalizeCodexFinalUpstreamAllowedToolRef(tool gjson.Result) ([]byte, bool)
 		if name == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"function"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("function", name), true
 	}
 
 	switch toolType {
@@ -1509,41 +1515,55 @@ func normalizeCodexFinalUpstreamAllowedToolRef(tool gjson.Result) ([]byte, bool)
 		if name == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"custom"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("custom", name), true
 	case "mcp":
 		serverLabel := strings.TrimSpace(tool.Get("server_label").String())
 		if serverLabel == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"mcp"}`)
-		raw, _ = helps.SetJSONBytes(raw, "server_label", serverLabel)
-		if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
-			raw, _ = helps.SetJSONBytes(raw, "name", name)
-		}
-		return raw, true
+		return codexRawMCPToolObject(serverLabel, strings.TrimSpace(tool.Get("name").String())), true
 	case "namespace":
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"namespace"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("namespace", name), true
 	case "file_search", "computer", "computer_use", "computer_use_preview", "code_interpreter", "shell", "apply_patch":
-		raw := []byte(`{}`)
-		raw, _ = helps.SetJSONBytes(raw, "type", toolType)
-		return raw, true
+		return codexRawToolObject(toolType), true
 	default:
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"function"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("function", name), true
 	}
+}
+
+func codexRawToolObject(toolType string) []byte {
+	raw := make([]byte, 0, len(toolType)+12)
+	raw = append(raw, `{"type":`...)
+	raw = util.AppendJSONString(raw, toolType)
+	return append(raw, '}')
+}
+
+func codexRawNamedToolObject(toolType, name string) []byte {
+	raw := make([]byte, 0, len(toolType)+len(name)+24)
+	raw = append(raw, `{"type":`...)
+	raw = util.AppendJSONString(raw, toolType)
+	raw = append(raw, `,"name":`...)
+	raw = util.AppendJSONString(raw, name)
+	return append(raw, '}')
+}
+
+func codexRawMCPToolObject(serverLabel, name string) []byte {
+	raw := make([]byte, 0, len(serverLabel)+len(name)+40)
+	raw = append(raw, `{"type":"mcp","server_label":`...)
+	raw = util.AppendJSONString(raw, serverLabel)
+	if name != "" {
+		raw = append(raw, `,"name":`...)
+		raw = util.AppendJSONString(raw, name)
+	}
+	return append(raw, '}')
 }
 
 func normalizeCodexFinalUpstreamToolType(toolType string) string {

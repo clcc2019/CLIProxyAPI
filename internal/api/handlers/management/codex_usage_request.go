@@ -139,6 +139,15 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	release, err := h.acquireCodexUpstreamSlot(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
+	if status, outage := h.activeCodexUsageOutage(auth, time.Now()); outage {
+		return nil, status, fmt.Errorf("codex usage upstream temporarily unavailable (shared outage cooldown)")
+	}
+
 	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
@@ -146,17 +155,22 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 	if h != nil {
 		client.Transport = h.codexUsageTransport(auth)
 	}
+	maxRetries := h.codexUsageRequestRetryLimit(auth)
 	for attempt := 0; ; attempt++ {
 		payload, status, err := h.doCodexUsageRequest(requestCtx, client, auth, accessToken, accountID)
 		if err == nil {
+			h.clearCodexUsageOutage(auth)
 			return payload, status, nil
 		}
-		if attempt >= codexUsageMaxRequestRetries || !codexUsageShouldRetry(requestCtx, status, err) {
+		if ctx.Err() == nil && codexUsageTransientFailure(status, err) {
+			h.markCodexUsageOutage(auth, status, time.Now())
+		}
+		if attempt >= maxRetries || !codexUsageShouldRetry(requestCtx, status, err) {
 			return nil, status, err
 		}
 		log.WithError(err).WithFields(log.Fields{
 			"attempt": attempt + 1,
-			"max":     codexUsageMaxRequestRetries,
+			"max":     maxRetries,
 			"status":  status,
 		}).Debug("retrying codex usage request after transient failure")
 		if errSleep := codexUsageSleepBeforeRetry(requestCtx, attempt+1); errSleep != nil {

@@ -1645,6 +1645,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	ctx = WithRefreshCoordinator(ctx, m.coordinatedRefreshForRequest)
 	var lastErr error
 	poolModeRetries := m.apiKeyPoolModeRetries(auth)
+	transportRetries := m.requestRetryLimitForAuth(auth)
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
@@ -1667,6 +1668,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
 				applyResultError(&result, errStream)
+				if shouldRetryTransportErrorWithSameAuth(result.Error, retryAttempt, transportRetries) {
+					logSameAuthTransportRetry(ctx, auth, provider, resultModel, retryAttempt+1, transportRetries, errStream)
+					continue
+				}
 				result.RetryAfter = retryAfterFromError(errStream)
 				m.MarkResult(ctx, result)
 				clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errStream)
@@ -1721,8 +1726,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
 				applyResultError(&result, bootstrapErr)
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
+				if shouldRetryTransportErrorWithSameAuth(result.Error, retryAttempt, transportRetries) {
+					logSameAuthTransportRetry(ctx, auth, provider, resultModel, retryAttempt+1, transportRetries, bootstrapErr)
+					continue
+				}
+				m.MarkResult(ctx, result)
 				lastErr = bootstrapErr
 				switch poolModeRetryDecisionForError(bootstrapErr, retryAttempt, poolModeRetries) {
 				case poolModeRetryInvalidRequest:
@@ -2949,6 +2958,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var authErr error
 		stopModelLoop := false
 		poolModeRetries := m.apiKeyPoolModeRetries(auth)
+		transportRetries := m.requestRetryLimitForAuth(auth)
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -2971,6 +2981,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 						return cliproxyexecutor.Response{}, errCtx
 					}
 					applyResultError(&result, errExec)
+					if shouldRetryTransportErrorWithSameAuth(result.Error, retryAttempt, transportRetries) {
+						logSameAuthTransportRetry(execCtx, auth, provider, resultModel, retryAttempt+1, transportRetries, errExec)
+						continue
+					}
 					if ra := retryAfterFromError(errExec); ra != nil {
 						result.RetryAfter = ra
 					}
@@ -3073,6 +3087,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var authErr error
 		stopModelLoop := false
 		poolModeRetries := m.apiKeyPoolModeRetries(auth)
+		transportRetries := m.requestRetryLimitForAuth(auth)
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -3095,6 +3110,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 						return cliproxyexecutor.Response{}, errCtx
 					}
 					applyResultError(&result, errExec)
+					if shouldRetryTransportErrorWithSameAuth(result.Error, retryAttempt, transportRetries) {
+						logSameAuthTransportRetry(execCtx, auth, provider, resultModel, retryAttempt+1, transportRetries, errExec)
+						continue
+					}
 					if ra := retryAfterFromError(errExec); ra != nil {
 						result.RetryAfter = ra
 					}
@@ -3859,6 +3878,43 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 		return 0, 0, 0
 	}
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
+}
+
+func (m *Manager) requestRetryLimitForAuth(auth *Auth) int {
+	retry := 0
+	if m != nil {
+		retry = int(m.requestRetry.Load())
+	}
+	if auth != nil {
+		if override, ok := auth.RequestRetryOverride(); ok {
+			retry = override
+		}
+	}
+	if retry < 0 {
+		return 0
+	}
+	return retry
+}
+
+func shouldRetryTransportErrorWithSameAuth(err *Error, retryAttempt int, retryLimit int) bool {
+	return retryAttempt >= 0 && retryAttempt < retryLimit && isProxyPoolTransportFailure(err)
+}
+
+func logSameAuthTransportRetry(ctx context.Context, auth *Auth, provider string, model string, attempt int, maxRetries int, err error) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"auth_id":     authID,
+		"provider":    provider,
+		"model":       model,
+		"retry":       attempt,
+		"max_retries": maxRetries,
+	}).WithError(err).Debug("retrying transient transport failure with same auth")
 }
 
 func borrowAuthIDSet() map[string]struct{} {

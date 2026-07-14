@@ -7,8 +7,28 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestCodexUsageRequestRetryLimitUsesConfigAndAuthOverride(t *testing.T) {
+	h := &Handler{cfg: &config.Config{RequestRetry: 3}}
+	if got := h.codexUsageRequestRetryLimit(nil); got != 3 {
+		t.Fatalf("configured retry limit = %d, want 3", got)
+	}
+	if got := h.codexUsageRequestRetryLimit(&coreauth.Auth{Metadata: map[string]any{"request_retry": 1}}); got != 1 {
+		t.Fatalf("auth retry override = %d, want 1", got)
+	}
+	if got := h.codexUsageRequestRetryLimit(&coreauth.Auth{Metadata: map[string]any{"request-retry": 0}}); got != 0 {
+		t.Fatalf("zero auth retry override = %d, want 0", got)
+	}
+	if got := (&Handler{cfg: &config.Config{}}).codexUsageRequestRetryLimit(nil); got != 0 {
+		t.Fatalf("explicit zero retry limit = %d, want 0", got)
+	}
+	if got := (*Handler)(nil).codexUsageRequestRetryLimit(nil); got != codexUsageMaxRequestRetries {
+		t.Fatalf("nil handler retry limit = %d, want fallback %d", got, codexUsageMaxRequestRetries)
+	}
+}
 
 func codexUsageOptionsContext(target string) *gin.Context {
 	gin.SetMode(gin.TestMode)

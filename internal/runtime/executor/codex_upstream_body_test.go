@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -448,7 +449,7 @@ func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT55XHighReasoningForUpstrea
 	}
 }
 
-func TestNormalizeCodexFinalUpstreamBody_NormalizesGPT56SolExpensiveReasoningForUpstream(t *testing.T) {
+func TestNormalizeCodexFinalUpstreamBody_CapsGPT56SolReasoningAtHighForUpstream(t *testing.T) {
 	tests := []struct {
 		name       string
 		model      string
@@ -459,7 +460,10 @@ func TestNormalizeCodexFinalUpstreamBody_NormalizesGPT56SolExpensiveReasoningFor
 		{name: "sol max", model: "gpt-5.6-sol", effort: "max", wantEffort: "high"},
 		{name: "sol high unchanged", model: "gpt-5.6-sol", effort: "high", wantEffort: "high"},
 		{name: "sol medium unchanged", model: "gpt-5.6-sol", effort: "medium", wantEffort: "medium"},
-		{name: "sol Ultra alias", model: "gpt-5.6-sol", effort: "Ultra", wantEffort: "high"},
+		{name: "sol low unchanged", model: "gpt-5.6-sol", effort: "low", wantEffort: "low"},
+		{name: "sol minimal unchanged", model: "gpt-5.6-sol", effort: "minimal", wantEffort: "minimal"},
+		{name: "sol none unchanged", model: "gpt-5.6-sol", effort: "none", wantEffort: "none"},
+		{name: "sol Ultra", model: "gpt-5.6-sol", effort: "Ultra", wantEffort: "high"},
 		{name: "sol uppercase model and effort", model: "GPT-5.6-SOL", effort: "XHIGH", wantEffort: "high"},
 		{name: "terra max unchanged", model: "gpt-5.6-terra", effort: "max", wantEffort: "max"},
 		{name: "luna xhigh unchanged", model: "gpt-5.6-luna", effort: "xhigh", wantEffort: "xhigh"},
@@ -822,6 +826,38 @@ func BenchmarkNormalizeCodexFinalUpstreamToolChoice(b *testing.B) {
 				b.Fatal("unexpected dropped tool choice")
 			}
 		}
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamToolChoiceEscapesNames(t *testing.T) {
+	name := "read \"quoted\"\\path\nnext"
+	nameJSON, err := json.Marshal(name)
+	if err != nil {
+		t.Fatalf("marshal name: %v", err)
+	}
+	tests := []struct {
+		name string
+		raw  string
+		path string
+	}{
+		{name: "function", raw: `{"type":"function","name":` + string(nameJSON) + `}`, path: "name"},
+		{name: "custom", raw: `{"type":"custom","name":` + string(nameJSON) + `}`, path: "name"},
+		{name: "allowed function", raw: `{"type":"allowed_tools","tools":[{"type":"function","name":` + string(nameJSON) + `}]}`, path: "tools.0.name"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, ok := normalizeCodexFinalUpstreamToolChoice(gjson.Parse(test.raw))
+			if !ok {
+				t.Fatal("tool choice was dropped")
+			}
+			if !gjson.ValidBytes(raw) {
+				t.Fatalf("tool choice is invalid JSON: %q", raw)
+			}
+			if got := gjson.GetBytes(raw, test.path).String(); got != name {
+				t.Fatalf("normalized name = %q, want %q; body=%s", got, name, raw)
+			}
+		})
 	}
 }
 

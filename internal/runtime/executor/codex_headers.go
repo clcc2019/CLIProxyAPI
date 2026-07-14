@@ -41,6 +41,30 @@ func codexSetSingleHeaderValue(headers http.Header, key string, value string) {
 	headers[key] = []string{value}
 }
 
+func codexSetPairedSingleHeaderValues(headers http.Header, firstKey string, firstValue string, secondKey string, secondValue string) {
+	if len(headers[firstKey]) == 0 && len(headers[secondKey]) == 0 {
+		values := []string{firstValue, secondValue}
+		headers[firstKey] = values[0:1:1]
+		headers[secondKey] = values[1:2:2]
+		return
+	}
+	codexSetSingleHeaderValue(headers, firstKey, firstValue)
+	codexSetSingleHeaderValue(headers, secondKey, secondValue)
+}
+
+func codexSetTripleSingleHeaderValues(headers http.Header, firstKey string, firstValue string, secondKey string, secondValue string, thirdKey string, thirdValue string) {
+	if len(headers[firstKey]) == 0 && len(headers[secondKey]) == 0 && len(headers[thirdKey]) == 0 {
+		values := []string{firstValue, secondValue, thirdValue}
+		headers[firstKey] = values[0:1:1]
+		headers[secondKey] = values[1:2:2]
+		headers[thirdKey] = values[2:3:3]
+		return
+	}
+	codexSetSingleHeaderValue(headers, firstKey, firstValue)
+	codexSetSingleHeaderValue(headers, secondKey, secondValue)
+	codexSetSingleHeaderValue(headers, thirdKey, thirdValue)
+}
+
 func codexHeaderGet(headers http.Header, key string) string {
 	if headers == nil {
 		return ""

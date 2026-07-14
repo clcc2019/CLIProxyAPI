@@ -39,8 +39,9 @@ const (
 )
 
 var (
-	codexInstallationIDOnce sync.Once
-	codexInstallationID     string
+	codexInstallationIDOnce      sync.Once
+	codexInstallationID          string
+	codexClientMetadataJSONField = []byte(`"client_metadata"`)
 )
 
 // codexGinHeadersCtxKey is the typed context key under which a resolved
@@ -241,12 +242,24 @@ func codexResetRequestBody(req *http.Request, body []byte) {
 	if req == nil {
 		return
 	}
-	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.Body = newCodexRequestBody(body)
 	req.ContentLength = int64(len(body))
 	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(body)), nil
+		return newCodexRequestBody(body), nil
 	}
 }
+
+type codexRequestBody struct {
+	bytes.Reader
+}
+
+func newCodexRequestBody(body []byte) *codexRequestBody {
+	reader := &codexRequestBody{}
+	reader.Reset(body)
+	return reader
+}
+
+func (*codexRequestBody) Close() error { return nil }
 
 type codexClientMetadataEntry struct {
 	key   string
@@ -268,6 +281,11 @@ func codexSetClientMetadata(body []byte, entries []codexClientMetadataEntry, ove
 func codexSetClientMetadataNormalized(body []byte, entries []codexClientMetadataEntry, overwrite bool) []byte {
 	if len(entries) == 0 {
 		return body
+	}
+	if overwrite && !codexBodyMayContainClientMetadata(body) {
+		if updated, ok := codexAppendTopLevelClientMetadataObject(body, entries); ok {
+			return updated
+		}
 	}
 	metadata := codexGJSONGetImmutableBytes(body, "client_metadata")
 	if overwrite && (!metadata.Exists() || metadata.Type == gjson.Null || !metadata.IsObject()) {
@@ -336,6 +354,13 @@ func codexSetClientMetadataNormalized(body []byte, entries []codexClientMetadata
 		return body
 	}
 	return updated
+}
+
+// codexBodyMayContainClientMetadata cheaply proves absence for the common
+// unescaped-key case. A backslash keeps the full gjson lookup enabled because
+// JSON object keys such as "client\u005fmetadata" are semantically equivalent.
+func codexBodyMayContainClientMetadata(body []byte) bool {
+	return bytes.Contains(body, codexClientMetadataJSONField) || bytes.IndexByte(body, '\\') >= 0
 }
 
 func codexSetClientMetadataAndResponseCreateType(body []byte, entries []codexClientMetadataEntry) []byte {

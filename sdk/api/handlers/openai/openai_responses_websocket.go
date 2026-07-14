@@ -40,6 +40,8 @@ const (
 	wsTurnStateHeader      = "x-codex-turn-state"
 	wsTimelineBodyKey      = "WEBSOCKET_TIMELINE_OVERRIDE"
 
+	codexLocalCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
+
 	maxResponsesWebsocketTimelineBytes      = 1 << 20
 	maxResponsesWebsocketErrorTimelineBytes = 4 << 10
 	maxResponsesWebsocketInboundBytes       = 64 << 20
@@ -913,11 +915,15 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 	if requestType != wsRequestTypeCreate && requestType != wsRequestTypeAppend {
 		return false
 	}
-	if strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) != "" {
+	previousResponseID := gjson.GetBytes(rawJSON, "previous_response_id")
+	if strings.TrimSpace(previousResponseID.String()) != "" {
 		return false
 	}
 	if !nextInput.Exists() || !nextInput.IsArray() {
 		return false
+	}
+	if requestType == wsRequestTypeCreate && !previousResponseID.Exists() && inputHasCodexLocalCompactionSummary(nextInput) {
+		return true
 	}
 
 	replace := false
@@ -937,6 +943,91 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 	})
 
 	return replace
+}
+
+func inputHasCodexLocalCompactionSummary(input gjson.Result) bool {
+	if !input.IsArray() {
+		return false
+	}
+
+	valid := true
+	hasSummary := false
+	index := 0
+	input.ForEach(func(_, item gjson.Result) bool {
+		currentIndex := index
+		index++
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType == "additional_tools" {
+			tools := item.Get("tools")
+			if currentIndex != 0 || strings.TrimSpace(item.Get("role").String()) != "developer" || !tools.IsArray() {
+				valid = false
+				return false
+			}
+			tools.ForEach(func(_, tool gjson.Result) bool {
+				if !tool.IsObject() || strings.TrimSpace(tool.Get("type").String()) == "" {
+					valid = false
+					return false
+				}
+				return true
+			})
+			return valid
+		}
+		if itemType != "" && itemType != "message" {
+			valid = false
+			return false
+		}
+
+		role := strings.TrimSpace(item.Get("role").String())
+		if role != "user" && role != "developer" {
+			valid = false
+			return false
+		}
+		if role == "user" && codexLocalCompactionMessageHasSummary(item) {
+			hasSummary = true
+		}
+		return true
+	})
+	return valid && hasSummary
+}
+
+func codexLocalCompactionMessageHasSummary(message gjson.Result) bool {
+	const summaryStart = codexLocalCompactionSummaryPrefix + "\n"
+
+	content := message.Get("content")
+	if content.Type == gjson.String {
+		return strings.HasPrefix(content.String(), summaryStart)
+	}
+	if !content.IsArray() {
+		return false
+	}
+
+	matched := 0
+	valid := true
+	content.ForEach(func(_, part gjson.Result) bool {
+		if strings.TrimSpace(part.Get("type").String()) != "input_text" {
+			return true
+		}
+		text := part.Get("text").String()
+		if text == "" {
+			return true
+		}
+		remaining := summaryStart[matched:]
+		if len(text) >= len(remaining) {
+			if strings.HasPrefix(text, remaining) {
+				matched = len(summaryStart)
+				return false
+			}
+			valid = false
+			return false
+		}
+		if !strings.HasPrefix(remaining, text) {
+			valid = false
+			return false
+		}
+		matched += len(text)
+		return true
+	})
+	return valid && matched == len(summaryStart)
 }
 
 func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) []byte {

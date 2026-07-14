@@ -357,9 +357,9 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	// arguments and reasoning text are excluded; let append grow as needed.
 	out := make([]byte, 0, 512)
 	out = append(out, `{"id":`...)
-	out = appendJSONString(out, id)
+	out = util.AppendJSONString(out, id)
 	out = append(out, `,"type":"message","role":"assistant","model":`...)
-	out = appendJSONString(out, model)
+	out = util.AppendJSONString(out, model)
 	out = append(out, `,"content":[`...)
 
 	hasToolCall := false
@@ -426,7 +426,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	if stopReason == "" {
 		out = append(out, "null"...)
 	} else {
-		out = appendJSONString(out, stopReason)
+		out = util.AppendJSONString(out, stopReason)
 	}
 	out = append(out, `,"stop_sequence":`...)
 	if raw := codexStopSequenceRaw(responseData); len(raw) > 0 {
@@ -713,7 +713,7 @@ func codexStringInputObject(input string) string {
 	}
 	out := make([]byte, 0, len(input)+16)
 	out = append(out, `{"input":`...)
-	out = appendJSONString(out, input)
+	out = util.AppendJSONString(out, input)
 	out = append(out, '}')
 	return string(out)
 }

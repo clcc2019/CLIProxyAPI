@@ -977,6 +977,155 @@ func TestManager_Execute_CodexUsageLimitFailsOverCredential(t *testing.T) {
 	}
 }
 
+func TestManager_RetriesProxyTransportFailureWithSameAuthBeforeFailover(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*authFallbackExecutor, string, error)
+		invoke    func(context.Context, *Manager, string) error
+		calls     func(*authFallbackExecutor) []string
+	}{
+		{
+			name: "execute",
+			configure: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.executeErrors = map[string]error{authID: err}
+			},
+			invoke: func(ctx context.Context, manager *Manager, model string) error {
+				_, err := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				return err
+			},
+			calls: (*authFallbackExecutor).ExecuteCalls,
+		},
+		{
+			name: "count",
+			configure: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.countErrors = map[string]error{authID: err}
+			},
+			invoke: func(ctx context.Context, manager *Manager, model string) error {
+				_, err := manager.ExecuteCount(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				return err
+			},
+			calls: (*authFallbackExecutor).CountCalls,
+		},
+		{
+			name: "stream dial",
+			configure: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.streamErrors = map[string]error{authID: err}
+			},
+			invoke: func(ctx context.Context, manager *Manager, model string) error {
+				result, err := manager.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				if err != nil {
+					return err
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						return chunk.Err
+					}
+				}
+				return nil
+			},
+			calls: (*authFallbackExecutor).StreamCalls,
+		},
+		{
+			name: "stream bootstrap",
+			configure: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.streamFirstErrors = map[string]error{authID: err}
+			},
+			invoke: func(ctx context.Context, manager *Manager, model string) error {
+				result, err := manager.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				if err != nil {
+					return err
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						return chunk.Err
+					}
+				}
+				return nil
+			},
+			calls: (*authFallbackExecutor).StreamCalls,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.SetRetryConfig(2, 0, 0)
+			executor := &authFallbackExecutor{id: "codex"}
+			manager.RegisterExecutor(executor)
+
+			base := strings.ReplaceAll(tt.name, " ", "-") + "-" + uuid.NewString()
+			model := "transport-retry-" + base
+			auths := registerFallbackTestAuths(t, manager, "codex", model, "aa-"+base, "bb-"+base)
+			transportErr := fmt.Errorf("read tcp [2406:da14::1]:34818->[2603:c021::1]:10808: i/o timeout")
+			tt.configure(executor, auths[0].ID, transportErr)
+
+			if err := tt.invoke(context.Background(), manager, model); err != nil {
+				t.Fatalf("invoke error: %v", err)
+			}
+			got := tt.calls(executor)
+			want := []string{auths[0].ID, auths[0].ID, auths[0].ID, auths[1].ID}
+			if len(got) != len(want) {
+				t.Fatalf("calls = %v, want %v", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("call %d auth = %q, want %q; all calls=%v", i, got[i], want[i], got)
+				}
+			}
+		})
+	}
+}
+
+func TestManager_SameAuthTransportRetryHonorsAuthOverride(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(3, 0, 0)
+	executor := &authFallbackExecutor{id: "codex"}
+	manager.RegisterExecutor(executor)
+
+	base := uuid.NewString()
+	model := "transport-retry-override-" + base
+	auths := registerFallbackTestAuths(t, manager, "codex", model, "aa-"+base, "bb-"+base)
+	auths[0].Metadata["request_retry"] = 0
+	if _, err := manager.Update(context.Background(), auths[0]); err != nil {
+		t.Fatalf("update auth request_retry override: %v", err)
+	}
+	executor.executeErrors = map[string]error{
+		auths[0].ID: fmt.Errorf("read tcp 127.0.0.1:34818->127.0.0.1:10808: i/o timeout"),
+	}
+
+	if _, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("execute error: %v", err)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{auths[0].ID, auths[1].ID}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
+}
+
+func TestManager_SameAuthTransportRetrySkipsHTTPFailures(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(3, 0, 0)
+	executor := &authFallbackExecutor{id: "codex"}
+	manager.RegisterExecutor(executor)
+
+	base := uuid.NewString()
+	model := "transport-retry-http-status-" + base
+	auths := registerFallbackTestAuths(t, manager, "codex", model, "aa-"+base, "bb-"+base)
+	executor.executeErrors = map[string]error{
+		auths[0].ID: &Error{HTTPStatus: http.StatusBadGateway, Message: "upstream returned 502"},
+	}
+
+	if _, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("execute error: %v", err)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{auths[0].ID, auths[1].ID}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("calls = %v, want immediate credential failover %v", got, want)
+	}
+}
+
 func TestManager_Execute_CodexUsageLimitDoesNotLeakWhenCredentialsExhausted(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	usageLimitErr := &credentialFailoverStatusError{

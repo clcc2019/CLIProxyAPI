@@ -379,6 +379,21 @@ func TestCodexSetClientMetadataNormalizesEntriesOnce(t *testing.T) {
 	}
 }
 
+func TestCodexSetClientMetadataRecognizesEscapedFieldName(t *testing.T) {
+	body := []byte(`{"client\u005fmetadata":{"keep":"value"}}`)
+	got := codexSetClientMetadata(body, []codexClientMetadataEntry{{key: "added", value: "new"}}, true)
+
+	if value := gjson.GetBytes(got, "client_metadata.keep").String(); value != "value" {
+		t.Fatalf("existing escaped client_metadata value = %q, want value; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.added").String(); value != "new" {
+		t.Fatalf("added client_metadata value = %q, want new; body=%s", value, got)
+	}
+	if bytes.Contains(got, []byte(`,"client_metadata":`)) {
+		t.Fatalf("escaped client_metadata key was duplicated; body=%s", got)
+	}
+}
+
 func BenchmarkCodexApplyWebsocketClientMetadataNoExistingMetadata(b *testing.B) {
 	body := []byte(`{"model":"gpt-5-codex","input":[{"role":"user","content":"hello"}],"tools":[],"stream":true}`)
 	headers := http.Header{}

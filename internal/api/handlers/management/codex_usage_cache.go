@@ -21,6 +21,7 @@ const (
 	codexUsageCacheDefaultTTL = 30 * time.Second
 	codexUsageCacheMaxTTL     = 5 * time.Minute
 	codexUsageCacheStaleTTL   = 5 * time.Minute
+	codexUsageOutageCooldown  = 5 * time.Second
 )
 
 type codexUsageCacheEntry struct {
@@ -31,7 +32,13 @@ type codexUsageCacheEntry struct {
 
 type codexUsageCache struct {
 	entries sync.Map // cache key -> *codexUsageCacheEntry
+	outages sync.Map // proxy fingerprint -> *codexUsageOutageEntry
 	flights singleflight.Group
+}
+
+type codexUsageOutageEntry struct {
+	Status int
+	Until  time.Time
 }
 
 type codexUsageRequestOptions struct {
@@ -73,6 +80,38 @@ func (c *codexUsageCache) store(key string, entry *codexUsageCacheEntry) {
 		return
 	}
 	c.entries.Store(key, entry)
+}
+
+func (c *codexUsageCache) activeOutage(key string, now time.Time) (int, bool) {
+	if c == nil || key == "" {
+		return 0, false
+	}
+	value, ok := c.outages.Load(key)
+	if !ok {
+		return 0, false
+	}
+	entry, ok := value.(*codexUsageOutageEntry)
+	if !ok || entry == nil || !now.Before(entry.Until) {
+		c.outages.Delete(key)
+		return 0, false
+	}
+	return entry.Status, true
+}
+
+func (c *codexUsageCache) markOutage(key string, status int, now time.Time) {
+	if c == nil || key == "" {
+		return
+	}
+	if status <= 0 {
+		status = http.StatusBadGateway
+	}
+	c.outages.Store(key, &codexUsageOutageEntry{Status: status, Until: now.Add(codexUsageOutageCooldown)})
+}
+
+func (c *codexUsageCache) clearOutage(key string) {
+	if c != nil && key != "" {
+		c.outages.Delete(key)
+	}
 }
 
 func (h *Handler) codexUsageHandlerCache() *codexUsageCache {
@@ -276,6 +315,30 @@ func (h *Handler) codexUsageCacheKey(auth *coreauth.Auth) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])
+}
+
+func (h *Handler) codexUsageOutageKey(auth *coreauth.Auth) string {
+	if h == nil {
+		return ""
+	}
+	proxyURL := strings.TrimSpace(h.codexSubscriptionProxyURL(auth))
+	if proxyURL == "" {
+		proxyURL = "direct"
+	}
+	sum := sha256.Sum256([]byte(proxyURL))
+	return hex.EncodeToString(sum[:])
+}
+
+func (h *Handler) activeCodexUsageOutage(auth *coreauth.Auth, now time.Time) (int, bool) {
+	return h.codexUsageHandlerCache().activeOutage(h.codexUsageOutageKey(auth), now)
+}
+
+func (h *Handler) markCodexUsageOutage(auth *coreauth.Auth, status int, now time.Time) {
+	h.codexUsageHandlerCache().markOutage(h.codexUsageOutageKey(auth), status, now)
+}
+
+func (h *Handler) clearCodexUsageOutage(auth *coreauth.Auth) {
+	h.codexUsageHandlerCache().clearOutage(h.codexUsageOutageKey(auth))
 }
 
 func codexUsageTokenFingerprint(accessToken string) string {

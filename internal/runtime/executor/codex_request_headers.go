@@ -22,10 +22,10 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 
 func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, requestKind codexFinalUpstreamRequestKind) {
 	headers := r.Header
-	codexSetSingleHeaderValue(headers, "Content-Type", "application/json")
 	if token = strings.TrimSpace(token); token != "" {
-		codexSetSingleHeaderValue(headers, "Authorization", "Bearer "+token)
+		codexSetPairedSingleHeaderValues(headers, "Content-Type", "application/json", "Authorization", "Bearer "+token)
 	} else {
+		codexSetSingleHeaderValue(headers, "Content-Type", "application/json")
 		headers.Del("Authorization")
 	}
 	apiKeyAuth := codexIsAPIKeyAuth(auth)
@@ -42,7 +42,6 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 	codexEnsureHeader(headers, profileHeaders, "Traceparent", "")
 	codexEnsureHeader(headers, profileHeaders, "Tracestate", "")
 	identity := codexIdentity(headers, profileHeaders, auth, cfgUserAgent)
-	codexSetSingleHeaderValue(headers, "User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: requestKind != codexFinalUpstreamCompact,
 	})
@@ -71,13 +70,17 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 		codexEnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	}
 
+	accept := "application/json"
 	if stream {
-		codexSetSingleHeaderValue(headers, "Accept", "text/event-stream")
-	} else {
-		codexSetSingleHeaderValue(headers, "Accept", "application/json")
+		accept = "text/event-stream"
 	}
-
-	codexSetOriginatorHeader(headers, identity.originator)
+	originator := strings.TrimSpace(identity.originator)
+	if originator == "" {
+		codexSetPairedSingleHeaderValues(headers, "User-Agent", identity.userAgent, "Accept", accept)
+		headers.Del("Originator")
+	} else {
+		codexSetTripleSingleHeaderValues(headers, "User-Agent", identity.userAgent, "Accept", accept, "Originator", originator)
+	}
 	// Residency precedence: inbound gin header > cfg default. Avoid the
 	// unnecessary target re-check from the previous implementation; we always
 	// enter this block with a freshly applied `Originator` and never set the
@@ -123,7 +126,7 @@ func codexSetOriginatorHeader(headers http.Header, originator string) {
 		headers.Del("Originator")
 		return
 	}
-	headers.Set("Originator", originator)
+	codexSetSingleHeaderValue(headers, "Originator", originator)
 }
 
 func codexApplyResponsesLiteHeader(headers http.Header, baseModel string) {
