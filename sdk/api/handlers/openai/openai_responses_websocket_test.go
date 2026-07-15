@@ -64,11 +64,12 @@ type websocketCaptureExecutor struct {
 }
 
 type websocketRetryFullTranscriptExecutor struct {
-	mu                sync.Mutex
-	payloads          [][]byte
-	sessions          map[string]chan error
-	secondCallPayload []byte
-	rejectIncremental bool
+	mu                           sync.Mutex
+	payloads                     [][]byte
+	sessions                     map[string]chan error
+	secondCallPayload            []byte
+	secondCallCreatedBeforeError bool
+	rejectIncremental            bool
 }
 
 type websocketStatusError struct {
@@ -546,7 +547,7 @@ func (e *websocketRetryFullTranscriptExecutor) ExecuteStream(_ context.Context, 
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
 	e.mu.Unlock()
 
-	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks := make(chan coreexecutor.StreamChunk, 2)
 	if e.rejectIncremental && strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()) != "" {
 		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id","type":"invalid_request_error"}}`)}
 		close(chunks)
@@ -556,6 +557,9 @@ func (e *websocketRetryFullTranscriptExecutor) ExecuteStream(_ context.Context, 
 	case 0:
 		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","id":"fc-1","call_id":"call_Rx1FW4RrRF9C1SyH2xxBVtEn","name":"tool","arguments":"{}"}]}}`)}
 	case 1:
+		if e.secondCallCreatedBeforeError {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.created","response":{"id":"resp-rejected","status":"in_progress"}}`)}
+		}
 		if len(e.secondCallPayload) > 0 {
 			chunks <- coreexecutor.StreamChunk{Payload: bytes.Clone(e.secondCallPayload)}
 		} else {
@@ -1317,6 +1321,21 @@ func TestAppendWebsocketTimelineEvent(t *testing.T) {
 	}
 	if !strings.Contains(got, "{\"type\":\"response.create\"}") {
 		t.Fatalf("timeline payload not found: %s", got)
+	}
+}
+
+var websocketTimelineBenchmarkSink int
+
+func BenchmarkAppendWebsocketTimelineEvents(b *testing.B) {
+	payload := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+	b.ReportAllocs()
+	for b.Loop() {
+		builder := newWebsocketTimelineBuilder(maxResponsesWebsocketTimelineBytes)
+		for i := 0; i < 32; i++ {
+			appendWebsocketTimelineEventWithPayloadType(&builder, "response", payload, ts, "response.output_text.delta")
+		}
+		websocketTimelineBenchmarkSink = builder.Len()
 	}
 }
 
@@ -2310,7 +2329,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 
 		data := make(chan []byte, 1)
 		errCh := make(chan *interfaces.ErrorMessage)
-		data <- []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"message\",\"id\":\"out-1\"}]}}\n\n")
+		data <- []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"status\":\"in_progress\"}}\n\ndata: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp-1\",\"status\":\"in_progress\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"message\",\"id\":\"out-1\"}]}}\n\n")
 		close(data)
 		close(errCh)
 
@@ -2325,7 +2344,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 			&timelineLog,
 			"session-1",
 			"session-1",
-			false,
+			true,
 		)
 		if err != nil {
 			serverErrCh <- err
@@ -2363,6 +2382,22 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	if errReadMessage != nil {
 		t.Fatalf("read websocket message: %v", errReadMessage)
 	}
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.created" {
+		t.Fatalf("first payload type = %s, want response.created", got)
+	}
+
+	_, payload, errReadMessage = conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read in-progress websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.in_progress" {
+		t.Fatalf("second payload type = %s, want response.in_progress", got)
+	}
+
+	_, payload, errReadMessage = conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read completed websocket message: %v", errReadMessage)
+	}
 	if gjson.GetBytes(payload, "type").String() != wsEventTypeCompleted {
 		t.Fatalf("payload type = %s, want %s", gjson.GetBytes(payload, "type").String(), wsEventTypeCompleted)
 	}
@@ -2370,6 +2405,114 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		t.Fatalf("payload unexpectedly rewrote completed event: %s", payload)
 	}
 
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestForwardResponsesWebsocketFlushesCreatedWithoutWaitingForNextEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	createdAccepted := make(chan struct{})
+	releaseNext := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseNext) })
+	}
+	t.Cleanup(release)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+		data := make(chan []byte)
+		errCh := make(chan *interfaces.ErrorMessage)
+		go func() {
+			data <- []byte(`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`)
+			close(createdAccepted)
+			<-releaseNext
+			data <- []byte(`{"type":"response.in_progress","response":{"id":"resp-1","status":"in_progress"}}`)
+			data <- []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[]}}`)
+			close(data)
+			close(errCh)
+		}()
+
+		timelineLog := newWebsocketTimelineBuilder(maxResponsesWebsocketTimelineBytes)
+		handler := &OpenAIResponsesAPIHandler{BaseAPIHandler: &handlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}}
+		_, _, _, err = handler.forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			&timelineLog,
+			"session-1",
+			"session-1",
+			true,
+		)
+		serverErrCh <- err
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	select {
+	case <-createdAccepted:
+	case <-time.After(time.Second):
+		t.Fatal("forwarder did not accept response.created")
+	}
+
+	type readResult struct {
+		payload []byte
+		err     error
+	}
+	firstRead := make(chan readResult, 1)
+	firstReadStarted := time.Now()
+	go func() {
+		_, payload, errRead := conn.ReadMessage()
+		firstRead <- readResult{payload: payload, err: errRead}
+	}()
+
+	var first readResult
+	select {
+	case first = <-firstRead:
+		release()
+		if elapsed := time.Since(firstReadStarted); elapsed > 4*responsesWebsocketRetryPreludeMaxDelay {
+			t.Fatalf("response.created latency = %s, want <= %s", elapsed, 4*responsesWebsocketRetryPreludeMaxDelay)
+		}
+	case <-time.After(4 * responsesWebsocketRetryPreludeMaxDelay):
+		release()
+		first = <-firstRead
+		t.Fatalf("response.created waited for the next upstream event: %v", first.err)
+	}
+	if first.err != nil {
+		t.Fatalf("read response.created: %v", first.err)
+	}
+	if got := gjson.GetBytes(first.payload, "type").String(); got != "response.created" {
+		t.Fatalf("first payload type = %q, want response.created", got)
+	}
+
+	for _, want := range []string{"response.in_progress", wsEventTypeCompleted} {
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Fatalf("read %s: %v", want, errRead)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != want {
+			t.Fatalf("payload type = %q, want %q", got, want)
+		}
+	}
 	if errServer := <-serverErrCh; errServer != nil {
 		t.Fatalf("server error: %v", errServer)
 	}
@@ -3698,7 +3841,7 @@ func TestResponsesWebsocketIgnoresResponseProcessedControlAck(t *testing.T) {
 func TestResponsesWebsocketRetriesFullTranscriptWhenIncrementalToolOutputIsRejected(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	executor := &websocketRetryFullTranscriptExecutor{}
+	executor := &websocketRetryFullTranscriptExecutor{secondCallCreatedBeforeError: true}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
 	auth := &coreauth.Auth{
@@ -3783,11 +3926,11 @@ func TestResponsesWebsocketRetriesFullTranscriptWhenIncrementalToolOutputIsRejec
 	}
 }
 
-func TestResponsesWebsocketRetriesFullTranscriptWhenIncrementalDataErrorIsRejected(t *testing.T) {
+func TestResponsesWebsocketRetriesFullTranscriptWhenIncrementalDataErrorFollowsCreated(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &websocketRetryFullTranscriptExecutor{
-		secondCallPayload: []byte(`{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"Previous response with id 'resp_0806d41b86f2084b016a1908c1edac819181dc011e6fffd7ce' not found.","param":"previous_response_id","type":"invalid_request_error"}}`),
+		secondCallPayload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-rejected\",\"status\":\"in_progress\"}}\n\ndata: {\"type\":\"error\",\"status\":400,\"error\":{\"code\":\"previous_response_not_found\",\"message\":\"Previous response with id 'resp_0806d41b86f2084b016a1908c1edac819181dc011e6fffd7ce' not found.\",\"param\":\"previous_response_id\",\"type\":\"invalid_request_error\"}}\n\n"),
 	}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)

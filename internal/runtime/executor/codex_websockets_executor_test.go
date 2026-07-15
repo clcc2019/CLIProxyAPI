@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -5292,5 +5296,109 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 
 	if dialer.Proxy != nil {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
+	}
+}
+
+func TestProxyAwareWebsocketDialerConnectsToSelfSignedWSSThroughHTTPProxy(t *testing.T) {
+	t.Setenv("SSL_CERT_FILE", "")
+
+	targetErrCh := make(chan error, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			targetErrCh <- errUpgrade
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		messageType, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			targetErrCh <- errRead
+			return
+		}
+		if errWrite := conn.WriteMessage(messageType, payload); errWrite != nil {
+			targetErrCh <- errWrite
+			return
+		}
+		targetErrCh <- nil
+	}))
+	defer target.Close()
+	t.Setenv("CODEX_CA_CERTIFICATE", string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: target.Certificate().Raw})))
+
+	proxyConnectHost := make(chan string, 1)
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
+			return
+		}
+		upstream, errDial := net.DialTimeout("tcp", r.Host, time.Second)
+		if errDial != nil {
+			http.Error(w, errDial.Error(), http.StatusBadGateway)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			_ = upstream.Close()
+			http.Error(w, "hijacking unsupported", http.StatusInternalServerError)
+			return
+		}
+		downstream, buffered, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			_ = upstream.Close()
+			return
+		}
+		defer func() { _ = downstream.Close() }()
+		defer func() { _ = upstream.Close() }()
+		proxyConnectHost <- r.Host
+		_, _ = buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		if errFlush := buffered.Flush(); errFlush != nil {
+			return
+		}
+		copyDone := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(upstream, downstream)
+			close(copyDone)
+		}()
+		_, _ = io.Copy(downstream, upstream)
+		<-copyDone
+	}))
+	defer proxyServer.Close()
+
+	dialer := newProxyAwareWebsocketDialer(
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: proxyServer.URL}},
+		nil,
+	)
+	wssURL := "wss" + strings.TrimPrefix(target.URL, "https")
+	conn, _, errDial := dialer.Dial(wssURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial self-signed WSS through proxy: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte("proxy-wss-ok")); errWrite != nil {
+		t.Fatalf("write websocket message: %v", errWrite)
+	}
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read websocket echo: %v", errRead)
+	}
+	if got := string(payload); got != "proxy-wss-ok" {
+		t.Fatalf("websocket echo = %q, want proxy-wss-ok", got)
+	}
+
+	targetURL, errParse := url.Parse(target.URL)
+	if errParse != nil {
+		t.Fatalf("parse target URL: %v", errParse)
+	}
+	select {
+	case gotHost := <-proxyConnectHost:
+		if gotHost != targetURL.Host {
+			t.Fatalf("proxy CONNECT host = %q, want %q", gotHost, targetURL.Host)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not observe CONNECT")
+	}
+	if errTarget := <-targetErrCh; errTarget != nil {
+		t.Fatalf("WSS target error: %v", errTarget)
 	}
 }

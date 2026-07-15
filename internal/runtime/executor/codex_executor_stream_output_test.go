@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -787,6 +788,85 @@ func TestCodexStreamArgumentDeltaRecordsEscapedWhitespacePayload(t *testing.T) {
 	}
 }
 
+func TestCodexStreamArgumentDeltaDirectDecoderMatchesJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "plain", raw: `plain`},
+		{name: "quote and backslash", raw: `quote:\" slash:\\`},
+		{name: "escaped slash", raw: `https:\/\/example.com\/path`},
+		{name: "controls", raw: `backspace:\b formfeed:\f newline:\n return:\r tab:\t`},
+		{name: "bmp unicode", raw: `\u4F60\u597D`},
+		{name: "surrogate pair", raw: `\uD83D\uDE00`},
+		{name: "literal utf8", raw: `你好，世界`},
+		{name: "mixed", raw: `{\"q\":\"\u4F60\u597D\nworld\",\"emoji\":\"\uD83D\uDE00\"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var want string
+			if err := json.Unmarshal([]byte(`"`+tt.raw+`"`), &want); err != nil {
+				t.Fatalf("test fixture is not valid JSON string content: %v", err)
+			}
+			decodedLen, ok := codexJSONStringDecodedLen([]byte(tt.raw))
+			if !ok {
+				t.Fatal("codexJSONStringDecodedLen() rejected valid JSON string content")
+			}
+			if decodedLen != len(want) {
+				t.Fatalf("decoded len = %d, want %d", decodedLen, len(want))
+			}
+			state := &codexStreamFunctionCallState{}
+			if !state.appendArgumentsDeltaRaw([]byte(tt.raw), true) {
+				t.Fatal("appendArgumentsDeltaRaw() rejected valid JSON string content")
+			}
+			if got := state.arguments(); got != want {
+				t.Fatalf("decoded arguments = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCodexStreamArgumentDeltaDirectDecoderRejectsInvalidWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "unknown escape", raw: []byte(`\q`)},
+		{name: "short unicode", raw: []byte(`\u123`)},
+		{name: "lone high surrogate", raw: []byte(`\uD800`)},
+		{name: "lone low surrogate", raw: []byte(`\uDC00`)},
+		{name: "invalid surrogate pair", raw: []byte(`\uD800\u0041`)},
+		{name: "invalid utf8", raw: []byte{0xff, '\\', 'n'}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &codexStreamFunctionCallState{}
+			state.appendArgumentsDeltaBytes([]byte("prefix"))
+			before := state.arguments()
+			if state.appendArgumentsDeltaRaw(tt.raw, true) {
+				t.Fatal("appendArgumentsDeltaRaw() accepted invalid JSON string content")
+			}
+			if got := state.arguments(); got != before {
+				t.Fatalf("arguments mutated after invalid delta: got %q, want %q", got, before)
+			}
+		})
+	}
+}
+
+func TestCodexStreamArgumentDeltaDoneOverridesDirectlyDecodedDeltas(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"{\"partial\":"}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"true}"}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.done","item_id":"fc_item_1","output_index":0,"arguments":"{\"final\":true}"}`))
+
+	if got := streamState.functionCallsByItem["fc_item_1"].arguments(); got != `{"final":true}` {
+		t.Fatalf("arguments after done = %q, want final arguments", got)
+	}
+}
+
 func TestCodexStreamArgumentDeltaRecordsCompactSequenceNumberPayload(t *testing.T) {
 	streamState := newCodexStreamCompletionState()
 	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
@@ -997,6 +1077,44 @@ func BenchmarkCodexStreamFunctionCallSingleArgumentDelta(b *testing.B) {
 		streamState.recordEvent(deltaEvent)
 		if got := streamState.functionCallsByItem["fc_item_1"].arguments(); len(got) == 0 {
 			b.Fatal("arguments are empty")
+		}
+	}
+}
+
+func BenchmarkCodexStreamFunctionCallArgumentDeltaMatrix(b *testing.B) {
+	addedEvent := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`)
+	tests := []struct {
+		name       string
+		deltaEvent []byte
+		deltaLen   int
+	}{
+		{
+			name:       "unescaped",
+			deltaEvent: []byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"chunk"}`),
+			deltaLen:   len("chunk"),
+		},
+		{
+			name:       "escaped",
+			deltaEvent: []byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"{\"q\":\"value\"}"}`),
+			deltaLen:   len(`{"q":"value"}`),
+		},
+	}
+	for _, tt := range tests {
+		for _, count := range []int{1, 8, 64, 512} {
+			b.Run(fmt.Sprintf("%s/%d", tt.name, count), func(b *testing.B) {
+				b.ReportAllocs()
+				b.ReportMetric(float64(count), "deltas/op")
+				for b.Loop() {
+					streamState := newCodexStreamCompletionState()
+					streamState.recordEvent(addedEvent)
+					for i := 0; i < count; i++ {
+						streamState.recordEvent(tt.deltaEvent)
+					}
+					if got := len(streamState.functionCallsByItem["fc_item_1"].arguments()); got != count*tt.deltaLen {
+						b.Fatalf("arguments len = %d, want %d", got, count*tt.deltaLen)
+					}
+				}
+			})
 		}
 	}
 }

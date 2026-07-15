@@ -46,6 +46,7 @@ const (
 	maxResponsesWebsocketErrorTimelineBytes = 4 << 10
 	maxResponsesWebsocketInboundBytes       = 64 << 20
 	responsesWebsocketWriteTimeout          = 30 * time.Second
+	responsesWebsocketRetryPreludeMaxDelay  = 50 * time.Millisecond
 
 	wsCompactResponseTypeKindOffset = len(`{"type":"response.`)
 )
@@ -1434,6 +1435,84 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	emittedPayload := false
 	noticeFilter := newResponsesNoticeFilter()
 	requestCtx := c.Request.Context()
+	type pendingRetryPreludePayload struct {
+		payload   []byte
+		eventType string
+	}
+	const (
+		maxPendingRetryPreludeEvents = 1
+		maxPendingRetryPreludeBytes  = 1 << 20
+	)
+	pendingRetryPrelude := make([]pendingRetryPreludePayload, 0, maxPendingRetryPreludeEvents)
+	pendingRetryPreludeBytes := 0
+	var pendingRetryPreludeTimer *time.Timer
+	var pendingRetryPreludeTimerC <-chan time.Time
+	stopPendingRetryPreludeTimer := func() {
+		if pendingRetryPreludeTimer == nil {
+			return
+		}
+		if !pendingRetryPreludeTimer.Stop() {
+			select {
+			case <-pendingRetryPreludeTimer.C:
+			default:
+			}
+		}
+		pendingRetryPreludeTimer = nil
+		pendingRetryPreludeTimerC = nil
+	}
+	defer stopPendingRetryPreludeTimer()
+	writeForwardedPayload := func(payload []byte, eventType string, timestamp time.Time) error {
+		markAPIResponseTimestampAt(c, timestamp)
+		if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, payload, timestamp, eventType); errWrite != nil {
+			log.Warnf(
+				"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+				sessionID,
+				websocketPayloadEventTypeName(eventType),
+				errWrite,
+			)
+			return errWrite
+		}
+		emittedPayload = true
+		return nil
+	}
+	flushPendingRetryPrelude := func() error {
+		stopPendingRetryPreludeTimer()
+		for _, pending := range pendingRetryPrelude {
+			if errWrite := writeForwardedPayload(pending.payload, pending.eventType, time.Now()); errWrite != nil {
+				pendingRetryPrelude = pendingRetryPrelude[:0]
+				pendingRetryPreludeBytes = 0
+				return errWrite
+			}
+		}
+		pendingRetryPrelude = pendingRetryPrelude[:0]
+		pendingRetryPreludeBytes = 0
+		return nil
+	}
+	bufferRetryPrelude := func(payload []byte, eventType string) bool {
+		if !retryCredentialFailoverWithFullTranscript || emittedPayload {
+			return false
+		}
+		// Buffer only response.created for a short, bounded grace period. The next
+		// event remains the normal acceptance boundary, while the timer prevents a
+		// long upstream thinking gap from hiding all lifecycle activity downstream.
+		if eventType != "response.created" {
+			return false
+		}
+		if len(pendingRetryPrelude) >= maxPendingRetryPreludeEvents ||
+			pendingRetryPreludeBytes+len(payload) > maxPendingRetryPreludeBytes {
+			return false
+		}
+		pendingRetryPrelude = append(pendingRetryPrelude, pendingRetryPreludePayload{
+			payload:   bytes.Clone(payload),
+			eventType: eventType,
+		})
+		pendingRetryPreludeBytes += len(payload)
+		if pendingRetryPreludeTimer == nil {
+			pendingRetryPreludeTimer = time.NewTimer(responsesWebsocketRetryPreludeMaxDelay)
+			pendingRetryPreludeTimerC = pendingRetryPreludeTimer.C
+		}
+		return true
+	}
 	failNilStreamChannels := func() error {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errResponsesWebsocketNilStreamChannels}
 		recordResponsesWebsocketAPIResponseError(h, c, errMsg)
@@ -1453,6 +1532,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	forwardTerminalError := func(errMsg *interfaces.ErrorMessage) error {
 		if errMsg != nil {
 			recordResponsesWebsocketAPIResponseError(h, c, errMsg)
+			if errFlush := flushPendingRetryPrelude(); errFlush != nil {
+				cancel(errFlush)
+				return errFlush
+			}
 			errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
 			log.Infof(
 				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -1490,6 +1573,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		case <-requestCtx.Done():
 			cancel(requestCtx.Err())
 			return completedOutput, completedResponseID, completed, requestCtx.Err()
+		case <-pendingRetryPreludeTimerC:
+			if errFlush := flushPendingRetryPrelude(); errFlush != nil {
+				cancel(errFlush)
+				return completedOutput, completedResponseID, completed, errFlush
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -1557,14 +1645,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 							stopForward = true
 							return false
 						}
-						markAPIResponseTimestampAt(c, now)
-						if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, now, eventType); errWrite != nil {
-							log.Warnf(
-								"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-								sessionID,
-								websocketPayloadEventTypeName(eventType),
-								errWrite,
-							)
+						if errWrite := flushPendingRetryPrelude(); errWrite != nil {
+							cancel(errWrite)
+							forwardErr = errWrite
+							stopForward = true
+							return false
+						}
+						if errWrite := writeForwardedPayload(filteredPayload, eventType, now); errWrite != nil {
 							cancel(errWrite)
 							forwardErr = errWrite
 							stopForward = true
@@ -1574,13 +1661,21 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						stopForward = true
 						return false
 					}
+					if bufferRetryPrelude(filteredPayload, eventType) {
+						continue
+					}
+					if errWrite := flushPendingRetryPrelude(); errWrite != nil {
+						cancel(errWrite)
+						forwardErr = errWrite
+						stopForward = true
+						return false
+					}
 					recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(toolCallCache, downstreamSessionKey, eventType, filteredPayload)
 					if eventType == wsEventTypeCompleted {
 						completed = true
 						completedOutput = responseCompletedOutputFromPayload(filteredPayload)
 						completedResponseID = responseCompletedIDFromPayload(filteredPayload)
 					}
-					markAPIResponseTimestampAt(c, now)
 					// log.Infof(
 					// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 					// 	sessionID,
@@ -1588,19 +1683,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// 	websocketPayloadEventType(payloads[i]),
 					// 	websocketPayloadPreview(payloads[i]),
 					// )
-					if errWrite := writeResponsesWebsocketPayloadWithEventType(conn, wsTimelineLog, filteredPayload, now, eventType); errWrite != nil {
-						log.Warnf(
-							"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-							sessionID,
-							websocketPayloadEventTypeName(eventType),
-							errWrite,
-						)
+					if errWrite := writeForwardedPayload(filteredPayload, eventType, now); errWrite != nil {
 						cancel(errWrite)
 						forwardErr = errWrite
 						stopForward = true
 						return false
 					}
-					emittedPayload = true
 				}
 				return true
 			})
@@ -2123,11 +2211,24 @@ func appendWebsocketTimelineEventWithPayloadType(builder *websocketTimelineBuild
 		return
 	}
 	trimmedPayload = util.RedactSensitiveLogBytes(trimmedPayload)
+	var formattedTimestampBuffer [64]byte
+	formattedTimestamp := timestamp.AppendFormat(formattedTimestampBuffer[:0], time.RFC3339Nano)
+	eventBytes := len("Timestamp: ") + len(formattedTimestamp) + len("\nEvent: websocket.") + len(eventType) + len(trimmedPayload) + 2
+	if builder.Len() > 0 {
+		eventBytes++
+	}
+	remaining := builder.maxBytes - builder.Len()
+	if eventBytes > remaining {
+		eventBytes = remaining + len(responsesWebsocketTimelineTruncatedMarker)
+	}
+	if eventBytes > 0 {
+		builder.Grow(eventBytes)
+	}
 	if builder.Len() > 0 {
 		appendWebsocketTimelineText(builder, "\n")
 	}
 	appendWebsocketTimelineText(builder, "Timestamp: ")
-	appendWebsocketTimelineText(builder, timestamp.Format(time.RFC3339Nano))
+	appendWebsocketTimelineBytes(builder, formattedTimestamp)
 	appendWebsocketTimelineText(builder, "\n")
 	appendWebsocketTimelineText(builder, "Event: websocket.")
 	appendWebsocketTimelineText(builder, eventType)

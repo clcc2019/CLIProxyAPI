@@ -87,7 +87,12 @@ func (r *UsageReporter) CaptureModelReasoningEffort(payloads ...[]byte) {
 	if r == nil {
 		return
 	}
+	var previous []byte
 	for _, payload := range payloads {
+		if len(previous) > 0 && bytes.Equal(previous, payload) {
+			continue
+		}
+		previous = payload
 		if effort := extractReasoningEffortFromPayload(payload); effort != "" {
 			r.modelReasoningEffort = effort
 			return
@@ -452,6 +457,15 @@ func normalizeReasoningEffortValue(value string) string {
 
 func extractReasoningEffortFromPayload(payload []byte) string {
 	if len(payload) == 0 {
+		return ""
+	}
+	// Every supported path contains either "effort" or "thinking". Most
+	// requests contain neither, so prove absence with optimized byte searches
+	// before asking gjson to traverse the full payload repeatedly. A backslash
+	// keeps the slow path enabled because JSON object keys may use escapes.
+	if !bytes.Contains(payload, []byte("effort")) &&
+		!bytes.Contains(payload, []byte("thinking")) &&
+		bytes.IndexByte(payload, '\\') < 0 {
 		return ""
 	}
 

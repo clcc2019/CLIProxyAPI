@@ -21,6 +21,10 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 }
 
 func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, requestKind codexFinalUpstreamRequestKind) {
+	applyCodexHeadersForRequestKindWithGinHeaders(r, auth, token, stream, cfg, requestKind, codexGinHeadersFromContext(r.Context()))
+}
+
+func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, requestKind codexFinalUpstreamRequestKind, ginHeaders http.Header) http.Header {
 	headers := r.Header
 	if token = strings.TrimSpace(token); token != "" {
 		codexSetPairedSingleHeaderValues(headers, "Content-Type", "application/json", "Authorization", "Bearer "+token)
@@ -30,7 +34,6 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 	}
 	apiKeyAuth := codexIsAPIKeyAuth(auth)
 
-	ginHeaders := codexGinHeadersFromContext(r.Context())
 	codexPinClientProfileFromFirstRequest(r.Context(), auth, headers, ginHeaders, cfg)
 	codexPreparePinnedClientProfileHeaders(headers, auth)
 	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
@@ -104,6 +107,7 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 			codexSetSingleHeaderValue(headers, "User-Agent", cfgUserAgent)
 		}
 	}
+	return profileHeaders
 }
 
 // trimHeaderValue returns the TrimSpace'd value for a header key without

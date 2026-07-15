@@ -109,6 +109,15 @@ func codexApplyHTTPClientMetadataWithSource(body []byte, target http.Header, sou
 	)
 }
 
+func codexApplyHTTPClientMetadataWithSourceAndPromptCacheKey(body []byte, target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config, promptCacheKey string) []byte {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body
+	}
+	var entries [11]codexClientMetadataEntry
+	metadataEntries := codexCompactClientMetadataEntries(codexResponsesClientMetadataEntries(entries[:0], target, source, auth, cfg, false, ""))
+	return codexSetClientMetadataAndPromptCacheKeyNormalized(body, metadataEntries, promptCacheKey)
+}
+
 func codexApplyWebsocketClientMetadata(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config) []byte {
 	return codexApplyWebsocketClientMetadataWithStreamStartMS(ctx, body, headers, auth, cfg, "")
 }
@@ -379,6 +388,35 @@ func codexSetClientMetadataAndResponseCreateTypeNormalized(body []byte, entries 
 	return codexSetClientMetadataNormalized(body, entries, true)
 }
 
+func codexSetClientMetadataAndPromptCacheKeyNormalized(body []byte, entries []codexClientMetadataEntry, promptCacheKey string) []byte {
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if promptCacheKey == "" {
+		return codexSetClientMetadataNormalized(body, entries, true)
+	}
+	existingPromptCacheKey := codexGJSONGetImmutableBytes(body, "prompt_cache_key")
+	if len(entries) > 0 &&
+		!existingPromptCacheKey.Exists() &&
+		!codexBodyMayContainClientMetadata(body) {
+		if updated, ok := codexAppendTopLevelPromptCacheKeyAndClientMetadataObject(body, promptCacheKey, entries); ok {
+			return updated
+		}
+	}
+	body = codexSetClientMetadataNormalized(body, entries, true)
+	if existingPromptCacheKey.Exists() && existingPromptCacheKey.Type == gjson.String && existingPromptCacheKey.String() == promptCacheKey {
+		return body
+	}
+	if !existingPromptCacheKey.Exists() {
+		if updated, ok := codexAppendTopLevelStringField(body, "prompt_cache_key", promptCacheKey); ok {
+			return updated
+		}
+	}
+	updated, err := sjson.SetBytes(body, "prompt_cache_key", promptCacheKey)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
 func codexReplaceClientMetadataRaw(body []byte, metadata gjson.Result, metadataBody []byte) ([]byte, bool) {
 	start, end, ok := codexJSONResultRawRange(body, metadata)
 	if !ok {
@@ -421,6 +459,45 @@ func codexAppendTopLevelClientMetadataObject(body []byte, entries []codexClientM
 		updated = append(updated, ':')
 		updated = codexAppendJSONString(updated, entry.value)
 		wrote = true
+	}
+	updated = append(updated, '}', '}')
+	updated = append(updated, suffix...)
+	return updated, true
+}
+
+func codexAppendTopLevelPromptCacheKeyAndClientMetadataObject(body []byte, promptCacheKey string, entries []codexClientMetadataEntry) ([]byte, bool) {
+	fieldCount, fieldsCap := codexClientMetadataOverrideFieldsCapacity(entries)
+	if fieldCount == 0 || promptCacheKey == "" {
+		return nil, false
+	}
+	trimmed, suffix, hasFields, ok := codexPrepareTopLevelObjectAppend(body)
+	if !ok {
+		return nil, false
+	}
+
+	extra := codexJSONStringCapacity("prompt_cache_key") + codexJSONStringCapacity(promptCacheKey) + 1
+	extra += codexJSONStringCapacity("client_metadata") + fieldsCap + 4
+	if hasFields {
+		extra++
+	}
+	updated := make([]byte, 0, len(body)+extra)
+	updated = append(updated, trimmed[:len(trimmed)-1]...)
+	if hasFields {
+		updated = append(updated, ',')
+	}
+	updated = codexAppendJSONString(updated, "prompt_cache_key")
+	updated = append(updated, ':')
+	updated = codexAppendJSONString(updated, promptCacheKey)
+	updated = append(updated, ',')
+	updated = codexAppendJSONString(updated, "client_metadata")
+	updated = append(updated, ':', '{')
+	for i, entry := range entries {
+		if i > 0 {
+			updated = append(updated, ',')
+		}
+		updated = codexAppendJSONString(updated, entry.key)
+		updated = append(updated, ':')
+		updated = codexAppendJSONString(updated, entry.value)
 	}
 	updated = append(updated, '}', '}')
 	updated = append(updated, suffix...)

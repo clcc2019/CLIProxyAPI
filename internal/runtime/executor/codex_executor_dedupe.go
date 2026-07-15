@@ -53,6 +53,11 @@ type codexPreparedRequest struct {
 	executionSessionID string
 }
 
+type codexPrepareRequestBodyOptions struct {
+	attachBody          bool
+	deferPromptCacheKey bool
+}
+
 // codexNonStreamHTTPResult is the structured result surfaced to fetch callers.
 // body + completedData can be large (megabytes for streamed aggregates);
 // errorBody is small and safe to defensively copy under clone().
@@ -82,22 +87,32 @@ func (e *CodexExecutor) prepareCodexRequestWithKind(ctx context.Context, from sd
 }
 
 func (e *CodexExecutor) prepareCodexRequestWithKindBody(ctx context.Context, from sdktranslator.Format, executionSessionID string, url string, requestKind codexFinalUpstreamRequestKind, req cliproxyexecutor.Request, rawJSON []byte, attachBody bool) (codexPreparedRequest, error) {
+	return e.prepareCodexRequestWithKindBodyOptions(ctx, from, executionSessionID, url, requestKind, req, rawJSON, codexPrepareRequestBodyOptions{
+		attachBody: attachBody,
+	})
+}
+
+func (e *CodexExecutor) prepareCodexRequestWithKindBodyOptions(ctx context.Context, from sdktranslator.Format, executionSessionID string, url string, requestKind codexFinalUpstreamRequestKind, req cliproxyexecutor.Request, rawJSON []byte, options codexPrepareRequestBodyOptions) (codexPreparedRequest, error) {
 	resolution := e.resolvePromptCacheResolution(ctx, from, executionSessionID, req)
 	cache := resolution.cache
 	body := codexSanitizeForcedUpstreamSessionBody(ctx, rawJSON)
 	isCompact := requestKind == codexFinalUpstreamCompact
-	if cache.ID != "" {
+	if cache.ID != "" && !options.deferPromptCacheKey {
 		body = codexSetPromptCacheKey(body, cache.ID)
 	}
 
 	var bodyReader io.Reader
-	if attachBody {
+	if options.attachBody {
 		bodyReader = bytes.NewReader(body)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
 	if err != nil {
 		return codexPreparedRequest{}, err
 	}
+	// NewRequestWithContext starts with a zero-capacity Header map. Reserve the
+	// common HTTP header count so identity/profile insertion avoids map growth
+	// without paying for the larger websocket header set.
+	httpReq.Header = make(http.Header, codexHTTPRequestHeaderInitialCapacity)
 	if cache.ID != "" && (!isCompact || resolution.headerEligibleID != "") {
 		fallbackHeaderValue := cache.ID
 		if resolution.headerEligibleID != "" {

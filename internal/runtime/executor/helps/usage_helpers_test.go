@@ -716,6 +716,43 @@ func TestResolveUsageAPIKeyFallsBackToContextForOAuth(t *testing.T) {
 	}
 }
 
+func TestExtractReasoningEffortFromPayload(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "top level", payload: `{"reasoning_effort":"high"}`, want: "high"},
+		{name: "responses", payload: `{"reasoning":{"effort":"xhigh"}}`, want: "xhigh"},
+		{name: "output config", payload: `{"output_config":{"effort":"low"}}`, want: "low"},
+		{name: "generation config level", payload: `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"medium"}}}`, want: "medium"},
+		{name: "nested generation config level", payload: `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"adaptive"}}}}`, want: "adaptive"},
+		{name: "thinking budget", payload: `{"thinking":{"budget_tokens":123}}`, want: "budget:123"},
+		{name: "thinking type", payload: `{"thinking":{"type":"enabled"}}`, want: "enabled"},
+		{name: "escaped key", payload: `{"reasoning\u005feffort":"high"}`, want: "high"},
+		{name: "ordinary payload", payload: `{"model":"gpt-5.4","input":"hello"}`, want: ""},
+		{name: "escaped ordinary payload", payload: `{"model":"gpt-5.4","input":"hello\\nworld"}`, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractReasoningEffortFromPayload([]byte(tt.payload)); got != tt.want {
+				t.Fatalf("extractReasoningEffortFromPayload() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+var reasoningEffortBenchmarkSink string
+
+func BenchmarkExtractReasoningEffortFromPayloadNoMarkers(b *testing.B) {
+	payload := []byte(`{"model":"gpt-5.4","input":"` + strings.Repeat("ordinary request payload ", 256) + `"}`)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		reasoningEffortBenchmarkSink = extractReasoningEffortFromPayload(payload)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

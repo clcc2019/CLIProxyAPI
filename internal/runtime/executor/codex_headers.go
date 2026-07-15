@@ -3,7 +3,8 @@ package executor
 import "net/http"
 
 const (
-	codexRequestHeaderInitialCapacity = 24
+	codexRequestHeaderInitialCapacity     = 24
+	codexHTTPRequestHeaderInitialCapacity = 14
 
 	codexHeaderSessionID                        = "Session_id"
 	codexHeaderThreadID                         = "Thread_id"

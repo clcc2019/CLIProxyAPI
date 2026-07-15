@@ -213,7 +213,6 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 	if threadID == "" {
 		threadID = sessionID
 	}
-	codexSetSessionIdentityHeaders(target, sessionID, threadID)
 
 	requestID := firstNonEmptyHeaderValue(target, source, "X-Client-Request-Id")
 	if opts.includeRequestID && requestID == "" {
@@ -225,17 +224,44 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 	if opts.includeRequestID && requestID == "" {
 		requestID = sessionID
 	}
-	if requestID != "" {
-		codexSetSingleHeaderValue(target, "X-Client-Request-Id", requestID)
-	} else {
+	codexSetSessionIdentityHeaders(target, sessionID, threadID, requestID)
+	if requestID == "" {
 		target.Del("X-Client-Request-Id")
 	}
 	target.Del("Conversation_id")
 	return sessionID
 }
 
-func codexSetSessionIdentityHeaders(target http.Header, sessionID string, threadID string) {
+func codexSetSessionIdentityHeaders(target http.Header, sessionID string, threadID string, requestID string) {
+	if target == nil {
+		return
+	}
+	requestIDMissing := requestID == "" || len(target["X-Client-Request-Id"]) == 0
+	if len(target[codexHeaderSessionID]) == 0 &&
+		len(target[codexHeaderThreadID]) == 0 &&
+		len(target[codexHeaderOfficialSessionID]) == 0 &&
+		len(target[codexHeaderOfficialThreadID]) == 0 &&
+		requestIDMissing {
+		values := []string{sessionID, threadID, sessionID, threadID, requestID}
+		target[codexHeaderSessionID] = values[0:1:1]
+		target[codexHeaderThreadID] = values[1:2:2]
+		target[codexHeaderOfficialSessionID] = values[2:3:3]
+		target[codexHeaderOfficialThreadID] = values[3:4:4]
+		if requestID != "" {
+			target["X-Client-Request-Id"] = values[4:5:5]
+		}
+		return
+	}
 	codexSetPairedSingleHeaderValues(target, codexHeaderSessionID, sessionID, codexHeaderThreadID, threadID)
+	if requestID != "" {
+		codexSetTripleSingleHeaderValues(
+			target,
+			codexHeaderOfficialSessionID, sessionID,
+			codexHeaderOfficialThreadID, threadID,
+			"X-Client-Request-Id", requestID,
+		)
+		return
+	}
 	codexSetPairedSingleHeaderValues(target, codexHeaderOfficialSessionID, sessionID, codexHeaderOfficialThreadID, threadID)
 }
 

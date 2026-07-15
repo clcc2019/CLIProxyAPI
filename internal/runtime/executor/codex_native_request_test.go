@@ -3,11 +3,37 @@ package executor
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func BenchmarkCodexTranslateNativeRequestWithOriginal(b *testing.B) {
+	format := sdktranslator.FromString("openai-response")
+	body := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"` + strings.Repeat("native-codex-payload-", 256) + `"}]}]}`)
+	headers := http.Header{"Originator": []string{"codex_cli_rs"}}
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for i := 0; i < b.N; i++ {
+		translated, original, native := codexTranslateRequestWithOriginal(
+			nil,
+			context.Background(),
+			format,
+			sdktranslator.FromString("codex"),
+			"gpt-5.4",
+			body,
+			body,
+			true,
+			headers,
+		)
+		if !native || len(translated) != len(body) || len(original) != len(body) {
+			b.Fatal("unexpected native translation result")
+		}
+	}
+}
 
 func TestCodexTranslateRequestWithOriginalBypassesCompatibilityRewriteForNativeClient(t *testing.T) {
 	format := sdktranslator.FromString("openai-response")

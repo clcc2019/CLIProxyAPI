@@ -433,6 +433,39 @@ func TestNormalizeCodexFinalUpstreamBody_DefaultsOfficialReasoningAndVerbosity(t
 	}
 }
 
+func TestNormalizeCodexFinalUpstreamBody_LooksUpModelCapabilitiesOnce(t *testing.T) {
+	originalCapabilitiesForModel := codexClientModelCapabilitiesForModel
+	calls := 0
+	codexClientModelCapabilitiesForModel = func(modelID string) (registry.CodexClientModelCapabilities, bool) {
+		calls++
+		return registry.CodexClientModelCapabilities{
+			SupportsReasoningSummaryParameter: true,
+			SupportsVerbosity:                 true,
+			DefaultVerbosity:                  "low",
+			SupportsImageDetailOriginal:       true,
+			ServiceTiers:                      []string{"priority"},
+		}, true
+	}
+	defer func() {
+		codexClientModelCapabilitiesForModel = originalCapabilitiesForModel
+	}()
+
+	normalizeCodexFinalUpstreamBodyUncached(
+		[]byte(`{"model":"client-alias","input":[],"reasoning":{"effort":"high"},"service_tier":"priority"}`),
+		"test-model",
+		&cliproxyauth.Auth{Provider: "codex"},
+		codexFinalUpstreamBodyOptions{
+			requestKind:                 codexFinalUpstreamResponses,
+			streamMode:                  codexStreamFieldTrue,
+			suppressDefaultInstructions: true,
+		},
+	)
+
+	if calls != 1 {
+		t.Fatalf("model capability lookups = %d, want 1", calls)
+	}
+}
+
 func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT55XHighReasoningForUpstream(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias","input":[],"reasoning":{"effort":"xhigh"}}`), "gpt-5.5", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,
@@ -449,22 +482,22 @@ func TestNormalizeCodexFinalUpstreamBody_DowngradesGPT55XHighReasoningForUpstrea
 	}
 }
 
-func TestNormalizeCodexFinalUpstreamBody_CapsGPT56SolReasoningAtHighForUpstream(t *testing.T) {
+func TestNormalizeCodexFinalUpstreamBody_PreservesGPT56SolReasoningForUpstream(t *testing.T) {
 	tests := []struct {
 		name       string
 		model      string
 		effort     string
 		wantEffort string
 	}{
-		{name: "sol xhigh", model: "gpt-5.6-sol", effort: "xhigh", wantEffort: "high"},
-		{name: "sol max", model: "gpt-5.6-sol", effort: "max", wantEffort: "high"},
+		{name: "sol xhigh", model: "gpt-5.6-sol", effort: "xhigh", wantEffort: "xhigh"},
+		{name: "sol max", model: "gpt-5.6-sol", effort: "max", wantEffort: "max"},
 		{name: "sol high unchanged", model: "gpt-5.6-sol", effort: "high", wantEffort: "high"},
 		{name: "sol medium unchanged", model: "gpt-5.6-sol", effort: "medium", wantEffort: "medium"},
 		{name: "sol low unchanged", model: "gpt-5.6-sol", effort: "low", wantEffort: "low"},
 		{name: "sol minimal unchanged", model: "gpt-5.6-sol", effort: "minimal", wantEffort: "minimal"},
 		{name: "sol none unchanged", model: "gpt-5.6-sol", effort: "none", wantEffort: "none"},
-		{name: "sol Ultra", model: "gpt-5.6-sol", effort: "Ultra", wantEffort: "high"},
-		{name: "sol uppercase model and effort", model: "GPT-5.6-SOL", effort: "XHIGH", wantEffort: "high"},
+		{name: "sol Ultra", model: "gpt-5.6-sol", effort: "Ultra", wantEffort: "Ultra"},
+		{name: "sol uppercase model and effort", model: "GPT-5.6-SOL", effort: "XHIGH", wantEffort: "XHIGH"},
 		{name: "terra max unchanged", model: "gpt-5.6-terra", effort: "max", wantEffort: "max"},
 		{name: "luna xhigh unchanged", model: "gpt-5.6-luna", effort: "xhigh", wantEffort: "xhigh"},
 	}
@@ -516,7 +549,7 @@ func TestNormalizeCodexFinalUpstreamReasoning_MapsUltraToOfficialRequestEffort(t
 	}
 
 	t.Run("caller effort", func(t *testing.T) {
-		gotBody := normalizeCodexFinalUpstreamReasoning([]byte(`{"reasoning":{"effort":"ultra","summary":"auto"}}`), capabilities)
+		gotBody := normalizeCodexFinalUpstreamReasoning([]byte(`{"reasoning":{"effort":"ultra","summary":"auto"}}`), &capabilities, false)
 		if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "max" {
 			t.Fatalf("reasoning.effort = %q, want max; body=%s", got, gotBody)
 		}
@@ -526,7 +559,14 @@ func TestNormalizeCodexFinalUpstreamReasoning_MapsUltraToOfficialRequestEffort(t
 	})
 
 	t.Run("default effort", func(t *testing.T) {
-		gotBody := normalizeCodexFinalUpstreamReasoning([]byte(`{}`), capabilities)
+		gotBody := normalizeCodexFinalUpstreamReasoning([]byte(`{}`), &capabilities, false)
+		if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "max" {
+			t.Fatalf("reasoning.effort = %q, want max; body=%s", got, gotBody)
+		}
+	})
+
+	t.Run("blank effort uses default", func(t *testing.T) {
+		gotBody := normalizeCodexFinalUpstreamReasoning([]byte(`{"reasoning":{"effort":"  "}}`), &capabilities, false)
 		if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "max" {
 			t.Fatalf("reasoning.effort = %q, want max; body=%s", got, gotBody)
 		}
@@ -743,9 +783,10 @@ func TestNormalizeCodexFinalUpstreamBody_UnknownModelKeepsReasoningAndRemovesUns
 
 func TestNormalizeCodexFinalUpstreamReasoningDropsUnsupportedSummaryParameterOnly(t *testing.T) {
 	body := []byte(`{"reasoning":{"effort":"high","summary":"auto"}}`)
-	gotBody := normalizeCodexFinalUpstreamReasoning(body, registry.CodexClientModelCapabilities{
+	capabilities := registry.CodexClientModelCapabilities{
 		SupportsReasoningSummaryParameter: false,
-	})
+	}
+	gotBody := normalizeCodexFinalUpstreamReasoning(body, &capabilities, false)
 	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "high" {
 		t.Fatalf("reasoning.effort = %q, want high; body=%s", got, gotBody)
 	}

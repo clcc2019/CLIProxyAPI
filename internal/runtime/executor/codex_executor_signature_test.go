@@ -31,14 +31,14 @@ func newCodexSignatureTestAuth(serverURL string) *cliproxyauth.Auth {
 	}}
 }
 
-func TestCodexExecutorCapsGPT56SolReasoningAtHighForUpstream(t *testing.T) {
+func TestCodexExecutorPreservesGPT56SolReasoningForUpstream(t *testing.T) {
 	for _, tt := range []struct {
 		effort string
 		want   string
 	}{
-		{effort: "xhigh", want: "high"},
-		{effort: "max", want: "high"},
-		{effort: "Ultra", want: "high"},
+		{effort: "xhigh", want: "xhigh"},
+		{effort: "max", want: "max"},
+		{effort: "Ultra", want: "ultra"},
 	} {
 		t.Run(tt.effort, func(t *testing.T) {
 			var gotBody []byte
