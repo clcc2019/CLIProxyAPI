@@ -24,7 +24,6 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -742,48 +741,16 @@ func (h *BaseAPIHandler) ExecuteImageWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
+	prepared, errMsg := h.prepareExecutionRequest(ctx, handlerType, modelName, rawJSON, alt, executionRequestMode{allowImageModel: allowImageModel})
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	if !clientModelAllowedForContext(ctx, normalizedModel) {
-		return nil, nil, clientModelAccessError(normalizedModel)
-	}
-	reqMeta := requestExecutionMetadata(ctx)
-	if reqMeta == nil {
-		reqMeta = make(map[string]any, 2)
-	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
-	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
-	if PassthroughHeadersEnabled(h.Cfg) {
-		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
-	}
-	setServiceTierMetadata(reqMeta, rawJSON)
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
-	opts := coreexecutor.Options{
-		Stream:          false,
-		Alt:             alt,
-		Headers:         requestHeadersFromContext(ctx),
-		OriginalRequest: rawJSON,
-		SourceFormat:    sdktranslator.FromString(handlerType),
-	}
-	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+	resp, err := h.AuthManager.Execute(prepared.ctx, prepared.providers, prepared.request, prepared.options)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = enrichAuthSelectionError(err, prepared.providers, prepared.normalizedModel)
 		return nil, nil, errorMessageFromError(err, http.StatusInternalServerError)
 	}
-	if !PassthroughHeadersEnabled(h.Cfg) {
+	if !prepared.passthroughHeaders {
 		return resp.Payload, nil, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
@@ -792,48 +759,16 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	prepared, errMsg := h.prepareExecutionRequest(ctx, handlerType, modelName, rawJSON, alt, executionRequestMode{})
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	if !clientModelAllowedForContext(ctx, normalizedModel) {
-		return nil, nil, clientModelAccessError(normalizedModel)
-	}
-	reqMeta := requestExecutionMetadata(ctx)
-	if reqMeta == nil {
-		reqMeta = make(map[string]any, 2)
-	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
-	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
-	if PassthroughHeadersEnabled(h.Cfg) {
-		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
-	}
-	setServiceTierMetadata(reqMeta, rawJSON)
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
-	opts := coreexecutor.Options{
-		Stream:          false,
-		Alt:             alt,
-		Headers:         requestHeadersFromContext(ctx),
-		OriginalRequest: rawJSON,
-		SourceFormat:    sdktranslator.FromString(handlerType),
-	}
-	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
+	resp, err := h.AuthManager.ExecuteCount(prepared.ctx, prepared.providers, prepared.request, prepared.options)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = enrichAuthSelectionError(err, prepared.providers, prepared.normalizedModel)
 		return nil, nil, errorMessageFromError(err, http.StatusInternalServerError)
 	}
-	if !PassthroughHeadersEnabled(h.Cfg) {
+	if !prepared.passthroughHeaders {
 		return resp.Payload, nil, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
@@ -852,54 +787,20 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if !allowImageModel && strings.TrimSpace(alt) != "responses/compact" {
-		ctx = coreexecutor.WithPreferUpstreamWebsocket(ctx)
-	}
-	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
+	prepared, errMsg := h.prepareExecutionRequest(ctx, handlerType, modelName, rawJSON, alt, executionRequestMode{
+		stream:          true,
+		allowImageModel: allowImageModel,
+	})
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
 	}
-	if !clientModelAllowedForContext(ctx, normalizedModel) {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- clientModelAccessError(normalizedModel)
-		close(errChan)
-		return nil, nil, errChan
-	}
-	reqMeta := requestExecutionMetadata(ctx)
-	if reqMeta == nil {
-		reqMeta = make(map[string]any, 2)
-	}
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
-	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
-	if PassthroughHeadersEnabled(h.Cfg) {
-		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
-	}
-	setServiceTierMetadata(reqMeta, rawJSON)
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
-	opts := coreexecutor.Options{
-		Stream:          true,
-		Alt:             alt,
-		Headers:         requestHeadersFromContext(ctx),
-		OriginalRequest: rawJSON,
-		SourceFormat:    sdktranslator.FromString(handlerType),
-	}
-	opts.Metadata = reqMeta
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	ctx = prepared.ctx
+	streamResult, err := h.AuthManager.ExecuteStream(ctx, prepared.providers, prepared.request, prepared.options)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = enrichAuthSelectionError(err, prepared.providers, prepared.normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errorMessageFromError(err, http.StatusInternalServerError)
 		close(errChan)
@@ -912,7 +813,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
+	passthroughHeadersEnabled := prepared.passthroughHeaders
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
 	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
 	var upstreamHeaders http.Header
@@ -988,7 +889,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					if !sentPayload {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
-							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, prepared.providers, prepared.request, prepared.options)
 							if retryErr == nil {
 								if retryResult == nil || retryResult.Chunks == nil {
 									streamErr = invalidStreamResultHandlerError("auth manager returned retry stream result without chunks")
@@ -1000,7 +901,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 									continue outer
 								}
 							} else {
-								streamErr = enrichAuthSelectionError(retryErr, providers, normalizedModel)
+								streamErr = enrichAuthSelectionError(retryErr, prepared.providers, prepared.normalizedModel)
 							}
 						}
 					}

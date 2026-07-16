@@ -619,21 +619,14 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	authID := prepared.authID
 	executionSessionID := prepared.executionSessionID
 	sess := prepared.sess
-	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
-
-	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
-	if errDial != nil {
-		bodyErr := websocketHandshakeBody(respHS)
-		if respHS != nil {
-			codexPublishRateLimitsFromHeaders(ctx, auth, respHS.Header)
-			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header, bodyErr)
-		}
-		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
-			e.activateSessionHTTPFallback(sess, nil, "upgrade_required", errDial)
+	attempt := e.connectPreparedCodexWebsocket(ctx, auth, prepared)
+	if attempt.err != nil {
+		if attempt.upgradeRequired() {
+			e.activateSessionHTTPFallback(sess, nil, "upgrade_required", attempt.err)
 			prepared.unlockSession()
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
 		}
-		if respHS != nil && respHS.StatusCode == http.StatusUnauthorized && !codexUnauthorizedRetryAlreadyUsed(ctx) {
+		if attempt.unauthorized() && !codexUnauthorizedRetryAlreadyUsed(ctx) {
 			refreshedAuth, retried, refreshErr := e.CodexExecutor.refreshCodexAuthAfterUnauthorized(ctx, auth)
 			if refreshErr != nil {
 				return resp, refreshErr
@@ -643,25 +636,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				return e.Execute(contextWithCodexUnauthorizedRetryUsed(ctx), refreshedAuth, req, opts)
 			}
 		}
-		if respHS != nil && respHS.StatusCode > 0 {
-			codexPublishRateLimitsFromErrorBody(ctx, auth, bodyErr)
-			return resp, statusErrWithHeaders{
-				statusErr: newCodexStatusErr(respHS.StatusCode, bodyErr),
-				headers:   respHS.Header.Clone(),
-			}
-		}
-		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
-		return resp, errDial
+		return resp, attempt.failure(ctx, e, auth)
 	}
-	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
-	if respHS != nil {
-		codexPublishRateLimitsFromHeaders(ctx, auth, respHS.Header)
-	}
-	if sess != nil && respHS != nil {
-		sess.rememberTurnStateHeader(respHS.Header)
-	}
+	conn := attempt.conn
 	if sess == nil {
-		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
 		defer func() {
 			reason := "completed"
 			if err != nil {
@@ -931,25 +909,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	authID := prepared.authID
 	executionSessionID := prepared.executionSessionID
 	sess := prepared.sess
-	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
-
-	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
-	var upstreamHeaders http.Header
-	if respHS != nil {
-		upstreamHeaders = respHS.Header.Clone()
-		codexPublishRateLimitsFromHeaders(ctx, auth, respHS.Header)
-	}
-	if errDial != nil {
-		bodyErr := websocketHandshakeBody(respHS)
-		if respHS != nil {
-			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header, bodyErr)
-		}
-		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
-			e.activateSessionHTTPFallback(sess, nil, "upgrade_required", errDial)
+	attempt := e.connectPreparedCodexWebsocket(ctx, auth, prepared)
+	if attempt.err != nil {
+		if attempt.upgradeRequired() {
+			e.activateSessionHTTPFallback(sess, nil, "upgrade_required", attempt.err)
 			prepared.unlockSession()
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 		}
-		if respHS != nil && respHS.StatusCode == http.StatusUnauthorized && !codexUnauthorizedRetryAlreadyUsed(ctx) {
+		if attempt.unauthorized() && !codexUnauthorizedRetryAlreadyUsed(ctx) {
 			refreshedAuth, retried, refreshErr := e.CodexExecutor.refreshCodexAuthAfterUnauthorized(ctx, auth)
 			if refreshErr != nil {
 				prepared.unlockSession()
@@ -960,26 +927,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return e.ExecuteStream(contextWithCodexUnauthorizedRetryUsed(ctx), refreshedAuth, req, opts)
 			}
 		}
-		if respHS != nil && respHS.StatusCode > 0 {
-			prepared.unlockSession()
-			codexPublishRateLimitsFromErrorBody(ctx, auth, bodyErr)
-			return nil, statusErrWithHeaders{
-				statusErr: newCodexStatusErr(respHS.StatusCode, bodyErr),
-				headers:   respHS.Header.Clone(),
-			}
-		}
-		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		prepared.unlockSession()
-		return nil, errDial
+		return nil, attempt.failure(ctx, e, auth)
 	}
-	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
-	if sess != nil && respHS != nil {
-		sess.rememberTurnStateHeader(respHS.Header)
-	}
-
-	if sess == nil {
-		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
-	}
+	conn := attempt.conn
+	upstreamHeaders := attempt.responseHeaders
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {

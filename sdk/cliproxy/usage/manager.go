@@ -420,10 +420,6 @@ func clearQueueItems(items []queueItem) {
 	}
 }
 
-func (m *Manager) dispatch(item queueItem) {
-	m.dispatchBatch([]queueItem{item})
-}
-
 func (m *Manager) dispatchBatch(batch []queueItem) {
 	plugins, _ := m.snapshot.Load().([]Plugin)
 	if len(plugins) == 0 || len(batch) == 0 {

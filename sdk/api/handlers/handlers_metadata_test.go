@@ -94,17 +94,23 @@ func TestRequestExecutionMetadataEmptyReturnsNil(t *testing.T) {
 type headerCaptureExecutor struct {
 	selectedAuthIDs []string
 	sessionHeaders  []string
+	executeRequests []coreexecutor.Request
+	executeOptions  []coreexecutor.Options
+	countRequests   []coreexecutor.Request
+	countOptions    []coreexecutor.Options
 }
 
 func (e *headerCaptureExecutor) Identifier() string { return "codex" }
 
-func (e *headerCaptureExecutor) Execute(_ context.Context, auth *coreauth.Auth, _ coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *headerCaptureExecutor) Execute(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
 	if auth != nil {
 		e.selectedAuthIDs = append(e.selectedAuthIDs, auth.ID)
 	} else {
 		e.selectedAuthIDs = append(e.selectedAuthIDs, "")
 	}
 	e.sessionHeaders = append(e.sessionHeaders, opts.Headers.Get("Session_id"))
+	e.executeRequests = append(e.executeRequests, req)
+	e.executeOptions = append(e.executeOptions, opts)
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
@@ -116,8 +122,16 @@ func (e *headerCaptureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) 
 	return auth, nil
 }
 
-func (e *headerCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
-	return coreexecutor.Response{Payload: []byte(`{"total_tokens":0}`)}, nil
+func (e *headerCaptureExecutor) CountTokens(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.countRequests = append(e.countRequests, req)
+	e.countOptions = append(e.countOptions, opts)
+	return coreexecutor.Response{
+		Payload: []byte(`{"total_tokens":0}`),
+		Headers: http.Header{
+			"X-Upstream-Request-Id": {"count-req-1"},
+			"Set-Cookie":            {"secret=value"},
+		},
+	}, nil
 }
 
 func (e *headerCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
@@ -169,6 +183,128 @@ func TestExecuteWithAuthManagerPassesHeadersToSessionAffinity(t *testing.T) {
 		if got != "codex-session-1" {
 			t.Fatalf("call %d Session_id header = %q, want codex-session-1", i, got)
 		}
+	}
+}
+
+func TestExecuteCountWithAuthManagerBuildsSharedExecutionRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/input_tokens", nil)
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+	ginCtx.Request.Header.Set("Idempotency-Key", "count-key")
+	ginCtx.Request.Header.Set("Session_id", "count-session")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	const (
+		model  = "test-count-request-model"
+		authID = "test-count-request-auth"
+	)
+	executor := &headerCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, manager)
+	rawJSON := []byte(`{"model":"test-count-request-model","reasoning":{"effort":"medium"},"service_tier":"priority"}`)
+	payload, headers, errMsg := handler.ExecuteCountWithAuthManager(ctx, "openai-response", model, rawJSON, "count-alt")
+	if errMsg != nil {
+		t.Fatalf("ExecuteCountWithAuthManager() error: %v", errMsg.Error)
+	}
+	if got := string(payload); got != `{"total_tokens":0}` {
+		t.Fatalf("payload = %s", got)
+	}
+	if got := headers.Get("X-Upstream-Request-Id"); got != "count-req-1" {
+		t.Fatalf("X-Upstream-Request-Id = %q", got)
+	}
+	if got := headers.Get("Set-Cookie"); got != "" {
+		t.Fatalf("Set-Cookie leaked through filtered headers: %q", got)
+	}
+	if len(executor.executeRequests) != 0 {
+		t.Fatalf("Execute calls = %d, want 0", len(executor.executeRequests))
+	}
+	if len(executor.countRequests) != 1 || len(executor.countOptions) != 1 {
+		t.Fatalf("CountTokens captures = (%d requests, %d options), want 1 each", len(executor.countRequests), len(executor.countOptions))
+	}
+	req := executor.countRequests[0]
+	opts := executor.countOptions[0]
+	if req.Model != model || string(req.Payload) != string(rawJSON) {
+		t.Fatalf("request = %#v, want model %q and original payload", req, model)
+	}
+	if opts.Stream {
+		t.Fatal("CountTokens options unexpectedly enabled streaming")
+	}
+	if opts.Alt != "count-alt" || opts.SourceFormat.String() != "openai-response" {
+		t.Fatalf("options alt/source = (%q, %q)", opts.Alt, opts.SourceFormat.String())
+	}
+	if opts.Headers.Get("Session_id") != "count-session" {
+		t.Fatalf("Session_id = %q", opts.Headers.Get("Session_id"))
+	}
+	if string(opts.OriginalRequest) != string(rawJSON) {
+		t.Fatalf("OriginalRequest = %s", opts.OriginalRequest)
+	}
+	meta := opts.Metadata
+	if got := meta[coreexecutor.RequestedModelMetadataKey]; got != model {
+		t.Fatalf("requested model metadata = %v", got)
+	}
+	if got := meta[coreexecutor.ReasoningEffortMetadataKey]; got != "medium" {
+		t.Fatalf("reasoning effort metadata = %v", got)
+	}
+	if got := meta[coreexecutor.ServiceTierMetadataKey]; got != "priority" {
+		t.Fatalf("service tier metadata = %v", got)
+	}
+	if got := meta[coreexecutor.NeedResponseHeadersMetadataKey]; got != true {
+		t.Fatalf("response headers metadata = %v", got)
+	}
+	if got := meta[idempotencyKeyMetadataKey]; got != "count-key" {
+		t.Fatalf("idempotency metadata = %v", got)
+	}
+	if got := meta[coreexecutor.RequestPathMetadataKey]; got != "/v1/responses/input_tokens" {
+		t.Fatalf("request path metadata = %v", got)
+	}
+	if got := meta[coreexecutor.RequestContentTypeMetadataKey]; got != "application/json" {
+		t.Fatalf("content type metadata = %v", got)
+	}
+}
+
+func TestExecuteImageWithAuthManagerAllowsImageOnlyModel(t *testing.T) {
+	const (
+		model  = "gpt-image-2"
+		authID = "test-image-request-auth"
+	)
+	executor := &headerCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	rawJSON := []byte(`{"model":"gpt-image-2","prompt":"draw a fox"}`)
+	if _, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, rawJSON, ""); errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("ordinary ExecuteWithAuthManager error = %#v, want image-only rejection", errMsg)
+	}
+	payload, _, errMsg := handler.ExecuteImageWithAuthManager(context.Background(), "openai", model, rawJSON, "image")
+	if errMsg != nil {
+		t.Fatalf("ExecuteImageWithAuthManager() error: %v", errMsg.Error)
+	}
+	if got := string(payload); got != `{"ok":true}` {
+		t.Fatalf("payload = %s", got)
+	}
+	if len(executor.executeRequests) != 1 || len(executor.executeOptions) != 1 {
+		t.Fatalf("Execute captures = (%d requests, %d options), want 1 each", len(executor.executeRequests), len(executor.executeOptions))
+	}
+	if executor.executeRequests[0].Model != model {
+		t.Fatalf("image request model = %q", executor.executeRequests[0].Model)
+	}
+	if executor.executeOptions[0].Stream {
+		t.Fatal("image non-stream request unexpectedly enabled streaming")
 	}
 }
 

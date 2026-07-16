@@ -18,6 +18,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"gopkg.in/yaml.v3"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -369,6 +370,44 @@ func TestManagementUsageDetailRetentionLimitRoute(t *testing.T) {
 	}
 	if cfg.UsageDetailRetentionLimit != 0 {
 		t.Fatalf("negative UsageDetailRetentionLimit = %d, want 0", cfg.UsageDetailRetentionLimit)
+	}
+}
+
+func TestUpdateClientsIgnoresNilReceiverAndConfig(t *testing.T) {
+	var nilServer *Server
+	nilServer.UpdateClients(&proxyconfig.Config{})
+
+	server := &Server{}
+	server.UpdateClients(nil)
+}
+
+func TestUpdateClientsNotifiesWebsocketAuthChangesOnce(t *testing.T) {
+	oldCfg := &proxyconfig.Config{}
+	oldCfg.Home.Enabled = true
+	oldSnapshot, err := yaml.Marshal(oldCfg)
+	if err != nil {
+		t.Fatalf("marshal old config: %v", err)
+	}
+
+	server := &Server{cfg: oldCfg, oldConfigYaml: oldSnapshot}
+	var calls int
+	server.SetWebsocketAuthChangeHandler(func(oldEnabled, newEnabled bool) {
+		calls++
+		if oldEnabled || !newEnabled {
+			t.Fatalf("websocket auth change = (%t, %t), want (false, true)", oldEnabled, newEnabled)
+		}
+	})
+
+	nextCfg := &proxyconfig.Config{WebsocketAuth: true}
+	nextCfg.Home.Enabled = true
+	server.UpdateClients(nextCfg)
+	server.UpdateClients(nextCfg)
+
+	if calls != 1 {
+		t.Fatalf("websocket auth callback calls = %d, want 1", calls)
+	}
+	if !server.wsAuthEnabled.Load() {
+		t.Fatal("websocket auth state was not updated")
 	}
 }
 

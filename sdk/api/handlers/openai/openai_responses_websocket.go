@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -246,100 +245,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	log.Infof("responses websocket: client connected id=%s remote=%s", connectionID, clientIP)
 	wsDone := make(chan struct{})
 	defer close(wsDone)
-	var activeDisconnectSessionMu sync.RWMutex
-	activeDisconnectSessionID := ""
-	setActiveDisconnectSessionID := func(sessionID string) {
-		activeDisconnectSessionMu.Lock()
-		activeDisconnectSessionID = strings.TrimSpace(sessionID)
-		activeDisconnectSessionMu.Unlock()
-	}
-	getActiveDisconnectSessionID := func() string {
-		activeDisconnectSessionMu.RLock()
-		defer activeDisconnectSessionMu.RUnlock()
-		return activeDisconnectSessionID
-	}
-	type upstreamDisconnectSubscriber interface {
-		UpstreamDisconnectChanIfExists(sessionID string) <-chan error
-	}
-	type websocketDisconnectSubscription struct {
-		done         chan struct{}
-		suppressNext atomic.Bool
-	}
-	var subscribedDisconnectSessions sync.Map
-	suppressNextUpstreamDisconnect := func(string) {}
-	subscribeUpstreamDisconnect := func(string) {}
-	if h != nil && h.AuthManager != nil {
-		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
-			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
-				suppressNextUpstreamDisconnect = func(sessionID string) {
-					sessionID = strings.TrimSpace(sessionID)
-					if sessionID == "" {
-						return
-					}
-					actual, ok := subscribedDisconnectSessions.Load(sessionID)
-					if !ok {
-						return
-					}
-					subscription, _ := actual.(*websocketDisconnectSubscription)
-					if subscription == nil {
-						return
-					}
-					subscription.suppressNext.Store(true)
-				}
-				subscribeUpstreamDisconnect = func(sessionID string) {
-					sessionID = strings.TrimSpace(sessionID)
-					if sessionID == "" {
-						return
-					}
-					subscription := &websocketDisconnectSubscription{done: make(chan struct{})}
-					for {
-						actual, loaded := subscribedDisconnectSessions.LoadOrStore(sessionID, subscription)
-						if !loaded {
-							break
-						}
-						existing, _ := actual.(*websocketDisconnectSubscription)
-						if existing == nil || existing.done == nil {
-							return
-						}
-						select {
-						case <-existing.done:
-							subscribedDisconnectSessions.Delete(sessionID)
-							continue
-						default:
-							return
-						}
-					}
-					disconnectCh := subscriber.UpstreamDisconnectChanIfExists(sessionID)
-					if disconnectCh == nil {
-						subscribedDisconnectSessions.Delete(sessionID)
-						close(subscription.done)
-						return
-					}
-					go func(subscribedSessionID string, disconnectCh <-chan error) {
-						defer close(subscription.done)
-						defer subscribedDisconnectSessions.Delete(subscribedSessionID)
-						select {
-						case <-wsDone:
-							return
-						case <-disconnectCh:
-							if subscription.suppressNext.Swap(false) {
-								return
-							}
-							if getActiveDisconnectSessionID() == subscribedSessionID {
-								_ = conn.Close()
-							}
-						}
-					}(sessionID, disconnectCh)
-				}
-			}
-		}
-	}
+	disconnectMonitor := newResponsesWebsocketDisconnectMonitor(h, conn, wsDone)
 	disconnectSessionID := headerExecutionSessionID
 	if disconnectSessionID == "" {
 		disconnectSessionID = generatedExecutionSessionID
 	}
-	setActiveDisconnectSessionID(disconnectSessionID)
-	subscribeUpstreamDisconnect(disconnectSessionID)
+	disconnectMonitor.setActive(disconnectSessionID)
+	disconnectMonitor.subscribe(disconnectSessionID)
 	var wsTerminateErr error
 	wsTimelineLog := newResponsesWebsocketTimelineBuilder(h)
 	defer func() {
@@ -399,10 +311,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		lastResponseIDIncrementalEligible = false
 		sessionID = strings.TrimSpace(sessionID)
 		if sessionID != "" {
-			suppressNextUpstreamDisconnect(sessionID)
-			setActiveDisconnectSessionID("")
+			disconnectMonitor.suppressNext(sessionID)
+			disconnectMonitor.setActive("")
 			h.AuthManager.ResetExecutionSession(sessionID)
-			setActiveDisconnectSessionID(sessionID)
+			disconnectMonitor.setActive(sessionID)
 		}
 		log.Infof("responses websocket: unpinned auth id=%s session=%s reason=%s", authID, sessionID, reason)
 		return true
@@ -521,7 +433,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		toolCachesReset := false
-		setActiveDisconnectSessionID(currentExecutionSessionID)
+		disconnectMonitor.setActive(currentExecutionSessionID)
 		if sessionChanged {
 			if h != nil && h.AuthManager != nil {
 				h.AuthManager.ResetExecutionSession(activeExecutionSessionID)
@@ -595,7 +507,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			})
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
-		subscribeUpstreamDisconnect(currentExecutionSessionID)
+		disconnectMonitor.subscribe(currentExecutionSessionID)
 
 		retryCredentialFailoverWithFullTranscript := requestSelectedIncrementalAuth &&
 			strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String()) != ""
@@ -604,10 +516,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			allowIncrementalInputWithPreviousResponseID &&
 			strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String()) != "" {
 			if h != nil && h.AuthManager != nil {
-				suppressNextUpstreamDisconnect(currentExecutionSessionID)
-				setActiveDisconnectSessionID("")
+				disconnectMonitor.suppressNext(currentExecutionSessionID)
+				disconnectMonitor.setActive("")
 				h.AuthManager.ResetExecutionSession(currentExecutionSessionID)
-				setActiveDisconnectSessionID(currentExecutionSessionID)
+				disconnectMonitor.setActive(currentExecutionSessionID)
 			}
 			retryJSON, _, retryErrMsg := normalizeResponsesWebsocketRequestWithMode(
 				payload,
@@ -639,7 +551,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 			}
 			dataChan, _, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, retryJSON, "")
-			subscribeUpstreamDisconnect(currentExecutionSessionID)
+			disconnectMonitor.subscribe(currentExecutionSessionID)
 			completedOutput, completedResponseID, completedForward, errForward = h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, connectionID, downstreamSessionKey, false, toolCallCache)
 		}
 		if errForward != nil {

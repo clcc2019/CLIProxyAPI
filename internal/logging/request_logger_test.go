@@ -154,6 +154,45 @@ func TestGenerateFilenameSanitizesPathAndQuery(t *testing.T) {
 	}
 }
 
+func TestFileStreamingLogWriterMarksDroppedChunks(t *testing.T) {
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0)
+	streamWriter, err := logger.LogStreamingRequest(
+		"/v1/responses",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		"dropped-chunks",
+	)
+	if err != nil {
+		t.Fatalf("LogStreamingRequest error = %v", err)
+	}
+	writer, ok := streamWriter.(*FileStreamingLogWriter)
+	if !ok {
+		t.Fatalf("stream writer type = %T, want *FileStreamingLogWriter", streamWriter)
+	}
+	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+		t.Fatalf("WriteStatus error = %v", errStatus)
+	}
+	writer.WriteChunkAsync([]byte("data: first\n\n"))
+	writer.droppedChunks.Store(3)
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("Close error = %v", errClose)
+	}
+
+	content, errRead := os.ReadFile(writer.logFilePath)
+	if errRead != nil {
+		t.Fatalf("read streaming log: %v", errRead)
+	}
+	if !bytes.Contains(content, []byte("data: first")) {
+		t.Fatalf("streaming log missing captured chunk: %s", content)
+	}
+	wantMarker := fmt.Sprintf(streamingLogDroppedMarker, 3)
+	if !bytes.Contains(content, []byte(wantMarker)) {
+		t.Fatalf("streaming log missing drop marker %q: %s", wantMarker, content)
+	}
+}
+
 func TestCleanupOldRequestLogsKeepsNewestTwenty(t *testing.T) {
 	dir := t.TempDir()
 	baseTime := time.Unix(1700000000, 0)

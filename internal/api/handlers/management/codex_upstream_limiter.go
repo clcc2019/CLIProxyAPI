@@ -2,7 +2,7 @@ package management
 
 import "context"
 
-const codexManagementUpstreamConcurrency = 4
+const codexManagementUpstreamConcurrency = 12
 
 // acquireCodexUpstreamSlot limits aggregate Codex management requests across
 // credentials. Waiting follows the caller's context, while each upstream
