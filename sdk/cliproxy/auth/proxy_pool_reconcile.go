@@ -9,6 +9,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+type proxyPoolRecoveryTimer struct {
+	timer     *time.Timer
+	recoverAt time.Time
+	sequence  uint64
+}
+
 // SetProxyLeaseStore swaps the optional persistence store for proxy-pool leases.
 func (m *Manager) SetProxyLeaseStore(store ProxyLeaseStore) {
 	if m == nil {
@@ -133,7 +139,7 @@ func (m *Manager) applyProxyPoolLeaseSnapshots(ctx context.Context, cfg *interna
 			leaseIndex++
 			leaseAuthID := strings.TrimSpace(lease.AuthID)
 			ok := strings.TrimSpace(lease.ProxyURL) != "" && (leaseAuthID == "" || leaseAuthID == auth.id)
-			m.applyProxyPoolLeaseSnapshotResult(auth, lease, ok)
+			m.applyProxyPoolLeaseSnapshotResult(cfg, auth, lease, ok)
 		}
 		return
 	}
@@ -167,6 +173,10 @@ func (m *Manager) enqueueProxyPoolReconcile(ctx context.Context) {
 		return
 	}
 	m.proxyReconcileMu.Lock()
+	if m.proxyReconcileStopping {
+		m.proxyReconcileMu.Unlock()
+		return
+	}
 	m.proxyReconcilePending = true
 	if m.proxyReconcileWake == nil || m.proxyReconcileCancel == nil {
 		m.startProxyPoolReconcileLoopLocked()
@@ -193,6 +203,9 @@ func (m *Manager) startProxyPoolReconcileLoopLocked() {
 	if m == nil {
 		return
 	}
+	if m.proxyReconcileStopping {
+		return
+	}
 	if m.proxyReconcileWake != nil && m.proxyReconcileCancel != nil {
 		return
 	}
@@ -209,6 +222,23 @@ func (m *Manager) stopProxyPoolReconcileLoop() {
 		return
 	}
 	m.proxyReconcileMu.Lock()
+	if m.proxyReconcileStopping {
+		done := m.proxyReconcileStopDone
+		m.proxyReconcileMu.Unlock()
+		if done != nil {
+			<-done
+		}
+		return
+	}
+	m.proxyReconcileStopping = true
+	done := make(chan struct{})
+	m.proxyReconcileStopDone = done
+	for proxyURL, recovery := range m.proxyRecoveryTimers {
+		if recovery != nil && recovery.timer != nil && recovery.timer.Stop() {
+			m.proxyRecoveryWG.Done()
+		}
+		delete(m.proxyRecoveryTimers, proxyURL)
+	}
 	cancel := m.proxyReconcileCancel
 	m.proxyReconcileCancel = nil
 	m.proxyReconcileWake = nil
@@ -216,8 +246,68 @@ func (m *Manager) stopProxyPoolReconcileLoop() {
 
 	if cancel != nil {
 		cancel()
-		m.proxyReconcileWG.Wait()
 	}
+	m.proxyRecoveryWG.Wait()
+	m.proxyReconcileWG.Wait()
+
+	m.proxyReconcileMu.Lock()
+	m.proxyReconcileStopping = false
+	if m.proxyReconcileStopDone == done {
+		m.proxyReconcileStopDone = nil
+		close(done)
+	}
+	m.proxyReconcileMu.Unlock()
+}
+
+func (m *Manager) scheduleProxyPoolRecoveryReconcile(proxyURL string, recoverAt time.Time) {
+	if m == nil {
+		return
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return
+	}
+	delay := time.Until(recoverAt)
+	if recoverAt.IsZero() || delay <= 0 {
+		m.enqueueProxyPoolReconcile(context.Background())
+		return
+	}
+
+	m.proxyReconcileMu.Lock()
+	if m.proxyReconcileStopping {
+		m.proxyReconcileMu.Unlock()
+		return
+	}
+	if m.proxyRecoveryTimers == nil {
+		m.proxyRecoveryTimers = make(map[string]*proxyPoolRecoveryTimer)
+	}
+	if current := m.proxyRecoveryTimers[proxyURL]; current != nil {
+		if current.recoverAt.Equal(recoverAt) {
+			m.proxyReconcileMu.Unlock()
+			return
+		}
+		if current.timer != nil && current.timer.Stop() {
+			m.proxyRecoveryWG.Done()
+		}
+	}
+	m.proxyRecoverySequence++
+	sequence := m.proxyRecoverySequence
+	recovery := &proxyPoolRecoveryTimer{recoverAt: recoverAt, sequence: sequence}
+	m.proxyRecoveryWG.Add(1)
+	recovery.timer = time.AfterFunc(delay, func() {
+		defer m.proxyRecoveryWG.Done()
+		m.proxyReconcileMu.Lock()
+		current := m.proxyRecoveryTimers[proxyURL]
+		if m.proxyReconcileStopping || current == nil || current.sequence != sequence {
+			m.proxyReconcileMu.Unlock()
+			return
+		}
+		delete(m.proxyRecoveryTimers, proxyURL)
+		m.proxyReconcileMu.Unlock()
+		m.enqueueProxyPoolReconcile(context.Background())
+	})
+	m.proxyRecoveryTimers[proxyURL] = recovery
+	m.proxyReconcileMu.Unlock()
 }
 
 func (m *Manager) runProxyPoolReconcileLoop(ctx context.Context, wake chan struct{}) {

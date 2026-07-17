@@ -21,6 +21,16 @@ func (m *Manager) applyProxyPoolLease(ctx context.Context, auth *Auth) {
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if !proxyPoolCanAssign(cfg, auth) {
+		// Free Codex accounts must never retain scarce pool capacity. Auth-file
+		// projections do not persist the runtime lease marker, so release by ID
+		// even when this incoming snapshot does not know about its prior lease.
+		if isFreeCodexAuth(auth) {
+			m.releaseProxyLease(ctx, auth.ID)
+			if authProxyPoolAssigned(auth) {
+				clearProxyPoolLease(auth)
+			}
+			return
+		}
 		if authProxyPoolAssigned(auth) {
 			m.releaseProxyLease(ctx, auth.ID)
 			clearProxyPoolLease(auth)
@@ -77,55 +87,53 @@ func (m *Manager) applyProxyPoolLeaseSnapshot(ctx context.Context, cfg *internal
 		log.WithField("auth_id", auth.id).Warnf("proxy-pool: failed to acquire proxy lease: %v", err)
 		return
 	}
-	proxyURL := strings.TrimSpace(lease.ProxyURL)
-	if !ok || proxyURL == "" {
-		if auth.assigned {
-			m.clearRuntimeProxyPoolLease(auth.id)
-		}
-		log.WithField("auth_id", auth.id).Warn("proxy-pool: no available proxy lease")
-		return
-	}
-	var schedulerSnapshot *Auth
-	scheduler := m.scheduler
-	m.mu.Lock()
-	if current := m.auths[auth.id]; current != nil {
-		changed := !authProxyPoolAssigned(current) || strings.TrimSpace(current.ProxyURL) != proxyURL
-		markProxyPoolLease(current, proxyURL)
-		if changed && scheduler != nil {
-			schedulerSnapshot = current.CloneForScheduler()
-		}
-	}
-	m.mu.Unlock()
-	if scheduler != nil && schedulerSnapshot != nil {
-		scheduler.upsertAuth(schedulerSnapshot)
-	}
+	leaseAuthID := strings.TrimSpace(lease.AuthID)
+	valid := ok && strings.TrimSpace(lease.ProxyURL) != "" && (leaseAuthID == "" || leaseAuthID == auth.id)
+	m.applyProxyPoolLeaseSnapshotResult(cfg, auth, lease, valid)
 }
 
-func (m *Manager) applyProxyPoolLeaseSnapshotResult(auth proxyPoolAuthSnapshot, lease ProxyLease, ok bool) {
+func (m *Manager) applyProxyPoolLeaseSnapshotResult(cfg *internalconfig.Config, auth proxyPoolAuthSnapshot, lease ProxyLease, ok bool) {
 	if m == nil {
 		return
 	}
 	proxyURL := strings.TrimSpace(lease.ProxyURL)
-	if !ok || proxyURL == "" {
-		if auth.assigned {
-			m.clearRuntimeProxyPoolLease(auth.id)
-		}
-		log.WithField("auth_id", auth.id).Warn("proxy-pool: no available proxy lease")
-		return
-	}
+	validLease := ok && proxyURL != ""
 	var schedulerSnapshot *Auth
 	scheduler := m.scheduler
+	stale := false
 	m.mu.Lock()
-	if current := m.auths[auth.id]; current != nil {
-		changed := !authProxyPoolAssigned(current) || strings.TrimSpace(current.ProxyURL) != proxyURL
-		markProxyPoolLease(current, proxyURL)
-		if changed && scheduler != nil {
+	current, currentSnapshot := m.currentProxyPoolAuthSnapshotLocked(auth.id)
+	if current == nil || !proxyPoolAuthSnapshotMatches(auth, currentSnapshot) || !m.proxyPoolConfigMatches(cfg) {
+		stale = true
+	} else if validLease {
+		if !proxyPoolCanAssign(cfg, current) || !proxyPoolContainsProxy(cfg, proxyURL) {
+			stale = true
+		} else {
+			changed := !authProxyPoolAssigned(current) || strings.TrimSpace(current.ProxyURL) != proxyURL
+			markProxyPoolLease(current, proxyURL)
+			if changed && scheduler != nil {
+				schedulerSnapshot = current.CloneForScheduler()
+			}
+		}
+	} else if auth.assigned && authProxyPoolAssigned(current) {
+		clearProxyPoolLease(current)
+		if scheduler != nil {
 			schedulerSnapshot = current.CloneForScheduler()
 		}
 	}
 	m.mu.Unlock()
+	if stale {
+		// Redis calls happen outside m.mu. An auth/config update can therefore
+		// supersede this reconcile while it is in flight. Never apply its stale
+		// result; queue a fresh snapshot to repair any backend lease it touched.
+		m.enqueueProxyPoolReconcile(context.Background())
+		return
+	}
 	if scheduler != nil && schedulerSnapshot != nil {
 		scheduler.upsertAuth(schedulerSnapshot)
+	}
+	if !validLease {
+		log.WithField("auth_id", auth.id).Warn("proxy-pool: no available proxy lease")
 	}
 }
 
@@ -201,6 +209,7 @@ func (m *Manager) shouldReleaseProxyLeaseForResult(result Result) bool {
 }
 
 type proxyPoolAuthSnapshot struct {
+	source   *Auth
 	id       string
 	proxyURL string
 	priority int
@@ -208,6 +217,7 @@ type proxyPoolAuthSnapshot struct {
 	assigned bool
 	disabled bool
 	apiKey   bool
+	freePlan bool
 }
 
 func proxyPoolAuthSnapshotFromAuth(auth *Auth) proxyPoolAuthSnapshot {
@@ -215,6 +225,7 @@ func proxyPoolAuthSnapshotFromAuth(auth *Auth) proxyPoolAuthSnapshot {
 		return proxyPoolAuthSnapshot{}
 	}
 	return proxyPoolAuthSnapshot{
+		source:   auth,
 		id:       strings.TrimSpace(auth.ID),
 		proxyURL: strings.TrimSpace(auth.ProxyURL),
 		priority: authPriority(auth),
@@ -222,7 +233,54 @@ func proxyPoolAuthSnapshotFromAuth(auth *Auth) proxyPoolAuthSnapshot {
 		assigned: authProxyPoolAssigned(auth),
 		disabled: auth.Disabled,
 		apiKey:   proxyPoolAuthIsAPIKey(auth),
+		freePlan: isFreeCodexAuth(auth),
 	}
+}
+
+func (m *Manager) currentProxyPoolAuthSnapshotLocked(authID string) (*Auth, proxyPoolAuthSnapshot) {
+	if m == nil {
+		return nil, proxyPoolAuthSnapshot{}
+	}
+	current := m.auths[strings.TrimSpace(authID)]
+	return current, proxyPoolAuthSnapshotFromAuth(current)
+}
+
+func (m *Manager) proxyPoolConfigMatches(expected *internalconfig.Config) bool {
+	if m == nil {
+		return false
+	}
+	current, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	return current == expected
+}
+
+func proxyPoolAuthSnapshotMatches(expected, current proxyPoolAuthSnapshot) bool {
+	if expected.source != nil && current.source != expected.source {
+		return false
+	}
+	return expected.id == current.id &&
+		expected.proxyURL == current.proxyURL &&
+		expected.priority == current.priority &&
+		expected.status == current.status &&
+		expected.assigned == current.assigned &&
+		expected.disabled == current.disabled &&
+		expected.apiKey == current.apiKey &&
+		expected.freePlan == current.freePlan
+}
+
+func proxyPoolContainsProxy(cfg *internalconfig.Config, proxyURL string) bool {
+	if cfg == nil {
+		return false
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return false
+	}
+	for _, candidate := range cfg.ProxyPool.Proxies {
+		if strings.TrimSpace(candidate) == proxyURL {
+			return true
+		}
+	}
+	return false
 }
 
 func proxyPoolAuthIsAPIKey(auth *Auth) bool {
@@ -247,7 +305,7 @@ func proxyPoolCanAssignSnapshot(cfg *internalconfig.Config, auth proxyPoolAuthSn
 	if auth.proxyURL != "" && !auth.assigned {
 		return false
 	}
-	return !auth.apiKey
+	return !auth.apiKey && !auth.freePlan
 }
 
 func proxyPoolSortAuthSnapshots(auths []proxyPoolAuthSnapshot) {
@@ -343,6 +401,7 @@ func (m *Manager) recordProxyPoolResult(ctx context.Context, result Result) {
 		"recover_at": failure.RecoverAt,
 	}).Warn("proxy-pool: proxy entered cooldown after transport failures")
 	m.clearRuntimeProxyPoolLease(result.AuthID)
+	m.scheduleProxyPoolRecoveryReconcile(proxyURL, failure.RecoverAt)
 }
 
 func (m *Manager) proxyPoolAssignedProxyURL(authID string) string {
@@ -486,6 +545,7 @@ func proxyPoolCanAssign(cfg *internalconfig.Config, auth *Auth) bool {
 		assigned: authProxyPoolAssigned(auth),
 		disabled: auth.Disabled,
 		apiKey:   proxyPoolAuthIsAPIKey(auth),
+		freePlan: isFreeCodexAuth(auth),
 	})
 }
 

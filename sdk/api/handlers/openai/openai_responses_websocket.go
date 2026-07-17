@@ -45,6 +45,8 @@ const (
 	maxResponsesWebsocketErrorTimelineBytes = 4 << 10
 	maxResponsesWebsocketInboundBytes       = 64 << 20
 	responsesWebsocketWriteTimeout          = 30 * time.Second
+	responsesWebsocketPingInterval          = 25 * time.Second
+	responsesWebsocketPingWriteTimeout      = 10 * time.Second
 	responsesWebsocketRetryPreludeMaxDelay  = 50 * time.Millisecond
 
 	wsCompactResponseTypeKindOffset = len(`{"type":"response.`)
@@ -245,6 +247,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	log.Infof("responses websocket: client connected id=%s remote=%s", connectionID, clientIP)
 	wsDone := make(chan struct{})
 	defer close(wsDone)
+	go keepResponsesWebsocketAlive(conn, wsDone, responsesWebsocketPingInterval)
 	disconnectMonitor := newResponsesWebsocketDisconnectMonitor(h, conn, wsDone)
 	disconnectSessionID := headerExecutionSessionID
 	if disconnectSessionID == "" {
@@ -572,6 +575,25 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			} else {
 				lastResponseID = ""
 				lastResponseIDIncrementalEligible = false
+			}
+		}
+	}
+}
+
+func keepResponsesWebsocketAlive(conn *websocket.Conn, done <-chan struct{}, interval time.Duration) {
+	if conn == nil || done == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case now := <-ticker.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, now.Add(responsesWebsocketPingWriteTimeout)); err != nil {
+				_ = conn.Close()
+				return
 			}
 		}
 	}

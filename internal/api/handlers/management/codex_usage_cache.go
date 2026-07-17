@@ -211,10 +211,13 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 	if !ok {
 		return nil, 0, fmt.Errorf("codex usage: invalid singleflight result")
 	}
+	// singleflight returns the same result value to every waiter. Give each
+	// caller its own map because response handlers may enrich the payload.
+	payload := cloneGinH(res.payload)
 	if res.err == nil {
-		h.syncCodexUsageQuotaCooldown(ctx, auth, res.payload)
+		h.syncCodexUsageQuotaCooldown(ctx, auth, payload)
 	}
-	return res.payload, res.status, res.err
+	return payload, res.status, res.err
 }
 
 func (h *Handler) loadCodexUsageCache(ctx context.Context, cache *codexUsageCache, key string, now time.Time, allowStale bool) (gin.H, bool, bool) {

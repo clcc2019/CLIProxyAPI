@@ -29,6 +29,62 @@ func TestResponsesWebsocketUpgraderEnablesCompression(t *testing.T) {
 	}
 }
 
+func TestKeepResponsesWebsocketAliveSendsPing(t *testing.T) {
+	accepted := make(chan *websocket.Conn, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			accepted <- conn
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer clientConn.Close()
+
+	var serverConn *websocket.Conn
+	select {
+	case serverConn = <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for server websocket")
+	}
+	defer serverConn.Close()
+
+	pingSeen := make(chan struct{}, 1)
+	clientConn.SetPingHandler(func(appData string) error {
+		select {
+		case pingSeen <- struct{}{}:
+		default:
+		}
+		return clientConn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+	})
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		_, _, _ = clientConn.ReadMessage()
+	}()
+
+	done := make(chan struct{})
+	go keepResponsesWebsocketAlive(serverConn, done, 10*time.Millisecond)
+	select {
+	case <-pingSeen:
+	case <-time.After(time.Second):
+		t.Fatal("downstream websocket heartbeat did not send a ping")
+	}
+	close(done)
+	_ = serverConn.Close()
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("client websocket reader did not stop")
+	}
+}
+
 func TestDefaultWebsocketOriginPort(t *testing.T) {
 	tests := []struct {
 		name   string

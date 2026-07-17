@@ -566,9 +566,16 @@ func (a *Auth) Clone() *Auth {
 	mu := a.ensureRuntimeMu()
 	mu.Lock()
 	defer mu.Unlock()
-	copyAuth := *a
+	// Do not copy the whole struct: runtimeMu is lazily initialized with an
+	// atomic CAS before this lock is acquired, so a concurrent failed CAS can
+	// race with a non-atomic struct copy of that internal pointer.
+	copyAuth := a.cloneSnapshotBase()
+	copyAuth.Storage = a.Storage
+	copyAuth.StatusMessage = a.StatusMessage
+	copyAuth.LastError = cloneError(a.LastError)
+	copyAuth.Success = a.Success
+	copyAuth.Failed = a.Failed
 	copyAuth.recentRequests = cloneRecentRequestRing(a.recentRequests)
-	copyAuth.runtimeMu = nil
 	copyAuth.Attributes = cloneStringMap(a.Attributes)
 	copyAuth.Metadata = cloneAnyMap(a.Metadata)
 	copyAuth.ModelStates = cloneModelStates(a.ModelStates)
@@ -585,9 +592,16 @@ func (a *Auth) CloneShallow() *Auth {
 	mu := a.ensureRuntimeMu()
 	mu.Lock()
 	defer mu.Unlock()
-	copyAuth := *a
-	copyAuth.recentRequests = nil
-	copyAuth.runtimeMu = nil
+	copyAuth := a.cloneSnapshotBase()
+	copyAuth.Storage = a.Storage
+	copyAuth.StatusMessage = a.StatusMessage
+	copyAuth.LastError = a.LastError
+	copyAuth.Success = a.Success
+	copyAuth.Failed = a.Failed
+	copyAuth.Attributes = a.Attributes
+	copyAuth.Metadata = a.Metadata
+	copyAuth.ModelStates = a.ModelStates
+	copyAuth.RateLimits = a.RateLimits
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
 }

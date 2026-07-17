@@ -62,18 +62,25 @@ func TestManager_RefreshAuth_SingleflightByAuthID(t *testing.T) {
 	}
 	manager.RegisterExecutor(executor)
 
-	auth := &Auth{ID: "singleflight-auth", Provider: "test"}
+	auth := &Auth{
+		ID:       "singleflight-auth",
+		Provider: "test",
+		Metadata: map[string]any{"access_token": "token"},
+	}
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
 
+	const callers = 8
+	results := make([]*Auth, callers)
+	errs := make([]error, callers)
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := 0; i < callers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(index int) {
 			defer wg.Done()
-			manager.refreshAuth(context.Background(), auth.ID)
-		}()
+			results[index], errs[index] = manager.refreshAuthShared(context.Background(), auth.ID, false)
+		}(i)
 	}
 
 	waitForRefreshStart(t, executor.started, "singleflight-auth")
@@ -83,6 +90,20 @@ func TestManager_RefreshAuth_SingleflightByAuthID(t *testing.T) {
 
 	if got := executor.calls.Load(); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
+	}
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d error = %v", i, errs[i])
+		}
+		if results[i] == nil {
+			t.Fatalf("caller %d auth = nil", i)
+		}
+	}
+	results[0].Metadata["caller_marker"] = "first"
+	for i := 1; i < callers; i++ {
+		if marker, ok := results[i].Metadata["caller_marker"]; ok {
+			t.Fatalf("caller %d observed another caller's mutation: %#v", i, marker)
+		}
 	}
 }
 

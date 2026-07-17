@@ -31,10 +31,7 @@ func (m *Manager) refreshAuthShared(ctx context.Context, id string, useLimit boo
 	if !ok {
 		return m.authCloneByID(id), nil
 	}
-	if outcome.auth == nil && outcome.err == nil {
-		outcome.auth = m.authCloneByID(id)
-	}
-	return outcome.auth, outcome.err
+	return m.cloneManagerRefreshOutcome(id, outcome)
 }
 
 func (m *Manager) RefreshAuth(ctx context.Context, auth *Auth) (*Auth, error) {
@@ -152,10 +149,19 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 	if !ok {
 		return m.authCloneByID(id), nil
 	}
-	if outcome.auth == nil && outcome.err == nil {
-		outcome.auth = m.authCloneByID(id)
+	return m.cloneManagerRefreshOutcome(id, outcome)
+}
+
+func (m *Manager) cloneManagerRefreshOutcome(id string, outcome managerRefreshOutcome) (*Auth, error) {
+	if outcome.auth != nil {
+		// singleflight shares its result object with every waiter. Preserve the
+		// Manager API's snapshot semantics by returning a caller-owned Auth.
+		return outcome.auth.Clone(), outcome.err
 	}
-	return outcome.auth, outcome.err
+	if outcome.err == nil {
+		return m.authCloneByID(id), nil
+	}
+	return nil, outcome.err
 }
 
 func (m *Manager) authCloneByID(id string) *Auth {

@@ -100,6 +100,97 @@ func BenchmarkNormalizeCodexWebsocketCompletionOutputText(b *testing.B) {
 	}
 }
 
+func TestReadCodexWebsocketPayloadWithSSESharesBackingArray(t *testing.T) {
+	payload, sseLine, err := readCodexWebsocketPayloadWithSSE(strings.NewReader(`{"type":"response.output_text.delta","delta":"hello"}`))
+	if err != nil {
+		t.Fatalf("readCodexWebsocketPayloadWithSSE() error = %v", err)
+	}
+	if got, want := string(payload), `{"type":"response.output_text.delta","delta":"hello"}`; got != want {
+		t.Fatalf("payload = %q, want %q", got, want)
+	}
+	if got, want := string(sseLine), `data: {"type":"response.output_text.delta","delta":"hello"}`; got != want {
+		t.Fatalf("SSE line = %q, want %q", got, want)
+	}
+	if len(payload) == 0 || &payload[0] != &sseLine[len(codexWebsocketSSEPrefix)] {
+		t.Fatal("payload and SSE line do not share a backing array")
+	}
+}
+
+func TestReadCodexWebsocketPayloadWithSSEPreservesLargePayload(t *testing.T) {
+	source := make([]byte, (64<<10)+17)
+	for i := range source {
+		source[i] = byte(i)
+	}
+
+	payload, sseLine, err := readCodexWebsocketPayloadWithSSE(bytes.NewReader(source))
+	if err != nil {
+		t.Fatalf("readCodexWebsocketPayloadWithSSE() error = %v", err)
+	}
+	if !bytes.Equal(payload, source) {
+		t.Fatal("large websocket payload changed while framing")
+	}
+	if !bytes.Equal(sseLine[:len(codexWebsocketSSEPrefix)], codexWebsocketSSEPrefix) ||
+		!bytes.Equal(sseLine[len(codexWebsocketSSEPrefix):], source) {
+		t.Fatal("large SSE frame does not contain the original payload")
+	}
+}
+
+func BenchmarkReadCodexWebsocketPayloadWithSSE(b *testing.B) {
+	source := []byte(`{"type":"response.output_text.delta","sequence_number":42,"delta":"hello"}`)
+	reader := bytes.NewReader(source)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		reader.Reset(source)
+		payload, sseLine, err := readCodexWebsocketPayloadWithSSE(reader)
+		if err != nil || len(payload) == 0 || len(sseLine) == 0 {
+			b.Fatal("unexpected framed websocket payload")
+		}
+	}
+}
+
+func BenchmarkReadCodexWebsocketPayloadThenEncodeSSE(b *testing.B) {
+	source := []byte(`{"type":"response.output_text.delta","sequence_number":42,"delta":"hello"}`)
+	reader := bytes.NewReader(source)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		reader.Reset(source)
+		payload, err := io.ReadAll(reader)
+		if err != nil || len(encodeCodexWebsocketAsSSE(payload)) == 0 {
+			b.Fatal("unexpected websocket payload")
+		}
+	}
+}
+
+func BenchmarkReadCodexWebsocketPayloadSizes(b *testing.B) {
+	for _, size := range []int{64, 1024, 64 << 10, 1 << 20} {
+		source := bytes.Repeat([]byte{'x'}, size)
+		b.Run(fmt.Sprintf("shared_sse/%d", size), func(b *testing.B) {
+			reader := bytes.NewReader(source)
+			b.ReportAllocs()
+			for b.Loop() {
+				reader.Reset(source)
+				payload, sseLine, err := readCodexWebsocketPayloadWithSSE(reader)
+				if err != nil || len(payload) != size || len(sseLine) != size+len(codexWebsocketSSEPrefix) {
+					b.Fatal("unexpected framed websocket payload")
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("read_all_then_encode/%d", size), func(b *testing.B) {
+			reader := bytes.NewReader(source)
+			b.ReportAllocs()
+			for b.Loop() {
+				reader.Reset(source)
+				payload, err := io.ReadAll(reader)
+				if err != nil || len(encodeCodexWebsocketAsSSE(payload)) != size+len(codexWebsocketSSEPrefix) {
+					b.Fatal("unexpected websocket payload")
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkPrepareCodexWebsocketRequest(b *testing.B) {
 	executor := NewCodexWebsocketsExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
@@ -2565,6 +2656,94 @@ func TestEnsureUpstreamConnRedialsRecentlyActiveBrokenConnection(t *testing.T) {
 	}
 }
 
+func TestEnsureUpstreamConnRequiresPongBeforeIdleReuse(t *testing.T) {
+	oldProbeTimeout := codexResponsesWebsocketProbeTimeout
+	codexResponsesWebsocketProbeTimeout = 50 * time.Millisecond
+	defer func() {
+		codexResponsesWebsocketProbeTimeout = oldProbeTimeout
+	}()
+
+	tests := []struct {
+		name            string
+		ignoreFirstPong bool
+		wantReconnected bool
+		wantConnections int32
+	}{
+		{name: "confirmed_pong_reuses_connection", wantConnections: 1},
+		{name: "missing_pong_reconnects", ignoreFirstPong: true, wantReconnected: true, wantConnections: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				upgrader    = websocket.Upgrader{}
+				accepted    atomic.Int32
+				serverMu    sync.Mutex
+				serverConns []*websocket.Conn
+			)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				connectionNumber := accepted.Add(1)
+				serverMu.Lock()
+				serverConns = append(serverConns, conn)
+				serverMu.Unlock()
+				conn.SetPingHandler(func(appData string) error {
+					if tt.ignoreFirstPong && connectionNumber == 1 {
+						return nil
+					}
+					return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+				})
+				for {
+					if _, _, errRead := conn.ReadMessage(); errRead != nil {
+						return
+					}
+				}
+			}))
+			defer server.Close()
+			defer func() {
+				serverMu.Lock()
+				defer serverMu.Unlock()
+				for _, conn := range serverConns {
+					if conn != nil {
+						_ = conn.Close()
+					}
+				}
+			}()
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+			executor := NewCodexWebsocketsExecutor(nil)
+			sess := &codexWebsocketSession{sessionID: "session-idle-probe"}
+			defer closeCodexWebsocketSession(sess, "test_cleanup")
+
+			firstConn, _, err := executor.ensureUpstreamConn(context.Background(), nil, sess, "auth-1", wsURL, http.Header{})
+			if err != nil {
+				t.Fatalf("initial ensureUpstreamConn() error = %v", err)
+			}
+			staleAt := time.Now().Add(-codexResponsesWebsocketProbeIdle - time.Second)
+			sess.lastActivityUnixNano.Store(staleAt.UnixNano())
+			sess.lastProbeUnixNano.Store(staleAt.UnixNano())
+
+			started := time.Now()
+			reusedConn, _, err := executor.ensureUpstreamConn(context.Background(), nil, sess, "auth-1", wsURL, http.Header{})
+			if err != nil {
+				t.Fatalf("idle ensureUpstreamConn() error = %v", err)
+			}
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("idle connection validation took %s", elapsed)
+			}
+			if gotReconnected := reusedConn != firstConn; gotReconnected != tt.wantReconnected {
+				t.Fatalf("reconnected = %v, want %v", gotReconnected, tt.wantReconnected)
+			}
+			if got := accepted.Load(); got != tt.wantConnections {
+				t.Fatalf("accepted connections = %d, want %d", got, tt.wantConnections)
+			}
+		})
+	}
+}
+
 func TestCloseExecutionSessionParksReusableSessionAndReattaches(t *testing.T) {
 	oldTTL := codexResponsesWebsocketParkTTL
 	codexResponsesWebsocketParkTTL = 5 * time.Second
@@ -2589,6 +2768,11 @@ func TestCloseExecutionSessionParksReusableSessionAndReattaches(t *testing.T) {
 		serverMu.Lock()
 		serverConns = append(serverConns, conn)
 		serverMu.Unlock()
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
 	}))
 	defer server.Close()
 	defer func() {
@@ -2624,6 +2808,8 @@ func TestCloseExecutionSessionParksReusableSessionAndReattaches(t *testing.T) {
 	sess1.wsURL = wsURL
 	sess1.authID = "auth-1"
 	sess1.touchActivity()
+	sess1.configureConn(conn)
+	go executor.readUpstreamLoop(sess1, conn)
 
 	executor.CloseExecutionSession("exec-1")
 
@@ -4537,9 +4723,9 @@ func testCodexWebsocketsExecuteRetriesFullRequestWhenPreviousResponseMissing(t *
 func TestReadCodexWebsocketMessageAcceptsNilContext(t *testing.T) {
 	conn := &websocket.Conn{}
 	readCh := make(chan codexWebsocketRead, 1)
-	readCh <- codexWebsocketRead{conn: conn, msgType: websocket.TextMessage, payload: []byte("ok")}
+	readCh <- codexWebsocketRead{conn: conn, msgType: websocket.TextMessage, frame: []byte("data: ok")}
 
-	msgType, payload, err := readCodexWebsocketMessage(nil, &codexWebsocketSession{}, conn, readCh)
+	msgType, payload, _, err := readCodexWebsocketMessage(nil, &codexWebsocketSession{}, conn, readCh)
 	if err != nil {
 		t.Fatalf("readCodexWebsocketMessage() error = %v", err)
 	}
@@ -4670,7 +4856,7 @@ func TestCodexWebsocketsRetryRebindsActiveReadChannel(t *testing.T) {
 		t.Fatalf("retry server WriteJSON() error = %v", err)
 	}
 
-	msgType, responsePayload, err := readCodexWebsocketMessage(ctx, sess, connRetry, readCh)
+	msgType, responsePayload, _, err := readCodexWebsocketMessage(ctx, sess, connRetry, readCh)
 	if err != nil {
 		t.Fatalf("readCodexWebsocketMessage() after retry error = %v", err)
 	}

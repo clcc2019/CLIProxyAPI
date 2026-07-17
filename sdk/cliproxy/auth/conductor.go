@@ -224,11 +224,16 @@ type Manager struct {
 	persistLocks   sync.Map
 
 	// Debounced proxy-pool reconciliation after auth changes.
-	proxyReconcileMu      sync.Mutex
-	proxyReconcileWake    chan struct{}
-	proxyReconcileCancel  context.CancelFunc
-	proxyReconcileWG      sync.WaitGroup
-	proxyReconcilePending bool
+	proxyReconcileMu       sync.Mutex
+	proxyReconcileWake     chan struct{}
+	proxyReconcileCancel   context.CancelFunc
+	proxyReconcileWG       sync.WaitGroup
+	proxyReconcilePending  bool
+	proxyReconcileStopping bool
+	proxyReconcileStopDone chan struct{}
+	proxyRecoveryTimers    map[string]*proxyPoolRecoveryTimer
+	proxyRecoverySequence  uint64
+	proxyRecoveryWG        sync.WaitGroup
 }
 
 type authRemovalTombstone struct {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -43,22 +44,27 @@ const (
 	codexResponsesWebsocketIdleTimeout        = 5 * time.Minute
 	// Rotate before the documented 60 minute upstream connection limit so the
 	// next turn opens a fresh socket instead of discovering the cap mid-chain.
-	codexResponsesWebsocketMaxLifetime  = 55 * time.Minute
-	codexResponsesWebsocketHandshakeTO  = 30 * time.Second
-	codexResponsesWebsocketWriteTO      = 30 * time.Second
-	codexResponsesWebsocketProbeIdle    = 45 * time.Second
-	codexResponsesWebsocketProbeWriteTO = 10 * time.Second
-	codexResponsesWebsocketReadBuffer   = 8
-	codexResponsesWebsocketReadLimit    = 64 << 20
-	codexResponsesWebsocketMaxParked    = 16
-	codexWebsocketHeaderInitialCapacity = 12
-	codexDefaultResponsesHTTPURL        = "https://chatgpt.com/backend-api/codex/responses"
-	codexDefaultResponsesWebsocketURL   = "wss://chatgpt.com/backend-api/codex/responses"
+	codexResponsesWebsocketMaxLifetime    = 55 * time.Minute
+	codexResponsesWebsocketHandshakeTO    = 30 * time.Second
+	codexResponsesWebsocketWriteTO        = 30 * time.Second
+	codexResponsesWebsocketProbeIdle      = 45 * time.Second
+	codexResponsesWebsocketReadBuffer     = 8
+	codexResponsesWebsocketReadLimit      = 64 << 20
+	codexResponsesWebsocketMaxParked      = 16
+	codexWebsocketHeaderInitialCapacity   = 12
+	codexWebsocketSSEFrameInitialCapacity = 512
+	codexDefaultResponsesHTTPURL          = "https://chatgpt.com/backend-api/codex/responses"
+	codexDefaultResponsesWebsocketURL     = "wss://chatgpt.com/backend-api/codex/responses"
 )
 
-var codexResponsesWebsocketParkTTL = 10 * time.Second
+var (
+	codexResponsesWebsocketParkTTL      = 10 * time.Second
+	codexResponsesWebsocketProbeTimeout = 5 * time.Second
+)
 
 var codexWebsocketWriteBufferPool sync.Pool
+
+var codexWebsocketSSEPrefix = []byte("data: ")
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
 //
@@ -104,6 +110,13 @@ type codexWebsocketSession struct {
 	authID string
 
 	writeMu sync.Mutex
+	probeMu sync.Mutex
+	// probePongConn and probePongCh bind pong acknowledgements to the connection
+	// being validated. probeSequence makes every probe payload unique so a
+	// delayed pong from an earlier probe cannot validate a stale socket.
+	probePongConn *websocket.Conn
+	probePongCh   chan string
+	probeSequence atomic.Uint64
 
 	activeMu   sync.Mutex
 	activeCh   chan codexWebsocketRead
@@ -146,7 +159,7 @@ func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
 type codexWebsocketRead struct {
 	conn    *websocket.Conn
 	msgType int
-	payload []byte
+	frame   []byte
 	err     error
 }
 
@@ -421,6 +434,11 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 	if s == nil || conn == nil {
 		return
 	}
+	pongCh := make(chan string, 8)
+	s.probeMu.Lock()
+	s.probePongConn = conn
+	s.probePongCh = pongCh
+	s.probeMu.Unlock()
 	s.touchActivity()
 	conn.SetPingHandler(func(appData string) error {
 		s.touchActivity()
@@ -433,8 +451,12 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 		s.touchActivity()
 		return nil
 	})
-	conn.SetPongHandler(func(string) error {
+	conn.SetPongHandler(func(appData string) error {
 		s.touchActivity()
+		select {
+		case pongCh <- appData:
+		default:
+		}
 		return nil
 	})
 }
@@ -510,22 +532,72 @@ func (s *codexWebsocketSession) shouldProbe(now time.Time) bool {
 	return now.Sub(time.Unix(0, reference)) >= codexResponsesWebsocketProbeIdle
 }
 
-func (s *codexWebsocketSession) probeConn(conn *websocket.Conn) error {
+func (s *codexWebsocketSession) probeConn(ctx context.Context, conn *websocket.Conn) error {
 	if s == nil {
 		return fmt.Errorf("codex websockets executor: session is nil")
 	}
 	if conn == nil {
 		return fmt.Errorf("codex websockets executor: websocket conn is nil")
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	now := time.Now()
-	if err := conn.WriteControl(websocket.PingMessage, nil, now.Add(codexResponsesWebsocketProbeWriteTO)); err != nil {
-		return err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	s.touchActivityAt(now)
-	s.markProbe(now)
-	return nil
+
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	if s.probePongConn != conn || s.probePongCh == nil {
+		return fmt.Errorf("codex websockets executor: websocket pong monitor is unavailable")
+	}
+	pongCh := s.probePongCh
+	for {
+		select {
+		case <-pongCh:
+			continue
+		default:
+		}
+		break
+	}
+
+	timeout := codexResponsesWebsocketProbeTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	now := time.Now()
+	deadline := now.Add(timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if !deadline.After(now) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return context.DeadlineExceeded
+	}
+	probePayload := "cliproxy:" + strconv.FormatUint(s.probeSequence.Add(1), 36)
+	s.writeMu.Lock()
+	errWrite := conn.WriteControl(websocket.PingMessage, []byte(probePayload), deadline)
+	s.writeMu.Unlock()
+	if errWrite != nil {
+		return errWrite
+	}
+
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return fmt.Errorf("codex websockets executor: websocket pong timeout after %s", timeout)
+		case pongPayload := <-pongCh:
+			if pongPayload != probePayload {
+				continue
+			}
+			s.touchActivity()
+			s.markProbe(time.Now())
+			return nil
+		}
+	}
 }
 
 func (s *codexWebsocketSession) notifyUpstreamDisconnect(err error) {
@@ -682,7 +754,7 @@ readLoop:
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
 		}
-		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+		msgType, payload, _, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 		if errRead != nil {
 			mappedErr := mapCodexWebsocketReadError(errRead)
 			if sess != nil && !readRetryUsed && (ctx == nil || ctx.Err() == nil) && !isCodexWebsocketMessageTooBigError(errRead) {
@@ -1004,7 +1076,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, sseLine, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -1058,6 +1130,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				continue
 			}
 
+			messagePayload := payload
 			payload = bytes.TrimSpace(payload)
 			if len(payload) == 0 {
 				continue
@@ -1188,7 +1261,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					}
 				}
 
-				line := encodeCodexWebsocketAsSSE(payload)
+				line := sseLine
+				if len(line) == 0 || !codexSameByteView(payload, messagePayload) {
+					line = encodeCodexWebsocketAsSSE(payload)
+				}
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
 				for i := range chunks {
 					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
@@ -2364,41 +2440,94 @@ func codexStripInternalChatMessageMetadata(item []byte) ([]byte, bool) {
 	return stripped, true
 }
 
-func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
+func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if sess == nil {
 		if conn == nil {
-			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
+			return 0, nil, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
-		msgType, payload, errRead := conn.ReadMessage()
-		return msgType, payload, errRead
+		return readCodexWebsocketFrame(conn)
 	}
 	if conn == nil {
-		return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
+		return 0, nil, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
 	}
 	if readCh == nil {
-		return 0, nil, fmt.Errorf("codex websockets executor: session read channel is nil")
+		return 0, nil, nil, fmt.Errorf("codex websockets executor: session read channel is nil")
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return 0, nil, ctx.Err()
+			return 0, nil, nil, ctx.Err()
 		case ev, ok := <-readCh:
 			if !ok {
-				return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
+				return 0, nil, nil, fmt.Errorf("codex websockets executor: session read channel closed")
 			}
 			if ev.conn != conn {
 				continue
 			}
 			if ev.err != nil {
-				return 0, nil, ev.err
+				return 0, nil, nil, ev.err
 			}
-			return ev.msgType, ev.payload, nil
+			if !bytes.HasPrefix(ev.frame, codexWebsocketSSEPrefix) {
+				return 0, nil, nil, fmt.Errorf("codex websockets executor: invalid framed websocket payload")
+			}
+			return ev.msgType, ev.frame[len(codexWebsocketSSEPrefix):], ev.frame, nil
 		}
 	}
+}
+
+func readCodexWebsocketFrame(conn *websocket.Conn) (int, []byte, []byte, error) {
+	msgType, reader, err := conn.NextReader()
+	if err != nil {
+		return msgType, nil, nil, err
+	}
+	payload, sseLine, err := readCodexWebsocketPayloadWithSSE(reader)
+	return msgType, payload, sseLine, err
+}
+
+// readCodexWebsocketPayloadWithSSE reserves the downstream SSE prefix in the
+// same allocation as the websocket payload. The raw JSON view is used for
+// event processing, while sseLine can be forwarded without copying when the
+// event remains unchanged.
+func readCodexWebsocketPayloadWithSSE(reader io.Reader) ([]byte, []byte, error) {
+	line := make([]byte, len(codexWebsocketSSEPrefix), codexWebsocketSSEFrameInitialCapacity)
+	copy(line, codexWebsocketSSEPrefix)
+	next := 256
+	chunks := make([][]byte, 0, 4)
+	finalSize := 0
+	for {
+		n, err := reader.Read(line[len(line):cap(line)])
+		line = line[:len(line)+n]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			if len(chunks) == 0 {
+				return line[len(codexWebsocketSSEPrefix):], line, err
+			}
+			finalSize += len(line)
+			framed := make([]byte, finalSize)
+			offset := 0
+			for _, chunk := range chunks {
+				offset += copy(framed[offset:], chunk)
+			}
+			copy(framed[offset:], line)
+			return framed[len(codexWebsocketSSEPrefix):], framed, err
+		}
+		if cap(line)-len(line) < cap(line)/16 {
+			chunks = append(chunks, line)
+			finalSize += len(line)
+			line = make([]byte, 0, next)
+			next += next / 2
+		}
+	}
+}
+
+func codexSameByteView(left, right []byte) bool {
+	return len(left) == len(right) && (len(left) == 0 || unsafe.SliceData(left) == unsafe.SliceData(right))
 }
 
 // codexWebsocketDialerCache memoises constructed websocket.Dialer instances by
@@ -2937,7 +3066,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 		// Under steady traffic, per-request pings add measurable overhead without improving
 		// liveness because recent reads/writes already prove the socket is healthy.
 		if sess.shouldProbe(time.Now()) {
-			if errProbe := sess.probeConn(conn); errProbe != nil {
+			if errProbe := sess.probeConn(ctx, conn); errProbe != nil {
 				e.invalidateUpstreamConn(sess, conn, "probe_failed", errProbe)
 				conn = nil
 				readerConn = nil
@@ -2989,7 +3118,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	}
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
-		msgType, payload, errRead := conn.ReadMessage()
+		msgType, _, sseLine, errRead := readCodexWebsocketFrame(conn)
 		if errRead != nil {
 			codexMetrics.wsUpstreamError.Add(1)
 			ch, done, active := sess.activeForConn(conn)
@@ -3045,7 +3174,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			continue
 		}
 		select {
-		case ch <- codexWebsocketRead{conn: conn, msgType: msgType, payload: payload}:
+		case ch <- codexWebsocketRead{conn: conn, msgType: msgType, frame: sseLine}:
 		case <-done:
 		}
 	}

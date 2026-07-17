@@ -1,8 +1,11 @@
 package management
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,6 +163,105 @@ func TestCodexUsageCacheLoadDeepClonesPayload(t *testing.T) {
 	}
 	if got := entry.Payload["labels"].([]string)[0]; got != "cached" {
 		t.Fatalf("cached labels[0] = %#v, want cached", got)
+	}
+}
+
+func TestFetchCodexUsageWithCacheIsolatesSingleflightPayloads(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var upstreamCalls atomic.Int32
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var startedOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRequest) }) }
+	t.Cleanup(release)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		startedOnce.Do(func() { close(requestStarted) })
+		<-releaseRequest
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":3},"rate_limit":null}`))
+	}))
+	t.Cleanup(server.Close)
+	originalURL := codexUsageURL
+	codexUsageURL = server.URL
+	t.Cleanup(func() { codexUsageURL = originalURL })
+
+	h := &Handler{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token": "usage-access-token",
+			"account_id":   "acct_123",
+		},
+	}
+
+	const callers = 16
+	payloads := make([]gin.H, callers)
+	statuses := make([]int, callers)
+	errs := make([]error, callers)
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	var done sync.WaitGroup
+	ready.Add(callers)
+	done.Add(callers)
+	for i := range callers {
+		go func(index int) {
+			defer done.Done()
+			ready.Done()
+			<-start
+			payloads[index], statuses[index], errs[index] = h.fetchCodexUsageWithCache(
+				context.Background(),
+				auth,
+				codexUsageRequestOptions{force: true, ttl: codexUsageCacheDefaultTTL},
+			)
+		}(i)
+	}
+	ready.Wait()
+	close(start)
+	select {
+	case <-requestStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the singleflight leader request")
+	}
+	// Keep the leader in flight long enough for all released goroutines to join
+	// the same request. The call-count assertion below verifies coalescing.
+	time.Sleep(100 * time.Millisecond)
+	release()
+	done.Wait()
+
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1 singleflight request", got)
+	}
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d error = %v", i, errs[i])
+		}
+		if statuses[i] != http.StatusOK {
+			t.Fatalf("caller %d status = %d, want %d", i, statuses[i], http.StatusOK)
+		}
+	}
+
+	payloads[0]["caller_marker"] = "first"
+	firstCredits, ok := codexUsageWindowMap(payloads[0]["rate_limit_reset_credits"])
+	if !ok {
+		t.Fatalf("first caller credits missing: %#v", payloads[0])
+	}
+	firstCredits["available_count"] = float64(0)
+	for i := 1; i < callers; i++ {
+		if marker, exists := payloads[i]["caller_marker"]; exists {
+			t.Fatalf("caller %d observed another caller's top-level mutation: %#v", i, marker)
+		}
+		credits, ok := codexUsageWindowMap(payloads[i]["rate_limit_reset_credits"])
+		if !ok {
+			t.Fatalf("caller %d credits missing: %#v", i, payloads[i])
+		}
+		if got := credits["available_count"]; got != float64(3) {
+			t.Fatalf("caller %d observed another caller's nested mutation: %#v", i, got)
+		}
 	}
 }
 

@@ -7,14 +7,22 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+var (
+	responsesSSEDataTag         = []byte("data:")
+	responsesSSECanonicalPrefix = []byte("data: ")
+)
+
 // ConvertCodexResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
 // to OpenAI Responses SSE events (response.*).
 
 func ConvertCodexResponseToOpenAIResponses(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
-	if bytes.HasPrefix(rawJSON, []byte("data:")) {
+	if bytes.HasPrefix(rawJSON, responsesSSECanonicalPrefix) && len(bytes.TrimSpace(rawJSON)) == len(rawJSON) {
+		return [][]byte{rawJSON}
+	}
+	if bytes.HasPrefix(rawJSON, responsesSSEDataTag) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
-		out := make([]byte, 0, len(rawJSON)+len("data: "))
-		out = append(out, []byte("data: ")...)
+		out := make([]byte, 0, len(rawJSON)+len(responsesSSECanonicalPrefix))
+		out = append(out, responsesSSECanonicalPrefix...)
 		out = append(out, rawJSON...)
 		return [][]byte{out}
 	}

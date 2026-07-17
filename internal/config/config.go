@@ -264,6 +264,8 @@ type RedisConfig struct {
 }
 
 // ProxyPoolConfig controls automatic stable proxy leases for auth-file credentials.
+// Codex Free-plan credentials are excluded so limited proxies remain available
+// to paid plans.
 type ProxyPoolConfig struct {
 	Enabled               bool     `yaml:"enabled" json:"enabled"`
 	StateStore            string   `yaml:"state-store,omitempty" json:"state-store,omitempty"`

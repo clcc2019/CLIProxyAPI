@@ -151,7 +151,11 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if errRuntime := m.persistRuntimeState(ctx, auth); errRuntime != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth runtime state: %v", errRuntime)
 	}
-	if !isRefreshUpdate(ctx) {
+	// Refresh updates normally skip reconciliation because token-only changes do
+	// not affect proxy eligibility. A Codex plan transition to Free is different:
+	// applyProxyPoolLease released its scarce lease above, so wake reconciliation
+	// after the Free snapshot is installed and let the next paid auth take it.
+	if !isRefreshUpdate(ctx) || isFreeCodexAuth(authClone) {
 		m.reconcileProxyPoolLeasesAfterAuthChange(ctx)
 		if current, okCurrent := m.GetByID(auth.ID); okCurrent && current != nil {
 			auth = current
