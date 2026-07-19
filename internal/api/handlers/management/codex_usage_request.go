@@ -133,9 +133,6 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 		return nil, 0, fmt.Errorf("codex access_token missing")
 	}
 	accountID := resolveCodexUsageAccountID(auth, accessToken)
-	if accountID == "" {
-		return nil, 0, fmt.Errorf("codex chatgpt account id missing")
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -293,7 +290,9 @@ func (h *Handler) doCodexUsageRequest(ctx context.Context, client *http.Client, 
 		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("ChatGPT-Account-ID", accountID)
+	if accountID != "" {
+		req.Header.Set("ChatGPT-Account-ID", accountID)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", codexUsageRequestUserAgent(h, auth))
 	if codexUsageFedramp(auth) {

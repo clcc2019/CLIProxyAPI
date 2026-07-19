@@ -796,6 +796,72 @@ func TestGetCodexUsageDerivesAccountIDFromAccessTokenClaims(t *testing.T) {
 	}
 }
 
+func TestGetCodexUsageFreeAccountWithoutAccountID(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if got := r.Header.Get("Authorization"); got != "Bearer free-access-token" {
+			t.Fatalf("Authorization = %q, want bearer access token", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-ID"); got != "" {
+			t.Fatalf("ChatGPT-Account-ID = %q, want empty for free account", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"plan_type": "free",
+			"rate_limit": {
+				"primary_window": {"used_percent": 25, "limit_window_seconds": 18000}
+			}
+		}`))
+	}))
+	t.Cleanup(server.Close)
+	originalURL := codexUsageURL
+	codexUsageURL = server.URL
+	t.Cleanup(func() { codexUsageURL = originalURL })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "free.json",
+		FileName: "free.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "free-access-token",
+			"plan_type":    "free",
+		},
+		Attributes: map[string]string{"path": "/tmp/free.json"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=free.json", nil)
+
+	h.GetCodexUsage(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if !sawRequest {
+		t.Fatal("usage endpoint was not called")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode usage payload: %v", err)
+	}
+	if got := payload["plan_type"]; got != "free" {
+		t.Fatalf("plan_type = %#v, want free", got)
+	}
+	if _, ok := payload["rate_limit"].(map[string]any); !ok {
+		t.Fatalf("rate_limit missing from payload: %#v", payload)
+	}
+}
+
 func TestGetCodexUsageMarksAuthScopedQuotaCooldown(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
