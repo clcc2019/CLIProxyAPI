@@ -906,6 +906,12 @@ func (h *Handler) fetchCodexAccountSubscriptionInfo(ctx context.Context, accessT
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	release, err := h.acquireCodexUpstreamSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	requestCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 

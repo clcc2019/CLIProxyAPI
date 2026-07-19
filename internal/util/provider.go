@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -229,24 +231,39 @@ func RedactSensitiveJSONBytes(data []byte) []byte {
 	if len(trimmed) == 0 {
 		return data
 	}
-	out, ok := redactSensitiveJSONBytes(trimmed)
+	out, changed, ok := redactSensitiveJSONBytes(trimmed)
 	if !ok {
+		return data
+	}
+	if !changed {
 		return data
 	}
 	return out
 }
 
-func redactSensitiveJSONBytes(trimmed []byte) ([]byte, bool) {
+func redactSensitiveJSONBytes(trimmed []byte) ([]byte, bool, bool) {
 	var value any
 	if err := json.Unmarshal(trimmed, &value); err != nil {
-		return nil, false
+		return nil, false, false
 	}
-	redactSensitiveJSONValue(value)
+	changed := false
+	if text, ok := value.(string); ok {
+		redacted := redactSensitiveJSONString(text)
+		if redacted != text {
+			value = redacted
+			changed = true
+		}
+	} else {
+		changed = redactSensitiveJSONValue(value)
+	}
+	if !changed {
+		return trimmed, false, true
+	}
 	out, err := json.Marshal(value)
 	if err != nil || len(out) == 0 {
-		return nil, false
+		return nil, false, false
 	}
-	return out, true
+	return out, true, true
 }
 
 // RedactSensitiveLogBytes masks credential-like JSON fields in plain JSON and
@@ -258,17 +275,357 @@ func RedactSensitiveLogBytes(data []byte) []byte {
 	if len(trimmed) == 0 {
 		return data
 	}
-	if out, ok := redactSensitiveJSONBytes(trimmed); ok {
+	// Most streamed response events contain no credential-shaped keys or text.
+	// Avoid unmarshalling and re-marshalling every JSON/SSE frame when the cheap
+	// ASCII-folded marker scan or the allocation-free string classifier proves
+	// that none of the redaction rules can match.
+	// Unicode escapes and literal runes that lower-case to ASCII can hide an
+	// otherwise visible marker (for example, "\\u0061uth" or "toKen"). Keep
+	// those payloads on the full parser path so the prefilter cannot weaken
+	// redaction.
+	if !mayHideSensitiveASCIIText(trimmed) {
+		hasNonTokenMarker := mayContainNonTokenSensitiveTextBytes(trimmed)
+		hasTokenMarker := asciifold.ContainsBytes(trimmed, "token")
+		if !hasNonTokenMarker && !hasTokenMarker {
+			return data
+		}
+		tokenOnly := hasTokenMarker && !hasNonTokenMarker
+		jsonCandidate := trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"'
+		validJSON := jsonCandidate && json.Valid(trimmed)
+		if validJSON {
+			if jsonContainsNoSensitiveCredentialsValid(trimmed, tokenOnly) {
+				return data
+			}
+		} else if textOrSSEContainsNoSensitiveCredentials(trimmed, tokenOnly) {
+			return data
+		}
+	}
+	if out, changed, ok := redactSensitiveJSONBytes(trimmed); ok {
+		if !changed {
+			return data
+		}
 		return out
 	}
 	return redactSensitivePlainTextBytes(redactSensitiveSSEDataBytes(data))
 }
 
+// mayHideSensitiveASCIIText catches encodings that can evade the raw ASCII
+// marker scan while still matching the Unicode-aware normalization used by the
+// full redactor. Ordinary non-ASCII text (for example CJK output) remains on
+// the fast path when none of its runes lower-case to ASCII.
+func mayHideSensitiveASCIIText(data []byte) bool {
+	for i := 0; i < len(data); {
+		value := data[i]
+		if value == '\\' && i+1 < len(data) && data[i+1] == 'u' {
+			return true
+		}
+		if value < utf8.RuneSelf {
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRune(data[i:])
+		if r == utf8.RuneError && size == 1 {
+			return true
+		}
+		lower := unicode.ToLower(r)
+		if lower >= 'a' && lower <= 'z' {
+			return true
+		}
+		i += size
+	}
+	return false
+}
+
+// jsonContainsNoSensitiveCredentials scans the strings in valid JSON without
+// decoding the value. It returns true only when none of those strings can be
+// changed by the full JSON redactor. Unknown token-shaped keys and escaped
+// marker-bearing strings deliberately return false to retain the conservative
+// parser fallback.
+func jsonContainsNoSensitiveCredentials(data []byte) bool {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return false
+	}
+	if !json.Valid(data) {
+		return false
+	}
+	if mayHideSensitiveASCIIText(data) {
+		return false
+	}
+	hasNonTokenMarker := mayContainNonTokenSensitiveTextBytes(data)
+	hasTokenMarker := asciifold.ContainsBytes(data, "token")
+	if !hasNonTokenMarker && !hasTokenMarker {
+		return true
+	}
+	return jsonContainsNoSensitiveCredentialsValid(data, hasTokenMarker && !hasNonTokenMarker)
+}
+
+func jsonContainsNoSensitiveCredentialsValid(data []byte, tokenOnly bool) bool {
+	for i := 0; i < len(data); i++ {
+		if data[i] != '"' {
+			continue
+		}
+		end := -1
+		escaped := false
+		for j := i + 1; j < len(data); j++ {
+			switch data[j] {
+			case '\\':
+				escaped = true
+				j++
+			case '"':
+				end = j
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			return false
+		}
+		raw := data[i+1 : end]
+		i = end
+		if escaped {
+			return false
+		}
+		if tokenOnly {
+			if !asciifold.ContainsBytes(raw, "token") {
+				continue
+			}
+		} else if !mayContainSensitiveTextBytes(raw) {
+			continue
+		}
+		next := end + 1
+		for next < len(data) && isJSONWhitespace(data[next]) {
+			next++
+		}
+		if next < len(data) && data[next] == ':' {
+			if asciifold.ContainsBytes(raw, "token") {
+				if !benignTokenUsageJSONKey(raw) {
+					return false
+				}
+				continue
+			}
+			if shouldRedactJSONKey(string(raw)) {
+				return false
+			}
+			continue
+		}
+		if plainTextContainsSensitiveCredential(raw) {
+			return false
+		}
+	}
+	return true
+}
+
+// textOrSSEContainsNoSensitiveCredentials extends the JSON classifier to SSE
+// data fields and ordinary text lines. Marker-bearing non-data lines are safe
+// only when none of the plain-text replacement patterns match.
+func textOrSSEContainsNoSensitiveCredentials(data []byte, tokenOnly bool) bool {
+	for len(data) > 0 {
+		line := data
+		if newline := bytes.IndexByte(data, '\n'); newline >= 0 {
+			line = data[:newline]
+			data = data[newline+1:]
+		} else {
+			data = nil
+		}
+		line = bytes.TrimSpace(line)
+		if tokenOnly {
+			if !asciifold.ContainsBytes(line, "token") {
+				continue
+			}
+		} else if !mayContainSensitiveTextBytes(line) {
+			continue
+		}
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			if plainTextContainsSensitiveCredential(line) || plainTextLineMayContinueCredential(line) {
+				return false
+			}
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if !json.Valid(payload) || !jsonContainsNoSensitiveCredentialsValid(payload, tokenOnly) {
+			return false
+		}
+	}
+	return true
+}
+
+// plainTextLineMayContinueCredential recognizes incomplete matches that the
+// full plain-text expressions could legally continue across a newline through
+// their \s* / \s+ segments (for example, "access_token=\nvalue").
+func plainTextLineMayContinueCredential(line []byte) bool {
+	line = bytes.TrimSpace(line)
+	for len(line) > 0 && (line[len(line)-1] == ':' || line[len(line)-1] == '=') {
+		line = bytes.TrimSpace(line[:len(line)-1])
+	}
+	for _, suffix := range plainCredentialContinuationSuffixes {
+		if asciiBytesHasSuffixFold(line, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+var plainCredentialContinuationSuffixes = [...]string{
+	"authorization",
+	"bearer",
+	"basic",
+	"apikey",
+	"api_key",
+	"api-key",
+	"api key",
+	"api_keys",
+	"api-keys",
+	"api keys",
+	"access_token",
+	"access-token",
+	"access token",
+	"accesstoken",
+	"access_tokens",
+	"access-tokens",
+	"access tokens",
+	"accesstokens",
+	"refresh_token",
+	"refresh-token",
+	"refresh token",
+	"refreshtoken",
+	"refresh_tokens",
+	"refresh-tokens",
+	"refresh tokens",
+	"refreshtokens",
+	"id_token",
+	"id-token",
+	"id token",
+	"idtoken",
+	"id_tokens",
+	"id-tokens",
+	"id tokens",
+	"idtokens",
+	"session_token",
+	"session-token",
+	"session token",
+	"sessiontoken",
+	"session_tokens",
+	"session-tokens",
+	"session tokens",
+	"sessiontokens",
+	"bearer_token",
+	"bearer-token",
+	"bearer token",
+	"bearertoken",
+	"bearer_tokens",
+	"bearer-tokens",
+	"bearer tokens",
+	"bearertokens",
+	"client_secret",
+	"client-secret",
+	"client secret",
+	"clientsecret",
+	"client_secrets",
+	"client-secrets",
+	"client secrets",
+	"clientsecrets",
+	"password",
+	"passwords",
+	"passcode",
+	"passcodes",
+	"credential",
+	"credentials",
+}
+
+func benignTokenUsageJSONKey(key []byte) bool {
+	// Keep this as an explicit allowlist. Broadly accepting every *_tokens key
+	// would misclassify credential collections such as access_tokens or
+	// refresh_tokens as usage counters and bypass the full JSON redactor.
+	for _, known := range benignTokenUsageJSONKeys {
+		if asciiBytesEqualFold(key, known) {
+			return true
+		}
+	}
+	return false
+}
+
+var benignTokenUsageJSONKeys = [...]string{
+	"tokens",
+	"token_usage",
+	"input_tokens",
+	"output_tokens",
+	"total_tokens",
+	"prompt_tokens",
+	"completion_tokens",
+	"cached_tokens",
+	"reasoning_tokens",
+	"audio_tokens",
+	"accepted_prediction_tokens",
+	"rejected_prediction_tokens",
+	"cache_creation_input_tokens",
+	"cache_read_input_tokens",
+	"input_tokens_details",
+	"output_tokens_details",
+	"prompt_tokens_details",
+	"completion_tokens_details",
+}
+
+func asciiBytesEqualFold(data []byte, lowerASCII string) bool {
+	if len(data) != len(lowerASCII) {
+		return false
+	}
+	for i := 0; i < len(data); i++ {
+		value := data[i]
+		if value >= 'A' && value <= 'Z' {
+			value += 'a' - 'A'
+		}
+		if value != lowerASCII[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiBytesHasSuffixFold(data []byte, lowerASCII string) bool {
+	if len(data) < len(lowerASCII) {
+		return false
+	}
+	return asciiBytesEqualFold(data[len(data)-len(lowerASCII):], lowerASCII)
+}
+
+func isJSONWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
+}
+
 var (
 	plainAuthorizationCredentialPattern = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:(bearer|basic|apikey)\s+)?([^\s,;]+)`)
 	plainBearerCredentialPattern        = regexp.MustCompile(`(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{8,})`)
-	plainKeyValueCredentialPattern      = regexp.MustCompile(`(?i)\b(api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|session[-_ ]?token|bearer[-_ ]?token|client[-_ ]?secret|password|credential|credentials)\b(\s*[:=]\s*)([^\s&;,]+)`)
+	plainKeyValueCredentialPattern      = regexp.MustCompile(`(?i)\b(api[-_ ]?keys?|access[-_ ]?tokens?|refresh[-_ ]?tokens?|id[-_ ]?tokens?|session[-_ ]?tokens?|bearer[-_ ]?tokens?|client[-_ ]?secrets?|passwords?|passcodes?|credentials?)\b(\s*[:=]\s*)([^\s&;,]+)`)
 )
+
+func plainTextContainsSensitiveCredential(data []byte) bool {
+	if asciifold.ContainsBytes(data, "authorization") && plainAuthorizationCredentialPattern.Match(data) {
+		return true
+	}
+	if (asciifold.ContainsBytes(data, "bearer") || asciifold.ContainsBytes(data, "basic")) &&
+		plainBearerCredentialPattern.Match(data) {
+		return true
+	}
+	if (asciifold.ContainsBytes(data, "api") ||
+		asciifold.ContainsBytes(data, "access") ||
+		asciifold.ContainsBytes(data, "refresh") ||
+		asciifold.ContainsBytes(data, "id_token") ||
+		asciifold.ContainsBytes(data, "id-token") ||
+		asciifold.ContainsBytes(data, "id token") ||
+		asciifold.ContainsBytes(data, "idtoken") ||
+		asciifold.ContainsBytes(data, "session") ||
+		asciifold.ContainsBytes(data, "bearer") ||
+		asciifold.ContainsBytes(data, "secret") ||
+		asciifold.ContainsBytes(data, "password") ||
+		asciifold.ContainsBytes(data, "passcode") ||
+		asciifold.ContainsBytes(data, "credential")) &&
+		plainKeyValueCredentialPattern.Match(data) {
+		return true
+	}
+	return false
+}
 
 func redactSensitivePlainTextBytes(data []byte) []byte {
 	if len(data) == 0 {
@@ -296,29 +653,46 @@ func redactSensitivePlainTextBytes(data []byte) []byte {
 	return redacted
 }
 
-func redactSensitiveJSONValue(value any) {
+func redactSensitiveJSONValue(value any) bool {
+	changed := false
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
 			if shouldRedactJSONKey(key) {
-				typed[key] = "[REDACTED]"
+				if child != "[REDACTED]" {
+					typed[key] = "[REDACTED]"
+					changed = true
+				}
 				continue
 			}
 			if str, ok := child.(string); ok {
-				typed[key] = redactSensitiveJSONString(str)
+				redacted := redactSensitiveJSONString(str)
+				if redacted != str {
+					typed[key] = redacted
+					changed = true
+				}
 				continue
 			}
-			redactSensitiveJSONValue(child)
+			if redactSensitiveJSONValue(child) {
+				changed = true
+			}
 		}
 	case []any:
 		for i, child := range typed {
 			if str, ok := child.(string); ok {
-				typed[i] = redactSensitiveJSONString(str)
+				redacted := redactSensitiveJSONString(str)
+				if redacted != str {
+					typed[i] = redacted
+					changed = true
+				}
 				continue
 			}
-			redactSensitiveJSONValue(child)
+			if redactSensitiveJSONValue(child) {
+				changed = true
+			}
 		}
 	}
+	return changed
 }
 
 func redactSensitiveJSONString(value string) string {
@@ -336,13 +710,14 @@ func redactSensitiveJSONString(value string) string {
 }
 
 var sensitiveTextMarkers = []string{
-	"authorization",
+	"auth",
 	"bearer",
 	"basic",
 	"api",
 	"token",
 	"secret",
 	"password",
+	"passcode",
 	"credential",
 }
 
@@ -365,6 +740,18 @@ func mayContainSensitiveTextBytes(data []byte) bool {
 	return false
 }
 
+func mayContainNonTokenSensitiveTextBytes(data []byte) bool {
+	for _, marker := range sensitiveTextMarkers {
+		if marker == "token" {
+			continue
+		}
+		if asciifold.ContainsBytes(data, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func shouldRedactJSONKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
 	if key == "" {
@@ -376,12 +763,15 @@ func shouldRedactJSONKey(key string) bool {
 	switch normalized {
 	case "authorization", "auth", "auth_token", "access_token", "refresh_token", "id_token",
 		"token", "bearer_token", "session_token", "api_key", "apikey", "x_api_key",
-		"secret", "client_secret", "password", "passcode", "credential", "credentials":
+		"secret", "client_secret", "password", "passcode", "credential", "credentials",
+		"auth_tokens", "access_tokens", "refresh_tokens", "id_tokens", "bearer_tokens",
+		"session_tokens", "api_tokens", "secret_tokens":
 		return true
 	}
 	switch compact {
 	case "authtoken", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "sessiontoken",
-		"apikey", "xapikey", "clientsecret":
+		"apikey", "xapikey", "clientsecret", "authtokens", "accesstokens", "refreshtokens",
+		"idtokens", "bearertokens", "sessiontokens", "apitokens", "secrettokens":
 		return true
 	}
 	return strings.Contains(normalized, "authorization") ||

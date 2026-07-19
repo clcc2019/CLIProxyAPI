@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 var (
@@ -26,6 +28,26 @@ var codexUsageRetryableTransportMarkers = []string{
 	"internal_error",
 	"timeout",
 	"deadline exceeded",
+}
+
+func (h *Handler) codexUsageRequestRetryLimit(auth *coreauth.Auth) int {
+	retry := codexUsageMaxRequestRetries
+	if h != nil {
+		h.mu.RLock()
+		if h.cfg != nil {
+			retry = h.cfg.RequestRetry
+		}
+		h.mu.RUnlock()
+	}
+	if auth != nil {
+		if override, ok := auth.RequestRetryOverride(); ok {
+			retry = override
+		}
+	}
+	if retry < 0 {
+		return 0
+	}
+	return retry
 }
 
 func codexUsageRetryableStatus(status int) bool {

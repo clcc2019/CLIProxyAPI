@@ -75,7 +75,11 @@ func codexTranslateRequestWithOriginal(
 
 	translated = bytes.Clone(payload)
 	if len(original) > 0 {
-		originalTranslated = bytes.Clone(original)
+		// Payload rules and response translators only inspect the original request;
+		// they never mutate it. Keep the owned clone for the body that continues
+		// through normalization, but borrow the caller's immutable original bytes
+		// instead of copying the same native payload a second time.
+		originalTranslated = original
 	}
 	return translated, originalTranslated, true
 }

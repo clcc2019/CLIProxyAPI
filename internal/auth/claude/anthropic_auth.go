@@ -350,7 +350,10 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	if !ok || tokenData == nil {
 		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
 	}
-	return tokenData, nil
+	// singleflight returns the same pointer to every waiter. Return a value copy
+	// so callers cannot race by mutating their refreshed token snapshot.
+	cloned := *tokenData
+	return &cloned, nil
 }
 
 func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*ClaudeTokenData, error) {

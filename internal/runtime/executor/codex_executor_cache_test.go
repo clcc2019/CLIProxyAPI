@@ -553,6 +553,53 @@ func TestCodexExecutorCacheHelper_SameConversationReusesKeyAcrossTurns(t *testin
 	}
 }
 
+func TestCodexExecutorCacheHelper_ContentFallbackIncludesStablePrefix(t *testing.T) {
+	executor := &CodexExecutor{}
+	ctx := ctxWithAPIKey(t, "api-key-prefix")
+
+	base := []byte(`{"model":"gpt-5","instructions":"project A","tools":[{"type":"function","name":"shell"}],"input":[{"role":"user","content":"hello"}]}`)
+	extended := []byte(`{"model":"gpt-5","instructions":"project A","tools":[{"type":"function","name":"shell"}],"input":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"next"}]}`)
+	differentInstructions := []byte(`{"model":"gpt-5","instructions":"project B","tools":[{"type":"function","name":"shell"}],"input":[{"role":"user","content":"hello"}]}`)
+	differentTools := []byte(`{"model":"gpt-5","instructions":"project A","tools":[{"type":"function","name":"search"}],"input":[{"role":"user","content":"hello"}]}`)
+
+	keyBase := assertPromptCacheKey(t, executor, ctx, "openai", cliproxyexecutor.Request{Model: "gpt-5", Payload: base}, base)
+	keyExtended := assertPromptCacheKey(t, executor, ctx, "openai", cliproxyexecutor.Request{Model: "gpt-5", Payload: extended}, extended)
+	keyInstructions := assertPromptCacheKey(t, executor, ctx, "openai", cliproxyexecutor.Request{Model: "gpt-5", Payload: differentInstructions}, differentInstructions)
+	keyTools := assertPromptCacheKey(t, executor, ctx, "openai", cliproxyexecutor.Request{Model: "gpt-5", Payload: differentTools}, differentTools)
+
+	if keyBase == "" || keyBase != keyExtended {
+		t.Fatalf("appending later turns must preserve the stable-prefix key: base=%q extended=%q", keyBase, keyExtended)
+	}
+	if keyBase == keyInstructions {
+		t.Fatalf("different instructions must not share prompt_cache_key: %q", keyBase)
+	}
+	if keyBase == keyTools {
+		t.Fatalf("different tools must not share prompt_cache_key: %q", keyBase)
+	}
+}
+
+func TestCodexExecutorCacheHelper_ContentFallbackIsDeterministicWithoutLocalExpiry(t *testing.T) {
+	executor := &CodexExecutor{}
+	ctx := ctxWithAPIKey(t, "api-key-deterministic")
+	payload := []byte(`{"model":"gpt-5","instructions":"stable","messages":[{"role":"user","content":"` + strings.Repeat("x", codexPromptResolutionMemoMaxPayload+1) + `"}]}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+	resolution1 := executor.resolvePromptCacheResolution(ctx, "openai", "", req)
+	resolution2 := executor.resolvePromptCacheResolution(ctx, "openai", "", req)
+	key1 := resolution1.cache.ID
+	key2 := resolution2.cache.ID
+
+	if key1 == "" || key1 != key2 {
+		t.Fatalf("content fallback must be deterministic: first=%q second=%q", key1, key2)
+	}
+	if !resolution1.cache.Expire.IsZero() || !resolution2.cache.Expire.IsZero() {
+		t.Fatalf("deterministic content fallback must not carry a process-local expiry: first=%v second=%v", resolution1.cache.Expire, resolution2.cache.Expire)
+	}
+	if !strings.HasPrefix(key1, "pc-") || len(key1) > codexPromptCacheKeyMaxLen {
+		t.Fatalf("deterministic prompt_cache_key must be bounded and namespaced: %q", key1)
+	}
+}
+
 func TestCodexExecutorCacheHelper_ConversationIDFieldPreferredOverContent(t *testing.T) {
 	executor := &CodexExecutor{}
 	ctx := ctxWithAPIKey(t, "api-key-field")
@@ -787,6 +834,31 @@ func TestCodexExecutorCacheHelper_ClaudeUserIDBackwardsCompatible(t *testing.T) 
 	}
 }
 
+func TestCodexExecutorCacheHelper_ClaudeCodeSessionUsesDeterministicKey(t *testing.T) {
+	executor := &CodexExecutor{}
+	ctx := ctxWithAPIKey(t, "api-key-claude-code")
+	payload1 := []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"device_id\":\"device-1\",\"account_uuid\":\"account-1\",\"session_id\":\"session-1\"}"},"messages":[{"role":"user","content":"hello"}]}`)
+	payload2 := []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"device_id\":\"device-1\",\"account_uuid\":\"account-1\",\"session_id\":\"session-1\"}"},"messages":[{"role":"user","content":"next"}]}`)
+	payloadOtherSession := []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"device_id\":\"device-1\",\"account_uuid\":\"account-1\",\"session_id\":\"session-2\"}"},"messages":[{"role":"user","content":"hello"}]}`)
+
+	resolution1 := executor.resolvePromptCacheResolution(ctx, "claude", "", cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payload1})
+	resolution2 := executor.resolvePromptCacheResolution(ctx, "claude", "", cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payload2})
+	resolutionOther := executor.resolvePromptCacheResolution(ctx, "claude", "", cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payloadOtherSession})
+
+	if resolution1.cache.ID == "" || resolution1.cache.ID != resolution2.cache.ID {
+		t.Fatalf("same Claude Code session must keep a deterministic key across turns: first=%q second=%q", resolution1.cache.ID, resolution2.cache.ID)
+	}
+	if resolution1.cache.ID == resolutionOther.cache.ID {
+		t.Fatalf("different Claude Code sessions must not share prompt_cache_key: %q", resolution1.cache.ID)
+	}
+	if !resolution1.cache.Expire.IsZero() || !resolution2.cache.Expire.IsZero() {
+		t.Fatalf("Claude Code session key must not carry a process-local expiry: first=%v second=%v", resolution1.cache.Expire, resolution2.cache.Expire)
+	}
+	if !strings.HasPrefix(resolution1.cache.ID, "pc-") || len(resolution1.cache.ID) > codexPromptCacheKeyMaxLen {
+		t.Fatalf("Claude Code prompt_cache_key must be bounded and namespaced: %q", resolution1.cache.ID)
+	}
+}
+
 func TestHashCodexDedupeHeaders_IgnoresTraceAndTimingHeaders(t *testing.T) {
 	left := http.Header{
 		"Content-Type":                          []string{"application/json"},
@@ -932,6 +1004,36 @@ func BenchmarkPrepareCodexHTTPCall(b *testing.B) {
 			true,
 		); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkPrepareCodexHTTPCallAddsPromptCacheKey(b *testing.B) {
+	b.Setenv(codexCompressionEnv, "0")
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
+	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"metadata":{"conversation_id":"cache-1"}}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: body}
+	from := sdktranslator.FromString("openai-response")
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		call, err := executor.prepareCodexHTTPCall(
+			context.Background(),
+			auth,
+			from,
+			"",
+			"https://chatgpt.com/backend-api/codex/responses",
+			req,
+			body,
+			"oauth-token",
+			true,
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if got := gjson.GetBytes(call.prepared.body, "prompt_cache_key").String(); got != "cache-1" {
+			b.Fatalf("prompt_cache_key = %q, want cache-1", got)
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	codexcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
@@ -315,17 +316,23 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
+	capabilities, capabilitiesKnown := codexClientModelCapabilitiesForModel(baseModel)
+	if !capabilitiesKnown {
+		// The official ModelInfo field defaults to true when an older/unknown
+		// catalog entry omits it.
+		capabilities.SupportsReasoningSummaryParameter = true
+	}
 
 	body = codexEnsureFinalUpstreamBodyDefaults(body, baseModel, opts)
 	body = normalizeCodexFinalUpstreamTools(body)
-	body = normalizeCodexFinalUpstreamText(body, baseModel)
+	body = normalizeCodexFinalUpstreamText(body, &capabilities)
 	body = normalizeCodexFinalUpstreamInputItems(body, opts)
 	body = normalizeCodexFinalUpstreamInputItemIDs(body, opts)
 	body = normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body, auth)
-	body = normalizeCodexFinalUpstreamModelControls(body, baseModel)
+	body = normalizeCodexFinalUpstreamModelControls(body, baseModel, &capabilities)
 	body = normalizeCodexFinalUpstreamStreamOptions(body, opts)
-	body = normalizeCodexFinalUpstreamToolOutputImageDetail(body, baseModel)
-	body = normalizeCodexFinalUpstreamServiceTier(body, baseModel, opts)
+	body = normalizeCodexFinalUpstreamToolOutputImageDetail(body, &capabilities, capabilitiesKnown)
+	body = normalizeCodexFinalUpstreamServiceTier(body, &capabilities, capabilitiesKnown, opts)
 
 	// Resolve all four inspected fields in a single payload traversal so
 	// downstream branches can reuse the decoded Result values rather than
@@ -395,7 +402,9 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	if len(edits) > 0 {
 		body = helps.EditJSONBytes(body, edits...)
 	}
-	body = normalizeCodexFinalUpstreamResponsesLite(body, baseModel)
+	if capabilitiesKnown {
+		body = normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, capabilities)
+	}
 	body = pruneCodexFinalUpstreamBody(body, opts)
 	body = codexEnsureResponsesContextField(body, opts.requestKind)
 	body = codexEnsureReasoningEncryptedContentInclude(body, opts)
@@ -436,25 +445,25 @@ func codexResponsesContextFieldExists(body []byte) bool {
 	return false
 }
 
-func normalizeCodexFinalUpstreamText(body []byte, baseModel string) []byte {
+func normalizeCodexFinalUpstreamText(body []byte, capabilities *registry.CodexClientModelCapabilities) []byte {
 	format := gjson.GetBytes(body, "text.format")
 	if !format.IsObject() {
-		return normalizeCodexFinalUpstreamTextVerbosity(body, baseModel)
+		return normalizeCodexFinalUpstreamTextVerbosity(body, capabilities)
 	}
 	formatType := format.Get("type")
 	if formatType.Type != gjson.String || strings.TrimSpace(formatType.String()) != "json_schema" {
-		return normalizeCodexFinalUpstreamTextVerbosity(body, baseModel)
+		return normalizeCodexFinalUpstreamTextVerbosity(body, capabilities)
 	}
 	schema := format.Get("schema")
 	if !schema.Exists() || schema.Type == gjson.Null {
-		return normalizeCodexFinalUpstreamTextVerbosity(body, baseModel)
+		return normalizeCodexFinalUpstreamTextVerbosity(body, capabilities)
 	}
 	name := format.Get("name")
 	if name.Type == gjson.String && strings.TrimSpace(name.String()) != "" {
-		return normalizeCodexFinalUpstreamTextVerbosity(body, baseModel)
+		return normalizeCodexFinalUpstreamTextVerbosity(body, capabilities)
 	}
 	body = helps.EditJSONBytes(body, helps.SetJSONEdit("text.format.name", codexDefaultOutputSchemaTextFormatName))
-	return normalizeCodexFinalUpstreamTextVerbosity(body, baseModel)
+	return normalizeCodexFinalUpstreamTextVerbosity(body, capabilities)
 }
 
 func normalizeCodexFinalUpstreamInputItems(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
@@ -555,20 +564,16 @@ func codexPreservesInputItemPassthroughMetadata(auth *cliproxyauth.Auth) bool {
 	}
 }
 
-func normalizeCodexFinalUpstreamModelControls(body []byte, baseModel string) []byte {
-	capabilities, ok := codexClientModelCapabilitiesForModel(baseModel)
-	if !ok {
-		// The official ModelInfo field defaults to true when an older/unknown
-		// catalog entry omits it.
-		capabilities.SupportsReasoningSummaryParameter = true
-	}
-	body = normalizeCodexFinalUpstreamReasoning(body, capabilities)
+func normalizeCodexFinalUpstreamModelControls(body []byte, baseModel string, capabilities *registry.CodexClientModelCapabilities) []byte {
+	requestedEffort := gjson.GetBytes(body, "reasoning.effort")
+	preserveRequestedEffort := strings.EqualFold(strings.TrimSpace(baseModel), "gpt-5.6-sol") &&
+		requestedEffort.Type == gjson.String && strings.TrimSpace(requestedEffort.String()) != ""
+	body = normalizeCodexFinalUpstreamReasoning(body, capabilities, preserveRequestedEffort)
 	return normalizeCodexFinalUpstreamReasoningEffortForModel(body, baseModel)
 }
 
-func normalizeCodexFinalUpstreamToolOutputImageDetail(body []byte, baseModel string) []byte {
-	capabilities, ok := codexClientModelCapabilitiesForModel(baseModel)
-	if !ok || capabilities.SupportsImageDetailOriginal {
+func normalizeCodexFinalUpstreamToolOutputImageDetail(body []byte, capabilities *registry.CodexClientModelCapabilities, capabilitiesKnown bool) []byte {
+	if !capabilitiesKnown || capabilities.SupportsImageDetailOriginal {
 		return body
 	}
 	input := gjson.GetBytes(body, "input")
@@ -637,7 +642,7 @@ func codexSanitizeOriginalInputImageDetail(value any) bool {
 	return changed
 }
 
-func normalizeCodexFinalUpstreamServiceTier(body []byte, baseModel string, opts codexFinalUpstreamBodyOptions) []byte {
+func normalizeCodexFinalUpstreamServiceTier(body []byte, capabilities *registry.CodexClientModelCapabilities, capabilitiesKnown bool, opts codexFinalUpstreamBodyOptions) []byte {
 	serviceTier := gjson.GetBytes(body, "service_tier")
 	if !serviceTier.Exists() {
 		return body
@@ -651,7 +656,7 @@ func normalizeCodexFinalUpstreamServiceTier(body []byte, baseModel string, opts 
 		return helps.EditJSONBytes(body, helps.DeleteJSONEdit("service_tier"))
 	}
 
-	if capabilities, ok := codexClientModelCapabilitiesForModel(baseModel); ok && !codexClientModelSupportsServiceTier(capabilities, value) {
+	if capabilitiesKnown && !codexClientModelSupportsServiceTier(capabilities, value) {
 		return helps.EditJSONBytes(body, helps.DeleteJSONEdit("service_tier"))
 	}
 
@@ -675,7 +680,7 @@ func codexServiceTierRequestValue(value string) string {
 	}
 }
 
-func codexClientModelSupportsServiceTier(capabilities registry.CodexClientModelCapabilities, serviceTier string) bool {
+func codexClientModelSupportsServiceTier(capabilities *registry.CodexClientModelCapabilities, serviceTier string) bool {
 	serviceTier = strings.TrimSpace(serviceTier)
 	if serviceTier == "" {
 		return false
@@ -688,7 +693,7 @@ func codexClientModelSupportsServiceTier(capabilities registry.CodexClientModelC
 	return false
 }
 
-func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.CodexClientModelCapabilities) []byte {
+func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities *registry.CodexClientModelCapabilities, preserveExplicitEffort bool) []byte {
 	reasoning := gjson.GetBytes(body, "reasoning")
 	defaultReasoningLevel := strings.TrimSpace(capabilities.DefaultReasoningLevel)
 	if !reasoning.Exists() || reasoning.Type == gjson.Null || !reasoning.IsObject() {
@@ -704,10 +709,11 @@ func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities registry.Cod
 		edits = append(edits, helps.DeleteJSONEdit("reasoning.summary"))
 	}
 	effort := reasoning.Get("effort")
-	if defaultReasoningLevel != "" && (!effort.Exists() || effort.Type == gjson.Null || (effort.Type == gjson.String && strings.TrimSpace(effort.String()) == "")) {
+	effortBlank := effort.Type == gjson.String && strings.TrimSpace(effort.String()) == ""
+	if defaultReasoningLevel != "" && (!effort.Exists() || effort.Type == gjson.Null || effortBlank) {
 		edits = append(edits, helps.SetJSONEdit("reasoning.effort", codexReasoningEffortForRequest(defaultReasoningLevel)))
 	}
-	if effort.Type == gjson.String {
+	if effort.Type == gjson.String && !effortBlank && !preserveExplicitEffort {
 		requestEffort := codexReasoningEffortForRequest(effort.String())
 		if requestEffort != effort.String() {
 			edits = append(edits, helps.SetJSONEdit("reasoning.effort", requestEffort))
@@ -727,22 +733,10 @@ func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel s
 
 	model := strings.TrimSpace(baseModel)
 	effortValue := strings.TrimSpace(effort.String())
-	if strings.EqualFold(model, "gpt-5.6-sol") && isCodexReasoningEffortAboveHigh(effortValue) {
-		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
-	}
 	if strings.EqualFold(model, "gpt-5.5") && strings.EqualFold(effortValue, "xhigh") {
 		return helps.EditJSONBytes(body, helps.SetJSONEdit("reasoning.effort", "high"))
 	}
 	return body
-}
-
-func isCodexReasoningEffortAboveHigh(effort string) bool {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "xhigh", "max", "ultra":
-		return true
-	default:
-		return false
-	}
 }
 
 func codexReasoningEffortForRequest(effort string) string {
@@ -753,8 +747,7 @@ func codexReasoningEffortForRequest(effort string) string {
 	return effort
 }
 
-func normalizeCodexFinalUpstreamTextVerbosity(body []byte, baseModel string) []byte {
-	capabilities, _ := codexClientModelCapabilitiesForModel(baseModel)
+func normalizeCodexFinalUpstreamTextVerbosity(body []byte, capabilities *registry.CodexClientModelCapabilities) []byte {
 	verbosity := gjson.GetBytes(body, "text.verbosity")
 	if !capabilities.SupportsVerbosity {
 		if !verbosity.Exists() {
@@ -774,14 +767,6 @@ func normalizeCodexFinalUpstreamTextVerbosity(body []byte, baseModel string) []b
 		return helps.EditJSONBytes(body, helps.SetJSONEdit("text.verbosity", defaultVerbosity))
 	}
 	return body
-}
-
-func normalizeCodexFinalUpstreamResponsesLite(body []byte, baseModel string) []byte {
-	capabilities, ok := codexClientModelCapabilitiesForModel(baseModel)
-	if !ok || !capabilities.UseResponsesLite {
-		return body
-	}
-	return normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, capabilities)
 }
 
 func normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body []byte, capabilities registry.CodexClientModelCapabilities) []byte {
@@ -1418,9 +1403,7 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 		if name == "" {
 			return []byte(`"auto"`), true
 		}
-		raw := []byte(`{"type":"function"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("function", name), true
 	case codexIsFinalUpstreamWebSearchToolType(choiceType):
 		return []byte(`{"type":"web_search"}`), true
 	case strings.EqualFold(choiceType, "image_generation"):
@@ -1433,9 +1416,7 @@ func normalizeCodexFinalUpstreamToolChoice(toolChoice gjson.Result) ([]byte, boo
 		if name == "" {
 			return []byte(`"auto"`), true
 		}
-		raw := []byte(`{"type":"custom"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("custom", name), true
 	case strings.EqualFold(choiceType, "allowed_tools"):
 		return normalizeCodexFinalUpstreamAllowedToolsChoice(toolChoice), true
 	default:
@@ -1458,21 +1439,30 @@ func normalizeCodexFinalUpstreamAllowedToolsChoice(toolChoice gjson.Result) []by
 		rawTools = normalizeCodexFinalUpstreamAllowedToolRefsArray(tools)
 	}
 
-	raw := []byte(`{"type":"allowed_tools"}`)
-	raw, _ = helps.SetJSONBytes(raw, "mode", mode)
-	raw, _ = helps.SetRawJSONBytes(raw, "tools", rawTools)
+	raw := make([]byte, 0, len(rawTools)+64)
+	raw = append(raw, `{"type":"allowed_tools","mode":`...)
+	raw = util.AppendJSONString(raw, mode)
+	raw = append(raw, `,"tools":`...)
+	raw = append(raw, rawTools...)
+	raw = append(raw, '}')
 	return raw
 }
 
 func normalizeCodexFinalUpstreamAllowedToolRefsArray(tools gjson.Result) []byte {
-	items := make([][]byte, 0)
+	raw := make([]byte, 0, len(tools.Raw))
+	raw = append(raw, '[')
+	first := true
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if rawTool, keep := normalizeCodexFinalUpstreamAllowedToolRef(tool); keep {
-			items = append(items, rawTool)
+			if !first {
+				raw = append(raw, ',')
+			}
+			raw = append(raw, rawTool...)
+			first = false
 		}
 		return true
 	})
-	return codexRawJSONArray(items)
+	return append(raw, ']')
 }
 
 func normalizeCodexFinalUpstreamAllowedToolRef(tool gjson.Result) ([]byte, bool) {
@@ -1489,9 +1479,7 @@ func normalizeCodexFinalUpstreamAllowedToolRef(tool gjson.Result) ([]byte, bool)
 		if name == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"function"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("function", name), true
 	}
 
 	switch toolType {
@@ -1509,41 +1497,55 @@ func normalizeCodexFinalUpstreamAllowedToolRef(tool gjson.Result) ([]byte, bool)
 		if name == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"custom"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("custom", name), true
 	case "mcp":
 		serverLabel := strings.TrimSpace(tool.Get("server_label").String())
 		if serverLabel == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"mcp"}`)
-		raw, _ = helps.SetJSONBytes(raw, "server_label", serverLabel)
-		if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
-			raw, _ = helps.SetJSONBytes(raw, "name", name)
-		}
-		return raw, true
+		return codexRawMCPToolObject(serverLabel, strings.TrimSpace(tool.Get("name").String())), true
 	case "namespace":
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"namespace"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("namespace", name), true
 	case "file_search", "computer", "computer_use", "computer_use_preview", "code_interpreter", "shell", "apply_patch":
-		raw := []byte(`{}`)
-		raw, _ = helps.SetJSONBytes(raw, "type", toolType)
-		return raw, true
+		return codexRawToolObject(toolType), true
 	default:
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {
 			return nil, false
 		}
-		raw := []byte(`{"type":"function"}`)
-		raw, _ = helps.SetJSONBytes(raw, "name", name)
-		return raw, true
+		return codexRawNamedToolObject("function", name), true
 	}
+}
+
+func codexRawToolObject(toolType string) []byte {
+	raw := make([]byte, 0, len(toolType)+12)
+	raw = append(raw, `{"type":`...)
+	raw = util.AppendJSONString(raw, toolType)
+	return append(raw, '}')
+}
+
+func codexRawNamedToolObject(toolType, name string) []byte {
+	raw := make([]byte, 0, len(toolType)+len(name)+24)
+	raw = append(raw, `{"type":`...)
+	raw = util.AppendJSONString(raw, toolType)
+	raw = append(raw, `,"name":`...)
+	raw = util.AppendJSONString(raw, name)
+	return append(raw, '}')
+}
+
+func codexRawMCPToolObject(serverLabel, name string) []byte {
+	raw := make([]byte, 0, len(serverLabel)+len(name)+40)
+	raw = append(raw, `{"type":"mcp","server_label":`...)
+	raw = util.AppendJSONString(raw, serverLabel)
+	if name != "" {
+		raw = append(raw, `,"name":`...)
+		raw = util.AppendJSONString(raw, name)
+	}
+	return append(raw, '}')
 }
 
 func normalizeCodexFinalUpstreamToolType(toolType string) string {

@@ -145,6 +145,63 @@ func TestCodexApplyHTTPClientMetadataIncludesOfficialIdentityProjection(t *testi
 	assertMetadata("keep", "value")
 }
 
+func TestCodexApplyHTTPClientMetadataAndPromptCacheKeyCombinedFastPath(t *testing.T) {
+	body := []byte("{\"model\":\"gpt-5-codex\",\"input\":[]}\n")
+	headers := http.Header{}
+	headers.Set(codexHeaderInstallationID, "install-1")
+
+	got := codexApplyHTTPClientMetadataWithSourceAndPromptCacheKey(body, headers, nil, nil, nil, `cache-\"one`)
+
+	if !gjson.ValidBytes(got) {
+		t.Fatalf("combined body is invalid JSON: %s", got)
+	}
+	if value := gjson.GetBytes(got, "prompt_cache_key").String(); value != `cache-\"one` {
+		t.Fatalf("prompt_cache_key = %q, want %q; body=%s", value, `cache-\"one`, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); value != "install-1" {
+		t.Fatalf("client_metadata.x-codex-installation-id = %q, want install-1; body=%s", value, got)
+	}
+	if !bytes.HasSuffix(got, []byte("\n")) {
+		t.Fatalf("combined fast path dropped trailing whitespace: %q", got)
+	}
+	if string(body) != "{\"model\":\"gpt-5-codex\",\"input\":[]}\n" {
+		t.Fatalf("combined fast path mutated input: %q", body)
+	}
+}
+
+func TestCodexApplyHTTPClientMetadataAndPromptCacheKeyFallsBackForExistingFields(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[],"prompt_cache_key":"old-cache","client_metadata":{"keep":"value"}}`)
+	headers := http.Header{}
+	headers.Set(codexHeaderInstallationID, "install-2")
+
+	got := codexApplyHTTPClientMetadataWithSourceAndPromptCacheKey(body, headers, nil, nil, nil, "new-cache")
+
+	if value := gjson.GetBytes(got, "prompt_cache_key").String(); value != "new-cache" {
+		t.Fatalf("prompt_cache_key = %q, want new-cache; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.keep").String(); value != "value" {
+		t.Fatalf("client_metadata.keep = %q, want value; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); value != "install-2" {
+		t.Fatalf("client_metadata.x-codex-installation-id = %q, want install-2; body=%s", value, got)
+	}
+}
+
+func TestCodexApplyHTTPClientMetadataAndPromptCacheKeyKeepsMatchingExistingKey(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[],"prompt_cache_key":"cache-1"}`)
+	headers := http.Header{}
+	headers.Set(codexHeaderInstallationID, "install-3")
+
+	got := codexApplyHTTPClientMetadataWithSourceAndPromptCacheKey(body, headers, nil, nil, nil, "cache-1")
+
+	if value := gjson.GetBytes(got, "prompt_cache_key").String(); value != "cache-1" {
+		t.Fatalf("prompt_cache_key = %q, want cache-1; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); value != "install-3" {
+		t.Fatalf("client_metadata.x-codex-installation-id = %q, want install-3; body=%s", value, got)
+	}
+}
+
 func TestCodexAppendJSONStringEscapesJSONStrings(t *testing.T) {
 	for _, value := range []string{
 		"plain-ascii",
@@ -376,6 +433,21 @@ func TestCodexSetClientMetadataNormalizesEntriesOnce(t *testing.T) {
 	}
 	if gjson.GetBytes(got, "client_metadata.empty").Exists() {
 		t.Fatalf("empty metadata entry should be omitted; body=%s", got)
+	}
+}
+
+func TestCodexSetClientMetadataRecognizesEscapedFieldName(t *testing.T) {
+	body := []byte(`{"client\u005fmetadata":{"keep":"value"}}`)
+	got := codexSetClientMetadata(body, []codexClientMetadataEntry{{key: "added", value: "new"}}, true)
+
+	if value := gjson.GetBytes(got, "client_metadata.keep").String(); value != "value" {
+		t.Fatalf("existing escaped client_metadata value = %q, want value; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.added").String(); value != "new" {
+		t.Fatalf("added client_metadata value = %q, want new; body=%s", value, got)
+	}
+	if bytes.Contains(got, []byte(`,"client_metadata":`)) {
+		t.Fatalf("escaped client_metadata key was duplicated; body=%s", got)
 	}
 }
 

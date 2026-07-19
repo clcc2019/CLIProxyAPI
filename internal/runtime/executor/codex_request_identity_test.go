@@ -1,10 +1,86 @@
 package executor
 
 import (
+	"net/http"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestCodexSetPairedSingleHeaderValuesKeepsSlicesIndependent(t *testing.T) {
+	headers := http.Header{}
+	codexSetPairedSingleHeaderValues(headers, "First", "one", "Second", "two")
+
+	headers["First"] = append(headers["First"], "extra")
+	if got := headers.Get("Second"); got != "two" {
+		t.Fatalf("Second = %q after appending First, want two", got)
+	}
+	if got := len(headers["Second"]); got != 1 {
+		t.Fatalf("len(Second) = %d, want 1", got)
+	}
+}
+
+func TestCodexSetTripleSingleHeaderValuesKeepsSlicesIndependent(t *testing.T) {
+	headers := http.Header{}
+	codexSetTripleSingleHeaderValues(headers, "First", "one", "Second", "two", "Third", "three")
+
+	headers["Second"] = append(headers["Second"], "extra")
+	if got := headers.Get("First"); got != "one" {
+		t.Fatalf("First = %q after appending Second, want one", got)
+	}
+	if got := headers.Get("Third"); got != "three" {
+		t.Fatalf("Third = %q after appending Second, want three", got)
+	}
+}
+
+func TestCodexSetSessionIdentityHeadersKeepsSlicesIndependent(t *testing.T) {
+	headers := http.Header{}
+	codexSetSessionIdentityHeaders(headers, "session-1", "thread-1", "request-1")
+
+	headers[codexHeaderOfficialSessionID] = append(headers[codexHeaderOfficialSessionID], "extra")
+	for key, want := range map[string]string{
+		codexHeaderSessionID:         "session-1",
+		codexHeaderThreadID:          "thread-1",
+		codexHeaderOfficialSessionID: "session-1",
+		codexHeaderOfficialThreadID:  "thread-1",
+		"X-Client-Request-Id":        "request-1",
+	} {
+		if got := headers.Get(key); got != want {
+			t.Fatalf("%s = %q after appending another header, want %q", key, got, want)
+		}
+	}
+}
+
+func TestCodexSetSessionIdentityHeadersUpdatesExistingValues(t *testing.T) {
+	headers := http.Header{
+		codexHeaderSessionID:  {"old-session", "extra"},
+		"X-Client-Request-Id": {"old-request", "extra"},
+	}
+	codexSetSessionIdentityHeaders(headers, "session-2", "thread-2", "request-2")
+
+	for key, want := range map[string]string{
+		codexHeaderSessionID:         "session-2",
+		codexHeaderThreadID:          "thread-2",
+		codexHeaderOfficialSessionID: "session-2",
+		codexHeaderOfficialThreadID:  "thread-2",
+		"X-Client-Request-Id":        "request-2",
+	} {
+		if got := headers.Values(key); len(got) != 1 || got[0] != want {
+			t.Fatalf("%s = %q, want [%q]", key, got, want)
+		}
+	}
+}
+
+var codexSessionIdentityHeadersBenchmarkSink http.Header
+
+func BenchmarkCodexSetSessionIdentityHeadersBatched(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		headers := http.Header{}
+		codexSetSessionIdentityHeaders(headers, "session-1", "thread-1", "request-1")
+		codexSessionIdentityHeadersBenchmarkSink = headers
+	}
+}
 
 func TestCodexIsAPIKeyAuthTreatsMirroredAccessTokenAsOAuth(t *testing.T) {
 	auth := &cliproxyauth.Auth{

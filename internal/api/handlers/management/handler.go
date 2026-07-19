@@ -60,6 +60,11 @@ type Handler struct {
 	// and keeps a brief stale copy for transient ChatGPT backend 5xx spikes.
 	// Lazily allocated under h.mu by codexUsageHandlerCache.
 	codexUsageCache *codexUsageCache
+	// codexUpstreamSlots bounds aggregate management traffic to ChatGPT's
+	// usage and account endpoints. The web UI may refresh many credentials at
+	// once, so leaving this unbounded amplifies one click into a proxy burst.
+	// Lazily allocated under h.mu by acquireCodexUpstreamSlot.
+	codexUpstreamSlots chan struct{}
 
 	// Codex quota maintenance periodically refreshes /wham/usage and primes a
 	// pristine 5-hour window with one minimal client-shaped request.

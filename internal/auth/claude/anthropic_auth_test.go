@@ -108,6 +108,7 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 	close(release)
 
+	tokenResults := make([]*ClaudeTokenData, 0, 2)
 	for i := 0; i < 2; i++ {
 		if err := <-errs; err != nil {
 			t.Fatalf("expected refresh to succeed, got %v", err)
@@ -116,8 +117,13 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 		if td == nil || td.AccessToken != "new-access" {
 			t.Fatalf("expected refreshed access token, got %#v", td)
 		}
+		tokenResults = append(tokenResults, td)
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected exactly 1 upstream refresh call, got %d", got)
+	}
+	tokenResults[0].AccessToken = "caller-mutation"
+	if got := tokenResults[1].AccessToken; got != "new-access" {
+		t.Fatalf("second caller observed shared token mutation: %q", got)
 	}
 }

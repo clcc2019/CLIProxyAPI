@@ -127,17 +127,19 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, finalOpts)
 	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
-	prepared, err := e.prepareCodexRequestWithKindBody(ctx, from, executionSessionID, url, requestKind, req, body, requestKind == codexFinalUpstreamCompact)
+	prepared, err := e.prepareCodexRequestWithKindBodyOptions(ctx, from, executionSessionID, url, requestKind, req, body, codexPrepareRequestBodyOptions{
+		attachBody:          requestKind == codexFinalUpstreamCompact,
+		deferPromptCacheKey: requestKind != codexFinalUpstreamCompact,
+	})
 	if err != nil {
 		return codexPreparedHTTPCall{}, err
 	}
-	applyCodexHeadersForRequestKind(prepared.httpReq, auth, token, stream, e.cfg, requestKind)
-	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
+	profileHeaders := applyCodexHeadersForRequestKindWithGinHeaders(prepared.httpReq, auth, token, stream, e.cfg, requestKind, ginHeaders)
 	codexApplyModelHeaderOverrides(prepared.httpReq.Header, baseModel)
 	codexApplyResponsesLiteHeader(prepared.httpReq.Header, baseModel)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)
 	if requestKind != codexFinalUpstreamCompact {
-		prepared.body = codexApplyHTTPClientMetadataWithSource(prepared.body, prepared.httpReq.Header, profileHeaders, auth, e.cfg)
+		prepared.body = codexApplyHTTPClientMetadataWithSourceAndPromptCacheKey(prepared.body, prepared.httpReq.Header, profileHeaders, auth, e.cfg, prepared.promptCacheID)
 		codexResetRequestBody(prepared.httpReq, prepared.body)
 		e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
 	}

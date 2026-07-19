@@ -9,6 +9,8 @@ import (
 
 const codexUsageLimitHeadsUpText = "⚠ Heads up, you have less than 10% of your 5h limit left. Run /status for a breakdown."
 
+var codexUsageWarningStreamEventsBenchmarkSink []codexUsageWarningStreamEvent
+
 func TestCodexShouldSuppressUsageWarningEvent(t *testing.T) {
 	payload := []byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + codexUsageLimitHeadsUpText + `"}]},"output_index":1}`)
 
@@ -54,6 +56,14 @@ func TestCodexUsageWarningStreamFilterDropsSplitUsageWarning(t *testing.T) {
 		if got := filter.Filter(codexEventOutputTextDelta, payload); len(got) != 0 {
 			t.Fatalf("split usage warning event was forwarded: %#v", got)
 		}
+	}
+}
+
+func TestCodexUsageWarningStreamFilterDropsEscapedSplitUsageWarning(t *testing.T) {
+	filter := newCodexUsageWarningStreamFilter()
+	payload := []byte(`{"type":"response.output_text.delta","item_id":"msg-warning","delta":"\u0048eads up, you have "}`)
+	if got := filter.Filter(codexEventOutputTextDelta, payload); len(got) != 0 {
+		t.Fatalf("escaped usage warning prefix was forwarded: %#v", got)
 	}
 }
 
@@ -162,5 +172,15 @@ func BenchmarkCodexPayloadMayContainUsageLimitWarning(b *testing.B) {
 		if !codexPayloadMayContainUsageLimitWarning(payload) {
 			b.Fatal("expected usage warning payload")
 		}
+	}
+}
+
+func BenchmarkCodexUsageWarningStreamFilterPassthrough(b *testing.B) {
+	filter := newCodexUsageWarningStreamFilter()
+	payload := []byte(`{"type":"response.output_text.delta","item_id":"msg-1","delta":"hello"}`)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		codexUsageWarningStreamEventsBenchmarkSink = filter.Filter(codexEventOutputTextDelta, payload)
 	}
 }

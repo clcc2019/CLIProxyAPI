@@ -784,6 +784,39 @@ func TestManagerExecuteStreamKeepsAuthInFlightUntilStreamDrained(t *testing.T) {
 	if got := manager.authInFlightCount("auth-a"); got != 0 {
 		t.Fatalf("auth-a in-flight after drain = %d, want 0", got)
 	}
+	if _, exists := manager.authInFlightCounts.Load("auth-a"); exists {
+		t.Fatal("auth-a in-flight counter was retained after the final lease completed")
+	}
+}
+
+func TestManagerAuthInFlightCounterRetiresSafelyUnderConcurrency(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	const workers = 32
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for range iterations {
+				lease := manager.beginAuthInFlight("auth-a")
+				if lease == nil {
+					t.Error("beginAuthInFlight returned nil")
+					return
+				}
+				lease.Close()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := manager.authInFlightCount("auth-a"); got != 0 {
+		t.Fatalf("auth-a in-flight after concurrent releases = %d, want 0", got)
+	}
+	if _, exists := manager.authInFlightCounts.Load("auth-a"); exists {
+		t.Fatal("auth-a in-flight counter was retained after concurrent releases")
+	}
 }
 
 func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) {

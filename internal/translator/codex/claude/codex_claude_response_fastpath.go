@@ -3,51 +3,9 @@ package claude
 import (
 	"strconv"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
-
-// appendJSONString appends s to dst as a JSON string literal (including surrounding quotes).
-// It escapes the minimum set of characters required by RFC 8259: quote, backslash, and
-// control characters. It deliberately does not escape HTML characters (<, >, &) in order
-// to match the behaviour of tidwall/sjson used previously in this file.
-func appendJSONString(dst []byte, s string) []byte {
-	const hex = "0123456789abcdef"
-	dst = append(dst, '"')
-	start := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 0x20 && c != '"' && c != '\\' {
-			continue
-		}
-		if i > start {
-			dst = append(dst, s[start:i]...)
-		}
-		switch c {
-		case '"':
-			dst = append(dst, '\\', '"')
-		case '\\':
-			dst = append(dst, '\\', '\\')
-		case '\n':
-			dst = append(dst, '\\', 'n')
-		case '\r':
-			dst = append(dst, '\\', 'r')
-		case '\t':
-			dst = append(dst, '\\', 't')
-		case '\b':
-			dst = append(dst, '\\', 'b')
-		case '\f':
-			dst = append(dst, '\\', 'f')
-		default:
-			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0xF])
-		}
-		start = i + 1
-	}
-	if start < len(s) {
-		dst = append(dst, s[start:]...)
-	}
-	dst = append(dst, '"')
-	return dst
-}
 
 // appendIndex writes ,"index":N for the common Claude event payloads.
 func appendIndexField(dst []byte, index int) []byte {
@@ -59,9 +17,9 @@ func appendIndexField(dst []byte, index int) []byte {
 func buildClaudeMessageStart(id, model string) []byte {
 	out := make([]byte, 0, 192+len(id)+len(model))
 	out = append(out, `{"type":"message_start","message":{"id":`...)
-	out = appendJSONString(out, id)
+	out = util.AppendJSONString(out, id)
 	out = append(out, `,"type":"message","role":"assistant","model":`...)
-	out = appendJSONString(out, model)
+	out = util.AppendJSONString(out, model)
 	out = append(out, `,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0},"content":[],"stop_reason":null}}`...)
 	return out
 }
@@ -72,7 +30,7 @@ func buildClaudeThinkingDelta(index int, text string) []byte {
 	out = append(out, `{"type":"content_block_delta"`...)
 	out = appendIndexField(out, index)
 	out = append(out, `,"delta":{"type":"thinking_delta","thinking":`...)
-	out = appendJSONString(out, text)
+	out = util.AppendJSONString(out, text)
 	out = append(out, "}}"...)
 	return out
 }
@@ -92,7 +50,7 @@ func buildClaudeTextDelta(index int, text string) []byte {
 	out = append(out, `{"type":"content_block_delta"`...)
 	out = appendIndexField(out, index)
 	out = append(out, `,"delta":{"type":"text_delta","text":`...)
-	out = appendJSONString(out, text)
+	out = util.AppendJSONString(out, text)
 	out = append(out, "}}"...)
 	return out
 }
@@ -114,7 +72,7 @@ func buildClaudeMessageDelta(stopReason string, stopSequenceRaw []byte, inputTok
 	if stopReason == "" {
 		out = append(out, "null"...)
 	} else {
-		out = appendJSONString(out, stopReason)
+		out = util.AppendJSONString(out, stopReason)
 	}
 	out = append(out, `,"stop_sequence":`...)
 	if len(stopSequenceRaw) == 0 {
@@ -140,9 +98,9 @@ func buildClaudeToolUseStart(index int, id, name string) []byte {
 	out = append(out, `{"type":"content_block_start"`...)
 	out = appendIndexField(out, index)
 	out = append(out, `,"content_block":{"type":"tool_use","id":`...)
-	out = appendJSONString(out, id)
+	out = util.AppendJSONString(out, id)
 	out = append(out, `,"name":`...)
-	out = appendJSONString(out, name)
+	out = util.AppendJSONString(out, name)
 	out = append(out, `,"input":{}}}`...)
 	return out
 }
@@ -153,7 +111,7 @@ func buildClaudeInputJSONDelta(index int, partialJSON string) []byte {
 	out = append(out, `{"type":"content_block_delta"`...)
 	out = appendIndexField(out, index)
 	out = append(out, `,"delta":{"type":"input_json_delta","partial_json":`...)
-	out = appendJSONString(out, partialJSON)
+	out = util.AppendJSONString(out, partialJSON)
 	out = append(out, "}}"...)
 	return out
 }
@@ -173,7 +131,7 @@ func buildClaudeSignatureDelta(index int, signature string) []byte {
 	out = append(out, `{"type":"content_block_delta"`...)
 	out = appendIndexField(out, index)
 	out = append(out, `,"delta":{"type":"signature_delta","signature":`...)
-	out = appendJSONString(out, signature)
+	out = util.AppendJSONString(out, signature)
 	out = append(out, "}}"...)
 	return out
 }
@@ -182,10 +140,10 @@ func buildClaudeSignatureDelta(index int, signature string) []byte {
 // into dst. signature is included only when non-empty.
 func appendClaudeThinkingBlock(dst []byte, thinking, signature string) []byte {
 	dst = append(dst, `{"type":"thinking","thinking":`...)
-	dst = appendJSONString(dst, thinking)
+	dst = util.AppendJSONString(dst, thinking)
 	if signature != "" {
 		dst = append(dst, `,"signature":`...)
-		dst = appendJSONString(dst, signature)
+		dst = util.AppendJSONString(dst, signature)
 	}
 	dst = append(dst, '}')
 	return dst
@@ -194,7 +152,7 @@ func appendClaudeThinkingBlock(dst []byte, thinking, signature string) []byte {
 // appendClaudeTextBlock writes a text content block into dst.
 func appendClaudeTextBlock(dst []byte, text string) []byte {
 	dst = append(dst, `{"type":"text","text":`...)
-	dst = appendJSONString(dst, text)
+	dst = util.AppendJSONString(dst, text)
 	dst = append(dst, '}')
 	return dst
 }
@@ -203,9 +161,9 @@ func appendClaudeTextBlock(dst []byte, text string) []byte {
 // syntactically valid JSON object literal (e.g. "{}" or `{"a":1}`).
 func appendClaudeToolUseBlock(dst []byte, id, name, inputRawJSON string) []byte {
 	dst = append(dst, `{"type":"tool_use","id":`...)
-	dst = appendJSONString(dst, id)
+	dst = util.AppendJSONString(dst, id)
 	dst = append(dst, `,"name":`...)
-	dst = appendJSONString(dst, name)
+	dst = util.AppendJSONString(dst, name)
 	dst = append(dst, `,"input":`...)
 	if inputRawJSON == "" {
 		dst = append(dst, "{}"...)

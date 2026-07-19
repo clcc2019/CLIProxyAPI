@@ -32,6 +32,9 @@ type codexUsageWarningStreamFilter struct {
 	pending []codexUsageWarningStreamEvent
 	text    string
 	key     string
+	// single backs the common one-event result. Filter callers consume the
+	// returned slice synchronously before invoking Filter again.
+	single [1]codexUsageWarningStreamEvent
 }
 
 func newCodexUsageWarningStreamFilter() *codexUsageWarningStreamFilter {
@@ -40,8 +43,11 @@ func newCodexUsageWarningStreamFilter() *codexUsageWarningStreamFilter {
 
 func (f *codexUsageWarningStreamFilter) Filter(eventType string, payload []byte) []codexUsageWarningStreamEvent {
 	event := codexUsageWarningStreamEvent{eventType: strings.TrimSpace(eventType), payload: payload}
-	if f == nil || len(payload) == 0 {
+	if f == nil {
 		return []codexUsageWarningStreamEvent{event}
+	}
+	if len(payload) == 0 {
+		return f.singleEvent(event)
 	}
 
 	if len(f.pending) == 0 {
@@ -52,7 +58,7 @@ func (f *codexUsageWarningStreamFilter) Filter(eventType string, payload []byte)
 		if codexShouldSuppressUsageWarningEvent(event.eventType, payload) {
 			return nil
 		}
-		return []codexUsageWarningStreamEvent{event}
+		return f.singleEvent(event)
 	}
 
 	if f.pendingMatches(event.eventType, payload) {
@@ -95,9 +101,22 @@ func (f *codexUsageWarningStreamFilter) Filter(eventType string, payload []byte)
 	return append(flushed, event)
 }
 
+func (f *codexUsageWarningStreamFilter) singleEvent(event codexUsageWarningStreamEvent) []codexUsageWarningStreamEvent {
+	f.single[0] = event
+	return f.single[:]
+}
+
 func (f *codexUsageWarningStreamFilter) shouldHoldDelta(eventType string, payload []byte, prefix string) bool {
 	if eventType != codexEventOutputTextDelta {
 		return false
+	}
+	if prefix == "" {
+		if raw, escaped, ok := codexTopLevelJSONStringRaw(payload, codexJSONKeyDelta); ok && !escaped {
+			if codexTextLooksLikeUsageLimitWarningBytes(raw) {
+				return false
+			}
+			return codexTextMayBeUsageLimitWarningPrefixBytes(raw)
+		}
 	}
 	text := prefix + gjson.GetBytes(payload, "delta").String()
 	if codexTextLooksLikeUsageLimitWarning(text) {
@@ -317,30 +336,45 @@ func codexTextLooksLikeUsageLimitWarning(text string) bool {
 		asciifold.Contains(text, "/status")
 }
 
+func codexTextLooksLikeUsageLimitWarningBytes(text []byte) bool {
+	return asciifold.ContainsBytes(text, "heads up") &&
+		asciifold.ContainsBytes(text, codexUsageWarningMarkerLessThan) &&
+		asciifold.ContainsBytes(text, codexUsageWarningMarkerLimitLeft) &&
+		(asciifold.ContainsBytes(text, codexUsageWarningMarkerStatus) ||
+			asciifold.ContainsBytes(text, codexUsageWarningMarkerEscapedStatus))
+}
+
 func codexTextMayBeUsageLimitWarningPrefix(text string) bool {
+	return codexTextMayBeUsageLimitWarningPrefixValue(text)
+}
+
+func codexTextMayBeUsageLimitWarningPrefixBytes(text []byte) bool {
+	return codexTextMayBeUsageLimitWarningPrefixValue(text)
+}
+
+func codexTextMayBeUsageLimitWarningPrefixValue[T ~string | ~[]byte](text T) bool {
 	const marker = "heads up you have less than"
-	text = strings.TrimSpace(text)
-	text = strings.TrimLeft(text, "⚠!,.:- \t\r\n")
-	if text == "" {
+	if len(text) == 0 {
 		return false
 	}
 
 	normalizedLen := 0
 	lastSpace := false
-	for _, r := range text {
+	for i := 0; i < len(text); i++ {
+		r := text[i]
 		c := byte(0)
 		switch {
 		case r >= 'A' && r <= 'Z':
-			c = byte(r + ('a' - 'A'))
+			c = r + ('a' - 'A')
 			lastSpace = false
 		case r >= 'a' && r <= 'z':
-			c = byte(r)
+			c = r
 			lastSpace = false
 		case r >= '0' && r <= '9':
-			c = byte(r)
+			c = r
 			lastSpace = false
 		case r == '/' || r == '%':
-			c = byte(r)
+			c = r
 			lastSpace = false
 		case r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == ',' || r == '.':
 			if lastSpace || normalizedLen == 0 {

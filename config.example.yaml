@@ -128,6 +128,7 @@ proxy-url: ""
 
 # Proxy pool assigns stable Redis-backed proxy leases to auth-file credentials
 # that do not have an explicit proxy_url/proxy-url configured. Redis must be enabled.
+# Codex Free-plan auth files do not consume pool leases.
 proxy-pool:
   enabled: false
   state-store: "redis"

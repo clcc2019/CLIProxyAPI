@@ -194,7 +194,7 @@ func TestCodexQuotaMaintenanceRequiresFreshUsageWhileUIFallbackRemainsAvailable(
 			"account_id":   "account-1",
 		},
 	}
-	handler := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{RequestRetry: 1}, nil)
 	t.Cleanup(handler.Close)
 	cache := handler.codexUsageHandlerCache()
 	cache.store(handler.codexUsageCacheKey(auth), &codexUsageCacheEntry{

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,77 @@ type fakeProxyLeaseStore struct {
 
 type failingReconcileProxyLeaseStore struct {
 	fakeProxyLeaseStore
+}
+
+type blockingProxyLeaseStore struct {
+	mu sync.Mutex
+
+	store fakeProxyLeaseStore
+
+	blockNextBatch bool
+	batchStarted   chan struct{}
+	batchRelease   chan struct{}
+}
+
+func (s *blockingProxyLeaseStore) AcquireProxyLease(ctx context.Context, authID string, proxyURLs []string) (ProxyLease, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.AcquireProxyLease(ctx, authID, proxyURLs)
+}
+
+func (s *blockingProxyLeaseStore) AcquireProxyLeases(ctx context.Context, authIDs []string, proxyURLs []string) ([]ProxyLease, error) {
+	s.mu.Lock()
+	block := s.blockNextBatch
+	started := s.batchStarted
+	release := s.batchRelease
+	s.blockNextBatch = false
+	s.mu.Unlock()
+	if block {
+		close(started)
+		<-release
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.AcquireProxyLeases(ctx, authIDs, proxyURLs)
+}
+
+func (s *blockingProxyLeaseStore) ReleaseProxyLease(ctx context.Context, authID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.ReleaseProxyLease(ctx, authID)
+}
+
+func (s *blockingProxyLeaseStore) ReconcileProxyLeases(ctx context.Context, authIDs []string, proxyURLs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.ReconcileProxyLeases(ctx, authIDs, proxyURLs)
+}
+
+func (s *blockingProxyLeaseStore) RecordProxyLeaseFailure(ctx context.Context, authID, proxyURL string, threshold int, cooldown time.Duration) (ProxyLeaseFailure, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.RecordProxyLeaseFailure(ctx, authID, proxyURL, threshold, cooldown)
+}
+
+func (s *blockingProxyLeaseStore) ClearProxyLeaseFailure(ctx context.Context, proxyURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.ClearProxyLeaseFailure(ctx, proxyURL)
+}
+
+func (s *blockingProxyLeaseStore) blockBatchAcquire() (<-chan struct{}, chan<- struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockNextBatch = true
+	s.batchStarted = make(chan struct{})
+	s.batchRelease = make(chan struct{})
+	return s.batchStarted, s.batchRelease
+}
+
+func (s *blockingProxyLeaseStore) lease(authID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.TrimSpace(s.store.leases[authID])
 }
 
 func (s *failingReconcileProxyLeaseStore) ReconcileProxyLeases(_ context.Context, _ []string, _ []string) error {
@@ -260,6 +332,9 @@ func TestProxyPoolSkipsExplicitProxyAndAPIKeyAuth(t *testing.T) {
 		Provider: "codex",
 		Status:   StatusActive,
 		ProxyURL: "http://manual.example.com:8080",
+		Attributes: map[string]string{
+			"plan_type": "free",
+		},
 		Metadata: map[string]any{"type": "codex", "access_token": "token"},
 	})
 	if err != nil {
@@ -286,6 +361,164 @@ func TestProxyPoolSkipsExplicitProxyAndAPIKeyAuth(t *testing.T) {
 	}
 	if len(leaseStore.leases) != 0 {
 		t.Fatalf("leases = %#v, want none", leaseStore.leases)
+	}
+}
+
+func TestProxyPoolLimitedProxySkipsHigherPriorityFreePlan(t *testing.T) {
+	leaseStore := &fakeProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	t.Cleanup(mgr.stopProxyPoolReconcileLoop)
+	mgr.SetProxyLeaseStore(leaseStore)
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.Proxies = []string{"http://proxy-a.example.com:8080"}
+	mgr.SetConfig(cfg)
+
+	freeAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "free-token",
+		"plan_type":    "FrEe",
+		"priority":     100,
+	}, AuthFileProjectionOptions{ID: "oauth-free"})
+	registeredFree, err := mgr.Register(WithSkipPersist(context.Background()), freeAuth)
+	if err != nil {
+		t.Fatalf("Register free auth error: %v", err)
+	}
+
+	plusAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "plus-token",
+		"plan_type":    "plus",
+		"priority":     0,
+	}, AuthFileProjectionOptions{ID: "oauth-plus"})
+	registeredPlus, err := mgr.Register(WithSkipPersist(context.Background()), plusAuth)
+	if err != nil {
+		t.Fatalf("Register plus auth error: %v", err)
+	}
+	mgr.flushProxyPoolReconcileQueue(context.Background())
+
+	if registeredFree.ProxyURL != "" {
+		t.Fatalf("free ProxyURL = %q, want no pool lease", registeredFree.ProxyURL)
+	}
+	if registeredPlus.ProxyURL != "http://proxy-a.example.com:8080" {
+		t.Fatalf("plus ProxyURL = %q, want limited pool proxy", registeredPlus.ProxyURL)
+	}
+	if _, ok := leaseStore.leases["oauth-free"]; ok {
+		t.Fatalf("free auth retained a lease: %#v", leaseStore.leases)
+	}
+	if got := leaseStore.leases["oauth-plus"]; got != "http://proxy-a.example.com:8080" {
+		t.Fatalf("plus lease = %q, want proxy-a", got)
+	}
+}
+
+func TestProxyPoolPlanChangeToFreeImmediatelyReleasesLease(t *testing.T) {
+	leaseStore := &fakeProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	t.Cleanup(mgr.stopProxyPoolReconcileLoop)
+	mgr.SetProxyLeaseStore(leaseStore)
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.Proxies = []string{"http://proxy-a.example.com:8080"}
+	mgr.SetConfig(cfg)
+
+	paidAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "paid-token",
+		"plan_type":    "plus",
+	}, AuthFileProjectionOptions{ID: "oauth-changing"})
+	registered, err := mgr.Register(WithSkipPersist(context.Background()), paidAuth)
+	if err != nil {
+		t.Fatalf("Register paid auth error: %v", err)
+	}
+	if registered.ProxyURL != "http://proxy-a.example.com:8080" {
+		t.Fatalf("paid ProxyURL = %q, want pool lease", registered.ProxyURL)
+	}
+
+	freeAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "free-token",
+		"plan_type":    "free",
+	}, AuthFileProjectionOptions{ID: "oauth-changing"})
+	updated, err := mgr.Update(WithSkipPersist(context.Background()), freeAuth)
+	if err != nil {
+		t.Fatalf("Update free auth error: %v", err)
+	}
+	if updated.ProxyURL != "" {
+		t.Fatalf("updated free ProxyURL = %q, want released", updated.ProxyURL)
+	}
+	if _, ok := leaseStore.leases["oauth-changing"]; ok {
+		t.Fatalf("free auth lease was not released immediately: %#v", leaseStore.leases)
+	}
+	if len(leaseStore.released) == 0 || leaseStore.released[len(leaseStore.released)-1] != "oauth-changing" {
+		t.Fatalf("released auths = %#v, want oauth-changing", leaseStore.released)
+	}
+
+	teamAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "team-token",
+		"plan_type":    "team",
+	}, AuthFileProjectionOptions{ID: "oauth-team"})
+	registeredTeam, err := mgr.Register(WithSkipPersist(context.Background()), teamAuth)
+	if err != nil {
+		t.Fatalf("Register team auth error: %v", err)
+	}
+	if registeredTeam.ProxyURL != "http://proxy-a.example.com:8080" {
+		t.Fatalf("team ProxyURL = %q, want reclaimed pool proxy", registeredTeam.ProxyURL)
+	}
+}
+
+func TestProxyPoolRefreshPlanChangeToFreeReassignsReleasedLease(t *testing.T) {
+	leaseStore := &fakeProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	t.Cleanup(mgr.stopProxyPoolReconcileLoop)
+	mgr.SetProxyLeaseStore(leaseStore)
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.Proxies = []string{"http://proxy-a.example.com:8080"}
+	mgr.SetConfig(cfg)
+
+	paidAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "paid-token",
+		"plan_type":    "plus",
+		"priority":     100,
+	}, AuthFileProjectionOptions{ID: "oauth-changing-on-refresh"})
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), paidAuth); err != nil {
+		t.Fatalf("Register paid auth error: %v", err)
+	}
+	waitingAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "waiting-token",
+		"plan_type":    "team",
+		"priority":     0,
+	}, AuthFileProjectionOptions{ID: "oauth-waiting-paid"})
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), waitingAuth); err != nil {
+		t.Fatalf("Register waiting paid auth error: %v", err)
+	}
+	mgr.flushProxyPoolReconcileQueue(context.Background())
+
+	freeAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "free-token",
+		"plan_type":    "free",
+		"priority":     100,
+	}, AuthFileProjectionOptions{ID: "oauth-changing-on-refresh"})
+	updateCtx := WithRefreshUpdate(WithSkipPersist(context.Background()))
+	updated, err := mgr.Update(updateCtx, freeAuth)
+	if err != nil {
+		t.Fatalf("Refresh update to free error: %v", err)
+	}
+	if updated.ProxyURL != "" {
+		t.Fatalf("free ProxyURL = %q, want released", updated.ProxyURL)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		waiting, ok := mgr.GetByID("oauth-waiting-paid")
+		if ok && waiting.ProxyURL == "http://proxy-a.example.com:8080" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("released proxy was not reassigned after refresh update: waiting=%#v leases=%#v", waiting, leaseStore.leases)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -467,6 +700,71 @@ func TestProxyPoolReconcileUsesBatchAcquireWhenAvailable(t *testing.T) {
 	}
 	if got := leaseStore.leases["oauth-2"]; got != "http://proxy-b.example.com:8080" {
 		t.Fatalf("oauth-2 lease = %q, want proxy-b", got)
+	}
+}
+
+func TestProxyPoolStaleReconcileDoesNotRestoreFreePlanLease(t *testing.T) {
+	leaseStore := &blockingProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	t.Cleanup(mgr.stopProxyPoolReconcileLoop)
+	mgr.SetProxyLeaseStore(leaseStore)
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.Proxies = []string{"http://proxy-a.example.com:8080"}
+	mgr.SetConfig(cfg)
+
+	paidAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "paid-token",
+		"plan_type":    "plus",
+	}, AuthFileProjectionOptions{ID: "oauth-changing-during-reconcile"})
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), paidAuth); err != nil {
+		t.Fatalf("Register paid auth error: %v", err)
+	}
+	mgr.flushProxyPoolReconcileQueue(context.Background())
+
+	batchStarted, batchRelease := leaseStore.blockBatchAcquire()
+	reconcileDone := make(chan struct{})
+	go func() {
+		defer close(reconcileDone)
+		mgr.ReconcileProxyPoolLeases(context.Background())
+	}()
+	select {
+	case <-batchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for blocked batch acquire")
+	}
+
+	freeAuth := NewAuthFromAuthFileMetadata(map[string]any{
+		"type":         "codex",
+		"access_token": "free-token",
+		"plan_type":    "free",
+	}, AuthFileProjectionOptions{ID: "oauth-changing-during-reconcile"})
+	updateCtx := WithRefreshUpdate(WithSkipPersist(context.Background()))
+	updated, err := mgr.Update(updateCtx, freeAuth)
+	if err != nil {
+		t.Fatalf("Update free auth error: %v", err)
+	}
+	if updated.ProxyURL != "" {
+		t.Fatalf("free ProxyURL before releasing reconcile = %q, want empty", updated.ProxyURL)
+	}
+
+	close(batchRelease)
+	select {
+	case <-reconcileDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stale reconcile")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		current, ok := mgr.GetByID("oauth-changing-during-reconcile")
+		if ok && current.ProxyURL == "" && leaseStore.lease(current.ID) == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stale reconcile restored free lease: auth=%#v backend_lease=%q", current, leaseStore.lease("oauth-changing-during-reconcile"))
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -694,6 +992,91 @@ func TestProxyPoolTransportFailureAtThresholdCoolsAndReleasesLease(t *testing.T)
 	}
 	if next.ProxyURL != "http://proxy-b.example.com:8080" {
 		t.Fatalf("oauth-2 ProxyURL = %q, want cooled proxy skipped", next.ProxyURL)
+	}
+}
+
+func TestProxyPoolCooldownExpiryAutomaticallyReacquiresLease(t *testing.T) {
+	leaseStore := &fakeProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	t.Cleanup(mgr.stopProxyPoolReconcileLoop)
+	mgr.SetProxyLeaseStore(leaseStore)
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.Proxies = []string{"http://proxy-a.example.com:8080"}
+	cfg.ProxyPool.ProxyFailureThreshold = 1
+	cfg.ProxyPool.ProxyFailureCooldown = "20ms"
+	mgr.SetConfig(cfg)
+
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), &Auth{
+		ID:       "oauth-recover",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "codex", "access_token": "token"},
+	}); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:  "oauth-recover",
+		Success: false,
+		Error:   &Error{Message: "proxyconnect tcp: connection refused"},
+	})
+
+	current, ok := mgr.GetByID("oauth-recover")
+	if !ok {
+		t.Fatal("auth missing after proxy failure")
+	}
+	if current.ProxyURL != "" {
+		t.Fatalf("ProxyURL during cooldown = %q, want empty", current.ProxyURL)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		current, ok = mgr.GetByID("oauth-recover")
+		if ok && current.ProxyURL == "http://proxy-a.example.com:8080" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("proxy lease was not reacquired after cooldown: auth=%#v leases=%#v", current, leaseStore.leases)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestStopProxyPoolReconcileLoopCancelsCooldownRecovery(t *testing.T) {
+	leaseStore := &fakeProxyLeaseStore{}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetProxyLeaseStore(leaseStore)
+	cfg := proxyPoolTestConfig()
+	cfg.ProxyPool.Proxies = []string{"http://proxy-a.example.com:8080"}
+	cfg.ProxyPool.ProxyFailureThreshold = 1
+	cfg.ProxyPool.ProxyFailureCooldown = "40ms"
+	mgr.SetConfig(cfg)
+
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), &Auth{
+		ID:       "oauth-stopped",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "codex", "access_token": "token"},
+	}); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+	mgr.flushProxyPoolReconcileQueue(context.Background())
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:  "oauth-stopped",
+		Success: false,
+		Error:   &Error{Message: "proxyconnect tcp: connection refused"},
+	})
+	mgr.stopProxyPoolReconcileLoop()
+
+	time.Sleep(80 * time.Millisecond)
+	current, ok := mgr.GetByID("oauth-stopped")
+	if !ok {
+		t.Fatal("auth missing after stop")
+	}
+	if current.ProxyURL != "" {
+		t.Fatalf("ProxyURL after stopped recovery = %q, want empty", current.ProxyURL)
+	}
+	if _, ok := leaseStore.leases["oauth-stopped"]; ok {
+		t.Fatalf("stopped manager reacquired lease: %#v", leaseStore.leases)
 	}
 }
 

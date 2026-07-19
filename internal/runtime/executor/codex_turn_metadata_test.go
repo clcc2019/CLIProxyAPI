@@ -131,6 +131,7 @@ func TestCodexEnsureTurnMetadataHeaderDerivesOfficialLineageDefaults(t *testing.
 	source.Set("X-OpenAI-Subagent", "review")
 
 	codexEnsureTurnMetadataHeader(headers, source, codexTurnMetadataDefaults{
+		installationID:         "install-1",
 		requestKind:            codexTurnRequestKind,
 		sessionID:              "session-1",
 		threadID:               "thread-1",
@@ -147,6 +148,7 @@ func TestCodexEnsureTurnMetadataHeaderDerivesOfficialLineageDefaults(t *testing.
 	for key, want := range map[string]string{
 		"parent_thread_id": "parent-1",
 		"subagent_kind":    "review",
+		"installation_id":  "install-1",
 	} {
 		if got, _ := parsed[key].(string); got != want {
 			t.Fatalf("%s = %q, want %q in %s", key, got, want, headers.Get(codexHeaderTurnMetadata))
@@ -264,6 +266,11 @@ func TestCodexResponsesAPIClientMetadataFromBodyFiltersNonMergeableKeys(t *testi
 	transportOnly := codexResponsesAPIClientMetadataFromBody([]byte(`{"client_metadata":{"x-codex-installation-id":"install-1"}}`))
 	if transportOnly != nil {
 		t.Fatalf("transport-only metadata = %#v, want nil", transportOnly)
+	}
+
+	escapedKey := codexResponsesAPIClientMetadataFromBody([]byte(`{"client\u005fmetadata":{"origin":"cli"}}`))
+	if len(escapedKey) != 1 || escapedKey["origin"] != "cli" {
+		t.Fatalf("escaped-key metadata = %#v, want mergeable origin", escapedKey)
 	}
 }
 

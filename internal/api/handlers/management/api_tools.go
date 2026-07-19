@@ -2,9 +2,11 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +119,9 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
+	if h.handleCodexUsageAPICall(c, method, parsedURL, auth) {
+		return
+	}
 
 	reqHeaders := body.Header
 	if reqHeaders == nil {
@@ -199,6 +204,74 @@ func (h *Handler) APICall(c *gin.Context) {
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
+	})
+}
+
+// handleCodexUsageAPICall routes the management UI's generic quota probe
+// through the guarded Codex usage path. The UI issues one /api-call per auth
+// with Promise.all, so using the generic transport here would bypass usage
+// caching, retry policy, shared concurrency control, and 502 sanitization.
+func (h *Handler) handleCodexUsageAPICall(c *gin.Context, method string, target *url.URL, auth *coreauth.Auth) bool {
+	if c == nil || !isCodexUsageAPICall(method, target, auth) {
+		return false
+	}
+
+	ctx := c.Request.Context()
+	auth = h.refreshCodexUsageAuthIfNeeded(ctx, auth)
+	payload, upstreamStatus, err := h.fetchCodexUsageWithCache(ctx, auth, codexUsageRequestOptions{
+		ttl: codexUsageCacheDefaultTTL,
+	})
+	if err != nil {
+		if codexUsageTransientFailure(upstreamStatus, err) {
+			payload = codexUsageUnavailablePayload(err, upstreamStatus)
+		} else {
+			status := upstreamStatus
+			if status <= 0 {
+				status = http.StatusBadGateway
+			}
+			writeAPICallJSONResponse(c, status, gin.H{"error": "codex usage request failed"})
+			return true
+		}
+	}
+	mergeCodexUsageLocalFields(payload, auth)
+	writeAPICallJSONResponse(c, http.StatusOK, payload)
+	return true
+}
+
+func isCodexUsageAPICall(method string, target *url.URL, auth *coreauth.Auth) bool {
+	if !strings.EqualFold(strings.TrimSpace(method), http.MethodGet) || target == nil || auth == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	usageTarget, err := url.Parse(codexUsageURL)
+	if err != nil || usageTarget.Scheme == "" || usageTarget.Host == "" {
+		return false
+	}
+	return strings.EqualFold(target.Scheme, usageTarget.Scheme) &&
+		strings.EqualFold(target.Host, usageTarget.Host) &&
+		target.EscapedPath() == usageTarget.EscapedPath()
+}
+
+func writeAPICallJSONResponse(c *gin.Context, statusCode int, payload any) {
+	if c == nil {
+		return
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode response"})
+		return
+	}
+	c.JSON(http.StatusOK, apiCallResponse{
+		StatusCode: statusCode,
+		Header: map[string][]string{
+			"Content-Type":                  {"application/json"},
+			"X-CPA-Codex-Usage-Guard":       {"active"},
+			"X-CPA-Codex-Usage-Outage-TTL":  {codexUsageOutageCooldown.String()},
+			"X-CPA-Codex-Usage-Concurrency": {strconv.Itoa(codexManagementUpstreamConcurrency)},
+		},
+		Body: string(body),
 	})
 }
 

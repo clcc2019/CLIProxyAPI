@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -195,12 +197,143 @@ func (s *codexStreamFunctionCallState) appendArgumentsDeltaRaw(delta []byte, esc
 		s.appendArgumentsDeltaBytes(delta)
 		return true
 	}
-	unquoted, ok := codexUnquoteJSONStringValue(delta)
+	decodedLen, ok := codexJSONStringDecodedLen(delta)
 	if !ok {
 		return false
 	}
-	s.appendArgumentsDelta(unquoted)
+	if s.Arguments == "" && s.argumentsBuilder.Len() == 0 {
+		var decoded strings.Builder
+		decoded.Grow(decodedLen)
+		codexAppendDecodedJSONString(&decoded, delta)
+		s.Arguments = decoded.String()
+		return true
+	}
+	s.ensureArgumentsBuilderCapacity(decodedLen)
+	if s.Arguments != "" && s.argumentsBuilder.Len() == 0 {
+		s.argumentsBuilder.WriteString(s.Arguments)
+		s.Arguments = ""
+	}
+	codexAppendDecodedJSONString(&s.argumentsBuilder, delta)
 	return true
+}
+
+func codexJSONStringDecodedLen(raw []byte) (int, bool) {
+	decodedLen := 0
+	for i := 0; i < len(raw); {
+		value := raw[i]
+		if value == '\\' {
+			_, encodedLen, next, ok := codexParseJSONStringEscape(raw, i)
+			if !ok {
+				return 0, false
+			}
+			decodedLen += encodedLen
+			i = next
+			continue
+		}
+		if value < 0x20 {
+			return 0, false
+		}
+		if value < utf8.RuneSelf {
+			decodedLen++
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRune(raw[i:])
+		if r == utf8.RuneError && size == 1 {
+			return 0, false
+		}
+		decodedLen += size
+		i += size
+	}
+	return decodedLen, true
+}
+
+func codexAppendDecodedJSONString(builder *strings.Builder, raw []byte) {
+	copyFrom := 0
+	for i := 0; i < len(raw); {
+		if raw[i] != '\\' {
+			i++
+			continue
+		}
+		_, _ = builder.Write(raw[copyFrom:i])
+		value, encodedLen, next, _ := codexParseJSONStringEscape(raw, i)
+		if encodedLen == 1 {
+			_ = builder.WriteByte(byte(value))
+		} else {
+			_, _ = builder.WriteRune(value)
+		}
+		i = next
+		copyFrom = next
+	}
+	_, _ = builder.Write(raw[copyFrom:])
+}
+
+func codexParseJSONStringEscape(raw []byte, slash int) (value rune, encodedLen int, next int, ok bool) {
+	if slash < 0 || slash+1 >= len(raw) || raw[slash] != '\\' {
+		return 0, 0, 0, false
+	}
+	switch escaped := raw[slash+1]; escaped {
+	case '"', '\\', '/':
+		return rune(escaped), 1, slash + 2, true
+	case 'b':
+		return '\b', 1, slash + 2, true
+	case 'f':
+		return '\f', 1, slash + 2, true
+	case 'n':
+		return '\n', 1, slash + 2, true
+	case 'r':
+		return '\r', 1, slash + 2, true
+	case 't':
+		return '\t', 1, slash + 2, true
+	case 'u':
+		first, parsed := codexParseJSONHex4(raw, slash+2)
+		if !parsed {
+			return 0, 0, 0, false
+		}
+		next = slash + 6
+		value = rune(first)
+		if value >= 0xD800 && value <= 0xDBFF {
+			if next+6 > len(raw) || raw[next] != '\\' || raw[next+1] != 'u' {
+				return 0, 0, 0, false
+			}
+			second, parsedSecond := codexParseJSONHex4(raw, next+2)
+			if !parsedSecond || second < 0xDC00 || second > 0xDFFF {
+				return 0, 0, 0, false
+			}
+			value = utf16.DecodeRune(value, rune(second))
+			next += 6
+		} else if value >= 0xDC00 && value <= 0xDFFF {
+			return 0, 0, 0, false
+		}
+		if !utf8.ValidRune(value) {
+			return 0, 0, 0, false
+		}
+		return value, utf8.RuneLen(value), next, true
+	default:
+		return 0, 0, 0, false
+	}
+}
+
+func codexParseJSONHex4(raw []byte, start int) (uint16, bool) {
+	if start < 0 || start+4 > len(raw) {
+		return 0, false
+	}
+	var value uint16
+	for i := start; i < start+4; i++ {
+		var digit byte
+		switch current := raw[i]; {
+		case current >= '0' && current <= '9':
+			digit = current - '0'
+		case current >= 'a' && current <= 'f':
+			digit = current - 'a' + 10
+		case current >= 'A' && current <= 'F':
+			digit = current - 'A' + 10
+		default:
+			return 0, false
+		}
+		value = value<<4 | uint16(digit)
+	}
+	return value, true
 }
 
 func (s *codexStreamFunctionCallState) setArguments(arguments string) {
@@ -890,15 +1023,14 @@ func codexJSONStringValue(raw []byte, escaped bool) (string, bool) {
 }
 
 func codexUnquoteJSONStringValue(raw []byte) (string, bool) {
-	quoted := make([]byte, 0, len(raw)+2)
-	quoted = append(quoted, '"')
-	quoted = append(quoted, raw...)
-	quoted = append(quoted, '"')
-	value, err := strconv.Unquote(string(quoted))
-	if err != nil {
+	decodedLen, ok := codexJSONStringDecodedLen(raw)
+	if !ok {
 		return "", false
 	}
-	return value, true
+	var decoded strings.Builder
+	decoded.Grow(decodedLen)
+	codexAppendDecodedJSONString(&decoded, raw)
+	return decoded.String(), true
 }
 
 func codexParseOptionalJSONStringRaw(data []byte, i int) (raw []byte, escaped bool, next int, isNull bool, ok bool) {
@@ -1130,6 +1262,16 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 	if len(s.functionCallsByItem) == 0 {
 		return s.patchCompletedOutputFromRecordedItemsOnly(completedData, outputResult)
 	}
+	if len(s.outputItemsByIndex) == 0 && len(s.outputItemsFallback) == 0 {
+		if state := s.singleFunctionCallState(); state != nil {
+			itemID, args, ok := codexRecoveredToolCallFields(state)
+			if !ok {
+				return completedData, 0
+			}
+			item := buildCodexRecoveredToolCallItem(state, itemID, args)
+			return patchCodexCompletedOutputWithSingleItemAtResult(completedData, outputResult, item), 1
+		}
+	}
 
 	recovered := make([]codexRecoveredStreamItem, 0, len(s.outputItemsByIndex)+len(s.outputItemsFallback)+len(s.functionCallsByItem))
 	seenCallIDs := make(map[string]struct{}, len(s.functionCallsByItem))
@@ -1178,16 +1320,8 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 		})
 		for _, key := range keys {
 			state := s.functionCallsByItem[key]
-			if state == nil {
-				continue
-			}
-			if strings.TrimSpace(state.CallID) == "" && state.ItemType != "local_shell_call" && state.ItemType != "tool_search_call" {
-				continue
-			}
-			if state.ItemType == "local_shell_call" && strings.TrimSpace(state.ActionRaw) == "" {
-				continue
-			}
-			if state.ItemType == "tool_search_call" && strings.TrimSpace(state.Execution) == "" {
+			itemID, args, ok := codexRecoveredToolCallFields(state)
+			if !ok {
 				continue
 			}
 			if strings.TrimSpace(state.CallID) != "" {
@@ -1199,21 +1333,7 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 				continue
 			}
 
-			args := state.arguments()
-			if strings.TrimSpace(args) == "" {
-				args = "{}"
-			}
-			itemID := state.ItemID
-			if strings.TrimSpace(itemID) == "" && state.ItemType != "custom_tool_call" {
-				itemID = fmt.Sprintf("fc_%s", state.CallID)
-			}
-
-			item := buildCodexCompletedToolCallItem(itemID, state.CallID, state.Name, state.ItemType, args)
-			if state.ItemType == "local_shell_call" {
-				item = buildCodexCompletedLocalShellCallItem(itemID, state.CallID, state.ActionRaw, state.Status)
-			} else if state.ItemType == "tool_search_call" {
-				item = buildCodexCompletedToolSearchCallItem(itemID, state.CallID, state.Execution, state.Status, args)
-			}
+			item := buildCodexRecoveredToolCallItem(state, itemID, args)
 			recovered = append(recovered, codexRecoveredStreamItem{outputIndex: state.OutputIndex, raw: item})
 			if strings.TrimSpace(state.CallID) != "" {
 				seenCallIDs[state.CallID] = struct{}{}
@@ -1234,6 +1354,59 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 
 	patched := patchCodexCompletedOutputWithRecoveredItemsAtResult(completedData, outputResult, recovered)
 	return patched, len(recovered)
+}
+
+func (s *codexStreamCompletionState) singleFunctionCallState() *codexStreamFunctionCallState {
+	var single *codexStreamFunctionCallState
+	for _, state := range s.functionCallsByItem {
+		if state == nil {
+			continue
+		}
+		if single == nil {
+			single = state
+			continue
+		}
+		if state != single {
+			return nil
+		}
+	}
+	return single
+}
+
+func codexRecoveredToolCallFields(state *codexStreamFunctionCallState) (itemID string, args string, ok bool) {
+	if state == nil {
+		return "", "", false
+	}
+	if strings.TrimSpace(state.CallID) == "" && state.ItemType != "local_shell_call" && state.ItemType != "tool_search_call" {
+		return "", "", false
+	}
+	if state.ItemType == "local_shell_call" && strings.TrimSpace(state.ActionRaw) == "" {
+		return "", "", false
+	}
+	if state.ItemType == "tool_search_call" && strings.TrimSpace(state.Execution) == "" {
+		return "", "", false
+	}
+
+	args = state.arguments()
+	if strings.TrimSpace(args) == "" {
+		args = "{}"
+	}
+	itemID = state.ItemID
+	if strings.TrimSpace(itemID) == "" && state.ItemType != "custom_tool_call" {
+		itemID = fmt.Sprintf("fc_%s", state.CallID)
+	}
+	return itemID, args, true
+}
+
+func buildCodexRecoveredToolCallItem(state *codexStreamFunctionCallState, itemID string, args string) []byte {
+	switch state.ItemType {
+	case "local_shell_call":
+		return buildCodexCompletedLocalShellCallItem(itemID, state.CallID, state.ActionRaw, state.Status)
+	case "tool_search_call":
+		return buildCodexCompletedToolSearchCallItem(itemID, state.CallID, state.Execution, state.Status, args)
+	default:
+		return buildCodexCompletedToolCallItem(itemID, state.CallID, state.Name, state.ItemType, args)
+	}
 }
 
 func codexJSONArrayHasItemsRaw(raw string) bool {
@@ -1512,7 +1685,9 @@ func buildCodexCompletedToolCallItem(itemID string, callID string, name string, 
 	case "tool_search_call":
 		return buildCodexCompletedToolSearchCallItem(itemID, callID, "client", "completed", args)
 	}
-	buf := make([]byte, 0, len(itemID)+len(callID)+len(name)+len(args)+80)
+	// The fixed JSON syntax contributes 92 bytes before escaped string growth.
+	// Reserve a small margin so the common ASCII path completes in one allocation.
+	buf := make([]byte, 0, len(itemID)+len(callID)+len(name)+len(args)+96)
 	buf = append(buf, `{"id":`...)
 	buf = strconv.AppendQuote(buf, itemID)
 	buf = append(buf, `,"type":"function_call","status":"completed","arguments":`...)
