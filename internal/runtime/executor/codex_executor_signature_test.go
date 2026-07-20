@@ -112,11 +112,31 @@ func TestCodexExecutorDropsInvalidReasoningEncryptedContentFromFinalRequest(t *t
 	if gjson.GetBytes(gotBody, "input.1.encrypted_content").Exists() {
 		t.Fatalf("non-string reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
 	}
+	if gjson.GetBytes(gotBody, "input.0.id").Exists() || gjson.GetBytes(gotBody, "input.1.id").Exists() {
+		t.Fatalf("invalid reasoning items retained orphan IDs with store disabled; body=%s", string(gotBody))
+	}
 	if got := gjson.GetBytes(gotBody, "input.2.encrypted_content").String(); got != validEncryptedContent {
 		t.Fatalf("valid reasoning encrypted_content = %q, want preserved", got)
 	}
 	if got := gjson.GetBytes(gotBody, "input.3.encrypted_content").String(); got != "leave-message-alone" {
 		t.Fatalf("non-reasoning encrypted_content = %q, want untouched", got)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningDropsOrphanIDOnlyWhenStoreDisabled(t *testing.T) {
+	body := []byte(`{"store":false,"input":[{"type":"reasoning","id":"rs-orphan","summary":[]},{"type":"message","id":"msg-1"}]}`)
+	got := sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "test", body)
+	if gjson.GetBytes(got, "input.0.id").Exists() {
+		t.Fatalf("orphan reasoning ID was retained: %s", got)
+	}
+	if gjson.GetBytes(got, "input.1.id").String() != "msg-1" {
+		t.Fatalf("non-reasoning ID changed: %s", got)
+	}
+
+	stored := []byte(`{"store":true,"input":[{"type":"reasoning","id":"rs-stored","summary":[]}]}`)
+	got = sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "test", stored)
+	if gjson.GetBytes(got, "input.0.id").String() != "rs-stored" {
+		t.Fatalf("store=true reasoning ID was removed: %s", got)
 	}
 }
 

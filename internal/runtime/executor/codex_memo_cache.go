@@ -5,9 +5,11 @@ import (
 	"container/list"
 	"encoding/binary"
 	"hash/maphash"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -328,7 +330,7 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 		codexMetrics.memoBodyMiss.Add(1)
 		return normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
 	}
-	authProvider := codexFinalUpstreamBodyMemoAuthProvider(auth)
+	authProvider := codexFinalUpstreamBodyMemoAuthProvider(auth, baseModel)
 	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, authProvider, opts, body)
 	if cached := globalCodexFinalUpstreamBodyMemo.getSharedWithHash(hash, baseModel, authProvider, opts, body); cached != nil {
 		return cached
@@ -344,11 +346,31 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 	return out
 }
 
-func codexFinalUpstreamBodyMemoAuthProvider(auth *cliproxyauth.Auth) string {
+func codexFinalUpstreamBodyMemoAuthProvider(auth *cliproxyauth.Auth, baseModel string) string {
 	if auth == nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
+	scope := strings.ToLower(strings.TrimSpace(auth.Provider)) + "\x00" + strings.TrimSpace(auth.ID)
+	capabilities, ok := registry.GetGlobalRegistry().GetCodexClientModelCapabilities(auth.ID, baseModel)
+	if !ok {
+		return scope
+	}
+	buf := make([]byte, 0, len(scope)+128)
+	buf = append(buf, scope...)
+	buf = append(buf, 0)
+	buf = strconv.AppendBool(buf, capabilities.SupportsParallelToolCalls)
+	buf = strconv.AppendBool(buf, capabilities.SupportsReasoningSummaryParameter)
+	buf = strconv.AppendBool(buf, capabilities.SupportsVerbosity)
+	buf = strconv.AppendBool(buf, capabilities.UseResponsesLite)
+	buf = strconv.AppendBool(buf, capabilities.SupportsImageDetailOriginal)
+	buf = append(buf, capabilities.DefaultReasoningLevel...)
+	buf = append(buf, 0)
+	buf = append(buf, capabilities.DefaultVerbosity...)
+	buf = append(buf, 0)
+	buf = append(buf, strings.Join(capabilities.ServiceTiers, ",")...)
+	buf = append(buf, 0)
+	buf = append(buf, capabilities.DefaultServiceTier...)
+	return string(buf)
 }
 
 func hashCodexFinalUpstreamBodyMemoKey(baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) uint64 {

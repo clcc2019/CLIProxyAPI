@@ -42,6 +42,15 @@ const codexDefaultToolSearchDescription = "# Tool discovery\n\nSearches over def
 
 var codexClientModelCapabilitiesForModel = registry.CodexClientModelCapabilitiesForModel
 
+func codexClientModelCapabilitiesForAuth(auth *cliproxyauth.Auth, modelID string) (registry.CodexClientModelCapabilities, bool) {
+	if auth != nil {
+		if capabilities, ok := registry.GetGlobalRegistry().GetCodexClientModelCapabilities(auth.ID, modelID); ok {
+			return capabilities, true
+		}
+	}
+	return codexClientModelCapabilitiesForModel(modelID)
+}
+
 func codexDefaultNamespaceDescription(namespaceName string) string {
 	return "Tools in the " + namespaceName + " namespace."
 }
@@ -129,7 +138,7 @@ var codexAllowedCompactFinalUpstreamFields = map[string]struct{}{
 	"text":                {},
 }
 
-func codexEnsureFinalUpstreamBodyDefaults(body []byte, baseModel string, opts codexFinalUpstreamBodyOptions) []byte {
+func codexEnsureFinalUpstreamBodyDefaults(body []byte, capabilities registry.CodexClientModelCapabilities, capabilitiesKnown bool, opts codexFinalUpstreamBodyOptions) []byte {
 	appendFields := make([]codexTopLevelRawField, 0, 4)
 	edits := make([]helps.JSONEdit, 0, 4)
 	addDefault := func(field string, rawValue []byte) {
@@ -178,7 +187,7 @@ func codexEnsureFinalUpstreamBodyDefaults(body []byte, baseModel string, opts co
 			edits = append(edits, helps.SetRawJSONEdit(field, []byte("[]")))
 		}
 	}
-	parallelToolCallsDefault := codexDefaultParallelToolCallsForModel(baseModel)
+	parallelToolCallsDefault := capabilitiesKnown && capabilities.SupportsParallelToolCalls
 
 	switch opts.requestKind {
 	case codexFinalUpstreamCompact:
@@ -205,13 +214,6 @@ func codexEnsureFinalUpstreamBodyDefaults(body []byte, baseModel string, opts co
 		return body
 	}
 	return helps.EditJSONBytes(body, edits...)
-}
-
-func codexDefaultParallelToolCallsForModel(baseModel string) bool {
-	if supported, ok := registry.CodexClientModelSupportsParallelToolCalls(baseModel); ok {
-		return supported
-	}
-	return false
 }
 
 func pruneCodexFinalUpstreamBody(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
@@ -316,14 +318,14 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
-	capabilities, capabilitiesKnown := codexClientModelCapabilitiesForModel(baseModel)
+	capabilities, capabilitiesKnown := codexClientModelCapabilitiesForAuth(auth, baseModel)
 	if !capabilitiesKnown {
 		// The official ModelInfo field defaults to true when an older/unknown
 		// catalog entry omits it.
 		capabilities.SupportsReasoningSummaryParameter = true
 	}
 
-	body = codexEnsureFinalUpstreamBodyDefaults(body, baseModel, opts)
+	body = codexEnsureFinalUpstreamBodyDefaults(body, capabilities, capabilitiesKnown, opts)
 	body = normalizeCodexFinalUpstreamTools(body)
 	body = normalizeCodexFinalUpstreamText(body, &capabilities)
 	body = normalizeCodexFinalUpstreamInputItems(body, opts)
@@ -782,6 +784,7 @@ func normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body []byte, capab
 
 	prefixItems := make([][]byte, 0, 2)
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
+		tools = codexResponsesLiteClientTools(tools)
 		prefixItems = append(prefixItems, []byte(`{"type":"additional_tools","role":"developer","tools":`+tools.Raw+`}`))
 	}
 	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) != "" {
@@ -817,6 +820,27 @@ func normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body []byte, capab
 		return body
 	}
 	return helps.EditJSONBytes(body, edits...)
+}
+
+func codexResponsesLiteClientTools(tools gjson.Result) gjson.Result {
+	if !tools.IsArray() {
+		return tools
+	}
+	items := make([][]byte, 0, len(tools.Array()))
+	changed := false
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		switch strings.TrimSpace(tool.Get("type").String()) {
+		case "web_search", "web_search_preview", "image_generation":
+			changed = true
+		default:
+			items = append(items, []byte(tool.Raw))
+		}
+		return true
+	})
+	if !changed {
+		return tools
+	}
+	return gjson.ParseBytes(codexRawJSONArray(items))
 }
 
 func normalizeCodexFinalUpstreamResponsesLiteInputImages(body []byte, input gjson.Result) []byte {

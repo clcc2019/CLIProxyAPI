@@ -1,6 +1,7 @@
 package misc
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -22,7 +23,7 @@ var customRootCAsCache struct {
 func CustomRootCAsFromEnv() (*x509.CertPool, error) {
 	codeXCA := strings.TrimSpace(os.Getenv("CODEX_CA_CERTIFICATE"))
 	sslCertFile := strings.TrimSpace(os.Getenv("SSL_CERT_FILE"))
-	cacheKey := codeXCA + "\x00" + sslCertFile
+	cacheKey := customRootCAsSourceFingerprint(codeXCA, sslCertFile)
 
 	customRootCAsCache.mu.RLock()
 	if customRootCAsCache.key == cacheKey {
@@ -43,6 +44,49 @@ func CustomRootCAsFromEnv() (*x509.CertPool, error) {
 	customRootCAsCache.pool = pool
 	customRootCAsCache.err = err
 	return pool, err
+}
+
+// CustomRootCAsEnvFingerprint returns a content-safe cache identity for the
+// custom CA environment. File-backed sources include file version metadata, so
+// replacing a certificate at the same path invalidates HTTP and websocket TLS
+// caches without retaining PEM data or filesystem paths in their keys.
+func CustomRootCAsEnvFingerprint() string {
+	return customRootCAsSourceFingerprint(
+		strings.TrimSpace(os.Getenv("CODEX_CA_CERTIFICATE")),
+		strings.TrimSpace(os.Getenv("SSL_CERT_FILE")),
+	)
+}
+
+func customRootCAsSourceFingerprint(values ...string) string {
+	hasher := sha256.New()
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		_, _ = hasher.Write([]byte{0})
+		if strings.Contains(value, "-----BEGIN CERTIFICATE-----") {
+			_, _ = hasher.Write([]byte("inline\x00"))
+			_, _ = hasher.Write([]byte(value))
+			continue
+		}
+
+		_, _ = hasher.Write([]byte("file\x00"))
+		_, _ = hasher.Write([]byte(value))
+		if value == "" {
+			continue
+		}
+		info, errStat := os.Stat(value)
+		if errStat != nil {
+			_, _ = fmt.Fprintf(hasher, "\x00stat-error:%T:%v", errStat, errStat)
+			continue
+		}
+		_, _ = fmt.Fprintf(
+			hasher,
+			"\x00size:%d:mtime:%d:mode:%d",
+			info.Size(),
+			info.ModTime().UnixNano(),
+			info.Mode(),
+		)
+	}
+	return fmt.Sprintf("%x", hasher.Sum(nil))
 }
 
 func loadCustomRootCAs(values ...string) (*x509.CertPool, error) {

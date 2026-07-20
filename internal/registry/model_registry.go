@@ -61,6 +61,10 @@ type ModelInfo struct {
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
 	// Config holds provider-specific request metadata bundled with a model.
 	Config *ModelConfig `json:"config,omitempty"`
+	// CodexCapabilities holds account-scoped Codex transport capabilities from
+	// the upstream /models catalog. It is runtime-only because the public model
+	// registry schema does not expose Codex's internal transport contract.
+	CodexCapabilities *CodexClientModelCapabilities `json:"-"`
 
 	// UserDefined indicates this model was defined through config file's models[]
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
@@ -645,6 +649,10 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 			}
 		}
 		copyModel.Config = &copyConfig
+	}
+	if model.CodexCapabilities != nil {
+		copyCapabilities := cloneCodexClientModelCapabilities(*model.CodexCapabilities)
+		copyModel.CodexCapabilities = &copyCapabilities
 	}
 	return &copyModel
 }

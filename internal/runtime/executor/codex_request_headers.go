@@ -133,11 +133,11 @@ func codexSetOriginatorHeader(headers http.Header, originator string) {
 	codexSetSingleHeaderValue(headers, "Originator", originator)
 }
 
-func codexApplyResponsesLiteHeader(headers http.Header, baseModel string) {
+func codexApplyResponsesLiteHeader(headers http.Header, baseModel string, auth *cliproxyauth.Auth) {
 	if headers == nil {
 		return
 	}
-	capabilities, ok := codexClientModelCapabilitiesForModel(baseModel)
+	capabilities, ok := codexClientModelCapabilitiesForAuth(auth, baseModel)
 	if ok && capabilities.UseResponsesLite {
 		headers.Set(codexWireHeaderOpenAIInternalCodexResponsesLite, "true")
 		return

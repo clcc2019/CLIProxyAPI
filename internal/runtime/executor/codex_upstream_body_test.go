@@ -2,6 +2,7 @@ package executor
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -638,6 +639,55 @@ func TestNormalizeCodexFinalUpstreamResponsesLiteWithCapabilities(t *testing.T) 
 	}
 	if got := gjson.GetBytes(gotBody, "input.2.role").String(); got != "user" {
 		t.Fatalf("input.2.role = %q, want original user message; body=%s", got, gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamResponsesLiteOmitsHostedTools(t *testing.T) {
+	body := []byte(`{
+		"input":[],
+		"tools":[
+			{"type":"web_search"},
+			{"type":"web_search_preview"},
+			{"type":"image_generation"},
+			{"type":"function","name":"local_tool","parameters":{"type":"object"}}
+		]
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, registry.CodexClientModelCapabilities{UseResponsesLite: true})
+	tools := gjson.GetBytes(gotBody, "input.0.tools").Array()
+	if len(tools) != 1 || tools[0].Get("name").String() != "local_tool" {
+		t.Fatalf("responses_lite additional tools = %s, want only local_tool; body=%s", gjson.GetBytes(gotBody, "input.0.tools").Raw, gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBodyUsesAccountScopedResponsesLiteCapability(t *testing.T) {
+	const authID = "test-account-responses-lite-disabled"
+	auth := &cliproxyauth.Auth{ID: authID, Provider: "codex"}
+	model := &registry.ModelInfo{
+		ID: "gpt-5.6-sol",
+		CodexCapabilities: &registry.CodexClientModelCapabilities{
+			ModelSlug:        "gpt-5.6-sol",
+			UseResponsesLite: false,
+		},
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{model})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+
+	body := []byte(`{"input":[],"instructions":"account instructions","tools":[{"type":"function","name":"tool","parameters":{"type":"object"}}]}`)
+	gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.6-sol", auth, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+	if !gjson.GetBytes(gotBody, "tools").Exists() {
+		t.Fatalf("account capability disabled Lite but tools were moved: %s", gotBody)
+	}
+	if gjson.GetBytes(gotBody, "input.0.type").String() == "additional_tools" {
+		t.Fatalf("account capability disabled Lite but additional_tools was emitted: %s", gotBody)
+	}
+	headers := make(http.Header)
+	codexApplyResponsesLiteHeader(headers, "gpt-5.6-sol", auth)
+	if headers.Get(codexWireHeaderOpenAIInternalCodexResponsesLite) != "" {
+		t.Fatalf("account capability disabled Lite but header was emitted: %#v", headers)
 	}
 }
 

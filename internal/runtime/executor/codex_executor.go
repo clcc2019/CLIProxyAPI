@@ -969,9 +969,9 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
 }
 
-func isCodexResponsesLiteRequest(body []byte, baseModel string, headers http.Header) bool {
-	if capabilities, ok := codexClientModelCapabilitiesForModel(baseModel); ok && capabilities.UseResponsesLite {
-		return true
+func isCodexResponsesLiteRequest(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) bool {
+	if capabilities, ok := codexClientModelCapabilitiesForAuth(auth, baseModel); ok {
+		return capabilities.UseResponsesLite
 	}
 	if headers != nil {
 		if value, ok := codexParseBoolLike(firstNonEmptyHeaderValue(headers, nil, codexWireHeaderOpenAIInternalCodexResponsesLite)); ok && value {
@@ -992,8 +992,29 @@ func isCodexResponsesLiteRequest(body []byte, baseModel string, headers http.Hea
 	return false
 }
 
+func isImageGenerationFunctionTool(tool gjson.Result) bool {
+	switch tool.Get("type").String() {
+	case "function":
+		return tool.Get("name").String() == "image_gen.imagegen"
+	case "namespace":
+		if tool.Get("name").String() != "image_gen" {
+			return false
+		}
+		tools := tool.Get("tools")
+		if !tools.IsArray() {
+			return false
+		}
+		for _, nestedTool := range tools.Array() {
+			if nestedTool.Get("type").String() == "function" && nestedTool.Get("name").String() == "imagegen" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
-	if isCodexResponsesLiteRequest(body, baseModel, headers) {
+	if isCodexResponsesLiteRequest(body, baseModel, auth, headers) {
 		return body
 	}
 	if strings.HasSuffix(baseModel, "spark") {
@@ -1012,7 +1033,7 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 		return body
 	}
 	for _, t := range tools.Array() {
-		if t.Get("type").String() == "image_generation" {
+		if t.Get("type").String() == "image_generation" || isImageGenerationFunctionTool(t) {
 			return body
 		}
 	}

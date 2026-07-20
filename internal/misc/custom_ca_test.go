@@ -52,6 +52,42 @@ func TestCustomRootCAsFromEnvLoadsPEMFile(t *testing.T) {
 	}
 }
 
+func TestCustomRootCAsFromEnvRefreshesReplacedPEMFile(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "rotating-ca.pem")
+	if err := os.WriteFile(certPath, []byte(mustCreateTestCertificatePEM(t)), 0o600); err != nil {
+		t.Fatalf("WriteFile(initial) error = %v", err)
+	}
+	t.Setenv("CODEX_CA_CERTIFICATE", "")
+	t.Setenv("SSL_CERT_FILE", certPath)
+
+	initialFingerprint := CustomRootCAsEnvFingerprint()
+	initialPool, errInitial := CustomRootCAsFromEnv()
+	if errInitial != nil || initialPool == nil {
+		t.Fatalf("CustomRootCAsFromEnv(initial) = (%v, %v), want non-nil pool without error", initialPool, errInitial)
+	}
+
+	if err := os.WriteFile(certPath, []byte(mustCreateTestCertificatePEM(t)), 0o600); err != nil {
+		t.Fatalf("WriteFile(rotated) error = %v", err)
+	}
+	rotatedTime := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(certPath, rotatedTime, rotatedTime); err != nil {
+		t.Fatalf("Chtimes(rotated) error = %v", err)
+	}
+
+	rotatedFingerprint := CustomRootCAsEnvFingerprint()
+	if rotatedFingerprint == initialFingerprint {
+		t.Fatal("same-path CA replacement did not invalidate the environment fingerprint")
+	}
+	rotatedPool, errRotated := CustomRootCAsFromEnv()
+	if errRotated != nil || rotatedPool == nil {
+		t.Fatalf("CustomRootCAsFromEnv(rotated) = (%v, %v), want non-nil pool without error", rotatedPool, errRotated)
+	}
+	if rotatedPool == initialPool {
+		t.Fatal("same-path CA replacement reused the stale certificate pool")
+	}
+}
+
 func mustCreateTestCertificatePEM(t *testing.T) string {
 	t.Helper()
 

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -24,9 +25,14 @@ type codexClientModelCapability struct {
 		ID string `json:"id"`
 	} `json:"service_tiers"`
 	DefaultServiceTier *string `json:"default_service_tier"`
+	DisplayName        string  `json:"display_name"`
+	Description        string  `json:"description"`
+	ContextWindow      int     `json:"context_window"`
+	MaxContextWindow   int     `json:"max_context_window"`
 }
 
 type CodexClientModelCapabilities struct {
+	ModelSlug                         string
 	SupportsParallelToolCalls         bool
 	SupportsReasoningSummaries        bool
 	SupportsReasoningSummaryParameter bool
@@ -37,6 +43,69 @@ type CodexClientModelCapabilities struct {
 	SupportsImageDetailOriginal       bool
 	ServiceTiers                      []string
 	DefaultServiceTier                string
+}
+
+// ParseCodexClientModelCatalog converts the account-scoped Codex /models
+// response into registry model entries while preserving static metadata as a
+// fallback for fields the remote catalog omits.
+func ParseCodexClientModelCatalog(data []byte, fallback []*ModelInfo) ([]*ModelInfo, error) {
+	var payload codexClientModelCapabilityPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("parse Codex model catalog: %w", err)
+	}
+
+	fallbackByID := make(map[string]*ModelInfo, len(fallback))
+	for _, model := range fallback {
+		if model == nil {
+			continue
+		}
+		if id := strings.TrimSpace(model.ID); id != "" {
+			fallbackByID[id] = model
+		}
+	}
+
+	models := make([]*ModelInfo, 0, len(payload.Models))
+	for _, remote := range payload.Models {
+		slug := strings.TrimSpace(remote.Slug)
+		if slug == "" {
+			continue
+		}
+		model := cloneModelInfo(fallbackByID[slug])
+		if model == nil {
+			model = &ModelInfo{
+				ID:      slug,
+				Object:  "model",
+				OwnedBy: "openai",
+				Type:    "openai",
+				Name:    slug,
+				Version: slug,
+			}
+		}
+		model.ID = slug
+		if displayName := strings.TrimSpace(remote.DisplayName); displayName != "" {
+			model.DisplayName = displayName
+		}
+		if description := strings.TrimSpace(remote.Description); description != "" {
+			model.Description = description
+		}
+		if remote.ContextWindow > 0 {
+			model.ContextLength = remote.ContextWindow
+			model.InputTokenLimit = remote.ContextWindow
+		} else if remote.MaxContextWindow > 0 {
+			model.ContextLength = remote.MaxContextWindow
+			model.InputTokenLimit = remote.MaxContextWindow
+		}
+		capabilities := defaultCodexClientModelCapabilities(slug)
+		if model.CodexCapabilities != nil {
+			capabilities = cloneCodexClientModelCapabilities(*model.CodexCapabilities)
+		} else if embedded, ok := CodexClientModelCapabilitiesForModel(slug); ok {
+			capabilities = embedded
+		}
+		capabilities = overlayCodexClientModelCapabilities(capabilities, remote)
+		model.CodexCapabilities = &capabilities
+		models = append(models, model)
+	}
+	return models, nil
 }
 
 var (
@@ -59,6 +128,32 @@ func CodexClientModelCapabilitiesForModel(modelID string) (CodexClientModelCapab
 	}
 	capabilities, ok := codexClientModelCapabilityMap[modelID]
 	return capabilities, ok
+}
+
+// GetCodexClientModelCapabilities returns the account-scoped capabilities
+// registered for one auth. Aliased model IDs fall back to the original remote
+// slug stored in the capability record.
+func (r *ModelRegistry) GetCodexClientModelCapabilities(clientID, modelID string) (CodexClientModelCapabilities, bool) {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if r == nil || clientID == "" || modelID == "" {
+		return CodexClientModelCapabilities{}, false
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	infos := r.clientModelInfos[clientID]
+	if info := infos[modelID]; info != nil && info.CodexCapabilities != nil {
+		return cloneCodexClientModelCapabilities(*info.CodexCapabilities), true
+	}
+	for _, info := range infos {
+		if info == nil || info.CodexCapabilities == nil {
+			continue
+		}
+		if info.CodexCapabilities.ModelSlug == modelID {
+			return cloneCodexClientModelCapabilities(*info.CodexCapabilities), true
+		}
+	}
+	return CodexClientModelCapabilities{}, false
 }
 
 // CodexClientModelSupportsParallelToolCalls returns the official Codex model
@@ -90,48 +185,77 @@ func loadCodexClientModelCapabilities() {
 			if slug == "" {
 				continue
 			}
-			serviceTiers := make([]string, 0, len(model.ServiceTiers))
-			for _, tier := range model.ServiceTiers {
-				id := strings.TrimSpace(tier.ID)
-				if id != "" {
-					serviceTiers = append(serviceTiers, id)
-				}
-			}
-			codexClientModelCapabilityMap[slug] = CodexClientModelCapabilities{
-				SupportsParallelToolCalls: boolPtrValue(model.SupportsParallelToolCalls),
-				// The current Codex catalog no longer emits the legacy
-				// supports_reasoning_summaries field. Older catalogs used it as
-				// an opt-out capability, so omission retains the previous true
-				// default while request shaping follows the newer summary-parameter
-				// capability below.
-				SupportsReasoningSummaries:        boolPtrValueDefault(model.SupportsReasoningSummaries, true),
-				SupportsReasoningSummaryParameter: boolPtrValueDefault(model.SupportsReasoningSummaryParameter, true),
-				DefaultReasoningLevel:             stringPtrValue(model.DefaultReasoningLevel),
-				SupportsVerbosity:                 boolPtrValue(model.SupportVerbosity),
-				DefaultVerbosity:                  stringPtrValue(model.DefaultVerbosity),
-				UseResponsesLite:                  boolPtrValue(model.UseResponsesLite),
-				SupportsImageDetailOriginal:       boolPtrValue(model.SupportsImageDetailOriginal),
-				ServiceTiers:                      serviceTiers,
-				DefaultServiceTier:                stringPtrValue(model.DefaultServiceTier),
-			}
+			codexClientModelCapabilityMap[slug] = codexClientModelCapabilities(model)
 		}
 	})
 }
 
-func boolPtrValue(value *bool) bool {
-	return value != nil && *value
+func codexClientModelCapabilities(model codexClientModelCapability) CodexClientModelCapabilities {
+	return overlayCodexClientModelCapabilities(
+		defaultCodexClientModelCapabilities(strings.TrimSpace(model.Slug)),
+		model,
+	)
 }
 
-func boolPtrValueDefault(value *bool, fallback bool) bool {
-	if value == nil {
-		return fallback
+func defaultCodexClientModelCapabilities(slug string) CodexClientModelCapabilities {
+	return CodexClientModelCapabilities{
+		ModelSlug:                         strings.TrimSpace(slug),
+		SupportsReasoningSummaries:        true,
+		SupportsReasoningSummaryParameter: true,
 	}
-	return *value
 }
 
-func stringPtrValue(value *string) string {
-	if value == nil {
-		return ""
+// overlayCodexClientModelCapabilities applies only fields explicitly present
+// in an account-scoped catalog record. Omitted fields retain the embedded or
+// previously registered values so a partial /models response cannot silently
+// switch the request wire protocol.
+func overlayCodexClientModelCapabilities(base CodexClientModelCapabilities, model codexClientModelCapability) CodexClientModelCapabilities {
+	base = cloneCodexClientModelCapabilities(base)
+	if slug := strings.TrimSpace(model.Slug); slug != "" {
+		base.ModelSlug = slug
 	}
-	return strings.TrimSpace(*value)
+	if model.SupportsParallelToolCalls != nil {
+		base.SupportsParallelToolCalls = *model.SupportsParallelToolCalls
+	}
+	if model.SupportsReasoningSummaries != nil {
+		base.SupportsReasoningSummaries = *model.SupportsReasoningSummaries
+	}
+	if model.SupportsReasoningSummaryParameter != nil {
+		base.SupportsReasoningSummaryParameter = *model.SupportsReasoningSummaryParameter
+	}
+	if model.DefaultReasoningLevel != nil {
+		base.DefaultReasoningLevel = strings.TrimSpace(*model.DefaultReasoningLevel)
+	}
+	if model.SupportVerbosity != nil {
+		base.SupportsVerbosity = *model.SupportVerbosity
+	}
+	if model.DefaultVerbosity != nil {
+		base.DefaultVerbosity = strings.TrimSpace(*model.DefaultVerbosity)
+	}
+	if model.UseResponsesLite != nil {
+		base.UseResponsesLite = *model.UseResponsesLite
+	}
+	if model.SupportsImageDetailOriginal != nil {
+		base.SupportsImageDetailOriginal = *model.SupportsImageDetailOriginal
+	}
+	if model.ServiceTiers != nil {
+		serviceTiers := make([]string, 0, len(model.ServiceTiers))
+		for _, tier := range model.ServiceTiers {
+			if id := strings.TrimSpace(tier.ID); id != "" {
+				serviceTiers = append(serviceTiers, id)
+			}
+		}
+		base.ServiceTiers = serviceTiers
+	}
+	if model.DefaultServiceTier != nil {
+		base.DefaultServiceTier = strings.TrimSpace(*model.DefaultServiceTier)
+	}
+	return base
+}
+
+func cloneCodexClientModelCapabilities(capabilities CodexClientModelCapabilities) CodexClientModelCapabilities {
+	if len(capabilities.ServiceTiers) > 0 {
+		capabilities.ServiceTiers = append([]string(nil), capabilities.ServiceTiers...)
+	}
+	return capabilities
 }

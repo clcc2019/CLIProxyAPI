@@ -30,6 +30,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
@@ -116,6 +117,13 @@ type Service struct {
 
 	// redisState owns the optional Redis client used for durable runtime state.
 	redisState *redisstate.Store
+
+	// codexRemoteCatalogs caches account-scoped /models responses. The official
+	// Codex client uses the same five-minute freshness window.
+	codexRemoteCatalogs sync.Map
+	// codexRemoteCatalogRefreshes collapses concurrent refreshes for the same
+	// auth source so auth watcher and refresh callbacks cannot stampede /models.
+	codexRemoteCatalogRefreshes singleflight.Group
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -320,6 +328,9 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	} else {
 		auth = applied
 	}
+	if errCatalog := s.refreshCodexRemoteCatalog(ctx, auth); errCatalog != nil {
+		log.Debugf("failed to refresh Codex model catalog for %s: %v", auth.ID, errCatalog)
+	}
 
 	// Register models after auth is updated in coreManager.
 	// This operation may block on network calls, but the auth configuration
@@ -342,6 +353,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		return
 	}
 	GlobalModelRegistry().UnregisterClient(id)
+	s.codexRemoteCatalogs.Delete(id)
 	removed, err := s.coreManager.Remove(ctx, id)
 	if err != nil {
 		log.Errorf("failed to remove auth %s: %v", id, err)
@@ -1196,6 +1208,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		default:
 			models = registry.GetCodexProModels()
 		}
+		models = s.codexModelsFromRemoteCatalog(a, models)
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry)

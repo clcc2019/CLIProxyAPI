@@ -5,13 +5,13 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -108,6 +108,9 @@ type codexWebsocketSession struct {
 	conn   *websocket.Conn
 	wsURL  string
 	authID string
+	// proxyPolicy is a credential-safe fingerprint of the effective proxy
+	// selection used when conn was established. It is protected by connMu.
+	proxyPolicy string
 
 	writeMu sync.Mutex
 	probeMu sync.Mutex
@@ -1341,7 +1344,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	codexEnsureExecutionSessionHeader(wsHeaders, codexGinHeadersFromContext(ctx), executionSessionID)
 	wsHeaders = applyCodexWebsocketHeadersForRequestKind(ctx, wsHeaders, auth, apiKey, e.cfg, codexWebsocketTurnMetadataRequestKind(body))
 	codexApplyModelHeaderOverrides(wsHeaders, baseModel)
-	codexApplyResponsesLiteHeader(wsHeaders, baseModel)
+	codexApplyResponsesLiteHeader(wsHeaders, baseModel, auth)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(wsHeaders, responsesAPIClientMetadata)
 	turnStateScope := trimHeaderValue(wsHeaders, codexHeaderTurnMetadata)
 	if explicitTurnMetadata != "" {
@@ -1366,7 +1369,13 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		executionSessionID: executionSessionID,
 	}
 	if prepared.executionSessionID != "" {
-		prepared.reuseKey = codexWebsocketReusableKeyFromParts(authID, wsURL, promptCacheID, trimHeaderValue(wsHeaders, codexHeaderWindowID))
+		prepared.reuseKey = codexWebsocketReusableKeyFromParts(
+			authID,
+			wsURL,
+			promptCacheID,
+			trimHeaderValue(wsHeaders, codexHeaderWindowID),
+			codexWebsocketProxyPolicyFingerprint(e.cfg, auth),
+		)
 		prepared.sess = e.getOrCreateSession(prepared.executionSessionID, prepared.reuseKey)
 		if prepared.sess != nil {
 			prepared.sess.reqMu.Lock()
@@ -1437,7 +1446,7 @@ func codexWebsocketReusableKey(_ sdktranslator.Format, authID string, wsURL stri
 	return codexWebsocketReusableKeyFromParts(authID, wsURL, promptCacheID, windowID)
 }
 
-func codexWebsocketReusableKeyFromParts(authID string, wsURL string, promptCacheID string, windowID string) string {
+func codexWebsocketReusableKeyFromParts(authID string, wsURL string, promptCacheID string, windowID string, proxyPolicy ...string) string {
 	promptCacheID = strings.TrimSpace(promptCacheID)
 	if promptCacheID == "" {
 		return ""
@@ -1447,11 +1456,17 @@ func codexWebsocketReusableKeyFromParts(authID string, wsURL string, promptCache
 	if authID == "" || wsURL == "" {
 		return ""
 	}
+	policySegment := ""
+	if len(proxyPolicy) > 0 {
+		if fingerprint := strings.TrimSpace(proxyPolicy[0]); fingerprint != "" {
+			policySegment = "|proxy=" + fingerprint
+		}
+	}
 	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {
-		return authID + "|" + wsURL + "|" + promptCacheID
+		return authID + "|" + wsURL + policySegment + "|" + promptCacheID
 	}
-	return authID + "|" + wsURL + "|" + promptCacheID + "|" + windowID
+	return authID + "|" + wsURL + policySegment + "|" + promptCacheID + "|" + windowID
 }
 
 func (e *CodexWebsocketsExecutor) retryCodexWebsocketWithoutPreviousResponse(
@@ -1685,6 +1700,7 @@ func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []by
 		body = []byte(`{}`)
 	}
 	body = codexEnsureResponsesContextField(body, codexFinalUpstreamResponses)
+	body = helps.SanitizeCodexInputItemIDs(body)
 
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
@@ -1728,6 +1744,7 @@ func buildCodexWebsocketRequestBodyWithCurrentTurnMetadata(body []byte) []byte {
 		body = []byte(`{}`)
 	}
 	body = codexEnsureResponsesContextField(body, codexFinalUpstreamResponses)
+	body = helps.SanitizeCodexInputItemIDs(body)
 
 	typeResult := gjson.GetBytes(body, "type")
 	if strings.TrimSpace(typeResult.String()) == "response.create" {
@@ -2538,14 +2555,11 @@ func codexSameByteView(left, right []byte) bool {
 var codexWebsocketDialerCache sync.Map
 
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
-	proxyURL := ""
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
-	cacheKey := proxyURL + "\x00" + os.Getenv("CODEX_CA_CERTIFICATE") + "\x00" + os.Getenv("SSL_CERT_FILE")
+	proxyURL := codexWebsocketProxyURL(cfg, auth)
+	// Never retain a proxy URL (and therefore possible credentials) in a
+	// process-global cache key. The full digest still distinguishes credential
+	// rotations and proxy target changes without exposing either value.
+	cacheKey := codexWebsocketDialerCacheKey(cfg, auth)
 	if cached, ok := codexWebsocketDialerCache.Load(cacheKey); ok {
 		if dialer, okDialer := cached.(*websocket.Dialer); okDialer {
 			return dialer
@@ -2556,6 +2570,64 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 	actual, _ := codexWebsocketDialerCache.LoadOrStore(cacheKey, dialer)
 	if cached, ok := actual.(*websocket.Dialer); ok {
 		return cached
+	}
+	return dialer
+}
+
+func codexWebsocketDialerCacheKey(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	return codexWebsocketProxyPolicyFingerprint(cfg, auth) + "\x00" + misc.CustomRootCAsEnvFingerprint()
+}
+
+func codexWebsocketProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.ProxyURL)
+	}
+	return ""
+}
+
+// codexWebsocketProxyPolicyFingerprint returns a credential-safe identity for
+// the effective websocket proxy policy. An empty explicit setting means
+// "inherit ProxyFromEnvironment"; the environment itself is intentionally not
+// copied into the key because net/http snapshots that process-level policy and
+// proxy environment variables may contain credentials.
+func codexWebsocketProxyPolicyFingerprint(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	proxyURL := codexWebsocketProxyURL(cfg, auth)
+	canonical := "inherit"
+	if proxyURL != "" {
+		setting, errParse := proxyutil.Parse(proxyURL)
+		switch {
+		case errParse != nil:
+			canonical = "invalid\x00" + proxyURL
+		case setting.Mode == proxyutil.ModeDirect:
+			canonical = "direct"
+		case setting.Mode == proxyutil.ModeProxy && setting.URL != nil:
+			canonical = "proxy\x00" + setting.URL.String()
+		default:
+			canonical = "invalid\x00" + proxyURL
+		}
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("%x", digest)
+}
+
+func blockCodexWebsocketDialer(dialer *websocket.Dialer, err error) *websocket.Dialer {
+	if dialer == nil {
+		dialer = &websocket.Dialer{}
+	}
+	if err == nil {
+		err = fmt.Errorf("invalid websocket proxy configuration")
+	}
+	blockedErr := fmt.Errorf("codex websockets executor: proxy policy rejected connection: %w", err)
+	dialer.Proxy = func(*http.Request) (*url.URL, error) {
+		return nil, blockedErr
+	}
+	dialer.NetDialContext = func(context.Context, string, string) (net.Conn, error) {
+		return nil, blockedErr
 	}
 	return dialer
 }
@@ -2586,7 +2658,7 @@ func buildCodexWebsocketDialer(proxyURL string) *websocket.Dialer {
 	setting, errParse := proxyutil.Parse(proxyURL)
 	if errParse != nil {
 		log.Errorf("codex websockets executor: %v", errParse)
-		return dialer
+		return blockCodexWebsocketDialer(dialer, errParse)
 	}
 
 	switch setting.Mode {
@@ -2595,7 +2667,7 @@ func buildCodexWebsocketDialer(proxyURL string) *websocket.Dialer {
 		return dialer
 	case proxyutil.ModeProxy:
 	default:
-		return dialer
+		return blockCodexWebsocketDialer(dialer, fmt.Errorf("invalid proxy mode"))
 	}
 
 	switch setting.URL.Scheme {
@@ -2612,7 +2684,7 @@ func buildCodexWebsocketDialer(proxyURL string) *websocket.Dialer {
 		})
 		if errSOCKS5 != nil {
 			log.Errorf("codex websockets executor: create SOCKS5 dialer failed: %v", errSOCKS5)
-			return dialer
+			return blockCodexWebsocketDialer(dialer, errSOCKS5)
 		}
 		dialer.Proxy = nil
 		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -2621,7 +2693,9 @@ func buildCodexWebsocketDialer(proxyURL string) *websocket.Dialer {
 	case "http", "https":
 		dialer.Proxy = http.ProxyURL(setting.URL)
 	default:
-		log.Errorf("codex websockets executor: unsupported proxy scheme: %s", setting.URL.Scheme)
+		errUnsupported := fmt.Errorf("unsupported proxy scheme: %s", setting.URL.Scheme)
+		log.Errorf("codex websockets executor: %v", errUnsupported)
+		return blockCodexWebsocketDialer(dialer, errUnsupported)
 	}
 
 	return dialer
@@ -2994,6 +3068,7 @@ func (e *CodexWebsocketsExecutor) resetSessionForReuseKey(sess *codexWebsocketSe
 	}
 	sess.authID = ""
 	sess.wsURL = ""
+	sess.proxyPolicy = ""
 	sess.connMu.Unlock()
 
 	sess.reuseKey = reuseKey
@@ -3045,9 +3120,59 @@ func (e *CodexWebsocketsExecutor) existingSession(sessionID string) *codexWebsoc
 	return sess
 }
 
+// detachMismatchedWebsocketSessionConn atomically removes a connection that
+// was established for a different credential, upstream URL, or proxy policy.
+// Closing happens after releasing connMu so the reader goroutine cannot turn a
+// controlled policy switch into a downstream disconnect notification.
+func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, proxyPolicy string) (*websocket.Conn, string, string, string) {
+	if sess == nil {
+		return nil, "", "", ""
+	}
+
+	authID = strings.TrimSpace(authID)
+	wsURL = strings.TrimSpace(wsURL)
+	proxyPolicy = strings.TrimSpace(proxyPolicy)
+
+	sess.connMu.Lock()
+	defer sess.connMu.Unlock()
+	conn := sess.conn
+	if conn == nil {
+		return nil, "", "", ""
+	}
+
+	storedAuthID := strings.TrimSpace(sess.authID)
+	storedWSURL := strings.TrimSpace(sess.wsURL)
+	storedProxyPolicy := strings.TrimSpace(sess.proxyPolicy)
+	targetChanged := storedAuthID != authID || storedWSURL != wsURL
+	proxyChanged := storedProxyPolicy != proxyPolicy
+	if !targetChanged && !proxyChanged {
+		return nil, "", "", ""
+	}
+
+	previousAuthID := sess.authID
+	previousWSURL := sess.wsURL
+	sess.conn = nil
+	if sess.readerConn == conn {
+		sess.readerConn = nil
+	}
+	reason := "proxy_policy_changed"
+	if targetChanged {
+		reason = "target_changed"
+	}
+	return conn, previousAuthID, previousWSURL, reason
+}
+
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
 	if sess == nil {
 		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
+	}
+	proxyPolicy := codexWebsocketProxyPolicyFingerprint(e.cfg, auth)
+
+	if staleConn, staleAuthID, staleWSURL, reason := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, proxyPolicy); staleConn != nil {
+		logCodexWebsocketDisconnected(sess.sessionID, staleAuthID, staleWSURL, reason, nil)
+		if errClose := staleConn.Close(); errClose != nil {
+			log.Errorf("codex websockets executor: close stale websocket error: %v", errClose)
+		}
 	}
 
 	sess.connMu.Lock()
@@ -3101,6 +3226,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.conn = conn
 	sess.wsURL = wsURL
 	sess.authID = authID
+	sess.proxyPolicy = proxyPolicy
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 

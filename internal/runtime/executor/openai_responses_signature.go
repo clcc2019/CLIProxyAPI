@@ -13,9 +13,6 @@ import (
 )
 
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"encrypted_content"`)) {
-		return body
-	}
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
 		return body
@@ -24,6 +21,7 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 	if provider == "" {
 		provider = "openai responses upstream"
 	}
+	stripOrphanReasoningIDs := !gjson.GetBytes(body, "store").Bool()
 
 	items := input.Array()
 	rawItems := make([][]byte, 0, len(items))
@@ -37,6 +35,18 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 
 		encryptedContent := item.Get("encrypted_content")
 		if !encryptedContent.Exists() {
+			if stripOrphanReasoningIDs && item.Get("id").Exists() {
+				next, err := sjson.DeleteBytes(rawItem, "id")
+				if err != nil {
+					helps.LogWithRequestID(ctx).Debugf("%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, err)
+					rawItems = append(rawItems, rawItem)
+					continue
+				}
+				rawItems = append(rawItems, next)
+				changed = true
+				helps.LogWithRequestID(ctx).Debugf("%s: dropped orphan reasoning id at input[%d] item_id=%q reason=missing encrypted_content with store disabled", provider, index, strings.TrimSpace(item.Get("id").String()))
+				continue
+			}
 			rawItems = append(rawItems, rawItem)
 			continue
 		}
@@ -65,6 +75,13 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 			helps.LogWithRequestID(ctx).Debugf("%s: failed to drop invalid reasoning encrypted_content at input[%d]: %v", provider, index, err)
 			rawItems = append(rawItems, rawItem)
 			continue
+		}
+		if stripOrphanReasoningIDs && item.Get("id").Exists() {
+			if nextWithoutID, errID := sjson.DeleteBytes(next, "id"); errID != nil {
+				helps.LogWithRequestID(ctx).Debugf("%s: failed to drop reasoning id after invalid encrypted_content at input[%d]: %v", provider, index, errID)
+			} else {
+				next = nextWithoutID
+			}
 		}
 		rawItems = append(rawItems, next)
 		changed = true
@@ -102,6 +119,7 @@ func dropOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider 
 	if reason == "" {
 		reason = "upstream rejected encrypted content"
 	}
+	stripOrphanReasoningIDs := !gjson.GetBytes(body, "store").Bool()
 
 	items := input.Array()
 	rawItems := make([][]byte, 0, len(items))
@@ -117,6 +135,13 @@ func dropOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider 
 			helps.LogWithRequestID(ctx).Debugf("%s: failed to drop reasoning encrypted_content at input[%d]: %v", provider, index, err)
 			rawItems = append(rawItems, rawItem)
 			continue
+		}
+		if stripOrphanReasoningIDs && item.Get("id").Exists() {
+			if nextWithoutID, errID := sjson.DeleteBytes(next, "id"); errID != nil {
+				helps.LogWithRequestID(ctx).Debugf("%s: failed to drop reasoning id after encrypted_content removal at input[%d]: %v", provider, index, errID)
+			} else {
+				next = nextWithoutID
+			}
 		}
 		rawItems = append(rawItems, next)
 		changed = true

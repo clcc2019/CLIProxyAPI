@@ -533,7 +533,13 @@ func TestPrepareCodexWebsocketRequestBuildsReusableKeyForPromptCache(t *testing.
 	}
 	defer prepared.unlockSession()
 
-	wantReuseKey := "auth-1|wss://chatgpt.com/backend-api/codex/responses|cache-1|cache-1:0"
+	wantReuseKey := codexWebsocketReusableKeyFromParts(
+		"auth-1",
+		"wss://chatgpt.com/backend-api/codex/responses",
+		"cache-1",
+		"cache-1:0",
+		codexWebsocketProxyPolicyFingerprint(executor.cfg, auth),
+	)
 	if prepared.reuseKey != wantReuseKey {
 		t.Fatalf("reuseKey = %q, want %q", prepared.reuseKey, wantReuseKey)
 	}
@@ -842,7 +848,14 @@ func TestPrepareCodexWebsocketRequestClearsIncrementalStateWhenReuseKeyChanges(t
 	if got := gjson.GetBytes(prepared.wsReqBody, "previous_response_id"); got.Exists() {
 		t.Fatalf("changed reuseKey should not reuse old previous_response_id: %s", prepared.wsReqBody)
 	}
-	if got := prepared.sess.reuseKey; got != "auth-1|"+upstreamWSURL+"|"+newCacheKey+"|"+newCacheKey+":0" {
+	wantReuseKey := codexWebsocketReusableKeyFromParts(
+		"auth-1",
+		upstreamWSURL,
+		newCacheKey,
+		newCacheKey+":0",
+		codexWebsocketProxyPolicyFingerprint(executor.cfg, auth),
+	)
+	if got := prepared.sess.reuseKey; got != wantReuseKey {
 		t.Fatalf("session reuseKey = %q, want new cache key", got)
 	}
 	if got := prepared.sess.lastResponseID; got != "" {
@@ -2807,6 +2820,7 @@ func TestCloseExecutionSessionParksReusableSessionAndReattaches(t *testing.T) {
 	sess1.readerConn = conn
 	sess1.wsURL = wsURL
 	sess1.authID = "auth-1"
+	sess1.proxyPolicy = codexWebsocketProxyPolicyFingerprint(executor.cfg, nil)
 	sess1.touchActivity()
 	sess1.configureConn(conn)
 	go executor.readUpstreamLoop(sess1, conn)

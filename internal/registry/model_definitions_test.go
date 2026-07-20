@@ -207,6 +207,74 @@ func TestCodexClientModelCapabilitiesIncludeGPT56(t *testing.T) {
 	}
 }
 
+func TestParseCodexClientModelCatalogPreservesAccountScopedResponsesLite(t *testing.T) {
+	models, err := ParseCodexClientModelCatalog([]byte(`{"models":[{"slug":"gpt-5.6-sol","display_name":"Account Sol","context_window":123456,"supports_parallel_tool_calls":false,"use_responses_lite":false}]}`), GetCodexProModels())
+	if err != nil {
+		t.Fatalf("ParseCodexClientModelCatalog: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("model count = %d, want 1", len(models))
+	}
+	model := models[0]
+	if model.ID != "gpt-5.6-sol" || model.DisplayName != "Account Sol" || model.ContextLength != 123456 {
+		t.Fatalf("parsed model = %#v", model)
+	}
+	if model.CodexCapabilities == nil {
+		t.Fatal("missing account-scoped Codex capabilities")
+	}
+	if model.CodexCapabilities.UseResponsesLite {
+		t.Fatal("account catalog should override the embedded responses_lite=true value")
+	}
+
+	registry := GetGlobalRegistry()
+	const clientID = "test-account-scoped-codex-capabilities"
+	registry.RegisterClient(clientID, "codex", models)
+	t.Cleanup(func() { registry.UnregisterClient(clientID) })
+	capabilities, ok := registry.GetCodexClientModelCapabilities(clientID, "gpt-5.6-sol")
+	if !ok {
+		t.Fatal("account-scoped capabilities were not registered")
+	}
+	if capabilities.UseResponsesLite || capabilities.SupportsParallelToolCalls {
+		t.Fatalf("account-scoped capabilities = %#v", capabilities)
+	}
+}
+
+func TestParseCodexClientModelCatalogPreservesEmbeddedCapabilitiesWhenRemoteFieldsAreOmitted(t *testing.T) {
+	models, err := ParseCodexClientModelCatalog([]byte(`{"models":[{"slug":"gpt-5.6-sol","display_name":"Partial Account Sol"}]}`), GetCodexProModels())
+	if err != nil {
+		t.Fatalf("ParseCodexClientModelCatalog: %v", err)
+	}
+	if len(models) != 1 || models[0].CodexCapabilities == nil {
+		t.Fatalf("parsed models = %#v", models)
+	}
+
+	got := models[0].CodexCapabilities
+	want, ok := CodexClientModelCapabilitiesForModel("gpt-5.6-sol")
+	if !ok {
+		t.Fatal("missing embedded gpt-5.6-sol capabilities")
+	}
+	if got.ModelSlug != want.ModelSlug ||
+		got.SupportsParallelToolCalls != want.SupportsParallelToolCalls ||
+		got.SupportsReasoningSummaries != want.SupportsReasoningSummaries ||
+		got.SupportsReasoningSummaryParameter != want.SupportsReasoningSummaryParameter ||
+		got.DefaultReasoningLevel != want.DefaultReasoningLevel ||
+		got.SupportsVerbosity != want.SupportsVerbosity ||
+		got.DefaultVerbosity != want.DefaultVerbosity ||
+		got.UseResponsesLite != want.UseResponsesLite ||
+		got.SupportsImageDetailOriginal != want.SupportsImageDetailOriginal ||
+		got.DefaultServiceTier != want.DefaultServiceTier {
+		t.Fatalf("partial remote capabilities = %#v, want embedded %#v", *got, want)
+	}
+	if len(got.ServiceTiers) != len(want.ServiceTiers) {
+		t.Fatalf("partial remote service tiers = %#v, want %#v", got.ServiceTiers, want.ServiceTiers)
+	}
+	for i := range want.ServiceTiers {
+		if got.ServiceTiers[i] != want.ServiceTiers[i] {
+			t.Fatalf("partial remote service tiers = %#v, want %#v", got.ServiceTiers, want.ServiceTiers)
+		}
+	}
+}
+
 func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	found := false
