@@ -31,7 +31,7 @@ func TestBuildCodexUserAgent_FallsBackToDefaultVersion(t *testing.T) {
 }
 
 func TestCodexCLIVersionPinned(t *testing.T) {
-	const want = "0.144.1"
+	const want = "0.144.6"
 	if CodexCLIVersion != want {
 		t.Fatalf("CodexCLIVersion = %q, want %q", CodexCLIVersion, want)
 	}

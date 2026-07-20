@@ -2828,10 +2828,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	}
 	codexEnsureFedramp(headers, profileHeaders, auth, apiKeyAuth)
 
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
+	attrs := codexClientProfileCustomHeaderAttrs(auth)
 	if util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs) {
 		codexEnsureVersionHeader(headers, nil)
 		if cfgUserAgent != "" {

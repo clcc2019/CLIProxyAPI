@@ -97,10 +97,7 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 		codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, accountID)
 	}
 	codexEnsureFedramp(headers, profileHeaders, auth, apiKeyAuth)
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
+	attrs := codexClientProfileCustomHeaderAttrs(auth)
 	if util.ApplyCustomHeadersFromAttrs(r, attrs) {
 		codexEnsureVersionHeader(headers, nil)
 		if cfgUserAgent != "" {

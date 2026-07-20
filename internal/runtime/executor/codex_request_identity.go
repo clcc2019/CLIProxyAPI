@@ -116,6 +116,9 @@ func codexIdentity(target http.Header, source http.Header, auth *cliproxyauth.Au
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	authUserAgent := codexAuthUserAgent(auth)
+	if codexGeneratedDefaultUserAgent(authUserAgent) {
+		authUserAgent = ""
+	}
 	switch {
 	case userAgent != "":
 		identity.userAgent = userAgent
@@ -135,7 +138,9 @@ func codexIdentity(target http.Header, source http.Header, auth *cliproxyauth.Au
 
 func codexResolvedOriginatorValue(target http.Header, source http.Header, auth *cliproxyauth.Auth) string {
 	if authOriginator := codexAuthOriginator(auth); authOriginator != "" {
-		return authOriginator
+		if !codexGeneratedDefaultOriginator(auth, authOriginator) {
+			return authOriginator
+		}
 	}
 	if originator := trimHeaderValue(target, "Originator"); originator != "" {
 		return originator

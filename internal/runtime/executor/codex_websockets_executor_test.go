@@ -1870,8 +1870,8 @@ func TestCodexEnsureVersionHeaderNormalizesMinimum(t *testing.T) {
 		},
 		{
 			name:          "newer prerelease is preserved",
-			sourceVersion: "0.144.2-alpha.1",
-			want:          "0.144.2-alpha.1",
+			sourceVersion: "0.144.7-alpha.1",
+			want:          "0.144.7-alpha.1",
 		},
 		{
 			name:          "newer stable client is preserved",
@@ -1980,6 +1980,7 @@ func TestApplyCodexWebsocketHeadersNormalizesVersionAndPassesThroughClientIdenti
 }
 
 func TestApplyCodexWebsocketHeadersUpdatesPinnedClientVersionAndKeepsOtherProfileHeaders(t *testing.T) {
+	codexResetClientProfilesForTest()
 	auth := &cliproxyauth.Auth{
 		Provider:   "codex",
 		Metadata:   map[string]any{"access_token": "oauth-token"},
@@ -2014,8 +2015,8 @@ func TestApplyCodexWebsocketHeadersUpdatesPinnedClientVersionAndKeepsOtherProfil
 	})
 	second := applyCodexWebsocketHeaders(secondCtx, http.Header{}, auth, "oauth-token", nil)
 
-	if published == nil {
-		t.Fatal("expected fixed websocket client version upgrade to publish auth update")
+	if published != nil {
+		t.Fatalf("runtime websocket client version upgrade should not publish auth update: %#v", published.Metadata)
 	}
 	for header, want := range map[string]string{
 		"User-Agent":              "codex_vscode/2.0.0",
@@ -2029,6 +2030,12 @@ func TestApplyCodexWebsocketHeadersUpdatesPinnedClientVersionAndKeepsOtherProfil
 		if got := second.Get(header); got != want {
 			t.Fatalf("second %s = %q, want %q", header, got, want)
 		}
+	}
+	if _, ok := auth.Metadata["headers"]; ok {
+		t.Fatalf("runtime websocket client profile pin should not mutate auth metadata headers: %#v", auth.Metadata)
+	}
+	if _, ok := auth.Attributes["header:User-Agent"]; ok {
+		t.Fatalf("runtime websocket client profile pin should not mutate auth attributes: %#v", auth.Attributes)
 	}
 }
 

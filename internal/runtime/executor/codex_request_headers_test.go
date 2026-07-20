@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -115,7 +116,8 @@ func TestApplyCodexHeadersDoesNotSetFedrampForAPIKeyAuth(t *testing.T) {
 	}
 }
 
-func TestApplyCodexHeadersPinsFirstClientProfileToAuth(t *testing.T) {
+func TestApplyCodexHeadersPinsFirstClientProfileAtRuntime(t *testing.T) {
+	codexResetClientProfilesForTest()
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-auth",
 		Provider: "codex",
@@ -150,37 +152,20 @@ func TestApplyCodexHeadersPinsFirstClientProfileToAuth(t *testing.T) {
 
 	applyCodexHeaders(req, auth, "oauth-token", true, nil)
 
-	if published == nil {
-		t.Fatal("expected first request client profile to be published")
+	if published != nil {
+		t.Fatalf("runtime client profile pin should not publish auth update: %#v", published.Metadata)
 	}
-	if got := auth.Metadata["user_agent"]; got != "first-codex/1.0" {
-		t.Fatalf("auth user_agent = %v, want first-codex/1.0", got)
+	if _, ok := auth.Metadata["user_agent"]; ok {
+		t.Fatalf("runtime client profile pin should not mutate auth user_agent: %#v", auth.Metadata)
 	}
-	if got := auth.Metadata["originator"]; got != "codex_vscode" {
-		t.Fatalf("auth originator = %v, want codex_vscode", got)
+	if _, ok := auth.Metadata["originator"]; ok {
+		t.Fatalf("runtime client profile pin should not mutate auth originator: %#v", auth.Metadata)
 	}
-	if got := auth.Metadata[codexClientProfilePinnedMetadataKey]; got != true {
-		t.Fatalf("auth profile pinned = %v, want true", got)
+	if _, ok := auth.Metadata[codexClientProfilePinnedMetadataKey]; ok {
+		t.Fatalf("runtime client profile pin should not mark auth metadata pinned: %#v", auth.Metadata)
 	}
-	headers, ok := auth.Metadata["headers"].(map[string]any)
-	if !ok {
-		t.Fatalf("auth metadata headers = %T, want map[string]any", auth.Metadata["headers"])
-	}
-	for key, want := range map[string]string{
-		"X-Codex-Beta-Features":   "first-feature",
-		"Version":                 "1.2.3",
-		"X-Codex-Installation-Id": "first-install",
-		"X-OpenAI-Subagent":       "first-subagent",
-		codexHeaderOAIAttestation: "first-attestation",
-		"Traceparent":             "00-first",
-		"Tracestate":              "state-first",
-	} {
-		if got := headers[key]; got != want {
-			t.Fatalf("auth metadata header %s = %v, want %s", key, got, want)
-		}
-	}
-	if got := published.Metadata["user_agent"]; got != "first-codex/1.0" {
-		t.Fatalf("published user_agent = %v, want first-codex/1.0", got)
+	if _, ok := auth.Metadata["headers"]; ok {
+		t.Fatalf("runtime client profile pin should not mutate auth metadata headers: %#v", auth.Metadata)
 	}
 	if got := req.Header.Get("User-Agent"); got != "first-codex/1.0" {
 		t.Fatalf("request User-Agent = %q, want first-codex/1.0", got)
@@ -253,6 +238,7 @@ func TestApplyCodexHeadersPinsFirstClientProfileToAuth(t *testing.T) {
 }
 
 func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.T) {
+	codexResetClientProfilesForTest()
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-auth-ua-update",
 		Provider: "codex",
@@ -290,8 +276,8 @@ func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.
 
 	applyCodexHeaders(upgradeReq, auth, "oauth-token", true, nil)
 
-	if published == nil {
-		t.Fatal("expected fixed client version upgrade to publish auth update")
+	if published != nil {
+		t.Fatalf("runtime client version upgrade should not publish auth update: %#v", published.Metadata)
 	}
 	if got := upgradeReq.Header.Get("User-Agent"); got != "codex_vscode/9.2.0 (darwin; arm64)" {
 		t.Fatalf("upgrade User-Agent = %q, want upgraded fixed-client UA", got)
@@ -299,18 +285,11 @@ func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.
 	if got := upgradeReq.Header.Get("Version"); got != "9.2.0" {
 		t.Fatalf("upgrade Version = %q, want upgraded fixed-client version", got)
 	}
-	if got := auth.Metadata["user_agent"]; got != "codex_vscode/9.2.0 (darwin; arm64)" {
-		t.Fatalf("auth user_agent = %v, want upgraded UA", got)
+	if _, ok := auth.Metadata["user_agent"]; ok {
+		t.Fatalf("runtime client version upgrade should not mutate auth user_agent: %#v", auth.Metadata)
 	}
-	headers, ok := auth.Metadata["headers"].(map[string]any)
-	if !ok {
-		t.Fatalf("auth metadata headers = %T, want map[string]any", auth.Metadata["headers"])
-	}
-	if got := headers["User-Agent"]; got != "codex_vscode/9.2.0 (darwin; arm64)" {
-		t.Fatalf("metadata headers User-Agent = %v, want upgraded UA", got)
-	}
-	if got := headers["Version"]; got != "9.2.0" {
-		t.Fatalf("metadata headers Version = %v, want upgraded version", got)
+	if _, ok := auth.Metadata["headers"]; ok {
+		t.Fatalf("runtime client version upgrade should not mutate auth metadata headers: %#v", auth.Metadata)
 	}
 
 	published = nil
@@ -408,7 +387,8 @@ func TestApplyCodexHeadersRejectsMismatchedPinnedClientVersions(t *testing.T) {
 	}
 }
 
-func TestCodexPinnedClientVersionUpdateDetachesShallowAuthMaps(t *testing.T) {
+func TestCodexPinnedClientVersionUpdateDoesNotMutateShallowAuthMaps(t *testing.T) {
+	codexResetClientProfilesForTest()
 	original := &cliproxyauth.Auth{
 		Provider: "codex",
 		Metadata: map[string]any{
@@ -446,12 +426,16 @@ func TestCodexPinnedClientVersionUpdateDetachesShallowAuthMaps(t *testing.T) {
 	if got := originalHeaders["Version"]; got != "1.0.0" {
 		t.Fatalf("shared nested metadata Version was mutated: %v", got)
 	}
-	if got := execution.Attributes["header:Version"]; got != "2.0.0" {
-		t.Fatalf("execution Version = %q, want 2.0.0", got)
+	if got := execution.Attributes["header:Version"]; got != "1.0.0" {
+		t.Fatalf("execution auth Version was mutated: %q", got)
+	}
+	if got := req.Header.Get("Version"); got != "2.0.0" {
+		t.Fatalf("request Version = %q, want 2.0.0", got)
 	}
 }
 
 func TestCodexPinnedClientVersionUpdatesDoNotMutateConcurrentShallowSource(t *testing.T) {
+	codexResetClientProfilesForTest()
 	original := &cliproxyauth.Auth{
 		Provider: "codex",
 		Metadata: map[string]any{
@@ -496,9 +480,53 @@ func TestCodexPinnedClientVersionUpdatesDoNotMutateConcurrentShallowSource(t *te
 	}
 }
 
+func TestCodexPinClientProfileFromFirstRequestConcurrentSameAuthDoesNotMutateAuthMaps(t *testing.T) {
+	codexResetClientProfilesForTest()
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-auth-concurrent-runtime-pin",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "oauth-token",
+		},
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+	}
+
+	const workers = 64
+	var wg sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			version := "2.0." + strconv.Itoa(index+1)
+			headers := http.Header{
+				"User-Agent":              {"codex_vscode/" + version},
+				"Originator":              {"codex_vscode"},
+				"Version":                 {version},
+				"X-Codex-Installation-Id": {"install-" + strconv.Itoa(index+1)},
+			}
+			codexPinClientProfileFromFirstRequest(context.Background(), auth, nil, headers, nil)
+		}(index)
+	}
+	wg.Wait()
+
+	if _, ok := auth.Metadata[codexClientProfilePinnedMetadataKey]; ok {
+		t.Fatalf("concurrent runtime pin should not mark auth metadata pinned: %#v", auth.Metadata)
+	}
+	if _, ok := auth.Metadata["headers"]; ok {
+		t.Fatalf("concurrent runtime pin should not mutate auth metadata headers: %#v", auth.Metadata)
+	}
+	if _, ok := auth.Attributes["header:User-Agent"]; ok {
+		t.Fatalf("concurrent runtime pin should not mutate auth attributes: %#v", auth.Attributes)
+	}
+}
+
 func TestApplyCodexHeadersKeepsLegacyDefaultPinnedClientProfile(t *testing.T) {
+	codexResetClientProfilesForTest()
 	const legacyDefaultUA = "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
-	const clientUA = "codex_vscode/0.144.1 (darwin; arm64)"
+	const clientUA = "codex_vscode/0.144.6 (darwin; arm64)"
 
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-auth-legacy-default-profile",
@@ -527,7 +555,7 @@ func TestApplyCodexHeadersKeepsLegacyDefaultPinnedClientProfile(t *testing.T) {
 	ctx := contextWithGinHeaders(map[string]string{
 		"User-Agent": clientUA,
 		"Originator": "codex_vscode",
-		"Version":    "0.144.1",
+		"Version":    "0.144.6",
 	})
 	ctx = cliproxyauth.WithAuthUpdateCallback(ctx, func(_ context.Context, updated *cliproxyauth.Auth) {
 		published = updated.Clone()
@@ -548,8 +576,8 @@ func TestApplyCodexHeadersKeepsLegacyDefaultPinnedClientProfile(t *testing.T) {
 	if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
 		t.Fatalf("request Originator = %q, want pinned codex_cli_rs", got)
 	}
-	if got := req.Header.Get("Version"); got != "0.144.1" {
-		t.Fatalf("request Version = %q, want 0.144.1", got)
+	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
+		t.Fatalf("request Version = %q, want %s", got, misc.CodexCLIVersion)
 	}
 	if got := auth.Metadata["user_agent"]; got != legacyDefaultUA {
 		t.Fatalf("auth user_agent = %v, want pinned %s", got, legacyDefaultUA)
@@ -566,8 +594,9 @@ func TestApplyCodexHeadersKeepsLegacyDefaultPinnedClientProfile(t *testing.T) {
 }
 
 func TestApplyCodexHeadersReplacesLegacyDefaultUnpinnedClientProfile(t *testing.T) {
+	codexResetClientProfilesForTest()
 	const legacyDefaultUA = "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
-	const clientUA = "codex_vscode/0.144.1 (darwin; arm64)"
+	const clientUA = "codex_vscode/0.144.6 (darwin; arm64)"
 
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-auth-legacy-default-unpinned-profile",
@@ -594,7 +623,7 @@ func TestApplyCodexHeadersReplacesLegacyDefaultUnpinnedClientProfile(t *testing.
 	ctx := contextWithGinHeaders(map[string]string{
 		"User-Agent": clientUA,
 		"Originator": "codex_vscode",
-		"Version":    "0.144.1",
+		"Version":    "0.144.6",
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
@@ -609,26 +638,30 @@ func TestApplyCodexHeadersReplacesLegacyDefaultUnpinnedClientProfile(t *testing.
 	if got := req.Header.Get("Originator"); got != "codex_vscode" {
 		t.Fatalf("request Originator = %q, want codex_vscode", got)
 	}
-	if got := auth.Metadata["originator"]; got != "codex_vscode" {
-		t.Fatalf("auth originator = %v, want codex_vscode", got)
+	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
+		t.Fatalf("request Version = %q, want %s", got, misc.CodexCLIVersion)
 	}
-	if got := auth.Attributes["header:Originator"]; got != "codex_vscode" {
-		t.Fatalf("auth header:Originator = %q, want codex_vscode", got)
+	if got := auth.Metadata["originator"]; got != "codex_cli_rs" {
+		t.Fatalf("auth originator was mutated: %v", got)
 	}
-	if got := auth.Attributes["header:Version"]; got != "0.144.1" {
-		t.Fatalf("auth header:Version = %q, want 0.144.1", got)
+	if got := auth.Attributes["header:Originator"]; got != "codex_cli_rs" {
+		t.Fatalf("auth header:Originator was mutated: %q", got)
+	}
+	if got := auth.Attributes["header:Version"]; got != "0.133.0" {
+		t.Fatalf("auth header:Version was mutated: %q", got)
 	}
 	headers, ok := auth.Metadata["headers"].(map[string]any)
 	if !ok {
 		t.Fatalf("auth metadata headers = %T, want map[string]any", auth.Metadata["headers"])
 	}
-	if got := headers["Version"]; got != "0.144.1" {
-		t.Fatalf("auth metadata Version = %v, want 0.144.1", got)
+	if got := headers["Version"]; got != "0.133.0" {
+		t.Fatalf("auth metadata Version was mutated: %v", got)
 	}
 }
 
 func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
-	const explicitUA = "codex_cli_rs/0.144.1 (Linux; x86_64) custom-terminal/1.0"
+	codexResetClientProfilesForTest()
+	const explicitUA = "codex_cli_rs/0.144.6 (Linux; x86_64) custom-terminal/1.0"
 
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-auth-explicit-current-cli-profile",
@@ -642,7 +675,7 @@ func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
 			"headers": map[string]any{
 				"User-Agent": explicitUA,
 				"Originator": "codex_cli_rs",
-				"Version":    "0.144.1",
+				"Version":    "0.144.6",
 			},
 		},
 		Attributes: map[string]string{
@@ -650,7 +683,7 @@ func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
 			"header:User-Agent": explicitUA,
 			"originator":        "codex_cli_rs",
 			"header:Originator": "codex_cli_rs",
-			"header:Version":    "0.144.1",
+			"header:Version":    "0.144.6",
 		},
 	}
 	ctx := contextWithGinHeaders(map[string]string{
@@ -671,7 +704,7 @@ func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
 	if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
 		t.Fatalf("request Originator = %q, want codex_cli_rs", got)
 	}
-	if got := req.Header.Get("Version"); got != "0.144.1" {
-		t.Fatalf("request Version = %q, want 0.144.1", got)
+	if got := req.Header.Get("Version"); got != "0.144.6" {
+		t.Fatalf("request Version = %q, want 0.144.6", got)
 	}
 }

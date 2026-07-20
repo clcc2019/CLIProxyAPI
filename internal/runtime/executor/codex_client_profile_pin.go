@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -18,67 +19,81 @@ var codexPinnedClientProfileHeaders = []string{
 	codexPinnedBetaFeaturesHeader,
 	"Version",
 	codexHeaderInstallationID,
-	"X-OpenAI-Subagent",
-	"X-OAI-Attestation",
+	codexWireHeaderOpenAISubagent,
+	codexWireHeaderOAIAttestation,
 	"Traceparent",
 	"Tracestate",
 	misc.CodexResidencyHeader,
-	"X-OpenAI-Fedramp",
-	"x-responsesapi-include-timing-metrics",
+	codexWireHeaderOpenAIFedramp,
+	codexWireHeaderResponsesAPIIncludeTimingMetrics,
 }
 
+type codexClientProfile struct {
+	headers http.Header
+}
+
+type codexClientProfileKey struct {
+	id   string
+	auth *cliproxyauth.Auth
+}
+
+var (
+	codexClientProfilesMu sync.RWMutex
+	codexClientProfiles   = make(map[codexClientProfileKey]codexClientProfile)
+)
+
 func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyauth.Auth, target http.Header, source http.Header, cfg *config.Config) {
+	_ = ctx
 	if auth == nil || (target == nil && source == nil) {
 		return
 	}
-	if codexClientProfilePinned(auth) {
-		userAgent, version, ok := codexPinnedClientVersionUpdate(auth, target, source)
-		if !ok {
-			return
-		}
-		codexDetachClientProfileMaps(auth)
-		codexEnsureAuthMetadata(auth)
-		auth.Metadata["user_agent"] = userAgent
-		codexSetAuthAttribute(auth, "header:User-Agent", userAgent)
-		codexSetAuthMetadataHeader(auth, "User-Agent", userAgent)
-		codexSetAuthAttribute(auth, "header:Version", version)
-		codexSetAuthMetadataHeader(auth, "Version", version)
-		cliproxyauth.PublishAuthProfileUpdate(ctx, auth)
+	key, ok := codexClientProfileKeyForAuth(auth)
+	if !ok {
 		return
 	}
 
-	changed := false
-	codexDetachClientProfileMaps(auth)
-	codexEnsureAuthMetadata(auth)
-	legacyGeneratedProfile := codexGeneratedDefaultUserAgent(codexAuthUserAgent(auth))
-	if pinned, ok := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool); !ok || !pinned {
-		auth.Metadata[codexClientProfilePinnedMetadataKey] = true
-		changed = true
+	codexClientProfilesMu.Lock()
+	defer codexClientProfilesMu.Unlock()
+
+	if profile, exists := codexClientProfiles[key]; exists {
+		if updated, ok := codexPinnedClientVersionUpdate(profile, target, source); ok {
+			codexClientProfiles[key] = updated
+		}
+		return
 	}
+
+	if profile, exists := codexLegacyClientProfileFromAuth(auth); exists {
+		if updated, ok := codexPinnedClientVersionUpdate(profile, target, source); ok {
+			profile = updated
+		}
+		codexClientProfiles[key] = profile
+		return
+	}
+
+	codexClientProfiles[key] = codexNewClientProfileFromRequest(auth, target, source, cfg)
+}
+
+func codexNewClientProfileFromRequest(auth *cliproxyauth.Auth, target http.Header, source http.Header, cfg *config.Config) codexClientProfile {
+	profile := codexClientProfile{headers: make(http.Header, len(codexPinnedClientProfileHeaders)+2)}
+	legacyGeneratedProfile := codexGeneratedDefaultUserAgent(codexAuthUserAgent(auth))
+
 	// Resolve the legacy originator before replacing its generated User-Agent.
 	// codexGeneratedDefaultOriginator uses the current User-Agent to distinguish
 	// an old generated profile from an explicit codex_cli_rs profile.
 	if value := firstNonEmptyHeaderValue(target, source, "Originator"); value != "" {
 		current := codexAuthOriginator(auth)
 		if current == "" || codexGeneratedDefaultOriginator(auth, current) {
-			codexEnsureAuthMetadata(auth)
-			auth.Metadata["originator"] = value
-			codexSetAuthAttribute(auth, "originator", value)
-			codexSetAuthAttribute(auth, "header:Originator", value)
-			changed = true
+			codexSetHeaderCasePreserved(profile.headers, "Originator", value)
 		}
 	}
 	if value := firstNonEmptyHeaderValue(target, source, "User-Agent"); value != "" {
 		current := codexAuthUserAgent(auth)
 		if current == "" || codexGeneratedDefaultUserAgent(current) {
-			auth.Metadata["user_agent"] = value
-			codexSetAuthAttribute(auth, "header:User-Agent", value)
-			codexSetAuthMetadataHeader(auth, "User-Agent", value)
-			changed = true
+			codexSetHeaderCasePreserved(profile.headers, "User-Agent", value)
 		}
 	}
 	for _, headerName := range codexPinnedClientProfileHeaders {
-		if codexAuthHeaderFixed(auth, headerName) && !(legacyGeneratedProfile && strings.EqualFold(headerName, "Version")) {
+		if codexClientProfileAuthHeaderFixed(auth, headerName) && !(legacyGeneratedProfile && strings.EqualFold(headerName, "Version")) {
 			continue
 		}
 		value := firstNonEmptyHeaderValue(target, source, headerName)
@@ -96,69 +111,34 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 		if value == "" {
 			continue
 		}
-		codexSetAuthMetadataHeader(auth, headerName, value)
-		codexSetAuthAttribute(auth, "header:"+headerName, value)
-		changed = true
+		codexSetHeaderCasePreserved(profile.headers, headerName, value)
 	}
-	if !changed {
-		return
-	}
-
-	cliproxyauth.PublishAuthProfileUpdate(ctx, auth)
+	return profile
 }
 
-func codexPinnedClientVersionUpdate(auth *cliproxyauth.Auth, target http.Header, source http.Header) (userAgent string, version string, ok bool) {
-	currentProduct, currentVersion, okCurrent := codexUserAgentProductVersion(codexAuthUserAgent(auth))
+func codexPinnedClientVersionUpdate(profile codexClientProfile, target http.Header, source http.Header) (codexClientProfile, bool) {
+	currentProduct, currentVersion, okCurrent := codexUserAgentProductVersion(trimHeaderValue(profile.headers, "User-Agent"))
 	candidateUserAgent := firstNonEmptyHeaderValue(target, source, "User-Agent")
 	candidateProduct, candidateVersion, okCandidate := codexUserAgentProductVersion(candidateUserAgent)
 	if !okCurrent || !okCandidate || !strings.EqualFold(currentProduct, candidateProduct) {
-		return "", "", false
+		return codexClientProfile{}, false
 	}
 	cmp, comparable := codexCompareVersions(candidateVersion, currentVersion)
 	if !comparable || cmp <= 0 {
-		return "", "", false
+		return codexClientProfile{}, false
 	}
 	if headerVersion := firstNonEmptyHeaderValue(target, source, "Version"); headerVersion != "" {
 		if versionCmp, valid := codexCompareVersions(headerVersion, candidateVersion); !valid || versionCmp != 0 {
-			return "", "", false
+			return codexClientProfile{}, false
 		}
 	}
-	return candidateUserAgent, candidateVersion, true
-}
-
-func codexDetachClientProfileMaps(auth *cliproxyauth.Auth) {
-	if auth == nil {
-		return
+	updated := codexClientProfile{headers: profile.headers.Clone()}
+	if updated.headers == nil {
+		updated.headers = make(http.Header, 2)
 	}
-	if auth.Attributes != nil {
-		attributes := make(map[string]string, len(auth.Attributes)+4)
-		for key, value := range auth.Attributes {
-			attributes[key] = value
-		}
-		auth.Attributes = attributes
-	}
-	if auth.Metadata == nil {
-		return
-	}
-	metadata := make(map[string]any, len(auth.Metadata)+2)
-	for key, value := range auth.Metadata {
-		metadata[key] = value
-	}
-	switch headers := auth.Metadata["headers"].(type) {
-	case map[string]any:
-		cloned := make(map[string]any, len(headers)+2)
-		for key, value := range headers {
-			cloned[key] = value
-		}
-		metadata["headers"] = cloned
-	case map[string]string:
-		cloned := make(map[string]string, len(headers)+2)
-		for key, value := range headers {
-			cloned[key] = value
-		}
-		metadata["headers"] = cloned
-	}
-	auth.Metadata = metadata
+	codexSetHeaderCasePreserved(updated.headers, "User-Agent", candidateUserAgent)
+	codexSetHeaderCasePreserved(updated.headers, "Version", candidateVersion)
+	return updated, true
 }
 
 func codexGeneratedDefaultOriginator(auth *cliproxyauth.Auth, originator string) bool {
@@ -211,68 +191,184 @@ func codexUserAgentProductVersion(userAgent string) (string, string, bool) {
 }
 
 func codexClientProfilePinned(auth *cliproxyauth.Auth) bool {
-	if auth == nil || len(auth.Metadata) == 0 {
-		return false
-	}
-	pinned, _ := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool)
-	return pinned
+	_, ok := codexPinnedClientProfileForAuth(auth)
+	return ok
 }
 
 func codexClientProfileSourceHeaders(auth *cliproxyauth.Auth, source http.Header) http.Header {
-	if codexClientProfilePinned(auth) {
-		return nil
+	if profile, ok := codexPinnedClientProfileForAuth(auth); ok {
+		return profile.headers.Clone()
 	}
 	return source
 }
 
 func codexPreparePinnedClientProfileHeaders(headers http.Header, auth *cliproxyauth.Auth) {
-	if headers == nil || !codexClientProfilePinned(auth) {
+	if headers == nil {
+		return
+	}
+	profile, ok := codexPinnedClientProfileForAuth(auth)
+	if !ok {
 		return
 	}
 
 	for existingKey := range headers {
-		switch {
-		case strings.EqualFold(existingKey, "User-Agent"):
-			if codexAuthUserAgent(auth) == "" && !codexAuthHeaderFixed(auth, "User-Agent") {
-				delete(headers, existingKey)
-			}
-		case strings.EqualFold(existingKey, "Originator"):
-			if codexAuthOriginator(auth) == "" && !codexAuthHeaderFixed(auth, "Originator") {
-				delete(headers, existingKey)
-			}
-		default:
-			for _, headerName := range codexPinnedClientProfileHeaders {
-				if !strings.EqualFold(existingKey, headerName) {
-					continue
-				}
-				if !codexAuthHeaderFixed(auth, headerName) {
-					delete(headers, existingKey)
-				}
-				break
-			}
+		if !codexPinnedClientProfileHeaderName(existingKey) || codexClientProfileAuthHeaderFixed(auth, existingKey) {
+			continue
+		}
+		if trimHeaderValue(profile.headers, existingKey) == "" {
+			delete(headers, existingKey)
+		}
+	}
+	for _, headerName := range codexAllClientProfileHeaders() {
+		if codexClientProfileAuthHeaderFixed(auth, headerName) {
+			continue
+		}
+		if value := trimHeaderValue(profile.headers, headerName); value != "" {
+			codexSetHeaderCasePreserved(headers, headerName, value)
 		}
 	}
 }
 
-func codexEnsureAuthMetadata(auth *cliproxyauth.Auth) {
-	if auth != nil && auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
+func codexPinnedClientProfileForAuth(auth *cliproxyauth.Auth) (codexClientProfile, bool) {
+	key, ok := codexClientProfileKeyForAuth(auth)
+	if !ok {
+		return codexClientProfile{}, false
 	}
+
+	codexClientProfilesMu.RLock()
+	profile, exists := codexClientProfiles[key]
+	codexClientProfilesMu.RUnlock()
+	if exists {
+		return codexCloneClientProfile(profile), true
+	}
+
+	legacyProfile, exists := codexLegacyClientProfileFromAuth(auth)
+	if !exists {
+		return codexClientProfile{}, false
+	}
+
+	codexClientProfilesMu.Lock()
+	defer codexClientProfilesMu.Unlock()
+	if profile, exists = codexClientProfiles[key]; exists {
+		return codexCloneClientProfile(profile), true
+	}
+	codexClientProfiles[key] = legacyProfile
+	return codexCloneClientProfile(legacyProfile), true
 }
 
-func codexSetAuthAttribute(auth *cliproxyauth.Auth, key string, value string) {
+func codexLegacyClientProfileFromAuth(auth *cliproxyauth.Auth) (codexClientProfile, bool) {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return codexClientProfile{}, false
+	}
+	pinned, _ := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool)
+	if !pinned {
+		return codexClientProfile{}, false
+	}
+
+	profile := codexClientProfile{headers: make(http.Header, len(codexPinnedClientProfileHeaders)+2)}
+	if value := codexAuthUserAgent(auth); value != "" {
+		codexSetHeaderCasePreserved(profile.headers, "User-Agent", value)
+	}
+	if value := codexAuthOriginator(auth); value != "" {
+		codexSetHeaderCasePreserved(profile.headers, "Originator", value)
+	}
+	for _, headerName := range codexPinnedClientProfileHeaders {
+		if value := codexAuthHeaderValue(auth, headerName); value != "" {
+			codexSetHeaderCasePreserved(profile.headers, headerName, value)
+		}
+	}
+	return profile, true
+}
+
+func codexCloneClientProfile(profile codexClientProfile) codexClientProfile {
+	return codexClientProfile{headers: profile.headers.Clone()}
+}
+
+func codexClientProfileKeyForAuth(auth *cliproxyauth.Auth) (codexClientProfileKey, bool) {
 	if auth == nil {
-		return
+		return codexClientProfileKey{}, false
 	}
-	key = strings.TrimSpace(key)
-	value = strings.TrimSpace(value)
-	if key == "" || value == "" {
-		return
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return codexClientProfileKey{id: id}, true
 	}
-	if auth.Attributes == nil {
-		auth.Attributes = make(map[string]string)
+	return codexClientProfileKey{auth: auth}, true
+}
+
+func codexAllClientProfileHeaders() []string {
+	headers := make([]string, 0, len(codexPinnedClientProfileHeaders)+2)
+	headers = append(headers, "User-Agent", "Originator")
+	headers = append(headers, codexPinnedClientProfileHeaders...)
+	return headers
+}
+
+func codexPinnedClientProfileHeaderName(name string) bool {
+	if strings.EqualFold(name, "User-Agent") || strings.EqualFold(name, "Originator") {
+		return true
 	}
-	auth.Attributes[key] = value
+	for _, headerName := range codexPinnedClientProfileHeaders {
+		if strings.EqualFold(name, headerName) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexClientProfileAuthHeaderFixed(auth *cliproxyauth.Auth, name string) bool {
+	name = strings.TrimSpace(name)
+	if auth == nil || name == "" {
+		return false
+	}
+	if codexLegacyClientProfilePinned(auth) && codexPinnedClientProfileHeaderName(name) {
+		return false
+	}
+	legacyGeneratedUserAgent := codexGeneratedDefaultUserAgent(codexAuthUserAgent(auth))
+	switch {
+	case strings.EqualFold(name, "User-Agent"):
+		if legacyGeneratedUserAgent {
+			return false
+		}
+	case strings.EqualFold(name, "Originator"):
+		if codexGeneratedDefaultOriginator(auth, codexAuthOriginator(auth)) {
+			return false
+		}
+	case strings.EqualFold(name, "Version"):
+		if legacyGeneratedUserAgent {
+			return false
+		}
+	}
+	return codexAuthHeaderFixed(auth, name)
+}
+
+func codexClientProfileCustomHeaderAttrs(auth *cliproxyauth.Auth) map[string]string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return nil
+	}
+	if !codexClientProfilePinned(auth) {
+		return auth.Attributes
+	}
+	filtered := make(map[string]string, len(auth.Attributes))
+	for key, value := range auth.Attributes {
+		headerName, ok := strings.CutPrefix(key, "header:")
+		if ok && codexPinnedClientProfileHeaderName(headerName) && !codexClientProfileAuthHeaderFixed(auth, headerName) {
+			continue
+		}
+		filtered[key] = value
+	}
+	return filtered
+}
+
+func codexResetClientProfilesForTest() {
+	codexClientProfilesMu.Lock()
+	defer codexClientProfilesMu.Unlock()
+	codexClientProfiles = make(map[codexClientProfileKey]codexClientProfile)
+}
+
+func codexLegacyClientProfilePinned(auth *cliproxyauth.Auth) bool {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return false
+	}
+	pinned, _ := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool)
+	return pinned
 }
 
 func codexAuthHeaderFixed(auth *cliproxyauth.Auth, name string) bool {
