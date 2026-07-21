@@ -20,6 +20,7 @@ func ApplyCodexMetadataFromMetadata(auth *Auth) {
 	email := strings.TrimSpace(metadataString(auth.Metadata, "email"))
 	accountID := strings.TrimSpace(metadataString(auth.Metadata, "account_id"))
 	planType := strings.TrimSpace(metadataString(auth.Metadata, "plan_type"))
+	authKind := strings.TrimSpace(metadataString(auth.Metadata, "auth_kind"))
 
 	if email == "" || accountID == "" || planType == "" {
 		if claims := parseCodexMetadataIDToken(auth.Metadata); claims != nil {
@@ -52,6 +53,9 @@ func ApplyCodexMetadataFromMetadata(auth *Auth) {
 	}
 	if planType != "" {
 		auth.Attributes["plan_type"] = planType
+	}
+	if authKind != "" {
+		auth.Attributes["auth_kind"] = authKind
 	}
 }
 

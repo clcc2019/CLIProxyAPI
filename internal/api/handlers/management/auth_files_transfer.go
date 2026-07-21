@@ -311,8 +311,21 @@ func normalizeImportedAuthJSON(data []byte) ([]byte, bool, error) {
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return nil, false, err
 	}
+	isSub2APIExport := strings.EqualFold(strings.TrimSpace(valueAsString(metadata["type"])), "sub2api-data")
+	if isSub2APIExport {
+		accounts, ok := metadata["accounts"].([]any)
+		if !ok || len(accounts) == 0 {
+			return nil, false, fmt.Errorf("Sub2API export contains no accounts")
+		}
+		if len(accounts) > 1 {
+			return nil, false, fmt.Errorf("Sub2API export contains %d accounts; export or upload one account per file", len(accounts))
+		}
+	}
 	normalized, changed := coreauth.NormalizeImportedAuthMetadata(metadata)
 	if !changed {
+		if isSub2APIExport {
+			return nil, false, fmt.Errorf("Sub2API export account is not a supported OpenAI Agent Identity credential")
+		}
 		return data, false, nil
 	}
 	normalizedData, err := json.MarshalIndent(normalized, "", "  ")

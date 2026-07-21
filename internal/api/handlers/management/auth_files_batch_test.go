@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -206,6 +207,103 @@ func TestUploadAuthFile_ConvertsOpenAISessionExportToCodexAuth(t *testing.T) {
 	}
 	if got := auths[0].Provider; got != "codex" {
 		t.Fatalf("provider = %q, want %q", got, "codex")
+	}
+}
+
+func TestUploadAuthFile_ConvertsSingleSub2APIAgentIdentityExport(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	export := `{
+		"type":"sub2api-data",
+		"version":1,
+		"accounts":[{
+			"name":"agent@example.com",
+			"platform":"openai",
+			"type":"oauth",
+			"credentials":{
+				"auth_mode":"agentIdentity",
+				"agent_runtime_id":"runtime-upload",
+				"agent_private_key":"private-upload",
+				"task_id":"task-upload",
+				"chatgpt_account_id":"account-upload",
+				"email":"agent@example.com"
+			},
+			"priority":4
+		}]
+	}`
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files?name=agent.json", bytes.NewBufferString(export))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.UploadAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected upload status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(filepath.Join(authDir, "agent.json"))
+	if err != nil {
+		t.Fatalf("read normalized auth file: %v", err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("decode normalized auth file: %v", err)
+	}
+	for key, want := range map[string]string{
+		"type": "codex", "auth_kind": "agent_identity", "agent_runtime_id": "runtime-upload",
+		"agent_private_key": "private-upload", "task_id": "task-upload", "account_id": "account-upload",
+	} {
+		if got := stored[key]; got != want {
+			t.Fatalf("stored[%q] = %#v, want %q; stored=%#v", key, got, want, stored)
+		}
+	}
+	if _, exists := stored["accounts"]; exists {
+		t.Fatal("stored auth retained Sub2API accounts wrapper")
+	}
+	auth, ok := manager.GetByID("agent.json")
+	if !ok {
+		t.Fatal("uploaded auth was not registered")
+	}
+	if auth.Provider != "codex" || auth.Attributes["auth_kind"] != "agent_identity" {
+		t.Fatalf("uploaded auth provider/kind = %q/%q", auth.Provider, auth.Attributes["auth_kind"])
+	}
+	for key, want := range map[string]string{
+		"agent_runtime_id":  "runtime-upload",
+		"agent_private_key": "private-upload",
+		"task_id":           "task-upload",
+		"account_id":        "account-upload",
+	} {
+		if got := auth.Metadata[key]; got != want {
+			t.Fatalf("registered metadata[%q] = %#v, want %q", key, got, want)
+		}
+	}
+}
+
+func TestUploadAuthFile_RejectsMultiAccountSub2APIExport(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	export := `{"type":"sub2api-data","accounts":[{},{}]}`
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files?name=agents.json", bytes.NewBufferString(export))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.UploadAuthFile(ctx)
+
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "contains 2 accounts") {
+		t.Fatalf("status/body = %d/%s, want explicit multi-account rejection", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(authDir, "agents.json")); !os.IsNotExist(err) {
+		t.Fatalf("multi-account export should not be written, stat err=%v", err)
 	}
 }
 

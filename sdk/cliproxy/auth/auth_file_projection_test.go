@@ -63,6 +63,126 @@ func TestNewAuthFromAuthFileMetadataAppliesCommonProjection(t *testing.T) {
 	}
 }
 
+func TestDecodeAuthFileMetadataNormalizesCodexAgentIdentity(t *testing.T) {
+	metadata, err := DecodeAuthFileMetadata([]byte(`{
+		"auth_mode": "agentIdentity",
+		"agent_runtime_id": "runtime-1",
+		"agent_private_key": "private-key-base64",
+		"task_id": "task-1",
+		"chatgpt_account_id": "account-1",
+		"chatgpt_user_id": "user-1",
+		"chatgpt_account_is_fedramp": true,
+		"proxy_url": "http://127.0.0.1:7890"
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeAuthFileMetadata: %v", err)
+	}
+	wantStrings := map[string]string{
+		"type":              "codex",
+		"auth_kind":         "agent_identity",
+		"agent_runtime_id":  "runtime-1",
+		"agent_private_key": "private-key-base64",
+		"task_id":           "task-1",
+		"account_id":        "account-1",
+		"chatgpt_user_id":   "user-1",
+		"proxy_url":         "http://127.0.0.1:7890",
+	}
+	for key, want := range wantStrings {
+		if got := authFileProjectionString(metadata, key); got != want {
+			t.Fatalf("metadata[%q] = %q, want %q; metadata=%#v", key, got, want, metadata)
+		}
+	}
+	if fedramp, ok := metadata["fedramp"].(bool); !ok || !fedramp {
+		t.Fatalf("metadata[fedramp] = %#v, want true", metadata["fedramp"])
+	}
+	if _, exists := metadata["auth_mode"]; exists {
+		t.Fatal("legacy auth_mode was not removed")
+	}
+
+	auth := NewAuthFromAuthFileMetadata(metadata, AuthFileProjectionOptions{ID: "agent.json"})
+	if auth.Provider != "codex" || auth.Attributes["auth_kind"] != "agent_identity" || auth.Attributes["account_id"] != "account-1" {
+		t.Fatalf("projected auth = provider %q attrs %#v", auth.Provider, auth.Attributes)
+	}
+}
+
+func TestDecodeAuthFileMetadataNormalizesNestedCamelCaseAgentIdentity(t *testing.T) {
+	metadata, err := DecodeAuthFileMetadata([]byte(`{
+		"type": "codex",
+		"agentIdentity": {
+			"authMode": "agentIdentity",
+			"agentRuntimeId": "runtime-2",
+			"agentPrivateKey": "private-key-2",
+			"taskId": "task-2",
+			"accountId": "account-2"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeAuthFileMetadata: %v", err)
+	}
+	if got := authFileProjectionString(metadata, "agent_runtime_id"); got != "runtime-2" {
+		t.Fatalf("agent_runtime_id = %q", got)
+	}
+	if got := authFileProjectionString(metadata, "agent_private_key"); got != "private-key-2" {
+		t.Fatalf("agent_private_key = %q", got)
+	}
+	if _, exists := metadata["agentIdentity"]; exists {
+		t.Fatal("nested agentIdentity was not removed")
+	}
+}
+
+func TestDecodeAuthFileMetadataUnwrapsSingleSub2APIAgentIdentityExport(t *testing.T) {
+	metadata, err := DecodeAuthFileMetadata([]byte(`{
+		"type": "sub2api-data",
+		"version": 1,
+		"accounts": [{
+			"name": "agent@example.com",
+			"platform": "openai",
+			"type": "oauth",
+			"credentials": {
+				"auth_mode": "agentIdentity",
+				"agent_runtime_id": "runtime-export",
+				"agent_private_key": "private-export",
+				"task_id": "task-export",
+				"chatgpt_account_id": "account-export",
+				"chatgpt_account_is_fedramp": true,
+				"email": "agent@example.com",
+				"plan_type": "plus"
+			},
+			"extra": {"last_refresh": "2026-07-21T05:23:22Z"},
+			"priority": 7
+		}]
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeAuthFileMetadata: %v", err)
+	}
+	wantStrings := map[string]string{
+		"type":              "codex",
+		"auth_kind":         "agent_identity",
+		"agent_runtime_id":  "runtime-export",
+		"agent_private_key": "private-export",
+		"task_id":           "task-export",
+		"account_id":        "account-export",
+		"email":             "agent@example.com",
+		"plan_type":         "plus",
+		"last_refresh":      "2026-07-21T05:23:22Z",
+		"label":             "agent@example.com",
+	}
+	for key, want := range wantStrings {
+		if got := authFileProjectionString(metadata, key); got != want {
+			t.Fatalf("metadata[%q] = %q, want %q; metadata=%#v", key, got, want, metadata)
+		}
+	}
+	if got, ok := metadata["priority"].(float64); !ok || got != 7 {
+		t.Fatalf("priority = %#v, want 7", metadata["priority"])
+	}
+	if got, ok := metadata["fedramp"].(bool); !ok || !got {
+		t.Fatalf("fedramp = %#v, want true", metadata["fedramp"])
+	}
+	if _, exists := metadata["accounts"]; exists {
+		t.Fatal("Sub2API accounts wrapper was not removed")
+	}
+}
+
 func TestNewAuthFromAuthFileMetadataAppliesCodexClientProfileFields(t *testing.T) {
 	auth := NewAuthFromAuthFileMetadata(map[string]any{
 		"type":                   "codex",

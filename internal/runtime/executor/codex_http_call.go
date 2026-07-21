@@ -22,14 +22,21 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 		return nil
 	}
 	apiKey, _ := codexCreds(auth)
-	if strings.TrimSpace(apiKey) != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	authorization, err := e.codexAuthorization(req.Context(), auth, apiKey)
+	if err != nil {
+		return err
+	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
 	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	if codexIsAgentIdentityAuth(auth) && authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
 	return nil
 }
 
@@ -47,6 +54,37 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	httpClient := helps.NewCodexHTTPClient(ctx, e.cfg, auth, 0)
 	resp, err := httpClient.Do(httpReq)
+	if resp != nil {
+		codexPublishRateLimitsFromHeaders(ctx, auth, resp.Header)
+	}
+	if err != nil || resp == nil || !codexIsAgentIdentityAuth(auth) || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+	body, errPeek := peekCodexAgentIdentityErrorBody(resp)
+	if errPeek != nil || !isCodexAgentIdentityTaskInvalid(resp.StatusCode, body) {
+		return resp, err
+	}
+	if req.Body != nil && req.GetBody == nil {
+		return resp, err
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		log.Debugf("codex executor: close unauthorized response body before agent identity retry: %v", errClose)
+	}
+	if _, _, errRecover := e.ensureCodexAgentIdentityTask(ctx, auth, codexAgentIdentityTaskID(auth)); errRecover != nil {
+		return nil, errRecover
+	}
+	retryReq := req.Clone(ctx)
+	if req.Body != nil {
+		retryBody, errBody := req.GetBody()
+		if errBody != nil {
+			return nil, errBody
+		}
+		retryReq.Body = retryBody
+	}
+	if errPrepare := e.PrepareRequest(retryReq, auth); errPrepare != nil {
+		return nil, errPrepare
+	}
+	resp, err = httpClient.Do(retryReq)
 	if resp != nil {
 		codexPublishRateLimitsFromHeaders(ctx, auth, resp.Header)
 	}
@@ -135,7 +173,11 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	if err != nil {
 		return codexPreparedHTTPCall{}, err
 	}
-	profileHeaders := applyCodexHeadersForRequestKindWithGinHeaders(prepared.httpReq, auth, token, stream, e.cfg, requestKind, ginHeaders)
+	authorization, err := e.codexAuthorization(ctx, auth, token)
+	if err != nil {
+		return codexPreparedHTTPCall{}, err
+	}
+	profileHeaders := applyCodexHeadersForRequestKindWithGinHeaders(prepared.httpReq, auth, authorization, stream, e.cfg, requestKind, ginHeaders)
 	codexApplyModelHeaderOverrides(prepared.httpReq.Header, baseModel)
 	codexApplyResponsesLiteHeader(prepared.httpReq.Header, baseModel, auth)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)

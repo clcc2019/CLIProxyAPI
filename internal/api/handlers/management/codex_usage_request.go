@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -74,8 +75,8 @@ func (h *Handler) codexUsageAuthFromDisk(name string) (*coreauth.Auth, int, stri
 	if status != http.StatusOK {
 		return nil, status, message
 	}
-	metadata := make(map[string]any)
-	if err := json.Unmarshal(data, &metadata); err != nil {
+	metadata, err := coreauth.DecodeAuthFileMetadata(data)
+	if err != nil {
 		return nil, http.StatusBadRequest, fmt.Sprintf("invalid auth file JSON: %v", err)
 	}
 	provider := strings.TrimSpace(valueAsString(metadata["type"]))
@@ -129,7 +130,7 @@ func (h *Handler) refreshCodexUsageAuthIfNeeded(ctx context.Context, auth *corea
 
 func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin.H, int, error) {
 	accessToken := codexUsageAccessToken(auth)
-	if accessToken == "" {
+	if accessToken == "" && !codexUsageIsAgentIdentity(auth) {
 		return nil, 0, fmt.Errorf("codex access_token missing")
 	}
 	accountID := resolveCodexUsageAccountID(auth, accessToken)
@@ -303,7 +304,9 @@ func (h *Handler) doCodexUsageRequest(ctx context.Context, client *http.Client, 
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 	if accountID != "" {
 		req.Header.Set("ChatGPT-Account-ID", accountID)
 	}
@@ -315,7 +318,16 @@ func (h *Handler) doCodexUsageRequest(ctx context.Context, client *http.Client, 
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}
 	}
-	resp, err := client.Do(req)
+	var resp *http.Response
+	if codexUsageIsAgentIdentity(auth) {
+		manager := h.authManagerSnapshot()
+		if manager == nil {
+			return nil, 0, fmt.Errorf("codex agent identity requires auth manager")
+		}
+		resp, err = manager.HttpRequest(ctx, auth, req)
+	} else {
+		resp, err = client.Do(req)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -325,7 +337,7 @@ func (h *Handler) doCodexUsageRequest(ctx context.Context, client *http.Client, 
 		return nil, resp.StatusCode, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, resp.StatusCode, fmt.Errorf("codex usage request failed with status %d: %s", resp.StatusCode, truncateForLog(string(body), 200))
+		return nil, resp.StatusCode, fmt.Errorf("codex usage request failed with status %d: %s", resp.StatusCode, truncateForLog(string(util.RedactSensitiveLogBytes(body)), 200))
 	}
 	payload := gin.H{}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -342,6 +354,21 @@ func codexUsageAccessToken(auth *coreauth.Auth) string {
 		return token
 	}
 	return strings.TrimSpace(authAttribute(auth, "access_token"))
+}
+
+func codexUsageIsAgentIdentity(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	kind := strings.TrimSpace(authAttribute(auth, "auth_kind"))
+	if kind == "" {
+		kind = codexAuthMetadataString(auth.Metadata, "auth_kind", "authKind", "auth_mode", "authMode")
+	}
+	if strings.EqualFold(kind, "agent_identity") || strings.EqualFold(kind, "agentIdentity") {
+		return true
+	}
+	return codexAuthMetadataString(auth.Metadata, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID") != "" &&
+		codexAuthMetadataString(auth.Metadata, "agent_private_key", "agentPrivateKey") != ""
 }
 
 func resolveCodexUsageAccountID(auth *coreauth.Auth, accessToken string) string {

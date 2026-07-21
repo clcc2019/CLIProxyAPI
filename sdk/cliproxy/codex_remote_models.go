@@ -38,7 +38,7 @@ func (s *Service) refreshCodexRemoteCatalog(ctx context.Context, auth *coreauth.
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || codexServiceAuthIsAPIKey(auth) {
 		return nil
 	}
-	if !codexServiceHasAccessToken(auth) {
+	if !codexServiceHasAccessToken(auth) && !codexServiceAuthIsAgentIdentity(auth) {
 		return nil
 	}
 	baseURL := codexServiceBaseURL(auth)
@@ -147,6 +147,12 @@ func codexRemoteCatalogSourceKey(auth *coreauth.Auth, baseURL string) string {
 	if accountID != "" {
 		return strings.TrimSpace(baseURL) + "\x00account:" + accountID
 	}
+	if codexServiceAuthIsAgentIdentity(auth) {
+		runtimeID := codexServiceMetadataString(auth, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID")
+		taskID := codexServiceMetadataString(auth, "task_id", "taskId")
+		digest := sha256.Sum256([]byte(runtimeID + "\x00" + taskID))
+		return strings.TrimSpace(baseURL) + "\x00agent:" + fmt.Sprintf("%x", digest)
+	}
 	token := codexServiceAccessToken(auth)
 	if token == "" {
 		return strings.TrimSpace(baseURL)
@@ -184,14 +190,47 @@ func codexServiceAuthIsAPIKey(auth *coreauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {
 		return false
 	}
+	if codexServiceAuthIsAgentIdentity(auth) {
+		return false
+	}
 	kind := strings.TrimSpace(auth.Attributes["auth_kind"])
 	if strings.EqualFold(kind, "apikey") || strings.EqualFold(kind, "api_key") {
 		return true
 	}
-	if strings.EqualFold(kind, "oauth") || strings.EqualFold(kind, "chatgpt") || strings.EqualFold(kind, "chatgpt_auth_tokens") || strings.EqualFold(kind, "agent_identity") {
+	if strings.EqualFold(kind, "oauth") || strings.EqualFold(kind, "chatgpt") || strings.EqualFold(kind, "chatgpt_auth_tokens") || strings.EqualFold(kind, "agent_identity") || strings.EqualFold(kind, "agentIdentity") {
 		return false
 	}
 	return strings.TrimSpace(auth.Attributes["api_key"]) != "" && !codexServiceHasAccessToken(auth)
+}
+
+func codexServiceAuthIsAgentIdentity(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	kind := ""
+	if auth.Attributes != nil {
+		kind = strings.TrimSpace(auth.Attributes["auth_kind"])
+	}
+	if kind == "" {
+		kind = codexServiceMetadataString(auth, "auth_kind", "authKind", "auth_mode", "authMode")
+	}
+	if strings.EqualFold(kind, "agent_identity") || strings.EqualFold(kind, "agentIdentity") {
+		return true
+	}
+	return codexServiceMetadataString(auth, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID") != "" &&
+		codexServiceMetadataString(auth, "agent_private_key", "agentPrivateKey") != ""
+}
+
+func codexServiceMetadataString(auth *coreauth.Auth, keys ...string) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	for _, key := range keys {
+		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func codexServiceHasAccessToken(auth *coreauth.Auth) bool {

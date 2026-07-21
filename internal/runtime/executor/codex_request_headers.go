@@ -26,8 +26,9 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 
 func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, requestKind codexFinalUpstreamRequestKind, ginHeaders http.Header) http.Header {
 	headers := r.Header
-	if token = strings.TrimSpace(token); token != "" {
-		codexSetPairedSingleHeaderValues(headers, "Content-Type", "application/json", "Authorization", "Bearer "+token)
+	authorization := codexAuthorizationHeaderValue(auth, token)
+	if authorization != "" {
+		codexSetPairedSingleHeaderValues(headers, "Content-Type", "application/json", "Authorization", authorization)
 	} else {
 		codexSetSingleHeaderValue(headers, "Content-Type", "application/json")
 		headers.Del("Authorization")
@@ -104,7 +105,27 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 			codexSetSingleHeaderValue(headers, "User-Agent", cfgUserAgent)
 		}
 	}
+	if codexIsAgentIdentityAuth(auth) && authorization != "" {
+		codexSetSingleHeaderValue(headers, "Authorization", authorization)
+	}
 	return profileHeaders
+}
+
+func codexAuthorizationHeaderValue(auth *cliproxyauth.Auth, credential string) string {
+	credential = strings.TrimSpace(credential)
+	if credential == "" {
+		return ""
+	}
+	if codexIsAgentIdentityAuth(auth) {
+		if strings.HasPrefix(strings.ToLower(credential), "agentassertion ") {
+			return credential
+		}
+		return "AgentAssertion " + credential
+	}
+	if strings.HasPrefix(strings.ToLower(credential), "bearer ") {
+		return credential
+	}
+	return "Bearer " + credential
 }
 
 // trimHeaderValue returns the TrimSpace'd value for a header key without

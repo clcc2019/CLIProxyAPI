@@ -65,6 +65,19 @@ func TestRedactSensitiveJSONBytesRedactsCredentialTextValues(t *testing.T) {
 	}
 }
 
+func TestRedactSensitiveLogBytesRedactsAgentIdentityCredentials(t *testing.T) {
+	raw := []byte(`{"agent_private_key":"private-key-material","message":"Authorization: AgentAssertion assertion-payload-secret"}`)
+	redacted := string(RedactSensitiveLogBytes(raw))
+	for _, leaked := range []string{"private-key-material", "assertion-payload-secret"} {
+		if strings.Contains(redacted, leaked) {
+			t.Fatalf("agent identity credential leaked %q: %s", leaked, redacted)
+		}
+	}
+	if !strings.Contains(redacted, "[REDACTED]") {
+		t.Fatalf("agent identity credentials were not redacted: %s", redacted)
+	}
+}
+
 func TestRedactSensitiveLogBytesRedactsSSEDataJSON(t *testing.T) {
 	raw := []byte("event: response.output_item.done\ndata: {\"access_token\":\"secret-token\",\"value\":\"visible\"}\n\ndata: [DONE]\n")
 
@@ -332,7 +345,7 @@ func TestRedactSensitiveLogBytesFastPathsCoverEverySensitiveKeyRule(t *testing.T
 	keys := []string{
 		"authorization", "auth", "auth_token", "access_token", "refresh_token", "id_token",
 		"token", "bearer_token", "session_token", "api_key", "apikey", "x_api_key",
-		"secret", "client_secret", "password", "passcode", "credential", "credentials",
+		"secret", "client_secret", "private_key", "agent_private_key", "agentPrivateKey", "password", "passcode", "credential", "credentials",
 		"AuthToken", "AccessToken", "RefreshToken", "IdToken", "BearerToken", "SessionToken",
 		"XApiKey", "ClientSecret", "custom_authorization_value", "custom_api_key_value",
 		"custom-apikey-value", "custom_token", "custom_secret", "user_password_hash",

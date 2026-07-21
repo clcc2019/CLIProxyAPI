@@ -33,10 +33,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	codexexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -171,7 +171,7 @@ func findCodexAuth(auths []*coreauth.Auth) *coreauth.Auth {
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 			continue
 		}
-		if metaStringValue(auth.Metadata, "access_token") == "" && metaStringValue(auth.Metadata, "refresh_token") == "" {
+		if !isAgentIdentityAuth(auth) && metaStringValue(auth.Metadata, "access_token") == "" && metaStringValue(auth.Metadata, "refresh_token") == "" {
 			continue
 		}
 		return auth
@@ -180,6 +180,9 @@ func findCodexAuth(auths []*coreauth.Auth) *coreauth.Auth {
 }
 
 func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth *coreauth.Auth) (string, bool, error) {
+	if isAgentIdentityAuth(auth) {
+		return "", false, nil
+	}
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken != "" {
 		if expiresAt, ok := auth.ExpirationTime(); !ok || time.Now().Add(accessTokenRefreshLeeway).Before(expiresAt) {
@@ -241,7 +244,9 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 	}
 	httpReq.Close = true
 	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+	if strings.TrimSpace(accessToken) != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 	httpReq.Header.Set("Originator", defaultCodexOriginator)
 	httpReq.Header.Set("User-Agent", defaultCodexUserAgent)
 	if auth != nil {
@@ -251,14 +256,10 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 		util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
 	}
 
-	httpClient := &http.Client{}
-	if auth != nil {
-		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
-			httpClient.Transport = transport
-		}
-	}
-
-	httpResp, errDo := httpClient.Do(httpReq)
+	// Reuse the runtime executor so Agent Identity requests get a freshly signed
+	// assertion, task recovery, and the same per-auth proxy behavior as the server.
+	executor := codexexecutor.NewCodexExecutor(nil)
+	httpResp, errDo := executor.HttpRequest(ctx, auth, httpReq)
 	if errDo != nil {
 		return nil, 0, errDo
 	}
@@ -272,7 +273,7 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 	}
 
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		return nil, 0, fmt.Errorf("models request failed with status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return nil, 0, fmt.Errorf("models request failed with status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(util.RedactSensitiveLogBytes(bodyBytes))))
 	}
 
 	count, errCount := countModels(bodyBytes)
@@ -280,6 +281,24 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 		return nil, 0, errCount
 	}
 	return bodyBytes, count, nil
+}
+
+func isAgentIdentityAuth(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	kind := ""
+	if auth.Attributes != nil {
+		kind = strings.TrimSpace(auth.Attributes["auth_kind"])
+	}
+	if kind == "" {
+		kind = metaStringValue(auth.Metadata, "auth_kind")
+	}
+	if strings.EqualFold(kind, "agent_identity") || strings.EqualFold(kind, "agentIdentity") {
+		return true
+	}
+	return metaStringValue(auth.Metadata, "agent_runtime_id") != "" &&
+		metaStringValue(auth.Metadata, "agent_private_key") != ""
 }
 
 func codexModelsURL(clientVersion string) (string, error) {

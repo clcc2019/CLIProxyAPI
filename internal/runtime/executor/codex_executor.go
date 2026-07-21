@@ -877,6 +877,16 @@ func (e *CodexExecutor) refreshCodexAuthAfterUnauthorized(ctx context.Context, a
 	return refreshed, true, nil
 }
 
+func (e *CodexExecutor) recoverCodexAuthAfterUnauthorized(ctx context.Context, auth *cliproxyauth.Auth, statusCode int, body []byte) (*cliproxyauth.Auth, bool, error) {
+	if recovered, err := e.recoverCodexAgentIdentityTask(ctx, auth, statusCode, body); err != nil {
+		return auth, false, err
+	} else if recovered {
+		log.Debugf("codex executor: retrying request after agent identity task rotation")
+		return auth, true, nil
+	}
+	return e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+}
+
 func (e *CodexExecutor) codexAuthService(auth *cliproxyauth.Auth) *codexauth.CodexAuth {
 	proxyURL := e.codexAuthProxyURL(auth)
 	// Composite key: proxyURL plus a fingerprint of env-driven CA configuration.

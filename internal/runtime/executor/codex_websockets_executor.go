@@ -702,7 +702,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
 		}
 		if attempt.unauthorized() && !codexUnauthorizedRetryAlreadyUsed(ctx) {
-			refreshedAuth, retried, refreshErr := e.CodexExecutor.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			refreshedAuth, retried, refreshErr := e.CodexExecutor.recoverCodexAuthAfterUnauthorized(ctx, auth, attempt.statusCode(), attempt.responseBody)
 			if refreshErr != nil {
 				return resp, refreshErr
 			}
@@ -992,7 +992,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 		}
 		if attempt.unauthorized() && !codexUnauthorizedRetryAlreadyUsed(ctx) {
-			refreshedAuth, retried, refreshErr := e.CodexExecutor.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			refreshedAuth, retried, refreshErr := e.CodexExecutor.recoverCodexAuthAfterUnauthorized(ctx, auth, attempt.statusCode(), attempt.responseBody)
 			if refreshErr != nil {
 				prepared.unlockSession()
 				return nil, refreshErr
@@ -1342,7 +1342,11 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		codexSetSingleHeaderValue(wsHeaders, codexHeaderTurnMetadata, explicitTurnMetadata)
 	}
 	codexEnsureExecutionSessionHeader(wsHeaders, codexGinHeadersFromContext(ctx), executionSessionID)
-	wsHeaders = applyCodexWebsocketHeadersForRequestKind(ctx, wsHeaders, auth, apiKey, e.cfg, codexWebsocketTurnMetadataRequestKind(body))
+	authorization, err := e.CodexExecutor.codexAuthorization(ctx, auth, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	wsHeaders = applyCodexWebsocketHeadersForRequestKind(ctx, wsHeaders, auth, authorization, e.cfg, codexWebsocketTurnMetadataRequestKind(body))
 	codexApplyModelHeaderOverrides(wsHeaders, baseModel)
 	codexApplyResponsesLiteHeader(wsHeaders, baseModel, auth)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(wsHeaders, responsesAPIClientMetadata)
@@ -1563,6 +1567,30 @@ func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequestWithReason(
 	if respHSRetry != nil {
 		codexPublishRateLimitsFromHeaders(ctx, auth, respHSRetry.Header)
 	}
+	if (errDialRetry != nil || connRetry == nil) && respHSRetry != nil &&
+		respHSRetry.StatusCode == http.StatusUnauthorized && codexIsAgentIdentityAuth(auth) {
+		responseHeaders := respHSRetry.Header.Clone()
+		bodyErr := websocketHandshakeBody(respHSRetry)
+		respHSRetry = nil
+		helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), http.StatusUnauthorized, responseHeaders, bodyErr)
+		codexPublishRateLimitsFromErrorBody(ctx, auth, bodyErr)
+		recovered, errRecover := e.CodexExecutor.recoverCodexAgentIdentityTask(ctx, auth, http.StatusUnauthorized, bodyErr)
+		if errRecover != nil {
+			return nil, nil, fmt.Errorf("codex websockets executor: recover agent identity task during reconnect: %w", errRecover)
+		}
+		if !recovered {
+			retryErr := statusErrWithHeaders{
+				statusErr: newCodexStatusErr(http.StatusUnauthorized, bodyErr),
+				headers:   responseHeaders,
+			}
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", retryErr)
+			return nil, nil, retryErr
+		}
+		connRetry, respHSRetry, errDialRetry = e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+		if respHSRetry != nil {
+			codexPublishRateLimitsFromHeaders(ctx, auth, respHSRetry.Header)
+		}
+	}
 	if errDialRetry != nil || connRetry == nil {
 		retryErr := errDialRetry
 		if respHSRetry != nil && respHSRetry.StatusCode > 0 {
@@ -1613,6 +1641,20 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	headers = headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	// Agent assertions contain a timestamp and must be regenerated for every
+	// handshake. Session reconnects can happen long after the request was first
+	// prepared, so reusing the original header may send an expired assertion.
+	if codexIsAgentIdentityAuth(auth) {
+		authorization, errAuthorization := e.CodexExecutor.codexAuthorization(ctx, auth, "")
+		if errAuthorization != nil {
+			return nil, nil, errAuthorization
+		}
+		headers.Set("Authorization", authorization)
 	}
 	helps.AddChatGPTCloudflareCookies(headers, wsURL)
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
@@ -2785,8 +2827,11 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	if headers == nil {
 		headers = make(http.Header, codexRequestHeaderInitialCapacity)
 	}
-	if strings.TrimSpace(token) != "" {
-		codexSetSingleHeaderValue(headers, "Authorization", "Bearer "+token)
+	authorization := codexAuthorizationHeaderValue(auth, token)
+	if authorization != "" {
+		codexSetSingleHeaderValue(headers, "Authorization", authorization)
+	} else {
+		headers.Del("Authorization")
 	}
 
 	ginHeaders := codexGinHeadersFromContext(ctx)
@@ -2834,6 +2879,9 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 		if cfgUserAgent != "" {
 			codexSetSingleHeaderValue(headers, "User-Agent", cfgUserAgent)
 		}
+	}
+	if codexIsAgentIdentityAuth(auth) && authorization != "" {
+		codexSetSingleHeaderValue(headers, "Authorization", authorization)
 	}
 	return headers
 }

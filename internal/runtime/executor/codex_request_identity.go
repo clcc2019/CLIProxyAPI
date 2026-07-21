@@ -29,6 +29,9 @@ func codexIsAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {
 		return false
 	}
+	if codexIsAgentIdentityAuth(auth) {
+		return false
+	}
 	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
 	if apiKey == "" {
 		return false
@@ -75,7 +78,7 @@ func codexAuthKind(authKind string) string {
 		return "chatgpt"
 	case strings.EqualFold(authKind, "chatgpt_auth_tokens"):
 		return "chatgpt_auth_tokens"
-	case strings.EqualFold(authKind, "agent_identity"):
+	case strings.EqualFold(authKind, "agent_identity"), strings.EqualFold(authKind, "agentIdentity"):
 		return "agent_identity"
 	default:
 		return strings.ToLower(authKind)

@@ -148,7 +148,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 			break
 		}
 		if httpResp.StatusCode == http.StatusUnauthorized && !codexUnauthorizedRetryAlreadyUsed(ctx) {
-			refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(ctx, auth)
+			refreshedAuth, retried, refreshErr := e.recoverCodexAuthAfterUnauthorized(ctx, auth, httpResp.StatusCode, data)
 			if refreshErr != nil {
 				codexRecordAPIResponseError(ctx, e.cfg, refreshErr)
 				return resp, refreshErr
@@ -269,7 +269,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if response.StatusCode == http.StatusUnauthorized && !codexUnauthorizedRetryAlreadyUsed(upstreamCtx) {
-			refreshedAuth, retried, refreshErr := e.refreshCodexAuthAfterUnauthorized(upstreamCtx, auth)
+			refreshedAuth, retried, refreshErr := e.recoverCodexAuthAfterUnauthorized(upstreamCtx, auth, response.StatusCode, data)
 			if refreshErr != nil {
 				codexRecordAPIResponseError(ctx, e.cfg, refreshErr)
 				return nil, refreshErr

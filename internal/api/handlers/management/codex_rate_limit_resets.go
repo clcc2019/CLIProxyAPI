@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -94,7 +95,7 @@ func mergeCodexRateLimitResetCreditDetails(usage gin.H, details gin.H) {
 
 func (h *Handler) fetchCodexRateLimitResetCreditDetails(ctx context.Context, auth *coreauth.Auth) (gin.H, int, error) {
 	accessToken := codexUsageAccessToken(auth)
-	if accessToken == "" {
+	if accessToken == "" && !codexUsageIsAgentIdentity(auth) {
 		return nil, 0, fmt.Errorf("codex access_token missing")
 	}
 	accountID := resolveCodexUsageAccountID(auth, accessToken)
@@ -117,7 +118,9 @@ func (h *Handler) fetchCodexRateLimitResetCreditDetails(ctx context.Context, aut
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 	req.Header.Set("ChatGPT-Account-ID", accountID)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", codexUsageRequestUserAgent(h, auth))
@@ -129,7 +132,16 @@ func (h *Handler) fetchCodexRateLimitResetCreditDetails(ctx context.Context, aut
 	if h != nil {
 		client.Transport = h.codexUsageTransport(auth)
 	}
-	resp, err := client.Do(req)
+	var resp *http.Response
+	if codexUsageIsAgentIdentity(auth) {
+		manager := h.authManagerSnapshot()
+		if manager == nil {
+			return nil, 0, fmt.Errorf("codex agent identity requires auth manager")
+		}
+		resp, err = manager.HttpRequest(requestCtx, auth, req)
+	} else {
+		resp, err = client.Do(req)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -139,7 +151,7 @@ func (h *Handler) fetchCodexRateLimitResetCreditDetails(ctx context.Context, aut
 		return nil, resp.StatusCode, err
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, resp.StatusCode, fmt.Errorf("codex reset credit details request failed with status %d: %s", resp.StatusCode, truncateForLog(string(body), 200))
+		return nil, resp.StatusCode, fmt.Errorf("codex reset credit details request failed with status %d: %s", resp.StatusCode, truncateForLog(string(util.RedactSensitiveLogBytes(body)), 200))
 	}
 	details := gin.H{}
 	if err = json.Unmarshal(body, &details); err != nil {
@@ -302,7 +314,7 @@ func codexRateLimitResetRedeemRequestID(c *gin.Context) (string, error) {
 
 func (h *Handler) consumeCodexRateLimitResetCredit(ctx context.Context, auth *coreauth.Auth, redeemRequestID string) (codexRateLimitResetConsumeResponse, int, error) {
 	accessToken := codexUsageAccessToken(auth)
-	if accessToken == "" {
+	if accessToken == "" && !codexUsageIsAgentIdentity(auth) {
 		return codexRateLimitResetConsumeResponse{}, 0, fmt.Errorf("codex access_token missing")
 	}
 	accountID := resolveCodexUsageAccountID(auth, accessToken)
@@ -333,7 +345,9 @@ func (h *Handler) consumeCodexRateLimitResetCredit(ctx context.Context, auth *co
 	if err != nil {
 		return codexRateLimitResetConsumeResponse{}, 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 	req.Header.Set("ChatGPT-Account-ID", accountID)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -341,7 +355,16 @@ func (h *Handler) consumeCodexRateLimitResetCredit(ctx context.Context, auth *co
 	if codexUsageFedramp(auth) {
 		req.Header.Set("X-OpenAI-Fedramp", "true")
 	}
-	resp, err := client.Do(req)
+	var resp *http.Response
+	if codexUsageIsAgentIdentity(auth) {
+		manager := h.authManagerSnapshot()
+		if manager == nil {
+			return codexRateLimitResetConsumeResponse{}, 0, fmt.Errorf("codex agent identity requires auth manager")
+		}
+		resp, err = manager.HttpRequest(requestCtx, auth, req)
+	} else {
+		resp, err = client.Do(req)
+	}
 	if err != nil {
 		return codexRateLimitResetConsumeResponse{}, 0, err
 	}
@@ -351,7 +374,7 @@ func (h *Handler) consumeCodexRateLimitResetCredit(ctx context.Context, auth *co
 		return codexRateLimitResetConsumeResponse{}, resp.StatusCode, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return codexRateLimitResetConsumeResponse{}, resp.StatusCode, fmt.Errorf("codex rate-limit reset consume request failed with status %d: %s", resp.StatusCode, truncateForLog(string(respBody), 200))
+		return codexRateLimitResetConsumeResponse{}, resp.StatusCode, fmt.Errorf("codex rate-limit reset consume request failed with status %d: %s", resp.StatusCode, truncateForLog(string(util.RedactSensitiveLogBytes(respBody)), 200))
 	}
 	var consume codexRateLimitResetConsumeResponse
 	if err := json.Unmarshal(respBody, &consume); err != nil {

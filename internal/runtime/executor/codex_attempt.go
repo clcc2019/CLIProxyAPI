@@ -84,7 +84,7 @@ func (attempt *codexNonStreamAttempt) executeInitial(preparedBody []byte) error 
 	if attempt.result.statusCode != http.StatusUnauthorized {
 		return nil
 	}
-	refreshedAuth, retried, errRefresh := attempt.executor.refreshCodexAuthAfterUnauthorized(attempt.ctx, attempt.auth)
+	refreshedAuth, retried, errRefresh := attempt.executor.recoverCodexAuthAfterUnauthorized(attempt.ctx, attempt.auth, attempt.result.statusCode, attempt.result.body)
 	if errRefresh != nil {
 		return errRefresh
 	}
@@ -172,7 +172,7 @@ func (attempt *codexStreamAttempt) executeInitial(preparedBody []byte) error {
 	if attempt.response == nil || attempt.response.StatusCode != http.StatusUnauthorized {
 		return nil
 	}
-	refreshedAuth, retried, errRefresh := attempt.executor.refreshCodexAuthAfterUnauthorized(attempt.upstreamCtx, attempt.auth)
+	refreshedAuth, retried, errRefresh := attempt.executor.recoverCodexAuthAfterUnauthorized(attempt.upstreamCtx, attempt.auth, attempt.response.StatusCode, attempt.errorBody)
 	if errRefresh != nil {
 		codexRecordAPIResponseError(attempt.logCtx, attempt.executor.cfg, errRefresh)
 		return errRefresh

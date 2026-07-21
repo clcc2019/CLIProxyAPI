@@ -526,6 +526,14 @@ var plainCredentialContinuationSuffixes = [...]string{
 	"client-secrets",
 	"client secrets",
 	"clientsecrets",
+	"private_key",
+	"private-key",
+	"private key",
+	"privatekey",
+	"agent_private_key",
+	"agent-private-key",
+	"agent private key",
+	"agentprivatekey",
 	"password",
 	"passwords",
 	"passcode",
@@ -595,9 +603,9 @@ func isJSONWhitespace(value byte) bool {
 }
 
 var (
-	plainAuthorizationCredentialPattern = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:(bearer|basic|apikey)\s+)?([^\s,;]+)`)
-	plainBearerCredentialPattern        = regexp.MustCompile(`(?i)\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{8,})`)
-	plainKeyValueCredentialPattern      = regexp.MustCompile(`(?i)\b(api[-_ ]?keys?|access[-_ ]?tokens?|refresh[-_ ]?tokens?|id[-_ ]?tokens?|session[-_ ]?tokens?|bearer[-_ ]?tokens?|client[-_ ]?secrets?|passwords?|passcodes?|credentials?)\b(\s*[:=]\s*)([^\s&;,]+)`)
+	plainAuthorizationCredentialPattern = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(?:(bearer|basic|apikey|agentassertion)\s+)?([^\s,;]+)`)
+	plainBearerCredentialPattern        = regexp.MustCompile(`(?i)\b(bearer|basic|agentassertion)\s+([A-Za-z0-9._~+/=-]{8,})`)
+	plainKeyValueCredentialPattern      = regexp.MustCompile(`(?i)\b(api[-_ ]?keys?|access[-_ ]?tokens?|refresh[-_ ]?tokens?|id[-_ ]?tokens?|session[-_ ]?tokens?|bearer[-_ ]?tokens?|client[-_ ]?secrets?|(?:agent[-_ ]?)?private[-_ ]?keys?|passwords?|passcodes?|credentials?)\b(\s*[:=]\s*)([^\s&;,]+)`)
 )
 
 func plainTextContainsSensitiveCredential(data []byte) bool {
@@ -716,6 +724,7 @@ var sensitiveTextMarkers = []string{
 	"api",
 	"token",
 	"secret",
+	"private",
 	"password",
 	"passcode",
 	"credential",
@@ -763,14 +772,14 @@ func shouldRedactJSONKey(key string) bool {
 	switch normalized {
 	case "authorization", "auth", "auth_token", "access_token", "refresh_token", "id_token",
 		"token", "bearer_token", "session_token", "api_key", "apikey", "x_api_key",
-		"secret", "client_secret", "password", "passcode", "credential", "credentials",
+		"secret", "client_secret", "private_key", "agent_private_key", "password", "passcode", "credential", "credentials",
 		"auth_tokens", "access_tokens", "refresh_tokens", "id_tokens", "bearer_tokens",
 		"session_tokens", "api_tokens", "secret_tokens":
 		return true
 	}
 	switch compact {
 	case "authtoken", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "sessiontoken",
-		"apikey", "xapikey", "clientsecret", "authtokens", "accesstokens", "refreshtokens",
+		"apikey", "xapikey", "clientsecret", "privatekey", "agentprivatekey", "authtokens", "accesstokens", "refreshtokens",
 		"idtokens", "bearertokens", "sessiontokens", "apitokens", "secrettokens":
 		return true
 	}

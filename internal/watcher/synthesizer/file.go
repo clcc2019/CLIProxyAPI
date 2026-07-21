@@ -94,7 +94,11 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	if !isSupportedSynthesizedAuthProvider(a.Provider) {
 		return nil
 	}
-	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	authKind := strings.TrimSpace(a.Attributes["auth_kind"])
+	if authKind == "" {
+		authKind = "oauth"
+	}
+	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, authKind)
 	return []*coreauth.Auth{a}
 }
 

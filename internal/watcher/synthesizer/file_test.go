@@ -276,6 +276,52 @@ func TestFileSynthesizer_Synthesize_CodexMinimalMetadataWithoutIDToken(t *testin
 	}
 }
 
+func TestFileSynthesizer_Synthesize_PreservesCodexAgentIdentity(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":              "codex",
+		"auth_kind":         "agent_identity",
+		"agent_runtime_id":  "runtime-reload",
+		"agent_private_key": "private-reload",
+		"task_id":           "task-reload",
+		"account_id":        "account-reload",
+	}
+	data, err := json.Marshal(authData)
+	if err != nil {
+		t.Fatalf("marshal auth file: %v", err)
+	}
+	if err = os.WriteFile(filepath.Join(tempDir, "codex-agent.json"), data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("synthesize auth file: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if got := auth.Attributes["auth_kind"]; got != "agent_identity" {
+		t.Fatalf("auth_kind = %q, want agent_identity", got)
+	}
+	for key, want := range map[string]string{
+		"agent_runtime_id":  "runtime-reload",
+		"agent_private_key": "private-reload",
+		"task_id":           "task-reload",
+		"account_id":        "account-reload",
+	} {
+		if got := auth.Metadata[key]; got != want {
+			t.Fatalf("metadata[%q] = %#v, want %q", key, got, want)
+		}
+	}
+}
+
 func TestFileSynthesizer_Synthesize_OpenAISessionExportAsCodexAuth(t *testing.T) {
 	tempDir := t.TempDir()
 
