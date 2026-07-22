@@ -317,6 +317,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 							fileData["id_token"] = claims
 							applyCodexSubscriptionFromClaims(fileData, claims)
 						}
+						applyCodexAuthModeEntry(fileData, auth)
 					}
 				}
 				if prefix := strings.TrimSpace(gjson.GetBytes(data, "prefix").String()); prefix != "" {

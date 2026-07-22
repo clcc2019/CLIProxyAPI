@@ -283,6 +283,10 @@ var anthropicFingerprintHosts = map[string]struct{}{
 	"api.anthropic.com": {},
 }
 
+var openAIAuthFingerprintHosts = map[string]struct{}{
+	"auth.openai.com": {},
+}
+
 // fallbackRoundTripper uses utls for selected HTTPS hosts and falls back to
 // standard transport for all other requests.
 type fallbackRoundTripper struct {
@@ -308,6 +312,17 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 	proxyURL := resolvedProxyURL(cfg, auth)
 	rootCAs := customRootCAsForUTLS("utls")
 	return newFingerprintHTTPClient(proxyURL, rootCAs, baseClient.Transport, timeout, anthropicFingerprintHosts, defaultTLSClientHelloID())
+}
+
+// NewOpenAIAuthHTTPClient creates a proxy-aware HTTP client that presents the
+// same stable Chrome TLS fingerprint used by browser-based Codex auth flows.
+// Only auth.openai.com is fingerprinted; test and fallback hosts continue to
+// use the normal shared transport.
+func NewOpenAIAuthHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	baseClient := NewProxyAwareHTTPClient(context.Background(), cfg, auth, timeout)
+	proxyURL := resolvedProxyURL(cfg, auth)
+	rootCAs := customRootCAsForUTLS("openai auth utls")
+	return newFingerprintHTTPClient(proxyURL, rootCAs, baseClient.Transport, timeout, openAIAuthFingerprintHosts, defaultTLSClientHelloID())
 }
 
 func newFingerprintHTTPClient(proxyURL string, rootCAs *x509.CertPool, fallback http.RoundTripper, timeout time.Duration, hosts map[string]struct{}, clientHello tls.ClientHelloID) *http.Client {

@@ -26,7 +26,6 @@ import (
 )
 
 const (
-	codexAgentIdentityAuthKind                = "agent_identity"
 	codexAgentIdentityTaskRegistrationBaseURL = "https://auth.openai.com/api/accounts"
 	codexAgentIdentityTaskRegistrationTimeout = 30 * time.Second
 	codexAgentIdentityTaskResponseMaxBytes    = 64 << 10
@@ -89,14 +88,7 @@ func peekCodexAgentIdentityErrorBody(resp *http.Response) ([]byte, error) {
 }
 
 func codexIsAgentIdentityAuth(auth *cliproxyauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if codexAuthKindHint(auth) == codexAgentIdentityAuthKind {
-		return true
-	}
-	return strings.TrimSpace(metadataString(auth.Metadata, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID")) != "" &&
-		strings.TrimSpace(metadataString(auth.Metadata, "agent_private_key", "agentPrivateKey")) != ""
+	return cliproxyauth.CodexAuthUsesAgentIdentity(auth)
 }
 
 func codexAgentIdentityPrivateKey(auth *cliproxyauth.Auth) (ed25519.PrivateKey, error) {

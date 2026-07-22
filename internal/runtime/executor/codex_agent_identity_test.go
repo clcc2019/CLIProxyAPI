@@ -97,6 +97,21 @@ func TestCodexAgentIdentityPrivateKeyRejectsNonPKCS8(t *testing.T) {
 	}
 }
 
+func TestCodexAuthorizationExplicitOAuthOverridesRetainedAgentIdentity(t *testing.T) {
+	auth, _, _ := newCodexAgentIdentityTestAuth(t, "task-retained")
+	auth.Metadata["auth_kind"] = "oauth"
+	auth.Metadata["access_token"] = "access-retained"
+	auth.Attributes = map[string]string{"auth_kind": "oauth"}
+
+	authorization, err := NewCodexExecutor(nil).codexAuthorization(context.Background(), auth, "access-retained")
+	if err != nil {
+		t.Fatalf("codexAuthorization: %v", err)
+	}
+	if authorization != "Bearer access-retained" {
+		t.Fatalf("authorization = %q, want Bearer access-retained", authorization)
+	}
+}
+
 func TestRegisterCodexAgentIdentityTaskSupportsPlainAndEncryptedResponses(t *testing.T) {
 	auth, _, privateKey := newCodexAgentIdentityTestAuth(t, "")
 	key, err := codexAgentIdentityKeyFromAuth(auth)

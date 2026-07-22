@@ -357,18 +357,7 @@ func codexUsageAccessToken(auth *coreauth.Auth) string {
 }
 
 func codexUsageIsAgentIdentity(auth *coreauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	kind := strings.TrimSpace(authAttribute(auth, "auth_kind"))
-	if kind == "" {
-		kind = codexAuthMetadataString(auth.Metadata, "auth_kind", "authKind", "auth_mode", "authMode")
-	}
-	if strings.EqualFold(kind, "agent_identity") || strings.EqualFold(kind, "agentIdentity") {
-		return true
-	}
-	return codexAuthMetadataString(auth.Metadata, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID") != "" &&
-		codexAuthMetadataString(auth.Metadata, "agent_private_key", "agentPrivateKey") != ""
+	return coreauth.CodexAuthUsesAgentIdentity(auth)
 }
 
 func resolveCodexUsageAccountID(auth *coreauth.Auth, accessToken string) string {

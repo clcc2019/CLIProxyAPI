@@ -204,21 +204,7 @@ func codexServiceAuthIsAPIKey(auth *coreauth.Auth) bool {
 }
 
 func codexServiceAuthIsAgentIdentity(auth *coreauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	kind := ""
-	if auth.Attributes != nil {
-		kind = strings.TrimSpace(auth.Attributes["auth_kind"])
-	}
-	if kind == "" {
-		kind = codexServiceMetadataString(auth, "auth_kind", "authKind", "auth_mode", "authMode")
-	}
-	if strings.EqualFold(kind, "agent_identity") || strings.EqualFold(kind, "agentIdentity") {
-		return true
-	}
-	return codexServiceMetadataString(auth, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID") != "" &&
-		codexServiceMetadataString(auth, "agent_private_key", "agentPrivateKey") != ""
+	return coreauth.CodexAuthUsesAgentIdentity(auth)
 }
 
 func codexServiceMetadataString(auth *coreauth.Auth, keys ...string) string {

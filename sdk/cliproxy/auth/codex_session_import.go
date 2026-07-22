@@ -141,6 +141,12 @@ func normalizeImportedCodexAgentIdentity(metadata map[string]any) (map[string]an
 	runtimeID := firstString("agent_runtime_id", "agentRuntimeId", "agentRuntimeID")
 	privateKey := firstString("agent_private_key", "agentPrivateKey")
 	isAgentIdentity := strings.EqualFold(authMode, "agentIdentity") || strings.EqualFold(authMode, "agent_identity")
+	// A non-Agent explicit mode is authoritative. This allows native auth
+	// files to retain reusable Agent Identity material while actively using
+	// their access token.
+	if authMode != "" && !isAgentIdentity {
+		return metadata, false
+	}
 	if !isAgentIdentity && (runtimeID == "" || privateKey == "") {
 		return metadata, false
 	}

@@ -284,21 +284,7 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 }
 
 func isAgentIdentityAuth(auth *coreauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	kind := ""
-	if auth.Attributes != nil {
-		kind = strings.TrimSpace(auth.Attributes["auth_kind"])
-	}
-	if kind == "" {
-		kind = metaStringValue(auth.Metadata, "auth_kind")
-	}
-	if strings.EqualFold(kind, "agent_identity") || strings.EqualFold(kind, "agentIdentity") {
-		return true
-	}
-	return metaStringValue(auth.Metadata, "agent_runtime_id") != "" &&
-		metaStringValue(auth.Metadata, "agent_private_key") != ""
+	return coreauth.CodexAuthUsesAgentIdentity(auth)
 }
 
 func codexModelsURL(clientVersion string) (string, error) {

@@ -105,6 +105,36 @@ func TestDecodeAuthFileMetadataNormalizesCodexAgentIdentity(t *testing.T) {
 	}
 }
 
+func TestDecodeAuthFileMetadataPreservesExplicitOAuthWithAgentIdentityMaterial(t *testing.T) {
+	metadata, err := DecodeAuthFileMetadata([]byte(`{
+		"type": "codex",
+		"auth_kind": "oauth",
+		"access_token": "access-token",
+		"agent_runtime_id": "runtime-retained",
+		"agent_private_key": "private-retained"
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeAuthFileMetadata: %v", err)
+	}
+	if got := authFileProjectionString(metadata, "auth_kind"); got != "oauth" {
+		t.Fatalf("auth_kind = %q, want oauth", got)
+	}
+	auth := NewAuthFromAuthFileMetadata(metadata, AuthFileProjectionOptions{ID: "dual-mode.json"})
+	if got := CodexAuthKind(auth); got != CodexAuthKindOAuth {
+		t.Fatalf("CodexAuthKind = %q, want %q", got, CodexAuthKindOAuth)
+	}
+	auth.Attributes["auth_kind"] = CodexAuthKindAgentIdentity
+	if got := CodexAuthKind(auth); got != CodexAuthKindOAuth {
+		t.Fatalf("metadata auth_kind did not override stale attribute: got %q", got)
+	}
+	if CodexAuthUsesAgentIdentity(auth) {
+		t.Fatal("explicit oauth auth unexpectedly uses Agent Identity")
+	}
+	if !CodexAccessTokenAvailable(auth) || !CodexAgentIdentityAvailable(auth) {
+		t.Fatalf("dual-mode capabilities not preserved: metadata=%#v", auth.Metadata)
+	}
+}
+
 func TestDecodeAuthFileMetadataNormalizesNestedCamelCaseAgentIdentity(t *testing.T) {
 	metadata, err := DecodeAuthFileMetadata([]byte(`{
 		"type": "codex",
