@@ -171,6 +171,10 @@ type Manager struct {
 	runtimeStates         map[string]AuthRuntimeState
 	scheduler             *authScheduler
 	authInFlightCounts    sync.Map
+	// authExecutionGates serializes admission with failure-state updates for an
+	// individual credential. It lets a quota cooldown become the cutoff for new
+	// upstream executions without serializing unrelated auth files.
+	authExecutionGates sync.Map
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
 	homeRuntimeAuths map[string]map[string]*Auth

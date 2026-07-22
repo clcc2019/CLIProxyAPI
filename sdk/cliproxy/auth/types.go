@@ -895,8 +895,10 @@ func cloneAuthMetadataForManagementSummary(src map[string]any) map[string]any {
 		"proxyUrl",
 		"priority",
 		"note",
+		"headers",
 		"user_agent",
 		"user-agent",
+		"codex_client_profile_pinned",
 		AuthFileCodexOriginatorKey,
 		AuthFileCodexOriginatorHeader,
 		AuthFileCodexBetaFeaturesKey,
@@ -922,6 +924,7 @@ func cloneAuthMetadataForManagementSummary(src map[string]any) map[string]any {
 	for _, key := range copyKeys {
 		copyManagementSummaryMetadataValue(dst, src, key)
 	}
+	projectAuthFileClientProfileForManagementSummary(dst, src)
 
 	nestedSubscriptionKeys := []string{
 		"subscription_expires_at",
@@ -971,6 +974,39 @@ func cloneAuthMetadataForManagementSummary(src map[string]any) map[string]any {
 		return nil
 	}
 	return dst
+}
+
+// projectAuthFileClientProfileForManagementSummary promotes the safe,
+// user-visible parts of a nested client_profile/client_features object into
+// the summary metadata. Auth-file imports keep that object nested, while the
+// management API consumes the canonical root fields and must show the same
+// profile as an auth file saved after runtime discovery.
+func projectAuthFileClientProfileForManagementSummary(dst map[string]any, src map[string]any) {
+	if dst == nil || len(src) == 0 {
+		return
+	}
+	if headers := extractClientProfileHeadersFromMetadata(src); len(headers) > 0 {
+		copied := make(map[string]any, len(headers))
+		for name, value := range headers {
+			copied[name] = value
+		}
+		dst["headers"] = copied
+	}
+	if value, ok := authFileClientProfileString(src, "user_agent", "user-agent", "userAgent", "header:User-Agent"); ok && value != "" {
+		dst["user_agent"] = value
+	}
+	if value, ok := authFileClientProfileString(src, AuthFileCodexOriginatorKey, AuthFileCodexOriginatorHeader, "header:"+AuthFileCodexOriginatorHeader); ok && value != "" {
+		dst[AuthFileCodexOriginatorKey] = value
+	}
+	if value, ok := authFileClientProfileString(src, AuthFileCodexBetaFeaturesKey, "beta-features", "betaFeatures", "header:"+AuthFileCodexBetaFeaturesHeader); ok && value != "" {
+		dst[AuthFileCodexBetaFeaturesKey] = value
+	}
+	if value, ok := authFileClientProfileString(src, AuthFileCodexInstallationIDKey, "installation-id", "installationId", "header:"+AuthFileCodexInstallationIDHeader); ok && value != "" {
+		dst[AuthFileCodexInstallationIDKey] = value
+	}
+	if value, ok := authFileClientProfileBool(src, AuthFileCodexIncludeTimingMetricsKey, "include-timing-metrics", "includeTimingMetrics", "header:"+AuthFileCodexIncludeTimingMetricsHeader); ok {
+		dst[AuthFileCodexIncludeTimingMetricsKey] = value
+	}
 }
 
 func copyManagementSummaryMetadataValue(dst map[string]any, src map[string]any, key string) {

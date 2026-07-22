@@ -83,6 +83,21 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 		if alias.Fork {
 			key += "|fork"
 		}
+		if len(alias.ReasoningEffort) > 0 {
+			efforts := make([]string, 0, len(alias.ReasoningEffort))
+			for rawSource, rawTarget := range alias.ReasoningEffort {
+				source := strings.ToLower(strings.TrimSpace(rawSource))
+				target := strings.ToLower(strings.TrimSpace(rawTarget))
+				if source == "" || target == "" {
+					continue
+				}
+				efforts = append(efforts, source+"="+target)
+			}
+			if len(efforts) > 0 {
+				sort.Strings(efforts)
+				key += "|reasoning-effort=" + strings.Join(efforts, ",")
+			}
+		}
 		if _, exists := seen[key]; exists {
 			continue
 		}

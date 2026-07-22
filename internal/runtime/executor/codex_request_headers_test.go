@@ -69,6 +69,64 @@ func TestApplyCodexHeadersUsesAuthFileClientProfileAttributes(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeadersPinsAgentIdentityAuthFileClientFeatures(t *testing.T) {
+	codexResetClientProfilesForTest()
+	t.Cleanup(codexResetClientProfilesForTest)
+
+	auth := cliproxyauth.NewAuthFromAuthFileMetadata(map[string]any{
+		"agentIdentity": map[string]any{
+			"authMode":        "agentIdentity",
+			"agentRuntimeId":  "runtime-fixed-client",
+			"agentPrivateKey": "private-key-fixed-client",
+			"clientFeatures": map[string]any{
+				"userAgent":      "codex_vscode/0.144.6 (linux; x64)",
+				"originator":     "codex_vscode",
+				"installationId": "fixed-installation",
+				"headers": map[string]any{
+					"Version":               "0.144.6",
+					"X-Codex-Beta-Features": "fixed-beta",
+					"X-OpenAI-Subagent":     "fixed-subagent",
+					"X-OAI-Attestation":     "fixed-attestation",
+				},
+			},
+		},
+	}, cliproxyauth.AuthFileProjectionOptions{ID: "agent-fixed-client.json"})
+
+	if pinned, _ := auth.Metadata[cliproxyauth.AuthFileCodexClientProfilePinnedKey].(bool); !pinned {
+		t.Fatalf("agent identity auth should pin its client profile: %#v", auth.Metadata)
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent":              "downstream/9.9.9",
+		"Originator":              "downstream",
+		"Version":                 "9.9.9",
+		"X-Codex-Beta-Features":   "downstream-beta",
+		"X-Codex-Installation-Id": "downstream-installation",
+		"X-OpenAI-Subagent":       "downstream-subagent",
+		"X-OAI-Attestation":       "downstream-attestation",
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, auth, "agent-assertion", true, nil)
+
+	for header, want := range map[string]string{
+		"Authorization":           "AgentAssertion agent-assertion",
+		"User-Agent":              "codex_vscode/0.144.6 (linux; x64)",
+		"Originator":              "codex_vscode",
+		"Version":                 "0.144.6",
+		"X-Codex-Beta-Features":   "fixed-beta",
+		"X-Codex-Installation-Id": "fixed-installation",
+		"X-OpenAI-Subagent":       "fixed-subagent",
+		"X-OAI-Attestation":       "fixed-attestation",
+	} {
+		if got := req.Header.Get(header); got != want {
+			t.Fatalf("%s = %q, want %q; headers=%#v", header, got, want, req.Header)
+		}
+	}
+}
+
 func TestApplyCodexHeadersSetsFedrampForOAuthAuth(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
@@ -132,15 +190,15 @@ func TestApplyCodexHeadersPinsFirstClientProfileAtRuntime(t *testing.T) {
 	}
 	var published *cliproxyauth.Auth
 	ctx := contextWithGinHeaders(map[string]string{
-		"User-Agent":              "first-codex/1.0",
-		"Originator":              "codex_vscode",
-		"X-Codex-Beta-Features":   "first-feature",
-		"Version":                 "1.2.3",
-		"X-Codex-Installation-Id": "first-install",
-		"X-OpenAI-Subagent":       "first-subagent",
-		codexHeaderOAIAttestation: "first-attestation",
-		"Traceparent":             "00-first",
-		"Tracestate":              "state-first",
+		"User-Agent":                  "first-codex/1.0",
+		"Originator":                  "codex_vscode",
+		"X-Codex-Beta-Features":       "first-feature",
+		"Version":                     "1.2.3",
+		"X-Codex-Installation-Id":     "first-install",
+		codexWireHeaderOpenAISubagent: "first-subagent",
+		codexWireHeaderOAIAttestation: "first-attestation",
+		"Traceparent":                 "00-first",
+		"Tracestate":                  "state-first",
 	})
 	ctx = cliproxyauth.WithAuthUpdateCallback(ctx, func(_ context.Context, updated *cliproxyauth.Auth) {
 		published = updated.Clone()
@@ -152,8 +210,42 @@ func TestApplyCodexHeadersPinsFirstClientProfileAtRuntime(t *testing.T) {
 
 	applyCodexHeaders(req, auth, "oauth-token", true, nil)
 
-	if published != nil {
-		t.Fatalf("runtime client profile pin should not publish auth update: %#v", published.Metadata)
+	if published == nil {
+		t.Fatal("runtime client profile pin should publish a persisted profile update")
+	}
+	if got := published.Metadata[codexClientProfilePinnedMetadataKey]; got != true {
+		t.Fatalf("published profile pinned = %v, want true", got)
+	}
+	if got := published.Metadata["user_agent"]; got != "first-codex/1.0" {
+		t.Fatalf("published user_agent = %v, want first-codex/1.0", got)
+	}
+	if got := published.Metadata["originator"]; got != "codex_vscode" {
+		t.Fatalf("published originator = %v, want codex_vscode", got)
+	}
+	publishedHeaders, ok := published.Metadata["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("published headers = %T, want map[string]any", published.Metadata["headers"])
+	}
+	for header, want := range map[string]string{
+		"User-Agent":                  "first-codex/1.0",
+		"Originator":                  "codex_vscode",
+		"X-Codex-Beta-Features":       "first-feature",
+		"Version":                     "1.2.3",
+		"X-Codex-Installation-Id":     "first-install",
+		codexWireHeaderOpenAISubagent: "first-subagent",
+		codexWireHeaderOAIAttestation: "first-attestation",
+		"Traceparent":                 "00-first",
+		"Tracestate":                  "state-first",
+	} {
+		if got := publishedHeaders[header]; got != want {
+			t.Fatalf("published %s = %v, want %q", header, got, want)
+		}
+		if got := published.Attributes["header:"+header]; got != want {
+			t.Fatalf("published header attribute %s = %q, want %q", header, got, want)
+		}
+	}
+	if got := published.Attributes["originator"]; got != "codex_vscode" {
+		t.Fatalf("published originator attribute = %q, want codex_vscode", got)
 	}
 	if _, ok := auth.Metadata["user_agent"]; ok {
 		t.Fatalf("runtime client profile pin should not mutate auth user_agent: %#v", auth.Metadata)
@@ -237,6 +329,79 @@ func TestApplyCodexHeadersPinsFirstClientProfileAtRuntime(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeadersBackfillsEmptyPinnedClientProfile(t *testing.T) {
+	codexResetClientProfilesForTest()
+	t.Cleanup(codexResetClientProfilesForTest)
+
+	auth := &cliproxyauth.Auth{
+		ID:       "empty-pinned-codex-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":                              "codex",
+			"access_token":                      "oauth-token",
+			codexClientProfilePinnedMetadataKey: true,
+		},
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	// Also cover the short-lived in-memory state created by an older process
+	// before it persisted any actual profile fields.
+	key, ok := codexClientProfileKeyForAuth(auth)
+	if !ok {
+		t.Fatal("expected auth profile key")
+	}
+	codexClientProfilesMu.Lock()
+	codexClientProfiles[key] = codexClientProfile{headers: make(http.Header)}
+	codexClientProfilesMu.Unlock()
+	var published *cliproxyauth.Auth
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent":              "codex_vscode/3.1.0 (linux; x64)",
+		"Originator":              "codex_vscode",
+		"Version":                 "3.1.0",
+		"X-Codex-Beta-Features":   "feature-a",
+		"X-Codex-Installation-Id": "captured-installation",
+	})
+	ctx = cliproxyauth.WithAuthUpdateCallback(ctx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if published == nil {
+		t.Fatal("empty pinned profile should be backfilled from the first request")
+	}
+	if got := published.Metadata["user_agent"]; got != "codex_vscode/3.1.0 (linux; x64)" {
+		t.Fatalf("published user_agent = %v, want captured client", got)
+	}
+	if got := published.Metadata["originator"]; got != "codex_vscode" {
+		t.Fatalf("published originator = %v, want codex_vscode", got)
+	}
+	headers, ok := published.Metadata["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("published headers = %T, want map[string]any", published.Metadata["headers"])
+	}
+	for header, want := range map[string]string{
+		"User-Agent":              "codex_vscode/3.1.0 (linux; x64)",
+		"Originator":              "codex_vscode",
+		"Version":                 "3.1.0",
+		"X-Codex-Beta-Features":   "feature-a",
+		"X-Codex-Installation-Id": "captured-installation",
+	} {
+		if got := headers[header]; got != want {
+			t.Fatalf("published %s = %v, want %q", header, got, want)
+		}
+	}
+	if got := req.Header.Get("User-Agent"); got != "codex_vscode/3.1.0 (linux; x64)" {
+		t.Fatalf("request User-Agent = %q, want captured client", got)
+	}
+	if _, ok := auth.Metadata["headers"]; ok {
+		t.Fatalf("backfill should not mutate execution auth metadata: %#v", auth.Metadata)
+	}
+}
+
 func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.T) {
 	codexResetClientProfilesForTest()
 	auth := &cliproxyauth.Auth{
@@ -276,8 +441,17 @@ func TestApplyCodexHeadersUpdatesPinnedUserAgentVersionForSameClient(t *testing.
 
 	applyCodexHeaders(upgradeReq, auth, "oauth-token", true, nil)
 
-	if published != nil {
-		t.Fatalf("runtime client version upgrade should not publish auth update: %#v", published.Metadata)
+	if published == nil {
+		t.Fatal("runtime client version upgrade should publish an auth profile update")
+	}
+	if got := published.Metadata[codexClientProfilePinnedMetadataKey]; got != true {
+		t.Fatalf("published profile pinned = %v, want true", got)
+	}
+	if got := published.Metadata["user_agent"]; got != "codex_vscode/9.2.0 (darwin; arm64)" {
+		t.Fatalf("published user_agent = %v, want upgraded fixed-client UA", got)
+	}
+	if headers, ok := published.Metadata["headers"].(map[string]any); !ok || headers["Version"] != "9.2.0" {
+		t.Fatalf("published profile version = %#v, want 9.2.0", published.Metadata["headers"])
 	}
 	if got := upgradeReq.Header.Get("User-Agent"); got != "codex_vscode/9.2.0 (darwin; arm64)" {
 		t.Fatalf("upgrade User-Agent = %q, want upgraded fixed-client UA", got)

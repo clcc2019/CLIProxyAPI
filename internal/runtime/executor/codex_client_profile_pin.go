@@ -43,7 +43,6 @@ var (
 )
 
 func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyauth.Auth, target http.Header, source http.Header, cfg *config.Config) {
-	_ = ctx
 	if auth == nil || (target == nil && source == nil) {
 		return
 	}
@@ -52,25 +51,71 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 		return
 	}
 
+	var (
+		profileToPublish codexClientProfile
+		publishProfile   bool
+	)
 	codexClientProfilesMu.Lock()
-	defer codexClientProfilesMu.Unlock()
-
-	if profile, exists := codexClientProfiles[key]; exists {
+	if profile, exists := codexClientProfiles[key]; exists && len(profile.headers) > 0 {
 		if updated, ok := codexPinnedClientVersionUpdate(profile, target, source); ok {
 			codexClientProfiles[key] = updated
+			profileToPublish = updated
+			publishProfile = true
 		}
+	} else {
+		delete(codexClientProfiles, key)
+		if profile, exists := codexLegacyClientProfileFromAuth(auth); exists {
+			if updated, ok := codexPinnedClientVersionUpdate(profile, target, source); ok {
+				profile = updated
+				profileToPublish = updated
+				publishProfile = true
+			}
+			codexClientProfiles[key] = profile
+		} else {
+			profile := codexNewClientProfileFromRequest(auth, target, source, cfg)
+			if len(profile.headers) > 0 {
+				codexClientProfiles[key] = profile
+				profileToPublish = profile
+				publishProfile = true
+			}
+		}
+	}
+	codexClientProfilesMu.Unlock()
+
+	if !publishProfile {
 		return
 	}
+	// The execution auth is a snapshot that may share nested maps with the
+	// manager-owned record. Publish a detached candidate instead of mutating it
+	// in place, so the manager can merge and persist only this profile update.
+	cliproxyauth.PublishAuthProfileUpdate(ctx, codexAuthWithPinnedClientProfile(auth, profileToPublish))
+}
 
-	if profile, exists := codexLegacyClientProfileFromAuth(auth); exists {
-		if updated, ok := codexPinnedClientVersionUpdate(profile, target, source); ok {
-			profile = updated
-		}
-		codexClientProfiles[key] = profile
-		return
+func codexAuthWithPinnedClientProfile(auth *cliproxyauth.Auth, profile codexClientProfile) *cliproxyauth.Auth {
+	candidate := auth.Clone()
+	if candidate == nil {
+		return nil
 	}
+	if candidate.Metadata == nil {
+		candidate.Metadata = make(map[string]any)
+	}
+	candidate.Metadata[codexClientProfilePinnedMetadataKey] = true
 
-	codexClientProfiles[key] = codexNewClientProfileFromRequest(auth, target, source, cfg)
+	for _, headerName := range codexAllClientProfileHeaders() {
+		value := trimHeaderValue(profile.headers, headerName)
+		if value == "" {
+			continue
+		}
+		codexSetAuthProfileHeader(candidate, headerName, value)
+		switch {
+		case strings.EqualFold(headerName, "User-Agent"):
+			candidate.Metadata["user_agent"] = value
+		case strings.EqualFold(headerName, "Originator"):
+			candidate.Metadata["originator"] = value
+			candidate.Attributes["originator"] = value
+		}
+	}
+	return candidate
 }
 
 func codexNewClientProfileFromRequest(auth *cliproxyauth.Auth, target http.Header, source http.Header, cfg *config.Config) codexClientProfile {
@@ -238,7 +283,7 @@ func codexPinnedClientProfileForAuth(auth *cliproxyauth.Auth) (codexClientProfil
 	codexClientProfilesMu.RLock()
 	profile, exists := codexClientProfiles[key]
 	codexClientProfilesMu.RUnlock()
-	if exists {
+	if exists && len(profile.headers) > 0 {
 		return codexCloneClientProfile(profile), true
 	}
 
@@ -250,7 +295,10 @@ func codexPinnedClientProfileForAuth(auth *cliproxyauth.Auth) (codexClientProfil
 	codexClientProfilesMu.Lock()
 	defer codexClientProfilesMu.Unlock()
 	if profile, exists = codexClientProfiles[key]; exists {
-		return codexCloneClientProfile(profile), true
+		if len(profile.headers) > 0 {
+			return codexCloneClientProfile(profile), true
+		}
+		delete(codexClientProfiles, key)
 	}
 	codexClientProfiles[key] = legacyProfile
 	return codexCloneClientProfile(legacyProfile), true
@@ -276,6 +324,13 @@ func codexLegacyClientProfileFromAuth(auth *cliproxyauth.Auth) (codexClientProfi
 		if value := codexAuthHeaderValue(auth, headerName); value != "" {
 			codexSetHeaderCasePreserved(profile.headers, headerName, value)
 		}
+	}
+	// Agent Identity imports can intentionally carry the pinned marker before
+	// any client feature has been observed. That is not a usable profile yet:
+	// treating it as one would permanently skip first-request collection and
+	// leave management UI with only {"pinned": true}.
+	if len(profile.headers) == 0 {
+		return codexClientProfile{}, false
 	}
 	return profile, true
 }
@@ -455,22 +510,50 @@ func codexSetAuthMetadataHeader(auth *cliproxyauth.Auth, name string, value stri
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	headers, ok := auth.Metadata["headers"].(map[string]any)
-	if !ok || headers == nil {
-		headers = make(map[string]any)
-		if existing, okExisting := auth.Metadata["headers"].(map[string]string); okExisting {
-			for key, existingValue := range existing {
-				if strings.TrimSpace(key) != "" && strings.TrimSpace(existingValue) != "" {
-					headers[key] = strings.TrimSpace(existingValue)
-				}
+	headers := make(map[string]any)
+	switch existing := auth.Metadata["headers"].(type) {
+	case map[string]any:
+		for key, existingValue := range existing {
+			headers[key] = existingValue
+		}
+	case map[string]string:
+		for key, existingValue := range existing {
+			if strings.TrimSpace(key) != "" && strings.TrimSpace(existingValue) != "" {
+				headers[key] = strings.TrimSpace(existingValue)
 			}
 		}
-		auth.Metadata["headers"] = headers
 	}
+	// Auth.Clone intentionally only clones the metadata map's first level. Make
+	// a fresh headers map before changing it so a published candidate cannot
+	// mutate the execution snapshot (or the manager record) through a shared
+	// nested map.
+	auth.Metadata["headers"] = headers
 	for key := range headers {
 		if strings.EqualFold(strings.TrimSpace(key), name) {
 			delete(headers, key)
 		}
 	}
 	headers[name] = value
+}
+
+func codexSetAuthProfileHeader(auth *cliproxyauth.Auth, name string, value string) {
+	if auth == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	value = strings.TrimSpace(value)
+	if name == "" || value == "" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	for key := range auth.Attributes {
+		headerName, ok := strings.CutPrefix(key, "header:")
+		if ok && strings.EqualFold(strings.TrimSpace(headerName), name) {
+			delete(auth.Attributes, key)
+		}
+	}
+	auth.Attributes["header:"+name] = value
+	codexSetAuthMetadataHeader(auth, name, value)
 }

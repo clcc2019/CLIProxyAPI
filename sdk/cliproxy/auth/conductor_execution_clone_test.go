@@ -232,9 +232,15 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 			"beta_features":                     "feature-a",
 			"installation_id":                   "install-1",
 			"include_timing_metrics":            true,
-			"token":                             map[string]any{"refresh_token": "nested-refresh", "access_token": "nested-access"},
-			"subscription":                      map[string]any{"current_period_end": "2026-06-19T11:44:26Z", "large_blob": "drop-me"},
-			runtimeStateMetadataKey:             map[string]any{"updated_at": "2026-05-20T00:00:00Z"},
+			"codex_client_profile_pinned":       true,
+			"headers": map[string]any{
+				"User-Agent":              "codex_vscode/1.0.0",
+				"Originator":              "codex_vscode",
+				"X-Codex-Installation-Id": "install-1",
+			},
+			"token":                 map[string]any{"refresh_token": "nested-refresh", "access_token": "nested-access"},
+			"subscription":          map[string]any{"current_period_end": "2026-06-19T11:44:26Z", "large_blob": "drop-me"},
+			runtimeStateMetadataKey: map[string]any{"updated_at": "2026-05-20T00:00:00Z"},
 		},
 	}
 	now := time.Now()
@@ -284,10 +290,13 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 	if cloned.Metadata["refresh_token"] != "refresh-token" || cloned.Metadata["plan_type"] != "plus" {
 		t.Fatalf("management summary metadata = %#v", cloned.Metadata)
 	}
-	for _, key := range []string{"originator", "beta_features", "installation_id", "include_timing_metrics"} {
+	for _, key := range []string{"originator", "beta_features", "installation_id", "include_timing_metrics", "codex_client_profile_pinned"} {
 		if _, ok := cloned.Metadata[key]; !ok {
 			t.Fatalf("management summary dropped %s metadata: %#v", key, cloned.Metadata)
 		}
+	}
+	if headers, ok := cloned.Metadata["headers"].(map[string]any); !ok || headers["X-Codex-Installation-Id"] != "install-1" {
+		t.Fatalf("management summary profile headers = %#v", cloned.Metadata["headers"])
 	}
 	if nested, ok := cloned.Metadata["token"].(map[string]any); !ok || nested["refresh_token"] != "nested-refresh" || nested["access_token"] != nil {
 		t.Fatalf("management summary nested token = %#v", cloned.Metadata["token"])
@@ -305,6 +314,66 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 	originalToken := auth.Metadata["token"].(map[string]any)
 	if originalToken["refresh_token"] != "nested-refresh" {
 		t.Fatal("CloneForManagementSummary should copy nested token map")
+	}
+	clonedHeaders := cloned.Metadata["headers"].(map[string]any)
+	clonedHeaders["X-Codex-Installation-Id"] = "mutated"
+	originalHeaders := auth.Metadata["headers"].(map[string]any)
+	if originalHeaders["X-Codex-Installation-Id"] != "install-1" {
+		t.Fatal("CloneForManagementSummary should copy profile headers")
+	}
+}
+
+func TestAuthCloneForManagementSummaryProjectsNestedClientFeatures(t *testing.T) {
+	auth := &Auth{
+		ID:       "nested-client-features",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"client_features": map[string]any{
+				"userAgent":      "codex_vscode/2.0.0 (linux; x64)",
+				"originator":     "codex_vscode",
+				"installationId": "nested-installation",
+				"headers": map[string]any{
+					"Version":                               "2.0.0",
+					"X-Codex-Beta-Features":                 "nested-feature",
+					"X-ResponsesAPI-Include-Timing-Metrics": "true",
+				},
+			},
+		},
+	}
+
+	cloned := auth.CloneForManagementSummary()
+	if cloned == nil {
+		t.Fatal("CloneForManagementSummary returned nil")
+	}
+	for key, want := range map[string]string{
+		"user_agent":      "codex_vscode/2.0.0 (linux; x64)",
+		"originator":      "codex_vscode",
+		"beta_features":   "nested-feature",
+		"installation_id": "nested-installation",
+	} {
+		if got := cloned.Metadata[key]; got != want {
+			t.Fatalf("summary metadata[%q] = %v, want %q", key, got, want)
+		}
+	}
+	if got := cloned.Metadata["include_timing_metrics"]; got != true {
+		t.Fatalf("summary include_timing_metrics = %v, want true", got)
+	}
+	headers, ok := cloned.Metadata["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("summary headers = %T, want map[string]any", cloned.Metadata["headers"])
+	}
+	if got := headers["Version"]; got != "2.0.0" {
+		t.Fatalf("summary Version = %v, want 2.0.0", got)
+	}
+	if _, ok := cloned.Metadata["client_features"]; ok {
+		t.Fatalf("summary should project rather than retain nested client features: %#v", cloned.Metadata)
+	}
+
+	headers["Version"] = "mutated"
+	originalFeatures := auth.Metadata["client_features"].(map[string]any)
+	originalHeaders := originalFeatures["headers"].(map[string]any)
+	if originalHeaders["Version"] != "2.0.0" {
+		t.Fatal("CloneForManagementSummary should detach projected profile headers")
 	}
 }
 

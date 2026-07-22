@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestSanitizeOAuthModelAlias_PreservesForkFlag(t *testing.T) {
 	cfg := &Config{
@@ -52,5 +55,40 @@ func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) 
 		if aliases[i].Name != exp.Name || aliases[i].Alias != exp.Alias || aliases[i].Fork != exp.Fork {
 			t.Fatalf("expected alias %d to be name=%q alias=%q fork=%v, got name=%q alias=%q fork=%v", i, exp.Name, exp.Alias, exp.Fork, aliases[i].Name, aliases[i].Alias, aliases[i].Fork)
 		}
+	}
+}
+
+func TestSanitizeOAuthModelAlias_NormalizesReasoningEffort(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			"codex": {
+				{
+					Name:  " gpt-5.6-terra ",
+					Alias: " gpt-5.5 ",
+					Fork:  true,
+					ReasoningEffort: map[string]string{
+						" Default ": " HIGH ",
+						"LOW":       " medium ",
+						"":          "ignored",
+						"xhigh":     "",
+					},
+				},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	aliases := cfg.OAuthModelAlias["codex"]
+	if len(aliases) != 1 {
+		t.Fatalf("expected 1 sanitized alias, got %d", len(aliases))
+	}
+	alias := aliases[0]
+	if alias.Name != "gpt-5.6-terra" || alias.Alias != "gpt-5.5" || !alias.Fork {
+		t.Fatalf("unexpected sanitized alias: %#v", alias)
+	}
+	wantEfforts := map[string]string{"default": "high", "low": "medium"}
+	if !reflect.DeepEqual(alias.ReasoningEffort, wantEfforts) {
+		t.Fatalf("reasoning-effort = %#v, want %#v", alias.ReasoningEffort, wantEfforts)
 	}
 }

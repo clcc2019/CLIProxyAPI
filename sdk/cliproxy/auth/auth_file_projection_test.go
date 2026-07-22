@@ -130,6 +130,54 @@ func TestDecodeAuthFileMetadataNormalizesNestedCamelCaseAgentIdentity(t *testing
 	}
 }
 
+func TestDecodeAuthFileMetadataPreservesNestedAgentIdentityClientFeatures(t *testing.T) {
+	metadata, err := DecodeAuthFileMetadata([]byte(`{
+		"agentIdentity": {
+			"authMode": "agentIdentity",
+			"agentRuntimeId": "runtime-client-features",
+			"agentPrivateKey": "private-key-client-features",
+			"clientFeatures": {
+				"userAgent": "codex_vscode/0.144.6 (linux; x64)",
+				"originator": "codex_vscode",
+				"installationId": "install-client-features",
+				"headers": {
+					"Version": "0.144.6",
+					"X-Codex-Beta-Features": "feature-a"
+				}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeAuthFileMetadata: %v", err)
+	}
+	if pinned, ok := metadata[AuthFileCodexClientProfilePinnedKey].(bool); !ok || !pinned {
+		t.Fatalf("%s = %#v, want true", AuthFileCodexClientProfilePinnedKey, metadata[AuthFileCodexClientProfilePinnedKey])
+	}
+	features, ok := metadata["client_features"].(map[string]any)
+	if !ok {
+		t.Fatalf("client_features = %T, want map[string]any; metadata=%#v", metadata["client_features"], metadata)
+	}
+	if got := authFileProjectionString(features, "installationId"); got != "install-client-features" {
+		t.Fatalf("client_features.installationId = %q", got)
+	}
+	if _, exists := metadata["agentIdentity"]; exists {
+		t.Fatal("nested agentIdentity was not removed")
+	}
+
+	auth := NewAuthFromAuthFileMetadata(metadata, AuthFileProjectionOptions{ID: "agent-client-features.json"})
+	for key, want := range map[string]string{
+		"header:User-Agent":              "codex_vscode/0.144.6 (linux; x64)",
+		"header:Originator":              "codex_vscode",
+		"header:X-Codex-Installation-Id": "install-client-features",
+		"header:Version":                 "0.144.6",
+		"header:X-Codex-Beta-Features":   "feature-a",
+	} {
+		if got := auth.Attributes[key]; got != want {
+			t.Fatalf("Attributes[%q] = %q, want %q; attrs=%#v", key, got, want, auth.Attributes)
+		}
+	}
+}
+
 func TestDecodeAuthFileMetadataUnwrapsSingleSub2APIAgentIdentityExport(t *testing.T) {
 	metadata, err := DecodeAuthFileMetadata([]byte(`{
 		"type": "sub2api-data",

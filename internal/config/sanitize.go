@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -154,13 +155,47 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				continue
 			}
 			seenAlias[aliasKey] = struct{}{}
-			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
+			clean = append(clean, OAuthModelAlias{
+				Name:            name,
+				Alias:           alias,
+				Fork:            entry.Fork,
+				ReasoningEffort: sanitizeOAuthModelAliasReasoningEffort(entry.ReasoningEffort),
+			})
 		}
 		if len(clean) > 0 {
 			out[channel] = clean
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+func sanitizeOAuthModelAliasReasoningEffort(efforts map[string]string) map[string]string {
+	if len(efforts) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(efforts))
+	for source := range efforts {
+		keys = append(keys, source)
+	}
+	sort.Strings(keys)
+
+	out := make(map[string]string, len(efforts))
+	for _, rawSource := range keys {
+		source := strings.ToLower(strings.TrimSpace(rawSource))
+		target := strings.ToLower(strings.TrimSpace(efforts[rawSource]))
+		if source == "" || target == "" {
+			continue
+		}
+		if _, exists := out[source]; exists {
+			continue
+		}
+		out[source] = target
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are

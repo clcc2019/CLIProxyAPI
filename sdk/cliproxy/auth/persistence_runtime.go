@@ -51,6 +51,22 @@ func preserveRuntimeState(existing, auth *Auth) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = cloneRecentRequestRing(existing.recentRequests)
+	// Request-time auth preparation works from an execution snapshot and calls
+	// Update when it has filled in metadata. That snapshot can predate a quota
+	// cooldown written by a concurrent usage probe. Preserve an active auth-wide
+	// quota block so the metadata update cannot revive the credential before its
+	// known reset time.
+	if !auth.Disabled && auth.Status != StatusDisabled && authScopedQuotaCooldownActive(existing, time.Now()) {
+		auth.Status = existing.Status
+		auth.StatusMessage = existing.StatusMessage
+		auth.Unavailable = existing.Unavailable
+		auth.Quota = existing.Quota
+		auth.LastError = cloneError(existing.LastError)
+		auth.NextRetryAfter = existing.NextRetryAfter
+		if existing.UpdatedAt.After(auth.UpdatedAt) {
+			auth.UpdatedAt = existing.UpdatedAt
+		}
+	}
 }
 
 var refreshPreservedMetadataKeys = []string{

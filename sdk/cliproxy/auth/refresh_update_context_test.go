@@ -92,6 +92,55 @@ func (e executionAuthUpdateExecutor) HttpRequest(context.Context, *Auth, *http.R
 	return nil, nil
 }
 
+type executionAuthProfileUpdateExecutor struct{}
+
+func (e executionAuthProfileUpdateExecutor) Identifier() string { return "codex" }
+
+func (e executionAuthProfileUpdateExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	if updated.Attributes == nil {
+		updated.Attributes = make(map[string]string)
+	}
+	headers := make(map[string]any)
+	for name, value := range ExtractCustomHeadersFromMetadata(updated.Metadata) {
+		headers[name] = value
+	}
+	headers["User-Agent"] = "codex_vscode/2.0.0"
+	headers["Originator"] = "codex_vscode"
+	headers["Version"] = "2.0.0"
+	headers["X-Codex-Beta-Features"] = "feature-a"
+	updated.Metadata["headers"] = headers
+	updated.Metadata["codex_client_profile_pinned"] = true
+	updated.Metadata["user_agent"] = "codex_vscode/2.0.0"
+	updated.Metadata["originator"] = "codex_vscode"
+	updated.Attributes["originator"] = "codex_vscode"
+	updated.Attributes["header:User-Agent"] = "codex_vscode/2.0.0"
+	updated.Attributes["header:Originator"] = "codex_vscode"
+	updated.Attributes["header:Version"] = "2.0.0"
+	updated.Attributes["header:X-Codex-Beta-Features"] = "feature-a"
+	PublishAuthProfileUpdate(ctx, updated)
+	return cliproxyexecutor.Response{Payload: []byte(`{}`)}, nil
+}
+
+func (e executionAuthProfileUpdateExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e executionAuthProfileUpdateExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func (e executionAuthProfileUpdateExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e executionAuthProfileUpdateExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
 func TestManagerPersistsExecutionRefreshUpdate(t *testing.T) {
 	store := &refreshUpdateCaptureStore{}
 	manager := NewManager(store, nil, nil)
@@ -149,6 +198,65 @@ func TestManagerPersistsExecutionAuthUpdate(t *testing.T) {
 	}
 	if got := headers["X-Codex-Beta-Features"]; got != "first-feature" {
 		t.Fatalf("persisted beta features = %v, want first-feature", got)
+	}
+}
+
+func TestManagerPersistsExecutionAuthProfileUpdate(t *testing.T) {
+	store := &refreshUpdateCaptureStore{}
+	manager := NewManager(store, nil, nil)
+	manager.RegisterExecutor(executionAuthProfileUpdateExecutor{})
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID:       "codex-profile-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "token",
+			"headers": map[string]any{
+				"X-Operator-Header": "preserve-me",
+			},
+		},
+		Attributes: map[string]string{
+			"header:X-Operator-Header": "preserve-me",
+		},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	store.reset()
+
+	if _, err := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	last := store.snapshot()
+	if last == nil {
+		t.Fatal("expected auth profile update to be persisted")
+	}
+	if got := last.Metadata["codex_client_profile_pinned"]; got != true {
+		t.Fatalf("persisted profile pinned = %v, want true", got)
+	}
+	if got := last.Metadata["user_agent"]; got != "codex_vscode/2.0.0" {
+		t.Fatalf("persisted user_agent = %v, want codex_vscode/2.0.0", got)
+	}
+	if got := last.Metadata["originator"]; got != "codex_vscode" {
+		t.Fatalf("persisted originator = %v, want codex_vscode", got)
+	}
+	if got := last.Metadata["access_token"]; got != "token" {
+		t.Fatalf("persisted access_token = %v, want token", got)
+	}
+	headers, ok := last.Metadata["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("persisted headers = %T, want map[string]any", last.Metadata["headers"])
+	}
+	for header, want := range map[string]string{
+		"X-Operator-Header":     "preserve-me",
+		"User-Agent":            "codex_vscode/2.0.0",
+		"Originator":            "codex_vscode",
+		"Version":               "2.0.0",
+		"X-Codex-Beta-Features": "feature-a",
+	} {
+		if got := headers[header]; got != want {
+			t.Fatalf("persisted %s = %v, want %q", header, got, want)
+		}
 	}
 }
 

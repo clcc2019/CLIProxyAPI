@@ -365,6 +365,19 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if hasUnauthorizedAuthFailure(auth) && auth.Unavailable && auth.NextRetryAfter.After(now) {
 		return true, blockReasonOther, auth.NextRetryAfter
 	}
+	// An auth-scoped failure applies to every model on the credential. Check it
+	// before a per-model state: a prior success for a different model must not
+	// let that model bypass a whole-account quota cooldown.
+	if authScopedCooldownActive(auth, now) {
+		next := auth.NextRetryAfter
+		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+			next = auth.Quota.NextRecoverAt
+		}
+		if next.Before(now) {
+			next = now
+		}
+		return true, blockReasonCooldown, next
+	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			state, ok := auth.ModelStates[model]
@@ -398,22 +411,6 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				}
 				return false, blockReasonNone, time.Time{}
 			}
-		}
-		// Fall through to auth-level check ONLY when this credential carries
-		// the auth-scope quota flag — i.e. an AuthScopedFailure marked every
-		// model on this auth as
-		// exhausted. Without this narrow scope, ordinary per-model 429s
-		// would accidentally block unrelated models through the aggregate
-		// Unavailable flag, breaking multi-model routing on other providers.
-		if auth.Quota.AuthScope && auth.Unavailable && auth.NextRetryAfter.After(now) {
-			next := auth.NextRetryAfter
-			if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
-				next = auth.Quota.NextRecoverAt
-			}
-			if next.Before(now) {
-				next = now
-			}
-			return true, blockReasonCooldown, next
 		}
 		return false, blockReasonNone, time.Time{}
 	}

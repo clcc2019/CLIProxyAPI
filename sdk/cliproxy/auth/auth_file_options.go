@@ -22,6 +22,10 @@ const (
 	// x-responsesapi-include-timing-metrics.
 	AuthFileCodexIncludeTimingMetricsKey = "include_timing_metrics"
 	AuthFileCodexOriginatorKey           = "originator"
+	// AuthFileCodexClientProfilePinnedKey makes the client profile stored in an
+	// auth file authoritative for that credential. It prevents downstream
+	// requests from changing the credential's Codex client fingerprint.
+	AuthFileCodexClientProfilePinnedKey = "codex_client_profile_pinned"
 
 	AuthFileCodexBetaFeaturesHeader         = "X-Codex-Beta-Features"
 	AuthFileCodexInstallationIDHeader       = "X-Codex-Installation-Id"
@@ -57,6 +61,13 @@ var authFileCodexIncludeTimingMetricsKeys = []string{
 var authFileCodexOriginatorKeys = []string{
 	AuthFileCodexOriginatorKey,
 	AuthFileCodexOriginatorHeader,
+}
+
+var authFileClientProfileObjectKeys = []string{
+	"client_profile",
+	"clientProfile",
+	"client_features",
+	"clientFeatures",
 }
 
 // ApplyAuthFileOptionsFromMetadata maps editable auth-file fields from Metadata
@@ -298,7 +309,7 @@ func authFileClientProfileString(metadata map[string]any, keys ...string) (strin
 	if value, ok := authFileHeadersString(ExtractCustomHeadersFromMetadata(metadata), keys...); ok {
 		return value, true
 	}
-	for _, objectKey := range []string{"client_profile", "clientProfile", "client_features", "clientFeatures"} {
+	for _, objectKey := range authFileClientProfileObjectKeys {
 		nested, ok := authFileNestedMetadata(metadata, objectKey)
 		if !ok {
 			continue
@@ -320,7 +331,7 @@ func authFileClientProfileBool(metadata map[string]any, keys ...string) (bool, b
 	if value, ok := authFileHeadersBool(ExtractCustomHeadersFromMetadata(metadata), keys...); ok {
 		return value, true
 	}
-	for _, objectKey := range []string{"client_profile", "clientProfile", "client_features", "clientFeatures"} {
+	for _, objectKey := range authFileClientProfileObjectKeys {
 		nested, ok := authFileNestedMetadata(metadata, objectKey)
 		if !ok {
 			continue

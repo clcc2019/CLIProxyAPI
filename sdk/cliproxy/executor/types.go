@@ -24,6 +24,11 @@ const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 // ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
 const ReasoningEffortMetadataKey = "reasoning_effort"
 
+// UpstreamReasoningEffortOverrideMetadataKey stores an internal override for the
+// reasoning.effort value sent to an upstream provider. It is set by routing
+// rules such as OAuth model aliases and is not client-controlled.
+const UpstreamReasoningEffortOverrideMetadataKey = "upstream_reasoning_effort_override"
+
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 

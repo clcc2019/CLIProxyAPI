@@ -1988,13 +1988,13 @@ func TestApplyCodexWebsocketHeadersUpdatesPinnedClientVersionAndKeepsOtherProfil
 	}
 
 	first := applyCodexWebsocketHeaders(contextWithGinHeaders(map[string]string{
-		"User-Agent":              "codex_vscode/1.0.0",
-		"Originator":              "codex_vscode",
-		"Version":                 "1.0.0",
-		"X-Codex-Beta-Features":   "first-feature",
-		"X-OpenAI-Subagent":       "first-subagent",
-		codexHeaderOAIAttestation: "first-attestation",
-		codexHeaderResponsesAPIIncludeTimingMetrics: "false",
+		"User-Agent":                  "codex_vscode/1.0.0",
+		"Originator":                  "codex_vscode",
+		"Version":                     "1.0.0",
+		"X-Codex-Beta-Features":       "first-feature",
+		codexWireHeaderOpenAISubagent: "first-subagent",
+		codexWireHeaderOAIAttestation: "first-attestation",
+		codexWireHeaderResponsesAPIIncludeTimingMetrics: "false",
 	}), http.Header{}, auth, "oauth-token", nil)
 	if got := first.Get(codexHeaderOAIAttestation); got != "first-attestation" {
 		t.Fatalf("first %s = %q, want first-attestation", codexHeaderOAIAttestation, got)
@@ -2015,8 +2015,28 @@ func TestApplyCodexWebsocketHeadersUpdatesPinnedClientVersionAndKeepsOtherProfil
 	})
 	second := applyCodexWebsocketHeaders(secondCtx, http.Header{}, auth, "oauth-token", nil)
 
-	if published != nil {
-		t.Fatalf("runtime websocket client version upgrade should not publish auth update: %#v", published.Metadata)
+	if published == nil {
+		t.Fatal("runtime websocket client version upgrade should publish an auth profile update")
+	}
+	if got := published.Metadata[codexClientProfilePinnedMetadataKey]; got != true {
+		t.Fatalf("published profile pinned = %v, want true", got)
+	}
+	publishedHeaders, ok := published.Metadata["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("published headers = %T, want map[string]any", published.Metadata["headers"])
+	}
+	for header, want := range map[string]string{
+		"User-Agent":                  "codex_vscode/2.0.0",
+		"Originator":                  "codex_vscode",
+		"Version":                     "2.0.0",
+		"X-Codex-Beta-Features":       "first-feature",
+		codexWireHeaderOpenAISubagent: "first-subagent",
+		codexWireHeaderOAIAttestation: "first-attestation",
+		codexWireHeaderResponsesAPIIncludeTimingMetrics: "false",
+	} {
+		if got := publishedHeaders[header]; got != want {
+			t.Fatalf("published %s = %v, want %q", header, got, want)
+		}
 	}
 	for header, want := range map[string]string{
 		"User-Agent":              "codex_vscode/2.0.0",

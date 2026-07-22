@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
@@ -167,6 +168,103 @@ func TestOAuthModelAliasChannel_DirectProviders(t *testing.T) {
 			t.Parallel()
 			if got := OAuthModelAliasChannel(provider, "oauth"); got != provider {
 				t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, provider)
+			}
+		})
+	}
+}
+
+func TestResolveOAuthUpstreamModel_ConfiguredEffortAliases(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"codex": {
+			{
+				Name:  "gpt-5.6-terra",
+				Alias: "gpt-5.5",
+				ReasoningEffort: map[string]string{
+					"default": "high",
+					"low":     "medium",
+					"medium":  "high",
+					"high":    "max",
+					"xhigh":   "max",
+				},
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+	auth := createAuthForChannel("codex")
+
+	for input, want := range map[string]string{
+		"gpt-5.5":         "gpt-5.6-terra",
+		"gpt-5.5(low)":    "gpt-5.6-terra",
+		"gpt-5.5(medium)": "gpt-5.6-terra",
+		"gpt-5.5(high)":   "gpt-5.6-terra",
+		"gpt-5.5(xhigh)":  "gpt-5.6-terra",
+		"gpt-5.5(none)":   "gpt-5.6-terra(none)",
+	} {
+		if got := mgr.resolveOAuthUpstreamModel(auth, input); got != want {
+			t.Errorf("resolveOAuthUpstreamModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestWithOAuthModelAliasReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{
+			Name:  "gpt-5.6-terra",
+			Alias: "gpt-5.5",
+			ReasoningEffort: map[string]string{
+				"default": "high",
+				"low":     "medium",
+				"high":    "max",
+			},
+		}},
+	})
+	auth := createAuthForChannel("codex")
+	auth.Prefix = "team"
+
+	tests := []struct {
+		name   string
+		effort string
+		want   string
+	}{
+		{name: "default when client omits effort", want: "high"},
+		{name: "configured client effort", effort: "low", want: "medium"},
+		{name: "another configured client effort", effort: "high", want: "max"},
+		{name: "unconfigured client effort is untouched", effort: "none"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := cliproxyexecutor.Request{
+				Model:    "gpt-5.6-terra",
+				Metadata: map[string]any{"preserved": true},
+			}
+			opts := cliproxyexecutor.Options{}
+			if tt.effort != "" {
+				opts.Metadata = map[string]any{cliproxyexecutor.ReasoningEffortMetadataKey: tt.effort}
+			}
+
+			got := mgr.withOAuthModelAliasReasoningEffort(req, auth, "team/gpt-5.5", opts)
+			if got.Model != req.Model {
+				t.Fatalf("model = %q, want %q", got.Model, req.Model)
+			}
+			if got.Metadata["preserved"] != true {
+				t.Fatalf("request metadata was not preserved: %#v", got.Metadata)
+			}
+			if actual, _ := got.Metadata[cliproxyexecutor.UpstreamReasoningEffortOverrideMetadataKey].(string); actual != tt.want {
+				t.Fatalf("upstream override = %q, want %q; metadata=%#v", actual, tt.want, got.Metadata)
+			}
+			if _, exists := req.Metadata[cliproxyexecutor.UpstreamReasoningEffortOverrideMetadataKey]; exists {
+				t.Fatalf("input request metadata was mutated: %#v", req.Metadata)
 			}
 		})
 	}

@@ -230,7 +230,12 @@ func TestUploadAuthFile_ConvertsSingleSub2APIAgentIdentityExport(t *testing.T) {
 				"agent_private_key":"private-upload",
 				"task_id":"task-upload",
 				"chatgpt_account_id":"account-upload",
-				"email":"agent@example.com"
+				"email":"agent@example.com",
+				"client_features":{
+					"user_agent":"codex_vscode/0.144.6 (linux; x64)",
+					"installation_id":"upload-installation",
+					"headers":{"Version":"0.144.6"}
+				}
 			},
 			"priority":4
 		}]
@@ -265,6 +270,12 @@ func TestUploadAuthFile_ConvertsSingleSub2APIAgentIdentityExport(t *testing.T) {
 	if _, exists := stored["accounts"]; exists {
 		t.Fatal("stored auth retained Sub2API accounts wrapper")
 	}
+	if pinned, ok := stored[coreauth.AuthFileCodexClientProfilePinnedKey].(bool); !ok || !pinned {
+		t.Fatalf("stored[%q] = %#v, want true", coreauth.AuthFileCodexClientProfilePinnedKey, stored[coreauth.AuthFileCodexClientProfilePinnedKey])
+	}
+	if features, ok := stored["client_features"].(map[string]any); !ok || features["installation_id"] != "upload-installation" {
+		t.Fatalf("stored client_features = %#v, want installation_id", stored["client_features"])
+	}
 	auth, ok := manager.GetByID("agent.json")
 	if !ok {
 		t.Fatal("uploaded auth was not registered")
@@ -281,6 +292,12 @@ func TestUploadAuthFile_ConvertsSingleSub2APIAgentIdentityExport(t *testing.T) {
 		if got := auth.Metadata[key]; got != want {
 			t.Fatalf("registered metadata[%q] = %#v, want %q", key, got, want)
 		}
+	}
+	if got := auth.Attributes["header:User-Agent"]; got != "codex_vscode/0.144.6 (linux; x64)" {
+		t.Fatalf("registered User-Agent = %q; attrs=%#v", got, auth.Attributes)
+	}
+	if got := auth.Attributes["header:Version"]; got != "0.144.6" {
+		t.Fatalf("registered Version = %q; attrs=%#v", got, auth.Attributes)
 	}
 }
 

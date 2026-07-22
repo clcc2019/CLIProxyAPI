@@ -20,6 +20,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if m.markCleanModelSuccessResult(ctx, result) {
 		return
 	}
+	unlockExecutionGate := func() {}
+	if !result.Success {
+		unlockExecutionGate = m.lockAuthExecutionGate(result.AuthID)
+	}
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
@@ -40,7 +44,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		persistAuthID = auth.ID
 
 		if result.Success {
-			if result.Model != "" {
+			// A successful request that was already in flight when a whole-auth
+			// quota cooldown was recorded must not revive that credential. The
+			// cooldown is cleared only after its reset path confirms recovery.
+			// Otherwise a late success can reset the aggregate state and make an
+			// exhausted auth selectable again before its reset time.
+			quotaCooldownActive := authScopedQuotaCooldownActive(auth, now)
+			if result.Model != "" && !quotaCooldownActive {
 				state := lookupModelState(auth, result.Model)
 				if !authStateIsClean(auth) || (state != nil && !modelStateIsClean(state)) {
 					state = ensureModelState(auth, result.Model)
@@ -56,7 +66,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					clearModelQuota = true
 					schedulerDirty = true
 				}
-			} else {
+			} else if result.Model == "" && !quotaCooldownActive {
 				if !authStateIsClean(auth) {
 					schedulerDirty = true
 				}
@@ -191,6 +201,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 	}
 	m.mu.Unlock()
+	unlockExecutionGate()
 	if persistAuthID != "" {
 		m.enqueuePersistAuthID(ctx, persistAuthID)
 	}
@@ -238,6 +249,7 @@ func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, reco
 	if !recoverAt.After(now) {
 		return
 	}
+	unlockExecutionGate := m.lockAuthExecutionGate(authID)
 
 	persistAuthID := ""
 	var schedulerSnapshot *Auth
@@ -245,6 +257,7 @@ func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, reco
 	if auth, ok := m.auths[authID]; ok && auth != nil {
 		if quotaCooldownDisabledForAuth(auth) {
 			m.mu.Unlock()
+			unlockExecutionGate()
 			return
 		}
 		auth.Unavailable = true
@@ -267,6 +280,7 @@ func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, reco
 		schedulerSnapshot = auth.CloneForScheduler()
 	}
 	m.mu.Unlock()
+	unlockExecutionGate()
 
 	if persistAuthID != "" {
 		m.enqueuePersistAuthID(ctx, persistAuthID)
@@ -289,6 +303,7 @@ func (m *Manager) ClearAuthQuotaCooldown(ctx context.Context, authID string) boo
 	if authID == "" {
 		return false
 	}
+	unlockExecutionGate := m.lockAuthExecutionGate(authID)
 
 	now := time.Now()
 	persistAuthID := ""
@@ -330,6 +345,7 @@ func (m *Manager) ClearAuthQuotaCooldown(ctx context.Context, authID string) boo
 		}
 	}
 	m.mu.Unlock()
+	unlockExecutionGate()
 
 	if persistAuthID == "" {
 		return false
@@ -362,6 +378,22 @@ func authHasQuotaCooldown(auth *Auth) bool {
 		return code == "rate_limited" || code == "usage_limit_reached" || code == "quota_exceeded"
 	}
 	return false
+}
+
+// authScopedCooldownActive reports whether an auth-wide cooldown is still in
+// effect, whether it came from quota exhaustion or another auth-scoped error.
+func authScopedCooldownActive(auth *Auth, now time.Time) bool {
+	if auth == nil || !auth.Unavailable || !auth.Quota.AuthScope {
+		return false
+	}
+	return auth.NextRetryAfter.After(now)
+}
+
+// authScopedQuotaCooldownActive reports whether an auth-wide quota block is
+// still in effect. It intentionally requires a future NextRetryAfter because
+// stale cooldown state is allowed to be cleared by a later successful request.
+func authScopedQuotaCooldownActive(auth *Auth, now time.Time) bool {
+	return auth != nil && auth.Quota.Exceeded && authScopedCooldownActive(auth, now)
 }
 
 func modelStateHasQuotaCooldown(state *ModelState) bool {

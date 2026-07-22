@@ -618,6 +618,58 @@ func TestBuildAuthFileEntryExposesCodexClientProfileFromHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildAuthFileEntryExposesNestedClientFeaturesFromManagementSummary(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	auth := &coreauth.Auth{
+		ID:       "nested-client-features.json",
+		FileName: "nested-client-features.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			coreauth.AuthFileCodexClientProfilePinnedKey: true,
+			"client_features": map[string]any{
+				"userAgent":      "codex_vscode/2.0.0 (linux; x64)",
+				"originator":     "codex_vscode",
+				"installationId": "nested-installation",
+				"headers": map[string]any{
+					"Version":                               "2.0.0",
+					"X-Codex-Beta-Features":                 "nested-feature",
+					"X-ResponsesAPI-Include-Timing-Metrics": "true",
+				},
+			},
+		},
+		Attributes: map[string]string{"path": "/tmp/nested-client-features.json"},
+	}
+
+	entry := h.buildAuthFileEntry(auth.CloneForManagementSummary())
+	profile, ok := entry["client_profile"].(gin.H)
+	if !ok {
+		t.Fatalf("entry[client_profile] = %T, want gin.H", entry["client_profile"])
+	}
+	if got, _ := profile["pinned"].(bool); !got {
+		t.Fatalf("client_profile[pinned] = %#v, want true", profile["pinned"])
+	}
+	for key, want := range map[string]string{
+		"user_agent":      "codex_vscode/2.0.0 (linux; x64)",
+		"originator":      "codex_vscode",
+		"beta_features":   "nested-feature",
+		"installation_id": "nested-installation",
+	} {
+		if got, _ := profile[key].(string); got != want {
+			t.Fatalf("client_profile[%s] = %q, want %q", key, got, want)
+		}
+	}
+	if got, _ := profile["include_timing_metrics"].(bool); !got {
+		t.Fatalf("client_profile[include_timing_metrics] = %#v, want true", profile["include_timing_metrics"])
+	}
+	headers, ok := profile["headers"].(map[string]string)
+	if !ok {
+		t.Fatalf("client_profile[headers] = %T, want map[string]string", profile["headers"])
+	}
+	if got := headers["Version"]; got != "2.0.0" {
+		t.Fatalf("client_profile headers Version = %q, want 2.0.0", got)
+	}
+}
+
 func TestBuildCodexAuthFilePreviewExposesClientProfileFromHeaders(t *testing.T) {
 	preview := buildCodexAuthFilePreview(map[string]any{
 		"type": "codex",

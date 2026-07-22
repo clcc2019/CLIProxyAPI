@@ -321,6 +321,11 @@ type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+
+	// ReasoningEffort maps a client-requested reasoning effort to the effort sent
+	// upstream. It is currently applied to Codex OAuth aliases. The special
+	// "default" key applies when the client does not specify an effort.
+	ReasoningEffort map[string]string `yaml:"reasoning-effort,omitempty" json:"reasoning_effort,omitempty"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.

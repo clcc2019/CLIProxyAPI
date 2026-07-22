@@ -319,9 +319,17 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 			resultModel := m.stateModelForExecution(credential.auth, state.routeModel, upstreamModel, credential.pooled)
 			execReq := state.req
 			execReq.Model = upstreamModel
+			execReq = m.withOAuthModelAliasReasoningEffort(execReq, credential.auth, state.routeModel, state.opts)
 			for retryAttempt := 0; ; retryAttempt++ {
+				releaseAdmission, errAdmission := m.admitAuthExecution(credential.auth, resultModel, retryAttempt > 0)
+				if errAdmission != nil {
+					authErr = errAdmission
+					stopModelLoop = true
+					break
+				}
 				lease := m.beginAuthInFlight(credential.auth.ID)
 				resp, errExec := func() (cliproxyexecutor.Response, error) {
+					defer releaseAdmission()
 					defer func() {
 						if r := recover(); r != nil {
 							lease.Close()

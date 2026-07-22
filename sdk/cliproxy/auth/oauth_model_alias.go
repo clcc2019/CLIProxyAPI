@@ -5,6 +5,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 type modelAliasEntry interface {
@@ -13,8 +14,13 @@ type modelAliasEntry interface {
 }
 
 type oauthModelAliasTable struct {
-	// reverse maps channel -> alias (lower) -> original upstream model name.
-	reverse map[string]map[string]string
+	// reverse maps channel -> alias (lower) -> upstream routing rule.
+	reverse map[string]map[string]oauthModelAliasRule
+}
+
+type oauthModelAliasRule struct {
+	upstreamModel   string
+	reasoningEffort map[string]string
 }
 
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -22,14 +28,14 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 		return &oauthModelAliasTable{}
 	}
 	out := &oauthModelAliasTable{
-		reverse: make(map[string]map[string]string, len(aliases)),
+		reverse: make(map[string]map[string]oauthModelAliasRule, len(aliases)),
 	}
 	for rawChannel, entries := range aliases {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(entries) == 0 {
 			continue
 		}
-		rev := make(map[string]string, len(entries))
+		rev := make(map[string]oauthModelAliasRule, len(entries))
 		for _, entry := range entries {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
@@ -43,7 +49,10 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			if _, exists := rev[aliasKey]; exists {
 				continue
 			}
-			rev[aliasKey] = name
+			rev[aliasKey] = oauthModelAliasRule{
+				upstreamModel:   name,
+				reasoningEffort: cloneOAuthModelAliasReasoningEffort(entry.ReasoningEffort),
+			}
 		}
 		if len(rev) > 0 {
 			out.reverse[channel] = rev
@@ -53,6 +62,36 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 		out.reverse = nil
 	}
 	return out
+}
+
+func cloneOAuthModelAliasReasoningEffort(efforts map[string]string) map[string]string {
+	if len(efforts) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(efforts))
+	for rawSource, rawTarget := range efforts {
+		source := strings.ToLower(strings.TrimSpace(rawSource))
+		target := strings.ToLower(strings.TrimSpace(rawTarget))
+		if source == "" || target == "" {
+			continue
+		}
+		if _, exists := out[source]; exists {
+			continue
+		}
+		out[source] = target
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (r oauthModelAliasRule) targetReasoningEffort(source string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source != "" {
+		return strings.TrimSpace(r.reasoningEffort[source])
+	}
+	return strings.TrimSpace(r.reasoningEffort["default"])
 }
 
 // SetOAuthModelAlias updates the OAuth model name alias table used during execution.
@@ -110,10 +149,13 @@ func modelAliasLookupCandidates(requestedModel string) (thinking.SuffixResult, [
 	if base == "" {
 		base = requestedModel
 	}
-	candidates := []string{base}
+	// Prefer an exact suffix-qualified alias when one is configured. The base
+	// model remains a fallback so a general alias still covers unlisted efforts.
+	candidates := make([]string, 0, 2)
 	if base != requestedModel {
 		candidates = append(candidates, requestedModel)
 	}
+	candidates = append(candidates, base)
 	return requestResult, candidates
 }
 
@@ -200,38 +242,36 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 // to the requested alias.
 //
 // If the requested model contains a thinking suffix (e.g., "gpt-5(high)"),
-// the suffix is preserved in the returned model name. However, if the alias's
-// original name already contains a suffix, the config suffix takes priority.
+// the suffix is preserved in the returned model name. A configured
+// reasoning-effort mapping for a Codex alias instead applies the target effort
+// through request metadata and leaves the upstream model name clean.
 func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {
 	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
 }
 
-func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) string {
+func (m *Manager) lookupOAuthModelAliasRule(auth *Auth, requestedModel, channel string) (oauthModelAliasRule, thinking.SuffixResult, string, bool) {
 	if m == nil || auth == nil {
-		return ""
+		return oauthModelAliasRule{}, thinking.SuffixResult{}, "", false
 	}
+	channel = strings.ToLower(strings.TrimSpace(channel))
 	if channel == "" {
-		return ""
+		return oauthModelAliasRule{}, thinking.SuffixResult{}, "", false
 	}
 
-	// Extract thinking suffix from requested model using ParseSuffix
-	requestResult := thinking.ParseSuffix(requestedModel)
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
 	baseModel := requestResult.ModelName
-
-	// Candidate keys to match: base model and raw input (handles suffix-parsing edge cases).
-	candidates := []string{baseModel}
-	if baseModel != requestedModel {
-		candidates = append(candidates, requestedModel)
+	if baseModel == "" {
+		baseModel = strings.TrimSpace(requestedModel)
 	}
 
 	raw := m.oauthModelAlias.Load()
 	table, _ := raw.(*oauthModelAliasTable)
 	if table == nil || table.reverse == nil {
-		return ""
+		return oauthModelAliasRule{}, requestResult, baseModel, false
 	}
 	rev := table.reverse[channel]
 	if rev == nil {
-		return ""
+		return oauthModelAliasRule{}, requestResult, baseModel, false
 	}
 
 	for _, candidate := range candidates {
@@ -239,26 +279,78 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		if key == "" {
 			continue
 		}
-		original := strings.TrimSpace(rev[key])
-		if original == "" {
+		rule, exists := rev[key]
+		if !exists || strings.TrimSpace(rule.upstreamModel) == "" {
 			continue
 		}
-		if strings.EqualFold(original, baseModel) {
-			return ""
-		}
+		return rule, requestResult, baseModel, true
+	}
 
-		// If config already has suffix, it takes priority.
-		if thinking.ParseSuffix(original).HasSuffix {
-			return original
-		}
-		// Preserve user's thinking suffix on the resolved model.
-		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-			return original + "(" + requestResult.RawSuffix + ")"
-		}
+	return oauthModelAliasRule{}, requestResult, baseModel, false
+}
+
+func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) string {
+	rule, requestResult, baseModel, ok := m.lookupOAuthModelAliasRule(auth, requestedModel, channel)
+	if !ok {
+		return ""
+	}
+
+	original := strings.TrimSpace(rule.upstreamModel)
+	if strings.EqualFold(original, baseModel) {
+		return ""
+	}
+
+	// If config already has suffix, it takes priority.
+	if thinking.ParseSuffix(original).HasSuffix {
 		return original
 	}
 
-	return ""
+	// A configured Codex effort map owns the translated effort. When a legacy
+	// suffix selects a mapped source effort, do not propagate that suffix to the
+	// upstream model name; the execution path will apply the configured target.
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && rule.targetReasoningEffort(requestResult.RawSuffix) != "" {
+		return original
+	}
+
+	// Preserve the caller's suffix for aliases without an effort override.
+	if requestResult.HasSuffix && requestResult.RawSuffix != "" {
+		return original + "(" + requestResult.RawSuffix + ")"
+	}
+	return original
+}
+
+func (m *Manager) oauthModelAliasReasoningEffort(auth *Auth, requestedModel, sourceEffort string) string {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return ""
+	}
+	rule, _, _, ok := m.lookupOAuthModelAliasRule(auth, requestedModel, modelAliasChannel(auth))
+	if !ok {
+		return ""
+	}
+	return rule.targetReasoningEffort(sourceEffort)
+}
+
+func (m *Manager) withOAuthModelAliasReasoningEffort(req cliproxyexecutor.Request, auth *Auth, routeModel string, opts cliproxyexecutor.Options) cliproxyexecutor.Request {
+	routeModel = rewriteModelForAuth(routeModel, auth)
+	if routeModel == "" {
+		routeModel = req.Model
+	}
+	sourceEffort := reasoningEffortFromOptions(opts)
+	if sourceEffort == "" {
+		sourceEffort = thinking.ExtractReasoningEffort(req.Payload, opts.SourceFormat.String(), routeModel)
+	}
+	targetEffort := m.oauthModelAliasReasoningEffort(auth, routeModel, sourceEffort)
+	if targetEffort == "" {
+		return req
+	}
+
+	metadata := make(map[string]any, len(req.Metadata)+1)
+	for key, value := range req.Metadata {
+		metadata[key] = value
+	}
+	metadata[cliproxyexecutor.UpstreamReasoningEffortOverrideMetadataKey] = targetEffort
+	req.Metadata = metadata
+	return req
 }
 
 // modelAliasChannel extracts the OAuth model alias channel from an Auth object.

@@ -64,6 +64,12 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, nil
 	}
 	m.applyPersistedRuntimeStateLocked(auth)
+	if existing := m.auths[auth.ID]; existing != nil {
+		// Register is normally used for initial loading, but a caller can also
+		// upsert an existing auth. Do not let a stale file snapshot overwrite a
+		// quota cooldown learned while this manager is running.
+		preserveRuntimeState(existing, auth)
+	}
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()

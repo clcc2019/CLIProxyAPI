@@ -156,6 +156,14 @@ func normalizeImportedCodexAgentIdentity(metadata map[string]any) (map[string]an
 	copyNonEmptyMetadataString(normalized, "task_id", firstString("task_id", "taskId"))
 	copyNonEmptyMetadataString(normalized, "account_id", firstString("account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"))
 	copyNonEmptyMetadataString(normalized, "chatgpt_user_id", firstString("chatgpt_user_id", "chatgptUserId", "chatgptUserID"))
+	normalizeImportedCodexClientFeatures(normalized, sources)
+	// Agent assertions are tied to the client that created the credential. Keep
+	// the auth-file client profile authoritative so requests from different
+	// downstream clients cannot change that fingerprint. An explicit false is
+	// preserved as an opt-out for operators who intentionally want that.
+	if _, explicitlyConfigured := normalized[AuthFileCodexClientProfilePinnedKey]; !explicitlyConfigured {
+		normalized[AuthFileCodexClientProfilePinnedKey] = true
+	}
 
 	for _, source := range sources {
 		for _, key := range []string{"chatgpt_account_is_fedramp", "chatgptAccountIsFedramp", "fedramp", "openai_fedramp"} {
@@ -177,6 +185,44 @@ func normalizeImportedCodexAgentIdentity(metadata map[string]any) (map[string]an
 		delete(normalized, key)
 	}
 	return normalized, true
+}
+
+// normalizeImportedCodexClientFeatures promotes a client profile nested under
+// an external agent_identity/agentIdentity object. Earlier imports removed
+// that wrapper after extracting the signing material, inadvertently dropping
+// the client fingerprint that must stay paired with an agent identity.
+func normalizeImportedCodexClientFeatures(normalized map[string]any, sources []map[string]any) {
+	if len(normalized) == 0 || hasImportedCodexClientFeatureObject(normalized) {
+		return
+	}
+	for _, source := range sources {
+		for _, key := range authFileClientProfileObjectKeys {
+			profile, ok := source[key].(map[string]any)
+			if !ok || len(profile) == 0 {
+				continue
+			}
+			normalized["client_features"] = cloneImportedMetadataMap(profile)
+			return
+		}
+	}
+}
+
+func hasImportedCodexClientFeatureObject(metadata map[string]any) bool {
+	for _, key := range authFileClientProfileObjectKeys {
+		profile, ok := metadata[key].(map[string]any)
+		if ok && len(profile) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneImportedMetadataMap(source map[string]any) map[string]any {
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func importedOpenAISubscriptionExpiresAt(metadata map[string]any) string {

@@ -197,9 +197,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		execReq = m.withOAuthModelAliasReasoningEffort(execReq, auth, routeModel, opts)
 		for retryAttempt := 0; ; retryAttempt++ {
+			releaseAdmission, errAdmission := m.admitAuthExecution(auth, resultModel, retryAttempt > 0)
+			if errAdmission != nil {
+				return nil, errAdmission
+			}
 			lease := m.beginAuthInFlight(auth.ID)
 			streamResult, errStream := func() (*cliproxyexecutor.StreamResult, error) {
+				defer releaseAdmission()
 				defer func() {
 					if r := recover(); r != nil {
 						lease.Close()

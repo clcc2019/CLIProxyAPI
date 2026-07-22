@@ -352,8 +352,23 @@ image-stream-data-interval-timeout-seconds: 0
 #     - name: "claude-sonnet-4-5-20250929"
 #       alias: "cs4.5"
 #   codex:
-#     - name: "gpt-5"
-#       alias: "g5"
+#     - name: gpt-5.6-terra
+#       alias: gpt-5.6-sol
+#       fork: true
+#     # Optional effort-aware GPT-5.5 -> GPT-5.6 Terra profile. The
+#     # reasoning-effort map is client effort -> upstream effort; `default`
+#     # applies when the client does not specify one. Choose values with your
+#     # own workload evaluations. `fork: true` keeps gpt-5.6-terra visible in
+#     # /v1/models as well.
+#     - name: "gpt-5.6-terra"
+#       alias: "gpt-5.5"
+#       fork: true
+#       reasoning-effort:
+#         default: high
+#         low: medium
+#         medium: high
+#         high: max
+#         xhigh: max
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
