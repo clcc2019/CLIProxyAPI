@@ -42,6 +42,9 @@ func CodexAgentIdentityAvailable(auth *Auth) bool {
 	if auth == nil {
 		return false
 	}
+	if auth.managementSummaryHasAgentIdentity {
+		return true
+	}
 	return codexAuthMetadataString(auth.Metadata, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID") != "" &&
 		codexAuthMetadataString(auth.Metadata, "agent_private_key", "agentPrivateKey") != ""
 }
@@ -51,6 +54,9 @@ func CodexAgentIdentityAvailable(auth *Auth) bool {
 func CodexAccessTokenAvailable(auth *Auth) bool {
 	if auth == nil {
 		return false
+	}
+	if auth.managementSummaryHasAccessToken {
+		return true
 	}
 	if codexAuthMetadataString(auth.Metadata, "access_token", "accessToken") != "" {
 		return true

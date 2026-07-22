@@ -104,6 +104,12 @@ type Auth struct {
 	recentRequests *recentRequestRing `json:"-"`
 	indexAssigned  bool               `json:"-"`
 	runtimeMu      unsafe.Pointer     `json:"-"`
+
+	// Management-list snapshots deliberately omit credential material. Retain
+	// these non-sensitive capability facts so list entries can still report the
+	// active Codex authentication mode accurately.
+	managementSummaryHasAccessToken   bool `json:"-"`
+	managementSummaryHasAgentIdentity bool `json:"-"`
 }
 
 const (
@@ -624,6 +630,8 @@ func (a *Auth) CloneForManagementSummary() *Auth {
 	copyAuth.recentRequests = cloneRecentRequestRing(a.recentRequests)
 	copyAuth.Attributes = cloneAuthAttributesForManagementSummary(a.Attributes)
 	copyAuth.Metadata = cloneAuthMetadataForManagementSummary(a.Metadata)
+	copyAuth.managementSummaryHasAccessToken = CodexAccessTokenAvailable(a)
+	copyAuth.managementSummaryHasAgentIdentity = CodexAgentIdentityAvailable(a)
 	return &copyAuth
 }
 
@@ -828,6 +836,8 @@ func cloneAuthAttributesForManagementSummary(src map[string]string) map[string]s
 		"header:" + AuthFileCodexIncludeTimingMetricsHeader,
 		"websockets",
 		"api_key",
+		"auth_kind",
+		"authKind",
 	} {
 		if value := src[key]; value != "" {
 			dst[key] = value
@@ -919,6 +929,10 @@ func cloneAuthMetadataForManagementSummary(src map[string]any) map[string]any {
 		"last_refreshed_at",
 		"lastRefreshedAt",
 		"disabled",
+		"auth_kind",
+		"authKind",
+		"auth_mode",
+		"authMode",
 		runtimeStateMetadataKey,
 	}
 	for _, key := range copyKeys {

@@ -175,6 +175,17 @@ func TestPatchCodexAuthModeCreatesAndReusesAgentIdentity(t *testing.T) {
 	if auth, ok := manager.GetByFileName("codex.json"); !ok || !coreauth.CodexAuthUsesAgentIdentity(auth) {
 		t.Fatalf("manager auth did not switch back to Agent Identity: %#v", auth)
 	}
+
+	summaries := manager.ListManagementSummary()
+	if len(summaries) != 1 {
+		t.Fatalf("management summaries = %d, want 1", len(summaries))
+	}
+	summaryEntry := h.buildAuthFileEntry(summaries[0])
+	if summaryEntry["auth_mode"] != codexAuthModeAgentIdentity ||
+		summaryEntry["has_access_token"] != true ||
+		summaryEntry["has_agent_identity"] != true {
+		t.Fatalf("management summary lost Codex auth-mode state: %#v", summaryEntry)
+	}
 }
 
 func TestPatchCodexAuthModeRegistrationFailureDoesNotWriteFile(t *testing.T) {
