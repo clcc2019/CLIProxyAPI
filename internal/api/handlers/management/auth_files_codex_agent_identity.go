@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -26,13 +27,17 @@ import (
 )
 
 const (
-	codexAuthModeAccessToken        = "access_token"
-	codexAuthModeAgentIdentity      = "agent_identity"
-	codexAgentRegistrationURL       = "https://auth.openai.com/api/accounts/v1/agent/register"
-	codexAgentRegistrationTimeout   = 30 * time.Second
-	codexAgentRegistrationMaxBytes  = 64 << 10
-	codexAgentRegistrationHarnessID = "codex-cli"
-	codexAgentRunningLocation       = "local"
+	codexAuthModeAccessToken                     = "access_token"
+	codexAuthModeAgentIdentity                   = "agent_identity"
+	codexAgentRegistrationURL                    = coreauth.CodexAgentIdentityProductionAuthAPIBaseURL + "/v1/agent/register"
+	codexAgentRegistrationTimeout                = 30 * time.Second
+	codexAgentRegistrationMaxBytes               = 64 << 10
+	codexAgentRegistrationMaxAttempts            = 3
+	codexAgentRegistrationCapabilityResponsesAPI = "responsesapi"
+	codexAgentRegistrationCLIHarnessID           = "codex-cli"
+	codexAgentRegistrationAppHarnessID           = "codex-app"
+	codexAgentIdentityAccountIDMetadataKey       = "agent_identity_account_id"
+	codexAgentIdentityChatGPTUserIDMetadataKey   = "agent_identity_chatgpt_user_id"
 )
 
 var codexAgentIdentityRegisterURL = codexAgentRegistrationURL
@@ -43,8 +48,10 @@ type codexAuthModeRequest struct {
 }
 
 type codexAgentRegistrationRequest struct {
-	ABOM codexAgentRegistrationABOM `json:"abom"`
-	Key  string                     `json:"agent_public_key"`
+	ABOM         codexAgentRegistrationABOM `json:"abom"`
+	Key          string                     `json:"agent_public_key"`
+	Capabilities []string                   `json:"capabilities"`
+	TTL          *uint64                    `json:"ttl"`
 }
 
 type codexAgentRegistrationABOM struct {
@@ -146,19 +153,27 @@ func (h *Handler) PatchCodexAuthMode(c *gin.Context) {
 		}
 		setCodexAuthModeDocument(doc, coreauth.CodexAuthKindOAuth)
 	case codexAuthModeAgentIdentity:
-		if coreauth.CodexAgentIdentityAvailable(fileAuth) {
-			if err = validateCodexAgentIdentity(fileAuth); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
-		} else {
-			accessToken := codexUsageAccessToken(fileAuth)
-			claims, claimErr := validateCodexAgentAccessToken(accessToken)
+		accessToken := codexUsageAccessToken(fileAuth)
+		claims, claimErr := validateCodexAgentAccessToken(accessToken)
+		identityAvailable := coreauth.CodexAgentIdentityAvailable(fileAuth)
+		var identityErr error
+		if identityAvailable {
+			identityErr = validateCodexAgentIdentity(fileAuth)
+		}
+		needsRegistration := !identityAvailable || identityErr != nil
+		if !needsRegistration && claimErr == nil && !codexAgentIdentityMatchesClaims(fileAuth, claims) {
+			needsRegistration = true
+		}
+		if needsRegistration {
 			if claimErr != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": claimErr.Error()})
+				if identityErr != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": identityErr.Error()})
+				} else {
+					c.JSON(http.StatusBadRequest, gin.H{"error": claimErr.Error()})
+				}
 				return
 			}
-			identity, createErr := h.createCodexAgentIdentity(c.Request.Context(), fileAuth, accessToken)
+			identity, createErr := h.createCodexAgentIdentity(c.Request.Context(), fileAuth, accessToken, claims)
 			if createErr != nil {
 				c.JSON(http.StatusBadGateway, gin.H{"error": createErr.Error()})
 				return
@@ -168,6 +183,7 @@ func (h *Handler) PatchCodexAuthMode(c *gin.Context) {
 			delete(doc, "task_id")
 			delete(doc, "taskId")
 			applyCodexAgentClaims(doc, claims)
+			applyCodexAgentIdentityBinding(doc, claims)
 			created = true
 		}
 		doc[coreauth.AuthFileCodexClientProfilePinnedKey] = true
@@ -201,7 +217,7 @@ func (h *Handler) PatchCodexAuthMode(c *gin.Context) {
 	updatedAuth.UpdatedAt = time.Now()
 
 	updatedAuth, err = manager.Update(c.Request.Context(), updatedAuth)
-	if err != nil {
+	if err != nil || updatedAuth == nil {
 		// Manager.Update installs its in-memory snapshot before persisting. Put
 		// both layers back so a persistence failure cannot leave a half-switched
 		// credential behind.
@@ -285,7 +301,7 @@ func validateCodexAgentIdentity(auth *coreauth.Auth) error {
 	return nil
 }
 
-func (h *Handler) createCodexAgentIdentity(ctx context.Context, auth *coreauth.Auth, accessToken string) (codexGeneratedAgentIdentity, error) {
+func (h *Handler) createCodexAgentIdentity(ctx context.Context, auth *coreauth.Auth, accessToken string, claims *codexauth.JWTClaims) (codexGeneratedAgentIdentity, error) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return codexGeneratedAgentIdentity{}, errors.New("failed to generate Agent Identity key")
@@ -301,12 +317,10 @@ func (h *Handler) createCodexAgentIdentity(ctx context.Context, auth *coreauth.A
 
 	agentVersion, headers := codexAgentRegistrationHeaders(auth)
 	payload := codexAgentRegistrationRequest{
-		ABOM: codexAgentRegistrationABOM{
-			AgentVersion:    agentVersion,
-			AgentHarnessID:  codexAgentRegistrationHarnessID,
-			RunningLocation: codexAgentRunningLocation,
-		},
-		Key: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPublicKey))),
+		ABOM:         codexAgentRegistrationABOMForHeaders(agentVersion, headers),
+		Key:          strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPublicKey))),
+		Capabilities: []string{codexAgentRegistrationCapabilityResponsesAPI},
+		TTL:          nil,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -316,50 +330,102 @@ func (h *Handler) createCodexAgentIdentity(ctx context.Context, auth *coreauth.A
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexAgentIdentityRegisterURL, bytes.NewReader(body))
-	if err != nil {
-		return codexGeneratedAgentIdentity{}, errors.New("failed to build Agent Identity registration")
-	}
-	for key, values := range headers {
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	requestCtx, cancel := context.WithTimeout(ctx, codexAgentRegistrationTimeout)
+	defer cancel()
 
 	h.mu.RLock()
 	cfg := h.cfg
 	h.mu.RUnlock()
-	resp, err := helps.NewOpenAIAuthHTTPClient(cfg, auth, codexAgentRegistrationTimeout).Do(req)
-	if err != nil {
-		return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration request failed")
+	client := helps.NewOpenAIAuthHTTPClient(cfg, auth, codexAgentRegistrationTimeout)
+	registrationURL := codexAgentRegistrationURLForAuth(auth)
+	for attempt := 1; attempt <= codexAgentRegistrationMaxAttempts; attempt++ {
+		req, requestErr := http.NewRequestWithContext(requestCtx, http.MethodPost, registrationURL, bytes.NewReader(body))
+		if requestErr != nil {
+			return codexGeneratedAgentIdentity{}, errors.New("failed to build Agent Identity registration")
+		}
+		for key, values := range headers {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+		if codexAgentRegistrationIsFedramp(auth, claims) {
+			req.Header.Set("X-OpenAI-Fedramp", "true")
+		}
+
+		resp, requestErr := client.Do(req)
+		if requestErr != nil {
+			if attempt < codexAgentRegistrationMaxAttempts && requestCtx.Err() == nil {
+				continue
+			}
+			return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration request failed")
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			statusCode := resp.StatusCode
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, codexAgentRegistrationMaxBytes))
+			_ = resp.Body.Close()
+			if attempt < codexAgentRegistrationMaxAttempts && codexAgentRegistrationRetryableStatus(statusCode) {
+				continue
+			}
+			return codexGeneratedAgentIdentity{}, fmt.Errorf("Agent Identity registration returned status %d", statusCode)
+		}
+		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, codexAgentRegistrationMaxBytes+1))
+		_ = resp.Body.Close()
+		if readErr != nil || len(responseBody) > codexAgentRegistrationMaxBytes {
+			return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration response is invalid")
+		}
+		var result codexAgentRegistrationResponse
+		if err = json.Unmarshal(responseBody, &result); err != nil {
+			return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration response is invalid")
+		}
+		runtimeID := strings.TrimSpace(result.AgentRuntimeID)
+		if runtimeID == "" {
+			runtimeID = strings.TrimSpace(result.AgentRuntimeIDCamel)
+		}
+		if runtimeID == "" {
+			return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration response omitted agent_runtime_id")
+		}
+		return codexGeneratedAgentIdentity{
+			RuntimeID:  runtimeID,
+			PrivateKey: base64.StdEncoding.EncodeToString(privateDER),
+		}, nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, codexAgentRegistrationMaxBytes))
-		return codexGeneratedAgentIdentity{}, fmt.Errorf("Agent Identity registration returned status %d", resp.StatusCode)
+	return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration request failed")
+}
+
+func codexAgentRegistrationURLForAuth(auth *coreauth.Auth) string {
+	if override := strings.TrimSpace(codexAgentIdentityRegisterURL); override != "" && override != codexAgentRegistrationURL {
+		return override
 	}
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, codexAgentRegistrationMaxBytes+1))
-	if err != nil || len(responseBody) > codexAgentRegistrationMaxBytes {
-		return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration response is invalid")
+	return strings.TrimRight(coreauth.CodexAgentIdentityAuthAPIBaseURL(auth), "/") + "/v1/agent/register"
+}
+
+func codexAgentRegistrationABOMForHeaders(agentVersion string, headers http.Header) codexAgentRegistrationABOM {
+	harnessID := codexAgentRegistrationCLIHarnessID
+	source := "cli"
+	clientHint := strings.ToLower(strings.TrimSpace(headers.Get(coreauth.AuthFileCodexOriginatorHeader) + " " + headers.Get("User-Agent")))
+	if strings.Contains(clientHint, "vscode") || strings.Contains(clientHint, "codex-app") {
+		harnessID = codexAgentRegistrationAppHarnessID
+		source = "vscode"
 	}
-	var result codexAgentRegistrationResponse
-	if err = json.Unmarshal(responseBody, &result); err != nil {
-		return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration response is invalid")
+	return codexAgentRegistrationABOM{
+		AgentVersion:    strings.TrimSpace(agentVersion),
+		AgentHarnessID:  harnessID,
+		RunningLocation: source + "-" + runtime.GOOS,
 	}
-	runtimeID := strings.TrimSpace(result.AgentRuntimeID)
-	if runtimeID == "" {
-		runtimeID = strings.TrimSpace(result.AgentRuntimeIDCamel)
+}
+
+func codexAgentRegistrationIsFedramp(auth *coreauth.Auth, claims *codexauth.JWTClaims) bool {
+	if claims != nil && claims.CodexAuthInfo.ChatgptAccountIsFedramp != nil {
+		return *claims.CodexAuthInfo.ChatgptAccountIsFedramp
 	}
-	if runtimeID == "" {
-		return codexGeneratedAgentIdentity{}, errors.New("Agent Identity registration response omitted agent_runtime_id")
-	}
-	return codexGeneratedAgentIdentity{
-		RuntimeID:  runtimeID,
-		PrivateKey: base64.StdEncoding.EncodeToString(privateDER),
-	}, nil
+	return codexUsageFedramp(auth)
+}
+
+func codexAgentRegistrationRetryableStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
 }
 
 func codexAgentRegistrationHeaders(auth *coreauth.Auth) (string, http.Header) {
@@ -460,6 +526,31 @@ func codexAgentUserAgentVersion(userAgent string) string {
 	return strings.TrimSpace(version)
 }
 
+func codexAgentIdentityMatchesClaims(auth *coreauth.Auth, claims *codexauth.JWTClaims) bool {
+	if auth == nil || claims == nil {
+		return false
+	}
+	boundAccountID := codexAuthMetadataString(auth.Metadata, codexAgentIdentityAccountIDMetadataKey)
+	boundUserID := codexAuthMetadataString(auth.Metadata, codexAgentIdentityChatGPTUserIDMetadataKey)
+	if boundAccountID == "" || boundUserID == "" {
+		return false
+	}
+	return boundAccountID == strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID) &&
+		boundUserID == strings.TrimSpace(claims.CodexAuthInfo.ChatgptUserID)
+}
+
+func applyCodexAgentIdentityBinding(doc map[string]any, claims *codexauth.JWTClaims) {
+	if doc == nil || claims == nil {
+		return
+	}
+	if value := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); value != "" {
+		doc[codexAgentIdentityAccountIDMetadataKey] = value
+	}
+	if value := strings.TrimSpace(claims.CodexAuthInfo.ChatgptUserID); value != "" {
+		doc[codexAgentIdentityChatGPTUserIDMetadataKey] = value
+	}
+}
+
 func applyCodexAgentClaims(doc map[string]any, claims *codexauth.JWTClaims) {
 	if doc == nil || claims == nil {
 		return
@@ -475,6 +566,9 @@ func applyCodexAgentClaims(doc map[string]any, claims *codexauth.JWTClaims) {
 	}
 	if value := strings.TrimSpace(claims.GetPlanType()); value != "" {
 		doc["plan_type"] = value
+	}
+	if claims.CodexAuthInfo.ChatgptAccountIsFedramp != nil {
+		doc["fedramp"] = *claims.CodexAuthInfo.ChatgptAccountIsFedramp
 	}
 }
 

@@ -151,6 +151,15 @@ func TestRegisterCodexAgentIdentityTaskSupportsPlainAndEncryptedResponses(t *tes
 				if r.Method != http.MethodPost || r.URL.Path != "/v1/agent/runtime-test/task/register" {
 					t.Errorf("request = %s %s", r.Method, r.URL.Path)
 				}
+				if authorization := r.Header.Get("Authorization"); authorization != "" {
+					t.Errorf("task registration Authorization = %q, want empty", authorization)
+				}
+				var requestBody map[string]string
+				if errDecode := json.NewDecoder(r.Body).Decode(&requestBody); errDecode != nil {
+					t.Errorf("decode task registration: %v", errDecode)
+				} else if len(requestBody) != 2 || requestBody["timestamp"] == "" || requestBody["signature"] == "" {
+					t.Errorf("task registration body = %#v", requestBody)
+				}
 				_, _ = io.WriteString(w, test.response(t))
 			}))
 			defer server.Close()
@@ -167,6 +176,48 @@ func TestRegisterCodexAgentIdentityTaskSupportsPlainAndEncryptedResponses(t *tes
 				t.Fatalf("taskID = %q, want %q", taskID, want)
 			}
 		})
+	}
+}
+
+func TestRegisterCodexAgentIdentityTaskRetriesTransientFailures(t *testing.T) {
+	auth, _, _ := newCodexAgentIdentityTestAuth(t, "")
+	key, err := codexAgentIdentityKeyFromAuth(auth)
+	if err != nil {
+		t.Fatalf("codexAgentIdentityKeyFromAuth: %v", err)
+	}
+
+	var registrations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if registrations.Add(1) < codexAgentIdentityRegistrationMaxAttempts {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, `{"task_id":"task-after-retry"}`)
+	}))
+	defer server.Close()
+	previous := codexAgentIdentityTaskRegistrationURL
+	codexAgentIdentityTaskRegistrationURL = server.URL
+	defer func() { codexAgentIdentityTaskRegistrationURL = previous }()
+
+	taskID, err := NewCodexExecutor(nil).registerCodexAgentIdentityTask(context.Background(), auth, key)
+	if err != nil {
+		t.Fatalf("registerCodexAgentIdentityTask: %v", err)
+	}
+	if taskID != "task-after-retry" || registrations.Load() != codexAgentIdentityRegistrationMaxAttempts {
+		t.Fatalf("task/registrations = %q/%d", taskID, registrations.Load())
+	}
+}
+
+func TestCodexAgentIdentityTaskRegistrationUsesStagingEnvironment(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "https://chatgpt-staging.com/backend-api/codex",
+	}}
+	previous := codexAgentIdentityTaskRegistrationURL
+	codexAgentIdentityTaskRegistrationURL = codexAgentIdentityTaskRegistrationBaseURL
+	defer func() { codexAgentIdentityTaskRegistrationURL = previous }()
+
+	if got := codexAgentIdentityTaskRegistrationBaseURLForAuth(auth); got != cliproxyauth.CodexAgentIdentityStagingAuthAPIBaseURL {
+		t.Fatalf("registration base URL = %q", got)
 	}
 }
 

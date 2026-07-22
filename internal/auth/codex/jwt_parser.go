@@ -48,6 +48,7 @@ type Organizations struct {
 // This includes ChatGPT account information, subscription status, and user/organization IDs.
 type CodexAuthInfo struct {
 	ChatgptAccountID               string          `json:"chatgpt_account_id"`
+	ChatgptAccountIsFedramp        *bool           `json:"chatgpt_account_is_fedramp"`
 	ChatgptPlanType                string          `json:"chatgpt_plan_type"`
 	ChatgptSubscriptionActiveStart any             `json:"chatgpt_subscription_active_start"`
 	ChatgptSubscriptionActiveUntil any             `json:"chatgpt_subscription_active_until"`

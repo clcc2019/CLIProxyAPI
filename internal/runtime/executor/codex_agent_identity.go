@@ -26,9 +26,10 @@ import (
 )
 
 const (
-	codexAgentIdentityTaskRegistrationBaseURL = "https://auth.openai.com/api/accounts"
+	codexAgentIdentityTaskRegistrationBaseURL = cliproxyauth.CodexAgentIdentityProductionAuthAPIBaseURL
 	codexAgentIdentityTaskRegistrationTimeout = 30 * time.Second
 	codexAgentIdentityTaskResponseMaxBytes    = 64 << 10
+	codexAgentIdentityRegistrationMaxAttempts = 3
 )
 
 // This variable is intentionally package-scoped so the registration protocol
@@ -201,56 +202,81 @@ func decryptCodexAgentTaskID(key codexAgentIdentityKey, encoded string) (string,
 }
 
 func (e *CodexExecutor) registerCodexAgentIdentityTask(ctx context.Context, auth *cliproxyauth.Auth, key codexAgentIdentityKey) (string, error) {
-	timestamp, signature, err := signCodexAgentTaskRegistration(key, time.Now())
-	if err != nil {
-		return "", err
-	}
-	body, err := json.Marshal(map[string]string{"timestamp": timestamp, "signature": signature})
-	if err != nil {
-		return "", errors.New("failed to serialize codex agent task registration")
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, codexAgentIdentityTaskRegistrationTimeout)
 	defer cancel()
-	registrationURL := strings.TrimRight(codexAgentIdentityTaskRegistrationURL, "/") + "/v1/agent/" + url.PathEscape(key.runtimeID) + "/task/register"
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, registrationURL, bytes.NewReader(body))
-	if err != nil {
-		return "", errors.New("failed to build codex agent task registration request")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	resp, err := helps.NewCodexHTTPClient(requestCtx, e.cfg, auth, 0).Do(req)
-	if err != nil {
-		return "", errors.New("codex agent task registration request failed")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("codex agent task registration returned status %d", resp.StatusCode)
-	}
-	limited := io.LimitReader(resp.Body, codexAgentIdentityTaskResponseMaxBytes+1)
-	responseBody, err := io.ReadAll(limited)
-	if err != nil || len(responseBody) > codexAgentIdentityTaskResponseMaxBytes {
-		return "", errors.New("codex agent task registration response is invalid")
-	}
-	var result codexAgentIdentityTaskRegistrationResponse
-	if err := json.Unmarshal(responseBody, &result); err != nil {
-		return "", errors.New("codex agent task registration response is invalid")
-	}
-	for _, taskID := range []string{result.TaskID, result.TaskIDCamel} {
-		if taskID = strings.TrimSpace(taskID); taskID != "" {
-			return taskID, nil
+	registrationBaseURL := codexAgentIdentityTaskRegistrationBaseURLForAuth(auth)
+	registrationURL := strings.TrimRight(registrationBaseURL, "/") + "/v1/agent/" + url.PathEscape(key.runtimeID) + "/task/register"
+	client := helps.NewCodexHTTPClient(requestCtx, e.cfg, auth, 0)
+	for attempt := 1; attempt <= codexAgentIdentityRegistrationMaxAttempts; attempt++ {
+		timestamp, signature, err := signCodexAgentTaskRegistration(key, time.Now())
+		if err != nil {
+			return "", err
 		}
+		body, err := json.Marshal(map[string]string{"timestamp": timestamp, "signature": signature})
+		if err != nil {
+			return "", errors.New("failed to serialize codex agent task registration")
+		}
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, registrationURL, bytes.NewReader(body))
+		if err != nil {
+			return "", errors.New("failed to build codex agent task registration request")
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			if attempt < codexAgentIdentityRegistrationMaxAttempts && requestCtx.Err() == nil {
+				continue
+			}
+			return "", errors.New("codex agent task registration request failed")
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			statusCode := resp.StatusCode
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, codexAgentIdentityTaskResponseMaxBytes))
+			_ = resp.Body.Close()
+			if attempt < codexAgentIdentityRegistrationMaxAttempts && codexAgentIdentityRegistrationRetryableStatus(statusCode) {
+				continue
+			}
+			return "", fmt.Errorf("codex agent task registration returned status %d", statusCode)
+		}
+		limited := io.LimitReader(resp.Body, codexAgentIdentityTaskResponseMaxBytes+1)
+		responseBody, readErr := io.ReadAll(limited)
+		_ = resp.Body.Close()
+		if readErr != nil || len(responseBody) > codexAgentIdentityTaskResponseMaxBytes {
+			return "", errors.New("codex agent task registration response is invalid")
+		}
+		var result codexAgentIdentityTaskRegistrationResponse
+		if err := json.Unmarshal(responseBody, &result); err != nil {
+			return "", errors.New("codex agent task registration response is invalid")
+		}
+		for _, taskID := range []string{result.TaskID, result.TaskIDCamel} {
+			if taskID = strings.TrimSpace(taskID); taskID != "" {
+				return taskID, nil
+			}
+		}
+		encrypted := strings.TrimSpace(result.EncryptedTaskID)
+		if encrypted == "" {
+			encrypted = strings.TrimSpace(result.EncryptedTaskIDCamel)
+		}
+		if encrypted == "" {
+			return "", errors.New("codex agent task registration response omitted task id")
+		}
+		return decryptCodexAgentTaskID(key, encrypted)
 	}
-	encrypted := strings.TrimSpace(result.EncryptedTaskID)
-	if encrypted == "" {
-		encrypted = strings.TrimSpace(result.EncryptedTaskIDCamel)
+	return "", errors.New("codex agent task registration request failed")
+}
+
+func codexAgentIdentityTaskRegistrationBaseURLForAuth(auth *cliproxyauth.Auth) string {
+	if override := strings.TrimSpace(codexAgentIdentityTaskRegistrationURL); override != "" && override != codexAgentIdentityTaskRegistrationBaseURL {
+		return override
 	}
-	if encrypted == "" {
-		return "", errors.New("codex agent task registration response omitted task id")
-	}
-	return decryptCodexAgentTaskID(key, encrypted)
+	return cliproxyauth.CodexAgentIdentityAuthAPIBaseURL(auth)
+}
+
+func codexAgentIdentityRegistrationRetryableStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
 }
 
 func (e *CodexExecutor) codexAgentIdentityState(auth *cliproxyauth.Auth, key codexAgentIdentityKey) *codexAgentIdentityTaskState {

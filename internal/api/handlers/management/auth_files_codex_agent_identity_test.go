@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -45,19 +46,40 @@ func TestPatchCodexAuthModeCreatesAndReusesAgentIdentity(t *testing.T) {
 			"Version":                               "0.155.0",
 			"X-Codex-Beta-Features":                 "feature-a",
 			"X-Codex-Installation-Id":               "installation-test",
+			"X-OpenAI-Fedramp":                      "true",
 			"x-responsesapi-include-timing-metrics": "true",
 		} {
 			if got := r.Header.Get(header); got != want {
 				t.Errorf("%s = %q, want %q", header, got, want)
 			}
 		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read registration: %v", err)
+			return
+		}
 		var payload codexAgentRegistrationRequest
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if err = json.Unmarshal(body, &payload); err != nil {
 			t.Errorf("decode registration: %v", err)
+			return
+		}
+		var rawPayload map[string]any
+		if err = json.Unmarshal(body, &rawPayload); err != nil {
+			t.Errorf("decode raw registration: %v", err)
+			return
+		}
+		if len(rawPayload) != 4 {
+			t.Errorf("registration fields = %#v, want exactly abom, agent_public_key, capabilities, ttl", rawPayload)
+		}
+		if ttl, exists := rawPayload["ttl"]; !exists || ttl != nil {
+			t.Errorf("ttl = %#v, exists=%t; want explicit null", ttl, exists)
+		}
+		if len(payload.Capabilities) != 1 || payload.Capabilities[0] != codexAgentRegistrationCapabilityResponsesAPI {
+			t.Errorf("capabilities = %#v", payload.Capabilities)
 		}
 		if payload.ABOM.AgentVersion != "0.155.0" ||
-			payload.ABOM.AgentHarnessID != codexAgentRegistrationHarnessID ||
-			payload.ABOM.RunningLocation != codexAgentRunningLocation {
+			payload.ABOM.AgentHarnessID != codexAgentRegistrationAppHarnessID ||
+			payload.ABOM.RunningLocation != "vscode-"+runtime.GOOS {
 			t.Errorf("ABOM = %#v", payload.ABOM)
 		}
 		publicKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(payload.Key))
@@ -143,14 +165,19 @@ func TestPatchCodexAuthModeCreatesAndReusesAgentIdentity(t *testing.T) {
 		t.Fatalf("private key = %T, want Ed25519", parsed)
 	}
 	for key, want := range map[string]string{
-		"account_id":      "account-test",
-		"chatgpt_user_id": "user-test",
-		"email":           "agent@example.com",
-		"plan_type":       "plus",
+		"account_id":                           "account-test",
+		"chatgpt_user_id":                      "user-test",
+		"email":                                "agent@example.com",
+		"plan_type":                            "plus",
+		codexAgentIdentityAccountIDMetadataKey: "account-test",
+		codexAgentIdentityChatGPTUserIDMetadataKey: "user-test",
 	} {
 		if got := stored[key]; got != want {
 			t.Fatalf("%s = %#v, want %q", key, got, want)
 		}
+	}
+	if fedramp, ok := stored["fedramp"].(bool); !ok || !fedramp {
+		t.Fatalf("fedramp = %#v, want true", stored["fedramp"])
 	}
 
 	rec = performCodexAuthModeRequest(t, h, "codex.json", codexAuthModeAccessToken)
@@ -192,7 +219,9 @@ func TestPatchCodexAuthModeRegistrationFailureDoesNotWriteFile(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
+	var registrations atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		registrations.Add(1)
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, `{"error":"contains-sensitive-upstream-details"}`)
 	}))
@@ -217,6 +246,9 @@ func TestPatchCodexAuthModeRegistrationFailureDoesNotWriteFile(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "contains-sensitive-upstream-details") {
 		t.Fatalf("response exposed upstream body: %s", rec.Body.String())
+	}
+	if registrations.Load() != 1 {
+		t.Fatalf("registrations = %d, want no retry for 401", registrations.Load())
 	}
 	after, err := os.ReadFile(authPath)
 	if err != nil {
@@ -250,6 +282,87 @@ func TestPatchCodexAuthModeRejectsMissingAccessToken(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("auth file changed after missing-token rejection")
+	}
+}
+
+func TestPatchCodexAuthModeReRegistersIdentityForDifferentAccount(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var registrations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		registrations.Add(1)
+		_, _ = io.WriteString(w, `{"agent_runtime_id":"runtime-rebound"}`)
+	}))
+	defer server.Close()
+	previousURL := codexAgentIdentityRegisterURL
+	codexAgentIdentityRegisterURL = server.URL
+	t.Cleanup(func() { codexAgentIdentityRegisterURL = previousURL })
+
+	h, _, authPath := newCodexAuthModeTestHandler(t, map[string]any{
+		"type":                                 "codex",
+		"auth_kind":                            coreauth.CodexAuthKindOAuth,
+		"access_token":                         codexAgentModeTestJWTForIdentity(t, "account-new", "user-new", false),
+		"account_id":                           "account-new",
+		"chatgpt_user_id":                      "user-new",
+		"agent_runtime_id":                     "runtime-old",
+		"agent_private_key":                    codexAgentModeTestPrivateKey(t),
+		codexAgentIdentityAccountIDMetadataKey: "account-old",
+		codexAgentIdentityChatGPTUserIDMetadataKey: "user-old",
+		"task_id": "task-old",
+	})
+
+	rec := performCodexAuthModeRequest(t, h, "codex.json", codexAuthModeAgentIdentity)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Created bool `json:"created"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Created || registrations.Load() != 1 {
+		t.Fatalf("created/registrations = %t/%d, want true/1", response.Created, registrations.Load())
+	}
+	stored := readCodexAuthModeTestDocument(t, authPath)
+	if stored["agent_runtime_id"] != "runtime-rebound" ||
+		stored[codexAgentIdentityAccountIDMetadataKey] != "account-new" ||
+		stored[codexAgentIdentityChatGPTUserIDMetadataKey] != "user-new" {
+		t.Fatalf("identity binding was not replaced: %#v", stored)
+	}
+	if _, exists := stored["task_id"]; exists {
+		t.Fatalf("stale task_id was retained: %#v", stored)
+	}
+}
+
+func TestPatchCodexAuthModeRetriesTransientRegistrationFailure(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var registrations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if registrations.Add(1) < codexAgentRegistrationMaxAttempts {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, `{"agent_runtime_id":"runtime-after-retry"}`)
+	}))
+	defer server.Close()
+	previousURL := codexAgentIdentityRegisterURL
+	codexAgentIdentityRegisterURL = server.URL
+	t.Cleanup(func() { codexAgentIdentityRegisterURL = previousURL })
+
+	h, _, _ := newCodexAuthModeTestHandler(t, map[string]any{
+		"type":         "codex",
+		"access_token": codexAgentModeTestJWTForIdentity(t, "account-retry", "user-retry", false),
+	})
+	rec := performCodexAuthModeRequest(t, h, "codex.json", codexAuthModeAgentIdentity)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if registrations.Load() != codexAgentRegistrationMaxAttempts {
+		t.Fatalf("registrations = %d, want %d", registrations.Load(), codexAgentRegistrationMaxAttempts)
 	}
 }
 
@@ -313,14 +426,30 @@ func readCodexAuthModeTestDocument(t *testing.T, path string) map[string]any {
 
 func codexAgentModeTestJWT(t *testing.T) string {
 	t.Helper()
+	return codexAgentModeTestJWTForIdentity(t, "account-test", "user-test", true)
+}
+
+func codexAgentModeTestJWTForIdentity(t *testing.T, accountID, userID string, fedramp bool) string {
+	t.Helper()
 	return testJWT(t, map[string]any{
 		"https://api.openai.com/auth": map[string]any{
-			"chatgpt_account_id": "account-test",
-			"chatgpt_user_id":    "user-test",
-			"chatgpt_plan_type":  "plus",
+			"chatgpt_account_id":         accountID,
+			"chatgpt_user_id":            userID,
+			"chatgpt_plan_type":          "plus",
+			"chatgpt_account_is_fedramp": fedramp,
 		},
 		"https://api.openai.com/profile": map[string]any{
 			"email": "agent@example.com",
 		},
 	})
+}
+
+func codexAgentModeTestPrivateKey(t *testing.T) string {
+	t.Helper()
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	der, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("marshal Agent Identity key: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(der)
 }
