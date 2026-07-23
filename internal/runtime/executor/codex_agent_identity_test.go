@@ -221,6 +221,20 @@ func TestCodexAgentIdentityTaskRegistrationUsesStagingEnvironment(t *testing.T) 
 	}
 }
 
+func TestCodexAgentIdentityRegistrationRetryableStatus(t *testing.T) {
+	for statusCode, want := range map[int]bool{
+		http.StatusTooManyRequests:     true,
+		http.StatusInternalServerError: true,
+		599:                            true,
+		http.StatusUnauthorized:        false,
+		600:                            false,
+	} {
+		if got := codexAgentIdentityRegistrationRetryableStatus(statusCode); got != want {
+			t.Errorf("retryable status %d = %t, want %t", statusCode, got, want)
+		}
+	}
+}
+
 func TestCodexAgentIdentityTaskRegistrationIsDeduplicated(t *testing.T) {
 	auth, _, _ := newCodexAgentIdentityTestAuth(t, "")
 	var registrations atomic.Int32

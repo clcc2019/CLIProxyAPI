@@ -27,12 +27,16 @@ import (
 )
 
 const (
-	codexAuthModeAccessToken                     = "access_token"
-	codexAuthModeAgentIdentity                   = "agent_identity"
-	codexAgentRegistrationURL                    = coreauth.CodexAgentIdentityProductionAuthAPIBaseURL + "/v1/agent/register"
-	codexAgentRegistrationTimeout                = 30 * time.Second
-	codexAgentRegistrationMaxBytes               = 64 << 10
-	codexAgentRegistrationMaxAttempts            = 3
+	codexAuthModeAccessToken          = "access_token"
+	codexAuthModeAgentIdentity        = "agent_identity"
+	codexAgentRegistrationURL         = coreauth.CodexAgentIdentityProductionAuthAPIBaseURL + "/v1/agent/register"
+	codexAgentRegistrationTimeout     = 30 * time.Second
+	codexAgentRegistrationMaxBytes    = 64 << 10
+	codexAgentRegistrationMaxAttempts = 3
+	// Keep bootstrap telemetry aligned with the current official Codex release.
+	// It is deliberately scoped to the control-plane request: regular proxy
+	// traffic continues to honour its configured compatibility profile.
+	codexAgentRegistrationVersion                = "0.145.0"
 	codexAgentRegistrationCapabilityResponsesAPI = "responsesapi"
 	codexAgentRegistrationCLIHarnessID           = "codex-cli"
 	codexAgentRegistrationAppHarnessID           = "codex-app"
@@ -185,6 +189,14 @@ func (h *Handler) PatchCodexAuthMode(c *gin.Context) {
 			applyCodexAgentClaims(doc, claims)
 			applyCodexAgentIdentityBinding(doc, claims)
 			created = true
+		} else if claims != nil {
+			// Existing Agent Identity records produced by Codex and imported from
+			// sub2api use account_id/chatgpt_user_id as their durable binding.
+			// Preserve that identity when it matches the current ChatGPT token,
+			// and add the explicit binding keys for subsequent mode switches.
+			// Re-registering an already valid identity is unnecessary and can be
+			// rejected by the upstream registration endpoint (for example, 403).
+			applyCodexAgentIdentityBinding(doc, claims)
 		}
 		doc[coreauth.AuthFileCodexClientProfilePinnedKey] = true
 		setCodexAuthModeDocument(doc, coreauth.CodexAuthKindAgentIdentity)
@@ -336,7 +348,11 @@ func (h *Handler) createCodexAgentIdentity(ctx context.Context, auth *coreauth.A
 	h.mu.RLock()
 	cfg := h.cfg
 	h.mu.RUnlock()
-	client := helps.NewOpenAIAuthHTTPClient(cfg, auth, codexAgentRegistrationTimeout)
+	// Agent registration is a native Codex control-plane call, not an
+	// interactive browser OAuth flow. Use the same proxy-aware HTTP transport
+	// as task registration (and sub2api) so its TLS and proxy behavior matches
+	// the official Codex client rather than the browser-fingerprinted auth path.
+	client := helps.NewCodexHTTPClient(requestCtx, cfg, auth, codexAgentRegistrationTimeout)
 	registrationURL := codexAgentRegistrationURLForAuth(auth)
 	for attempt := 1; attempt <= codexAgentRegistrationMaxAttempts; attempt++ {
 		req, requestErr := http.NewRequestWithContext(requestCtx, http.MethodPost, registrationURL, bytes.NewReader(body))
@@ -369,7 +385,7 @@ func (h *Handler) createCodexAgentIdentity(ctx context.Context, auth *coreauth.A
 			if attempt < codexAgentRegistrationMaxAttempts && codexAgentRegistrationRetryableStatus(statusCode) {
 				continue
 			}
-			return codexGeneratedAgentIdentity{}, fmt.Errorf("Agent Identity registration returned status %d", statusCode)
+			return codexGeneratedAgentIdentity{}, codexAgentRegistrationStatusError(statusCode)
 		}
 		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, codexAgentRegistrationMaxBytes+1))
 		_ = resp.Body.Close()
@@ -413,8 +429,15 @@ func codexAgentRegistrationABOMForHeaders(agentVersion string, headers http.Head
 	return codexAgentRegistrationABOM{
 		AgentVersion:    strings.TrimSpace(agentVersion),
 		AgentHarnessID:  harnessID,
-		RunningLocation: source + "-" + runtime.GOOS,
+		RunningLocation: source + "-" + codexAgentRegistrationOperatingSystem(runtime.GOOS),
 	}
+}
+
+func codexAgentRegistrationOperatingSystem(goos string) string {
+	if strings.EqualFold(strings.TrimSpace(goos), "darwin") {
+		return "macos"
+	}
+	return strings.ToLower(strings.TrimSpace(goos))
 }
 
 func codexAgentRegistrationIsFedramp(auth *coreauth.Auth, claims *codexauth.JWTClaims) bool {
@@ -425,29 +448,43 @@ func codexAgentRegistrationIsFedramp(auth *coreauth.Auth, claims *codexauth.JWTC
 }
 
 func codexAgentRegistrationRetryableStatus(statusCode int) bool {
-	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
+	return statusCode == http.StatusTooManyRequests ||
+		(statusCode >= http.StatusInternalServerError && statusCode < 600)
+}
+
+func codexAgentRegistrationStatusError(statusCode int) error {
+	switch statusCode {
+	case http.StatusUnauthorized:
+		return errors.New("Agent Identity registration was unauthorized by upstream (401); re-authenticate this Codex credential and try again")
+	case http.StatusForbidden:
+		// The creation request happens before the auth file is modified, so the
+		// operator can safely keep using the retained Bearer credential. Avoid
+		// returning the upstream response body here: it can contain request or
+		// account details that should not reach the management API.
+		return errors.New("Agent Identity registration was denied by upstream (403); this credential cannot create a new identity, so access-token mode was left unchanged")
+	default:
+		return fmt.Errorf("Agent Identity registration returned status %d", statusCode)
+	}
 }
 
 func codexAgentRegistrationHeaders(auth *coreauth.Auth) (string, http.Header) {
 	headers := make(http.Header)
-	userAgent := codexAgentClientFeatureString(auth, "user_agent", "user-agent", "userAgent", "User-Agent")
+	storedUserAgent := codexAgentClientFeatureString(auth, "user_agent", "user-agent", "userAgent", "User-Agent")
 	originator := codexAgentClientFeatureString(auth, coreauth.AuthFileCodexOriginatorKey, coreauth.AuthFileCodexOriginatorHeader)
-	version := codexAgentClientFeatureString(auth, "version", "Version")
-	if userAgent == "" {
-		userAgent = misc.CodexCLIUserAgentWithOriginatorAndVersion(originator, version)
-	}
 	if originator == "" {
-		originator = codexAgentUserAgentProduct(userAgent)
+		originator = codexAgentUserAgentProduct(storedUserAgent)
 	}
 	if originator == "" {
 		originator = misc.CodexCLIOriginator
 	}
-	if version == "" {
-		version = codexAgentUserAgentVersion(userAgent)
-	}
-	if version == "" {
-		version = misc.CodexCLIVersion
-	}
+	// Codex derives these values from the currently running binary rather than
+	// its persisted auth record. Auth files created by older proxy versions can
+	// retain a stale User-Agent/Version pair; sending it to the Agent Identity
+	// control plane can cause registration to be rejected. Preserve the
+	// originator (CLI vs. VS Code) but always use this build's supported Codex
+	// version and host descriptor for the bootstrap request.
+	version := codexAgentRegistrationVersion
+	userAgent := misc.CodexCLIUserAgentWithOriginatorAndVersion(originator, version)
 	headers.Set("User-Agent", userAgent)
 	headers.Set(coreauth.AuthFileCodexOriginatorHeader, originator)
 	headers.Set("Version", version)
@@ -530,8 +567,21 @@ func codexAgentIdentityMatchesClaims(auth *coreauth.Auth, claims *codexauth.JWTC
 	if auth == nil || claims == nil {
 		return false
 	}
-	boundAccountID := codexAuthMetadataString(auth.Metadata, codexAgentIdentityAccountIDMetadataKey)
-	boundUserID := codexAuthMetadataString(auth.Metadata, codexAgentIdentityChatGPTUserIDMetadataKey)
+	boundAccountID := codexAuthMetadataString(
+		auth.Metadata,
+		codexAgentIdentityAccountIDMetadataKey,
+		"account_id",
+		"accountId",
+		"chatgpt_account_id",
+		"chatgptAccountId",
+	)
+	boundUserID := codexAuthMetadataString(
+		auth.Metadata,
+		codexAgentIdentityChatGPTUserIDMetadataKey,
+		"chatgpt_user_id",
+		"chatgptUserId",
+		"chatgptUserID",
+	)
 	if boundAccountID == "" || boundUserID == "" {
 		return false
 	}

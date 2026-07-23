@@ -19,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/crypto/ssh"
 )
@@ -41,9 +42,9 @@ func TestPatchCodexAuthModeCreatesAndReusesAgentIdentity(t *testing.T) {
 			t.Errorf("Authorization = %q", got)
 		}
 		for header, want := range map[string]string{
-			"User-Agent":                            "codex_vscode/0.155.0 (Linux; x86_64)",
+			"User-Agent":                            misc.CodexCLIUserAgentWithOriginatorAndVersion("codex_vscode", codexAgentRegistrationVersion),
 			"Originator":                            "codex_vscode",
-			"Version":                               "0.155.0",
+			"Version":                               codexAgentRegistrationVersion,
 			"X-Codex-Beta-Features":                 "feature-a",
 			"X-Codex-Installation-Id":               "installation-test",
 			"X-OpenAI-Fedramp":                      "true",
@@ -77,9 +78,9 @@ func TestPatchCodexAuthModeCreatesAndReusesAgentIdentity(t *testing.T) {
 		if len(payload.Capabilities) != 1 || payload.Capabilities[0] != codexAgentRegistrationCapabilityResponsesAPI {
 			t.Errorf("capabilities = %#v", payload.Capabilities)
 		}
-		if payload.ABOM.AgentVersion != "0.155.0" ||
+		if payload.ABOM.AgentVersion != codexAgentRegistrationVersion ||
 			payload.ABOM.AgentHarnessID != codexAgentRegistrationAppHarnessID ||
-			payload.ABOM.RunningLocation != "vscode-"+runtime.GOOS {
+			payload.ABOM.RunningLocation != "vscode-"+codexAgentRegistrationOperatingSystem(runtime.GOOS) {
 			t.Errorf("ABOM = %#v", payload.ABOM)
 		}
 		publicKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(payload.Key))
@@ -259,6 +260,46 @@ func TestPatchCodexAuthModeRegistrationFailureDoesNotWriteFile(t *testing.T) {
 	}
 }
 
+func TestPatchCodexAuthModeRegistrationForbiddenExplainsFallback(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":"must-not-be-exposed"}`)
+	}))
+	defer server.Close()
+	previousURL := codexAgentIdentityRegisterURL
+	codexAgentIdentityRegisterURL = server.URL
+	t.Cleanup(func() { codexAgentIdentityRegisterURL = previousURL })
+
+	h, _, authPath := newCodexAuthModeTestHandler(t, map[string]any{
+		"type":         "codex",
+		"access_token": codexAgentModeTestJWT(t),
+	})
+	before, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("read before: %v", err)
+	}
+
+	rec := performCodexAuthModeRequest(t, h, "codex.json", codexAuthModeAgentIdentity)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "denied by upstream (403)") ||
+		!strings.Contains(rec.Body.String(), "access-token mode was left unchanged") ||
+		strings.Contains(rec.Body.String(), "must-not-be-exposed") {
+		t.Fatalf("unexpected registration error response: %s", rec.Body.String())
+	}
+	after, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("auth file changed after forbidden registration\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
 func TestPatchCodexAuthModeRejectsMissingAccessToken(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -282,6 +323,146 @@ func TestPatchCodexAuthModeRejectsMissingAccessToken(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("auth file changed after missing-token rejection")
+	}
+}
+
+func TestPatchCodexAuthModeReusesValidIdentityWithoutAccessToken(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var registrations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		registrations.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	previousURL := codexAgentIdentityRegisterURL
+	codexAgentIdentityRegisterURL = server.URL
+	t.Cleanup(func() { codexAgentIdentityRegisterURL = previousURL })
+
+	privateKey := codexAgentModeTestPrivateKey(t)
+	h, _, authPath := newCodexAuthModeTestHandler(t, map[string]any{
+		"type":                                 "codex",
+		"auth_kind":                            coreauth.CodexAuthKindOAuth,
+		"agent_runtime_id":                     "runtime-existing",
+		"agent_private_key":                    privateKey,
+		codexAgentIdentityAccountIDMetadataKey: "account-existing",
+		codexAgentIdentityChatGPTUserIDMetadataKey: "user-existing",
+	})
+
+	rec := performCodexAuthModeRequest(t, h, "codex.json", codexAuthModeAgentIdentity)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Created bool `json:"created"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Created || registrations.Load() != 0 {
+		t.Fatalf("created/registrations = %t/%d, want false/0", response.Created, registrations.Load())
+	}
+	stored := readCodexAuthModeTestDocument(t, authPath)
+	if stored["auth_kind"] != coreauth.CodexAuthKindAgentIdentity ||
+		stored["agent_runtime_id"] != "runtime-existing" ||
+		stored["agent_private_key"] != privateKey {
+		t.Fatalf("existing identity was not retained: %#v", stored)
+	}
+}
+
+func TestPatchCodexAuthModeReusesImportedIdentityBoundByStandardClaims(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var registrations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		registrations.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	previousURL := codexAgentIdentityRegisterURL
+	codexAgentIdentityRegisterURL = server.URL
+	t.Cleanup(func() { codexAgentIdentityRegisterURL = previousURL })
+
+	privateKey := codexAgentModeTestPrivateKey(t)
+	h, _, authPath := newCodexAuthModeTestHandler(t, map[string]any{
+		"type":              "codex",
+		"auth_kind":         coreauth.CodexAuthKindOAuth,
+		"access_token":      codexAgentModeTestJWTForIdentity(t, "account-imported", "user-imported", false),
+		"agent_runtime_id":  "runtime-imported",
+		"agent_private_key": privateKey,
+		// This is the persisted layout used by Codex and sub2api exports. It
+		// deliberately omits CLIProxyAPI's optional binding keys.
+		"account_id":      "account-imported",
+		"chatgpt_user_id": "user-imported",
+		"task_id":         "task-imported",
+	})
+
+	rec := performCodexAuthModeRequest(t, h, "codex.json", codexAuthModeAgentIdentity)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Created bool `json:"created"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Created || registrations.Load() != 0 {
+		t.Fatalf("created/registrations = %t/%d, want false/0", response.Created, registrations.Load())
+	}
+	stored := readCodexAuthModeTestDocument(t, authPath)
+	if stored["auth_kind"] != coreauth.CodexAuthKindAgentIdentity ||
+		stored["agent_runtime_id"] != "runtime-imported" ||
+		stored["agent_private_key"] != privateKey ||
+		stored["task_id"] != "task-imported" {
+		t.Fatalf("imported identity was not retained: %#v", stored)
+	}
+	if stored[codexAgentIdentityAccountIDMetadataKey] != "account-imported" ||
+		stored[codexAgentIdentityChatGPTUserIDMetadataKey] != "user-imported" {
+		t.Fatalf("identity binding was not backfilled: %#v", stored)
+	}
+}
+
+func TestPatchCodexAuthModeReRegistersInvalidIdentity(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var registrations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		registrations.Add(1)
+		_, _ = io.WriteString(w, `{"agent_runtime_id":"runtime-repaired"}`)
+	}))
+	defer server.Close()
+	previousURL := codexAgentIdentityRegisterURL
+	codexAgentIdentityRegisterURL = server.URL
+	t.Cleanup(func() { codexAgentIdentityRegisterURL = previousURL })
+
+	h, _, authPath := newCodexAuthModeTestHandler(t, map[string]any{
+		"type":                                 "codex",
+		"auth_kind":                            coreauth.CodexAuthKindOAuth,
+		"access_token":                         codexAgentModeTestJWTForIdentity(t, "account-repair", "user-repair", false),
+		"agent_runtime_id":                     "runtime-broken",
+		"agent_private_key":                    "not-valid-base64",
+		codexAgentIdentityAccountIDMetadataKey: "account-repair",
+		codexAgentIdentityChatGPTUserIDMetadataKey: "user-repair",
+		"task_id": "task-stale",
+	})
+
+	rec := performCodexAuthModeRequest(t, h, "codex.json", codexAuthModeAgentIdentity)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if registrations.Load() != 1 {
+		t.Fatalf("registrations = %d, want 1", registrations.Load())
+	}
+	stored := readCodexAuthModeTestDocument(t, authPath)
+	if stored["agent_runtime_id"] != "runtime-repaired" || stored["agent_private_key"] == "not-valid-base64" {
+		t.Fatalf("invalid identity was not replaced: %#v", stored)
+	}
+	if _, exists := stored["task_id"]; exists {
+		t.Fatalf("stale task_id was retained: %#v", stored)
 	}
 }
 
@@ -363,6 +544,46 @@ func TestPatchCodexAuthModeRetriesTransientRegistrationFailure(t *testing.T) {
 	}
 	if registrations.Load() != codexAgentRegistrationMaxAttempts {
 		t.Fatalf("registrations = %d, want %d", registrations.Load(), codexAgentRegistrationMaxAttempts)
+	}
+}
+
+func TestCodexAgentRegistrationURLUsesStagingEnvironment(t *testing.T) {
+	previousURL := codexAgentIdentityRegisterURL
+	codexAgentIdentityRegisterURL = codexAgentRegistrationURL
+	t.Cleanup(func() { codexAgentIdentityRegisterURL = previousURL })
+
+	auth := &coreauth.Auth{Metadata: map[string]any{
+		"base_url": "https://chatgpt-staging.com/backend-api/codex",
+	}}
+	want := coreauth.CodexAgentIdentityStagingAuthAPIBaseURL + "/v1/agent/register"
+	if got := codexAgentRegistrationURLForAuth(auth); got != want {
+		t.Fatalf("registration URL = %q, want %q", got, want)
+	}
+}
+
+func TestCodexAgentRegistrationOperatingSystem(t *testing.T) {
+	for input, want := range map[string]string{
+		"darwin":  "macos",
+		" linux ": "linux",
+		"WINDOWS": "windows",
+	} {
+		if got := codexAgentRegistrationOperatingSystem(input); got != want {
+			t.Errorf("operating system for %q = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestCodexAgentRegistrationRetryableStatus(t *testing.T) {
+	for statusCode, want := range map[int]bool{
+		http.StatusTooManyRequests:     true,
+		http.StatusInternalServerError: true,
+		599:                            true,
+		http.StatusBadRequest:          false,
+		600:                            false,
+	} {
+		if got := codexAgentRegistrationRetryableStatus(statusCode); got != want {
+			t.Errorf("retryable status %d = %t, want %t", statusCode, got, want)
+		}
 	}
 }
 

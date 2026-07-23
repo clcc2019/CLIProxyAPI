@@ -276,7 +276,8 @@ func codexAgentIdentityTaskRegistrationBaseURLForAuth(auth *cliproxyauth.Auth) s
 }
 
 func codexAgentIdentityRegistrationRetryableStatus(statusCode int) bool {
-	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
+	return statusCode == http.StatusTooManyRequests ||
+		(statusCode >= http.StatusInternalServerError && statusCode < 600)
 }
 
 func (e *CodexExecutor) codexAgentIdentityState(auth *cliproxyauth.Auth, key codexAgentIdentityKey) *codexAgentIdentityTaskState {
