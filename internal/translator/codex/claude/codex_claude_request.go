@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -89,15 +88,15 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				if messageRole == "assistant" {
 					partType = "output_text"
 				}
-				message, _ = sjson.SetBytes(message, codexIndexedPath("content", contentIndex, "type"), partType)
-				message, _ = sjson.SetBytes(message, codexIndexedPath("content", contentIndex, "text"), text)
+				message, _ = sjson.SetBytes(message, codexcommon.IndexedPath("content", contentIndex, "type"), partType)
+				message, _ = sjson.SetBytes(message, codexcommon.IndexedPath("content", contentIndex, "text"), text)
 				contentIndex++
 				hasContent = true
 			}
 
 			appendImageContent := func(dataURL string) {
-				message, _ = sjson.SetBytes(message, codexIndexedPath("content", contentIndex, "type"), "input_image")
-				message, _ = sjson.SetBytes(message, codexIndexedPath("content", contentIndex, "image_url"), dataURL)
+				message, _ = sjson.SetBytes(message, codexcommon.IndexedPath("content", contentIndex, "type"), "input_image")
+				message, _ = sjson.SetBytes(message, codexcommon.IndexedPath("content", contentIndex, "image_url"), dataURL)
 				contentIndex++
 				hasContent = true
 			}
@@ -404,14 +403,14 @@ func codexClaudeToolResultContentItems(contentResult gjson.Result) ([]byte, bool
 						mediaType = "application/octet-stream"
 					}
 					dataURL := codexDataURL(mediaType, data)
-					toolResultContent, _ = sjson.SetBytes(toolResultContent, codexIndexedPath("", toolResultContentIndex, "type"), "input_image")
-					toolResultContent, _ = sjson.SetBytes(toolResultContent, codexIndexedPath("", toolResultContentIndex, "image_url"), dataURL)
+					toolResultContent, _ = sjson.SetBytes(toolResultContent, codexcommon.IndexedPath("", toolResultContentIndex, "type"), "input_image")
+					toolResultContent, _ = sjson.SetBytes(toolResultContent, codexcommon.IndexedPath("", toolResultContentIndex, "image_url"), dataURL)
 					toolResultContentIndex++
 				}
 			}
 		} else if toolResultContentType == "text" {
-			toolResultContent, _ = sjson.SetBytes(toolResultContent, codexIndexedPath("", toolResultContentIndex, "type"), "input_text")
-			toolResultContent, _ = sjson.SetBytes(toolResultContent, codexIndexedPath("", toolResultContentIndex, "text"), contentResults[k].Get("text").String())
+			toolResultContent, _ = sjson.SetBytes(toolResultContent, codexcommon.IndexedPath("", toolResultContentIndex, "type"), "input_text")
+			toolResultContent, _ = sjson.SetBytes(toolResultContent, codexcommon.IndexedPath("", toolResultContentIndex, "text"), contentResults[k].Get("text").String())
 			toolResultContentIndex++
 		}
 	}
@@ -606,25 +605,6 @@ func convertClaudeWebSearchToolToCodex(tool gjson.Result) []byte {
 		out, _ = sjson.SetRawBytes(out, "user_location", []byte(userLocation.Raw))
 	}
 	return out
-}
-
-// codexIndexedPath composes an sjson path of the form "<prefix>.<idx>.<suffix>"
-// without the allocation overhead of fmt.Sprintf. Hot translator paths invoke
-// sjson.SetBytes repeatedly per content part; building the path with
-// strconv.AppendInt/append keeps the allocations predictable.
-func codexIndexedPath(prefix string, idx int, suffix string) string {
-	// Capacity: prefix + '.' + up to 20 digits + '.' + suffix.
-	buf := make([]byte, 0, len(prefix)+len(suffix)+22)
-	if prefix != "" {
-		buf = append(buf, prefix...)
-		buf = append(buf, '.')
-	}
-	buf = strconv.AppendInt(buf, int64(idx), 10)
-	if suffix != "" {
-		buf = append(buf, '.')
-		buf = append(buf, suffix...)
-	}
-	return string(buf)
 }
 
 // codexDataURL builds a "data:<mime>;base64,<data>" URL without fmt.Sprintf.

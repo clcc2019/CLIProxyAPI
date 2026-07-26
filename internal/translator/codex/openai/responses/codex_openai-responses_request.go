@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"fmt"
 	"strings"
 
 	codexcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/common"
@@ -164,16 +163,23 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 		return rawJSON
 	}
 
-	inputArray := inputResult.Array()
+	// Read roles off the single parse above rather than re-scanning the whole
+	// payload once per element. The previous implementation issued a
+	// gjson.GetBytes against the (progressively rewritten) result for every
+	// index, making this O(n) full-body scans for an n-item input array — the
+	// dominant cost on long conversations, which is exactly what Codex sends.
+	// Item count is fixed here, so indices stay valid across the rewrites below.
 	result := rawJSON
-
-	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
-		rolePath := fmt.Sprintf("input.%d.role", i)
-		if gjson.GetBytes(result, rolePath).String() == "system" {
-			result, _ = sjson.SetBytes(result, rolePath, "developer")
+	index := 0
+	inputResult.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("role").String() == "system" {
+			if updated, err := sjson.SetBytes(result, codexcommon.IndexedPath("input", index, "role"), "developer"); err == nil {
+				result = updated
+			}
 		}
-	}
+		index++
+		return true
+	})
 
 	return result
 }
@@ -183,25 +189,37 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 	result := rawJSON
 
-	tools := gjson.GetBytes(result, "tools")
-	if tools.IsArray() {
-		toolArray := tools.Array()
-		for i := 0; i < len(toolArray); i++ {
-			typePath := fmt.Sprintf("tools.%d.type", i)
-			result = normalizeCodexBuiltinToolAtPath(result, typePath)
-		}
-	}
-
+	result = normalizeCodexBuiltinToolTypesAt(result, "tools")
 	result = normalizeCodexBuiltinToolAtPath(result, "tool_choice.type")
+	result = normalizeCodexBuiltinToolTypesAt(result, "tool_choice.tools")
 
-	toolChoiceTools := gjson.GetBytes(result, "tool_choice.tools")
-	if toolChoiceTools.IsArray() {
-		toolArray := toolChoiceTools.Array()
-		for i := 0; i < len(toolArray); i++ {
-			typePath := fmt.Sprintf("tool_choice.tools.%d.type", i)
-			result = normalizeCodexBuiltinToolAtPath(result, typePath)
-		}
+	return result
+}
+
+// normalizeCodexBuiltinToolTypesAt normalizes the "type" of every element in the
+// array at arrayPath. Types are read from one parse of the array instead of a
+// fresh full-payload lookup per element; only elements that actually need
+// rewriting pay for an sjson.SetBytes.
+func normalizeCodexBuiltinToolTypesAt(rawJSON []byte, arrayPath string) []byte {
+	tools := gjson.GetBytes(rawJSON, arrayPath)
+	if !tools.IsArray() {
+		return rawJSON
 	}
+
+	result := rawJSON
+	index := 0
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		currentType := tool.Get("type").String()
+		if normalizedType := normalizeCodexBuiltinToolType(currentType); normalizedType != "" {
+			typePath := codexcommon.IndexedPath(arrayPath, index, "type")
+			if updated, err := sjson.SetBytes(result, typePath, normalizedType); err == nil {
+				result = updated
+				log.Debugf("codex responses: normalized builtin tool type at %s from %q to %q", typePath, currentType, normalizedType)
+			}
+		}
+		index++
+		return true
+	})
 
 	return result
 }
