@@ -503,6 +503,16 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			baseCtx = logging.WithRequestID(baseCtx, requestID)
 		}
 	}
+	if logging.GetEndpoint(baseCtx) == "" {
+		if endpoint := logging.GetEndpoint(requestCtx); endpoint != "" {
+			baseCtx = logging.WithEndpoint(baseCtx, endpoint)
+		}
+	}
+	if logging.GetClientIP(baseCtx) == "" {
+		if clientIP := logging.GetClientIP(requestCtx); clientIP != "" {
+			baseCtx = logging.WithClientIP(baseCtx, clientIP)
+		}
+	}
 
 	newCtx, cancelContext := context.WithCancel(baseCtx)
 	cancel := cancelContext

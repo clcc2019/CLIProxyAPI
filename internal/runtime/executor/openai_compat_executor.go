@@ -326,9 +326,17 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 		var param any
 		var streamUsage helps.StreamUsageBuffer
 		passthroughOpenAI := state.from == state.to
-		errRead := helps.ReadStreamLines(state.resp.Body, func(line []byte) error {
+		// Bound a stalled upstream: the client carries no timeout, so a socket
+		// that stays open but stops delivering would block this read forever.
+		guardedBody, idleGuard := guardStreamIdle(state.resp.Body, providerStreamIdleTimeout)
+		defer idleGuard.StopTimer()
+		streamCompleted := false
+		errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 			helps.AppendAPIResponseChunk(state.ctx, e.cfg, line)
 			streamUsage.ObserveOpenAIStream(line)
+			if isOpenAIStreamTerminalLine(line) {
+				streamCompleted = true
+			}
 			if len(line) == 0 {
 				return nil
 			}
@@ -353,6 +361,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 			}
 			return nil
 		})
+		errRead = resolveStreamIdleError(idleGuard, errRead, streamCompleted)
 		if errRead != nil {
 			helps.RecordAPIResponseError(state.ctx, e.cfg, errRead)
 			state.reporter.PublishFailureWithError(state.ctx, errRead)
@@ -380,7 +389,12 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 		defer closeOpenAICompatResponseBody(resp)
 		currentEvent := ""
 		var streamUsage helps.StreamUsageBuffer
-		errRead := helps.ReadStreamLines(resp.Body, func(line []byte) error {
+		// Bound a stalled upstream: the client carries no timeout, so a socket
+		// that stays open but stops delivering would block this read forever.
+		guardedBody, idleGuard := guardStreamIdle(resp.Body, providerStreamIdleTimeout)
+		defer idleGuard.StopTimer()
+		streamCompleted := false
+		errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			streamUsage.ObserveOpenAIStream(line)
 			trimmed := bytes.TrimSpace(line)
@@ -397,7 +411,13 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 			}
 			payload := bytes.TrimSpace(trimmed[5:])
 			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+				streamCompleted = true
 				return nil
+			}
+			// This path speaks the Responses protocol, whose terminal marker is
+			// a typed event rather than the [DONE] sentinel handled above.
+			if isOpenAIResponsesTerminalPayload(currentEvent, payload) {
+				streamCompleted = true
 			}
 			if currentEvent != "" && gjson.ValidBytes(payload) && !gjson.GetBytes(payload, "type").Exists() {
 				if updated, err := sjson.SetBytes(payload, "type", currentEvent); err == nil {
@@ -407,6 +427,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 			out <- cliproxyexecutor.StreamChunk{Payload: payload}
 			return nil
 		})
+		errRead = resolveStreamIdleError(idleGuard, errRead, streamCompleted)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			if reporter != nil {

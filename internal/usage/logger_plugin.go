@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -162,6 +163,8 @@ type usageDayKey struct {
 type RequestDetail struct {
 	Timestamp            time.Time  `json:"timestamp"`
 	APIKey               string     `json:"api_key,omitempty"`
+	Endpoint             string     `json:"endpoint,omitempty"`
+	ClientIP             string     `json:"client_ip,omitempty"`
 	LatencyMs            int64      `json:"latency_ms"`
 	Source               string     `json:"source"`
 	AuthIndex            string     `json:"auth_index"`
@@ -169,6 +172,15 @@ type RequestDetail struct {
 	Tokens               TokenStats `json:"tokens"`
 	Failed               bool       `json:"failed"`
 	ErrorMessage         string     `json:"error_message,omitempty"`
+	// Attempts lists the credentials that failed before this request settled.
+	// It is empty for the common single-attempt case, and only ever populated
+	// on failover, so it costs nothing on the happy path. Without it the
+	// record shows only the final outcome and the earlier failures — the ones
+	// that explain a cascade — are unrecoverable after the fact.
+	Attempts []internallogging.UpstreamAttempt `json:"attempts,omitempty"`
+	// AttemptsTruncated counts attempts dropped by the recorder's cap, so a
+	// long chain never reads as if it were complete.
+	AttemptsTruncated int `json:"attempts_truncated,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -298,9 +310,12 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
+	attempts, attemptsTruncated := internallogging.UpstreamAttempts(ctx)
 	requestDetail := RequestDetail{
 		Timestamp:            timestamp,
 		APIKey:               apiKey,
+		Endpoint:             strings.TrimSpace(internallogging.GetEndpoint(ctx)),
+		ClientIP:             strings.TrimSpace(internallogging.GetClientIP(ctx)),
 		LatencyMs:            normaliseLatency(record.Latency),
 		Source:               record.Source,
 		AuthIndex:            record.AuthIndex,
@@ -308,6 +323,8 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Tokens:               detail,
 		Failed:               failed,
 		ErrorMessage:         normalizeRequestErrorMessage(record.ErrorMessage, failed),
+		Attempts:             attempts,
+		AttemptsTruncated:    attemptsTruncated,
 	}
 	s.updateAPIStats(stats, modelName, requestDetail)
 	s.appendAggregateRecord(statsKey, modelName, requestDetail)

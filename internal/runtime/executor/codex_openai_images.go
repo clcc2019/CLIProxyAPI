@@ -324,7 +324,14 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			}
 		}
 
-		scanner := bufio.NewScanner(httpResp.Body)
+		// Bound a stalled upstream: this client carries no timeout, so a socket
+		// that stays open but stops delivering would block the scan forever.
+		// Every completion path below returns from inside the loop, so reaching
+		// the post-loop code already means the stream ended without finishing —
+		// the guard only needs to make sure that end actually arrives.
+		guardedBody, idleGuard := guardStreamIdle(httpResp.Body, providerStreamIdleTimeout)
+		defer idleGuard.StopTimer()
+		scanner := bufio.NewScanner(guardedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
@@ -367,7 +374,10 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 				return
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		// A tripped watchdog closes the body, which bufio.Scanner reports as a
+		// clean end of input. Surface it as the idle timeout rather than the
+		// generic disconnect below, so a stall is distinguishable in logs.
+		if errScan := resolveStreamIdleError(idleGuard, scanner.Err(), false); errScan != nil {
 			if codexRequestContextDone(ctx, errScan) {
 				return
 			}

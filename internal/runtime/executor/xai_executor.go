@@ -359,7 +359,12 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				log.Errorf("xai executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
+		// Bound a stalled upstream: the client carries no timeout, so a socket
+		// that stays open but stops delivering would block this scan forever.
+		guardedBody, idleGuard := guardStreamIdle(httpResp.Body, providerStreamIdleTimeout)
+		defer idleGuard.StopTimer()
+		streamCompleted := false
+		scanner := bufio.NewScanner(guardedBody)
 		scanner.Buffer(nil, 52_428_800)
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
@@ -374,6 +379,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				case "response.output_item.done":
 					xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed":
+					streamCompleted = true
 					if detail, ok := helps.ParseCodexUsage(eventData); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -390,7 +396,11 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				}
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		// A tripped watchdog closes the body, which bufio.Scanner reports as a
+		// clean end of input (Err() == nil). Without folding the guard verdict
+		// in here, a truncated stream would be delivered as a success.
+		errScan := resolveStreamIdleError(idleGuard, scanner.Err(), streamCompleted)
+		if errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			select {

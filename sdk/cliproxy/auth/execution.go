@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
@@ -215,6 +216,7 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 			continue
 		}
 		state.attempted[auth.ID] = struct{}{}
+		prepareStartedAt := time.Now()
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			result := Result{AuthID: auth.ID, Provider: provider, Model: state.routeModel, Success: false, Error: &Error{Message: errPrepare.Error()}}
@@ -222,6 +224,10 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 				result.Error.HTTPStatus = status
 			}
 			m.MarkResult(execCtx, result)
+			// A credential that fails to prepare (expired token, failed
+			// refresh) never reaches the executor, so it would otherwise
+			// vanish from the history despite consuming a failover slot.
+			state.recordAttempt(&preparedMixedCredential{auth: auth, provider: provider}, prepareStartedAt, errPrepare)
 			forceNewUpstreamSessionForNextCredential(&state.opts)
 			state.lastErr = errPrepare
 			continue
@@ -237,7 +243,12 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 	}
 }
 
-func (state *mixedExecutionState) failCredential(err error) error {
+// failCredential is the single funnel every credential failure passes through
+// before failover moves on, which makes it the one place that sees the whole
+// retry chain. Recording here keeps the per-attempt history complete without
+// scattering bookkeeping across each protocol's error branches.
+func (state *mixedExecutionState) failCredential(credential *preparedMixedCredential, startedAt time.Time, err error) error {
+	state.recordAttempt(credential, startedAt, err)
 	if isRequestInvalidError(err) {
 		return err
 	}
@@ -247,6 +258,27 @@ func (state *mixedExecutionState) failCredential(err error) error {
 		state.homeAuthCount++
 	}
 	return nil
+}
+
+func (state *mixedExecutionState) recordAttempt(credential *preparedMixedCredential, startedAt time.Time, err error) {
+	if state == nil || err == nil {
+		return
+	}
+	attempt := logging.UpstreamAttempt{
+		Model:     state.routeModel,
+		Status:    statusCodeFromError(err),
+		Kind:      classifyAttemptFailure(err),
+		Message:   err.Error(),
+		ElapsedMs: logging.AttemptElapsed(startedAt),
+	}
+	if credential != nil {
+		attempt.Provider = credential.provider
+		if credential.auth != nil {
+			attempt.AuthID = credential.auth.ID
+			attempt.AuthLabel = credential.auth.Label
+		}
+	}
+	logging.RecordUpstreamAttempt(state.ctx, attempt)
 }
 
 type responseExecutionMode uint8
@@ -313,6 +345,7 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 
 		var authErr error
 		stopModelLoop := false
+		credentialStartedAt := time.Now()
 		poolModeRetries := m.apiKeyPoolModeRetries(credential.auth)
 		transportRetries := m.requestRetryLimitForAuth(credential.auth)
 		for _, upstreamModel := range credential.models {
@@ -349,10 +382,17 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 						logSameAuthTransportRetry(credential.ctx, credential.auth, credential.provider, resultModel, retryAttempt+1, transportRetries, errExec)
 						continue
 					}
+					if shouldRetryClaudeOverloadWithSameAuth(credential.provider, errExec, retryAttempt, transportRetries) {
+						logSameAuthClaudeOverloadRetry(credential.ctx, credential.auth, credential.provider, resultModel, retryAttempt+1, transportRetries, errExec)
+						continue
+					}
 					if ra := retryAfterFromError(errExec); ra != nil {
 						result.RetryAfter = ra
 					}
 					m.MarkResult(credential.ctx, result)
+					if isClaudeOverloadedFailure(credential.provider, errExec) {
+						return cliproxyexecutor.Response{}, errExec
+					}
 					clearSelectedAuthMetadataForCredentialFailover(credential.provider, state.opts.Metadata, credential.auth.ID, errExec)
 					authErr = errExec
 					switch poolModeRetryDecisionForError(errExec, retryAttempt, poolModeRetries) {
@@ -375,7 +415,7 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 			}
 		}
 		if authErr != nil {
-			if errFailover := state.failCredential(authErr); errFailover != nil {
+			if errFailover := state.failCredential(credential, credentialStartedAt, authErr); errFailover != nil {
 				return cliproxyexecutor.Response{}, errFailover
 			}
 		}
@@ -397,6 +437,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if errCredential != nil {
 			return nil, errCredential
 		}
+		credentialStartedAt := time.Now()
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(credential.ctx, credential.auth, state.req)
 		streamResult, errStream := m.executeStreamWithModelPool(
 			credential.ctx,
@@ -413,7 +454,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := credential.ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			if errFailover := state.failCredential(errStream); errFailover != nil {
+			if isClaudeOverloadedFailure(credential.provider, errStream) {
+				return nil, errStream
+			}
+			if errFailover := state.failCredential(credential, credentialStartedAt, errStream); errFailover != nil {
 				return nil, errFailover
 			}
 			continue

@@ -1,6 +1,10 @@
 package auth
 
-import "errors"
+import (
+	"errors"
+	"net/http"
+	"strings"
+)
 
 // AuthScopedFailure marks an executor error whose consequence applies to the
 // entire auth (i.e., the credential itself is no longer usable for any model),
@@ -28,9 +32,11 @@ func isAuthScopedFailure(err error) bool {
 	}
 	var a AuthScopedFailure
 	if errors.As(err, &a) && a != nil {
-		return a.IsAuthScopedFailure()
+		if a.IsAuthScopedFailure() {
+			return true
+		}
 	}
-	return false
+	return isUsageLimitExhaustedFailure(err)
 }
 
 // CredentialFailoverFailure marks an executor error that should abandon the
@@ -47,7 +53,27 @@ func isCredentialFailoverFailure(err error) bool {
 	}
 	var f CredentialFailoverFailure
 	if errors.As(err, &f) && f != nil {
-		return f.IsCredentialFailoverFailure()
+		if f.IsCredentialFailoverFailure() {
+			return true
+		}
 	}
-	return false
+	return isUsageLimitExhaustedFailure(err)
+}
+
+// isUsageLimitExhaustedFailure recognizes the quota-exhaustion response that
+// Codex returns without requiring every executor to wrap it in both conductor
+// marker interfaces. It is deliberately narrower than a generic 429: ordinary
+// request-rate limiting should retain the executor's existing retry behavior.
+func isUsageLimitExhaustedFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(err.Error())
+	if statusCodeFromError(err) != http.StatusTooManyRequests && !strings.Contains(raw, "http 429") {
+		return false
+	}
+	return strings.Contains(raw, "usage limit has been reached") ||
+		strings.Contains(raw, "you've hit your usage limit") ||
+		strings.Contains(raw, "usage_limit_reached") ||
+		strings.Contains(raw, "insufficient_quota")
 }

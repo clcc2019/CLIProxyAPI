@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -250,7 +251,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	applyClaudeHeadersWithIncoming(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -434,7 +435,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	applyClaudeHeadersWithIncoming(httpReq, auth, apiKey, true, extraBetas, e.cfg, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -503,6 +504,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				log.Errorf("response body close error: %v", errClose)
 			}
 		}()
+		// Guard against an upstream that holds the connection open but stops
+		// sending. The client is built with no timeout, so without this the
+		// read below blocks forever on a healthy socket.
+		guardedBody, idleGuard := guardStreamIdle(decodedBody, providerStreamIdleTimeout)
+		defer idleGuard.StopTimer()
 		var streamUsage cliproxyusage.Detail
 		streamUsageSeen := false
 		recordStreamUsage := func(detail cliproxyusage.Detail) {
@@ -527,10 +533,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
-			errRead := helps.ReadStreamLines(decodedBody, func(line []byte) error {
+			streamCompleted := false
+			errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					recordStreamUsage(detail)
+				}
+				if isClaudeStreamTerminalLine(line) {
+					streamCompleted = true
 				}
 				if isClaudeOAuthToken(apiKey) {
 					line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolReverseMap)
@@ -540,6 +550,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				out <- cliproxyexecutor.StreamChunk{Payload: line}
 				return nil
 			})
+			errRead = resolveStreamIdleError(idleGuard, errRead, streamCompleted)
 			if errRead != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 				publishStreamUsage(true, errRead)
@@ -552,10 +563,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		// For other formats, use translation
 		var param any
-		errRead := helps.ReadStreamLines(decodedBody, func(line []byte) error {
+		streamCompleted := false
+		errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				recordStreamUsage(detail)
+			}
+			if isClaudeStreamTerminalLine(line) {
+				streamCompleted = true
 			}
 			if isClaudeOAuthToken(apiKey) {
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolReverseMap)
@@ -575,6 +590,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			return nil
 		})
+		errRead = resolveStreamIdleError(idleGuard, errRead, streamCompleted)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			publishStreamUsage(true, errRead)
@@ -623,7 +639,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	applyClaudeHeadersWithIncoming(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -779,14 +795,9 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 }
 
 // normalizeClaudeTemperatureForThinking keeps Anthropic message requests valid when
-// thinking is enabled. Anthropic rejects temperatures other than 1 when
-// thinking.type is enabled/adaptive/auto.
+// thinking is enabled. Anthropic rejects top_p/top_k and temperatures other than 1
+// when thinking.type is enabled/adaptive/auto.
 func normalizeClaudeTemperatureForThinking(body []byte) []byte {
-	temp := gjson.GetBytes(body, "temperature")
-	if !temp.Exists() {
-		return body
-	}
-
 	thinkingType := strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())
 	switch {
 	case strings.EqualFold(thinkingType, "enabled"):
@@ -796,13 +807,39 @@ func normalizeClaudeTemperatureForThinking(body []byte) []byte {
 		return body
 	}
 
-	{
-		if temp.Type == gjson.Number && temp.Float() == 1 {
-			return body
-		}
-		body, _ = sjson.SetBytes(body, "temperature", 1)
+	// Anthropic does not allow probability or candidate-count sampling together
+	// with extended thinking. Remove them even when temperature is omitted.
+	body, _ = sjson.DeleteBytes(body, "top_p")
+	body, _ = sjson.DeleteBytes(body, "top_k")
+
+	temp := gjson.GetBytes(body, "temperature")
+	if !temp.Exists() || (temp.Type == gjson.Number && temp.Float() == 1) {
+		return body
 	}
+	body, _ = sjson.SetBytes(body, "temperature", 1)
 	return body
+}
+
+// isClaudeStreamTerminalLine reports whether an SSE line carries an event that
+// ends the turn. It is used only to decide whether a tripped idle watchdog
+// represents lost content or merely a slow drain after the response was
+// already complete.
+//
+// Both terminal shapes are accepted. "message_stop" is the normal end of a
+// Claude stream; an "error" event also terminates it, and the read loop
+// surfaces that error on its own — re-labelling it as an idle timeout would
+// replace a precise upstream message with a generic one. Only the JSON `data:`
+// line is inspected, since the sibling `event:` line carries no payload.
+func isClaudeStreamTerminalLine(line []byte) bool {
+	payload := helps.JSONPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	switch gjson.GetBytes(payload, "type").String() {
+	case "message_stop", "error":
+		return true
+	}
+	return false
 }
 
 func validateClaudeAggregatedStream(data []byte) error {
@@ -1020,6 +1057,65 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 }
 
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+	applyClaudeHeadersWithIncoming(r, auth, apiKey, stream, extraBetas, cfg, nil)
+}
+
+const (
+	claudeHeaderRemoteContainerID    = "X-Claude-Remote-Container-Id"
+	claudeHeaderRemoteSessionID      = "X-Claude-Remote-Session-Id"
+	claudeHeaderClientApp            = "X-Client-App"
+	claudeHeaderAdditionalProtection = "X-Anthropic-Additional-Protection"
+	claudeEnvRemoteContainerID       = "CLAUDE_CODE_CONTAINER_ID"
+	claudeEnvRemoteSessionID         = "CLAUDE_CODE_REMOTE_SESSION_ID"
+	claudeEnvClientApp               = "CLAUDE_AGENT_SDK_CLIENT_APP"
+	claudeEnvAdditionalProtection    = "CLAUDE_CODE_ADDITIONAL_PROTECTION"
+)
+
+// applyClaudeCodeClientContext preserves the optional client-context headers
+// emitted by Claude Code. A request can carry them through the proxy directly;
+// equivalent process environment values support deployments where CLIProxyAPI
+// itself is launched by Claude Code. Per-auth header: overrides are applied
+// afterwards, retaining their existing highest precedence.
+func applyClaudeCodeClientContext(target, incoming http.Header) {
+	if target == nil {
+		return
+	}
+	for _, header := range []struct {
+		name string
+		env  string
+	}{
+		{name: claudeHeaderRemoteContainerID, env: claudeEnvRemoteContainerID},
+		{name: claudeHeaderRemoteSessionID, env: claudeEnvRemoteSessionID},
+		{name: claudeHeaderClientApp, env: claudeEnvClientApp},
+	} {
+		misc.EnsureHeader(target, incoming, header.name, strings.TrimSpace(os.Getenv(header.env)))
+	}
+
+	// Claude Code emits this header only when its matching environment flag is
+	// truthy. Preserve a client-supplied true value and mirror the same accepted
+	// spellings for a proxy-side environment value.
+	if claudeHeaderTruthy(incoming.Get(claudeHeaderAdditionalProtection)) ||
+		claudeHeaderTruthy(os.Getenv(claudeEnvAdditionalProtection)) {
+		target.Set(claudeHeaderAdditionalProtection, "true")
+	}
+}
+
+func claudeHeaderTruthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// applyClaudeHeadersWithIncoming applies Claude headers using the inbound request
+// headers supplied by the execution pipeline. The Gin-context fallback preserves
+// compatibility for direct executor callers that do not populate Options.Headers.
+func applyClaudeHeadersWithIncoming(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, incomingHeaders http.Header) {
+	if r == nil {
+		return
+	}
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -1042,18 +1138,22 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	r.Header.Set("Content-Type", "application/json")
 
-	var ginHeaders http.Header
-	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
+	// requestHeadersFromContext returns Header.Clone(), which may be a non-nil
+	// empty map. Treat that the same as no supplied headers so direct executor
+	// callers retain the legacy Gin-context behaviour.
+	if len(incomingHeaders) == 0 {
+		if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			incomingHeaders = ginCtx.Request.Header
+		}
 	}
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
 	if stabilizeDeviceProfile {
-		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
+		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, incomingHeaders, cfg)
 	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
+	if val := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ",")); val != "" {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
 			baseBetas += ",oauth-2025-04-20"
@@ -1082,22 +1182,23 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
-	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
+	misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
 	// Only set browser access header for API key mode; real Claude Code CLI does not send it.
 	if useAPIKey {
-		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
+		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
-	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
+	misc.EnsureHeader(r.Header, incomingHeaders, "X-App", "cli")
+	applyClaudeCodeClientContext(r.Header, incomingHeaders)
 	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
+	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Retry-Count", "0")
+	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Runtime", "node")
+	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Lang", "js")
+	misc.EnsureHeader(r.Header, incomingHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
+	misc.EnsureHeader(r.Header, incomingHeaders, "X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	if isAnthropicBase {
-		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
+		misc.EnsureHeader(r.Header, incomingHeaders, "x-client-request-id", uuid.New().String())
 	}
 	r.Header.Set("Connection", "keep-alive")
 	if stream {
@@ -1116,7 +1217,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stabilizeDeviceProfile {
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
-		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
+		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg)
 	}
 	var attrs map[string]string
 	if auth != nil {

@@ -16,6 +16,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"gopkg.in/yaml.v3"
@@ -236,6 +237,50 @@ func TestNewServer_ConfiguresInboundHTTPServerLimits(t *testing.T) {
 	}
 	if server.server.MaxHeaderBytes != inboundMaxHeaderBytes {
 		t.Fatalf("unexpected MaxHeaderBytes: got %d want %d", server.server.MaxHeaderBytes, inboundMaxHeaderBytes)
+	}
+}
+
+func TestNewServer_AddsRequestMetadataInCommercialMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: proxyconfig.ClientAPIKeys{{APIKey: "test-key"}},
+		},
+		AuthDir:        authDir,
+		CommercialMode: true,
+		Debug:          true,
+	}
+
+	server := NewServer(
+		cfg,
+		auth.NewManager(nil, nil, nil),
+		sdkaccess.NewManager(),
+		filepath.Join(tmpDir, "config.yaml"),
+		WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *proxyconfig.Config) {
+			engine.POST("/test/request-metadata", func(c *gin.Context) {
+				if endpoint := internallogging.GetEndpoint(c.Request.Context()); endpoint != "POST /test/request-metadata" {
+					t.Errorf("endpoint = %q, want POST /test/request-metadata", endpoint)
+				}
+				if clientIP := internallogging.GetClientIP(c.Request.Context()); clientIP != "203.0.113.8" {
+					t.Errorf("client IP = %q, want 203.0.113.8", clientIP)
+				}
+				c.Status(http.StatusNoContent)
+			})
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/test/request-metadata", nil)
+	req.RemoteAddr = "203.0.113.8:4242"
+	resp := httptest.NewRecorder()
+	server.engine.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusNoContent, resp.Body.String())
 	}
 }
 

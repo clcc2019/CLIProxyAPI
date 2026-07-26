@@ -400,6 +400,96 @@ func TestRequestLoggingMiddlewareSummarizesLargeRequestBody(t *testing.T) {
 	}
 }
 
+func TestRequestLoggingMiddlewareAddsRequestMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	if err := router.SetTrustedProxies(nil); err != nil {
+		t.Fatalf("SetTrustedProxies error: %v", err)
+	}
+	router.Use(RequestLoggingMiddleware(&capturingRequestLogger{enabled: true}))
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		if endpoint := logging.GetEndpoint(c.Request.Context()); endpoint != "POST /v1/chat/completions" {
+			t.Errorf("endpoint = %q, want POST /v1/chat/completions", endpoint)
+		}
+		if clientIP := logging.GetClientIP(c.Request.Context()); clientIP != "203.0.113.8" {
+			t.Errorf("client IP = %q, want 203.0.113.8", clientIP)
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.RemoteAddr = "203.0.113.8:4242"
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNoContent)
+	}
+}
+
+func TestRequestMetadataMiddlewareAddsRequestMetadataWithoutRequestLogger(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	if err := router.SetTrustedProxies(nil); err != nil {
+		t.Fatalf("SetTrustedProxies error: %v", err)
+	}
+	router.Use(RequestMetadataMiddleware())
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		if endpoint := logging.GetEndpoint(c.Request.Context()); endpoint != "POST /v1/chat/completions" {
+			t.Errorf("endpoint = %q, want POST /v1/chat/completions", endpoint)
+		}
+		if clientIP := logging.GetClientIP(c.Request.Context()); clientIP != "203.0.113.8" {
+			t.Errorf("client IP = %q, want 203.0.113.8", clientIP)
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.RemoteAddr = "203.0.113.8:4242"
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNoContent)
+	}
+}
+
+func TestRequestLoggingMiddlewareWritesClientIPToRequestLog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logsDir := t.TempDir()
+	router := gin.New()
+	if err := router.SetTrustedProxies(nil); err != nil {
+		t.Fatalf("SetTrustedProxies error: %v", err)
+	}
+	router.Use(RequestLoggingMiddleware(logging.NewFileRequestLogger(true, logsDir, "", 0)))
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.RemoteAddr = "203.0.113.8:4242"
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	entries, err := os.ReadDir(logsDir)
+	if err != nil {
+		t.Fatalf("ReadDir error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("log files = %d, want 1", len(entries))
+	}
+	logBytes, err := os.ReadFile(logsDir + "/" + entries[0].Name())
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "Client IP: 203.0.113.8") {
+		t.Fatalf("request log missing client IP: %s", logBytes)
+	}
+}
+
 func TestCaptureRequestInfoSkipsHeadersWhenDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

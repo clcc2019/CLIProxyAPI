@@ -8,6 +8,7 @@ import (
 )
 
 type endpointKey struct{}
+type clientIPKey struct{}
 type responseStatusKey struct{}
 type responseHeadersKey struct{}
 
@@ -33,6 +34,25 @@ func GetEndpoint(ctx context.Context) string {
 	}
 	if endpoint, ok := ctx.Value(endpointKey{}).(string); ok {
 		return endpoint
+	}
+	return ""
+}
+
+// WithClientIP attaches the resolved downstream client IP to ctx.
+func WithClientIP(ctx context.Context, clientIP string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, clientIPKey{}, clientIP)
+}
+
+// GetClientIP returns the resolved downstream client IP stored in ctx.
+func GetClientIP(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if clientIP, ok := ctx.Value(clientIPKey{}).(string); ok {
+		return clientIP
 	}
 	return ""
 }

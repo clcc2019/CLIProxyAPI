@@ -185,69 +185,100 @@ func (h *Handler) syncCodexUsageQuotaCooldown(ctx context.Context, auth *coreaut
 	if manager == nil {
 		return
 	}
-	recoverAt, exhausted := codexUsageQuotaRecoverAt(payload, time.Now())
+	recoverAt, exhausted, observed := codexUsageQuotaState(payload, time.Now())
+	if !observed {
+		// A partial or malformed usage response is not evidence that an existing
+		// cooldown has recovered. Keep its state until a usable main window is
+		// returned instead of making the credential selectable prematurely.
+		return
+	}
 	if !exhausted {
+		// The usage endpoint is authoritative for auth-wide Codex limits. A
+		// previously persisted cooldown must be cleared when it now reports
+		// headroom; otherwise the auth remains labelled "quota exhausted" even
+		// though its credential file has usable quota again.
+		manager.ClearAuthQuotaCooldownFromUsage(ctx, auth.ID)
 		return
 	}
 	manager.MarkAuthQuotaCooldown(ctx, auth.ID, recoverAt)
 }
 
+// codexUsageQuotaRecoverAt reports whether the credential's main Codex quota is
+// exhausted, and when it recovers.
+//
+// Only the primary rate_limit windows count. additional_rate_limits describe
+// per-feature metering (code review and friends): exhausting one of those does
+// not stop the credential from serving normal Codex traffic, so folding them in
+// here blocked credentials that still had quota. Free-plan credentials only get
+// a weekly window upstream, and their primary_window can read 100% while the
+// weekly window still has room, so it is skipped for that plan.
 func codexUsageQuotaRecoverAt(payload gin.H, now time.Time) (time.Time, bool) {
+	recoverAt, exhausted, _ := codexUsageQuotaState(payload, now)
+	return recoverAt, exhausted
+}
+
+// codexUsageQuotaState reports a main quota state only when at least one
+// applicable rate-limit window contains a numeric used_percent. The observed
+// result lets callers distinguish confirmed headroom from an incomplete usage
+// payload, so a failed parse cannot clear a live cooldown.
+func codexUsageQuotaState(payload gin.H, now time.Time) (time.Time, bool, bool) {
 	if len(payload) == 0 {
-		return time.Time{}, false
+		return time.Time{}, false, false
 	}
 	if now.IsZero() {
 		now = time.Now()
 	}
-	var latestReset time.Time
-	exhaustedWithoutReset := false
-	scanRateLimit := func(value any) {
-		rateLimit, ok := value.(map[string]any)
-		if !ok {
-			if typed, ok := value.(gin.H); ok {
-				rateLimit = map[string]any(typed)
-			}
-		}
-		if len(rateLimit) == 0 {
-			return
-		}
-		for _, key := range []string{"primary_window", "secondary_window"} {
-			window, ok := codexUsageWindowMap(rateLimit[key])
-			if !ok {
-				continue
-			}
-			usedPercent, ok := numberFromAny(window["used_percent"])
-			if !ok || usedPercent < 100 {
-				continue
-			}
-			resetAt, hasReset := codexUsageWindowResetAt(window)
-			if !hasReset {
-				exhaustedWithoutReset = true
-				continue
-			}
-			if resetAt.After(now) && resetAt.After(latestReset) {
-				latestReset = resetAt
-			}
-		}
+	rateLimit, ok := codexUsageWindowMap(payload["rate_limit"])
+	if !ok {
+		return time.Time{}, false, false
 	}
 
-	scanRateLimit(payload["rate_limit"])
-	if additional, ok := payload["additional_rate_limits"].([]any); ok {
-		for _, item := range additional {
-			limit, ok := codexUsageWindowMap(item)
-			if !ok {
-				continue
-			}
-			scanRateLimit(limit["rate_limit"])
+	windowKeys := []string{"primary_window", "secondary_window"}
+	if codexUsagePayloadIsFreePlan(payload) {
+		windowKeys = []string{"secondary_window"}
+	}
+
+	var latestReset time.Time
+	exhaustedWithoutReset := false
+	observed := false
+	for _, key := range windowKeys {
+		window, ok := codexUsageWindowMap(rateLimit[key])
+		if !ok {
+			continue
+		}
+		usedPercent, hasUsage := numberFromAny(window["used_percent"])
+		if !hasUsage {
+			continue
+		}
+		observed = true
+		if usedPercent < 100 {
+			continue
+		}
+		resetAt, hasReset := codexUsageWindowResetAtOrAfter(window, now)
+		if !hasReset {
+			exhaustedWithoutReset = true
+			continue
+		}
+		if resetAt.After(now) && resetAt.After(latestReset) {
+			latestReset = resetAt
 		}
 	}
 	if !latestReset.IsZero() {
-		return latestReset, true
+		return latestReset, true, true
 	}
 	if exhaustedWithoutReset {
-		return time.Time{}, true
+		return time.Time{}, true, true
 	}
-	return time.Time{}, false
+	return time.Time{}, false, observed
+}
+
+func codexUsagePayloadIsFreePlan(payload gin.H) bool {
+	for _, key := range []string{"plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType"} {
+		if value := strings.TrimSpace(valueAsString(payload[key])); value != "" {
+			return strings.EqualFold(value, "free")
+		}
+	}
+	return false
 }
 
 func codexUsageWindowMap(value any) (map[string]any, bool) {

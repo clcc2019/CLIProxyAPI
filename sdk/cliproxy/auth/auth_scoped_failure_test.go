@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -14,6 +16,55 @@ type authScopedTestErr struct{ code int }
 func (e *authScopedTestErr) Error() string             { return "auth-scoped test error" }
 func (e *authScopedTestErr) StatusCode() int           { return e.code }
 func (e *authScopedTestErr) IsAuthScopedFailure() bool { return true }
+
+func TestUsageLimit429IsClassifiedAsAuthScopedCredentialFailover(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "status-bearing usage-limit response",
+			err:  &Error{HTTPStatus: http.StatusTooManyRequests, Message: "The usage limit has been reached"},
+			want: true,
+		},
+		{
+			name: "plain HTTP 429 usage-limit response",
+			err:  fmt.Errorf("HTTP 429: The usage limit has been reached"),
+			want: true,
+		},
+		{
+			name: "ordinary request rate limit",
+			err:  &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Too many requests, retry later"},
+			want: false,
+		},
+		{
+			name: "usage-limit text without a 429",
+			err:  &Error{HTTPStatus: http.StatusBadGateway, Message: "The usage limit has been reached"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAuthScopedFailure(tt.err); got != tt.want {
+				t.Fatalf("isAuthScopedFailure() = %t, want %t", got, tt.want)
+			}
+			if got := isCredentialFailoverFailure(tt.err); got != tt.want {
+				t.Fatalf("isCredentialFailoverFailure() = %t, want %t", got, tt.want)
+			}
+			resultErr := resultErrorFromError(tt.err)
+			if tt.want {
+				if resultErr.Code != "usage_limit_reached" {
+					t.Fatalf("result error code = %q, want usage_limit_reached", resultErr.Code)
+				}
+				if resultErr.HTTPStatus != http.StatusTooManyRequests {
+					t.Fatalf("result error HTTP status = %d, want 429", resultErr.HTTPStatus)
+				}
+			}
+		})
+	}
+}
 
 // TestMarkResult_AuthScoped429_SuspendsEntireAuth verifies that when an
 // executor returns an auth-scoped failure (i.e., OAuth's shared-bucket

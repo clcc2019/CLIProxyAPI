@@ -27,6 +27,8 @@ var lastRequestLogFinalizeWarnUnixNano atomic.Int64
 // body capture is limited to small known-size payloads to avoid large per-request memory spikes.
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		attachRequestLogMetadata(c)
+
 		if logger == nil {
 			c.Next()
 			return
@@ -75,6 +77,34 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 		wrapper.release()
 	}
+}
+
+// RequestMetadataMiddleware records request data that is shared by usage
+// reporting and optional request-file logging. It must be installed even when
+// request-file logging is disabled (for example in CommercialMode), otherwise
+// usage detail records cannot identify the client or the requested endpoint.
+func RequestMetadataMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		attachRequestLogMetadata(c)
+		c.Next()
+	}
+}
+
+// attachRequestLogMetadata makes stable request data available to both request
+// logging and usage reporting. Gin resolves ClientIP using its configured
+// trusted-proxy policy, so forwarded headers are only honored for trusted peers.
+func attachRequestLogMetadata(c *gin.Context) {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return
+	}
+	endpoint := strings.TrimSpace(c.Request.Method + " " + c.Request.URL.Path)
+	ctx := logging.WithEndpoint(c.Request.Context(), endpoint)
+	ctx = logging.WithClientIP(ctx, c.ClientIP())
+	// Installed for every request, not just logged ones: credential failover
+	// happens deep in the auth manager, which has no view of whether request
+	// logging is enabled, and the recorder is a no-op without this holder.
+	ctx = logging.WithUpstreamAttempts(ctx)
+	c.Request = c.Request.WithContext(ctx)
 }
 
 func warnRequestLogFinalizeError(err error) {
@@ -171,6 +201,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool, captureHeaders bool, h
 	requestInfo := &RequestInfo{
 		URL:       url,
 		Method:    method,
+		ClientIP:  logging.GetClientIP(c.Request.Context()),
 		Headers:   headers,
 		RequestID: logging.GetGinRequestID(c),
 		Timestamp: time.Now(),

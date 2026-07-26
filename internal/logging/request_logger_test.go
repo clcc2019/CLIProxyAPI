@@ -74,7 +74,7 @@ func TestWriteRequestInfoWithBodyWritesInlineBody(t *testing.T) {
 	body := []byte(`{"hello":"world"}`)
 	timestamp := time.Unix(1700000000, 0).UTC()
 
-	err := writeRequestInfoWithBody(&output, "/v1/chat/completions", "POST", headers, body, "", timestamp, "", "", true)
+	err := writeRequestInfoWithBody(&output, "/v1/chat/completions", "POST", "203.0.113.8", headers, body, "", timestamp, "", "", true)
 	if err != nil {
 		t.Fatalf("writeRequestInfoWithBody error = %v", err)
 	}
@@ -85,6 +85,9 @@ func TestWriteRequestInfoWithBodyWritesInlineBody(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "Method: POST") {
 		t.Fatalf("log output missing method: %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "Client IP: 203.0.113.8") {
+		t.Fatalf("log output missing client IP: %q", logOutput)
 	}
 	if !strings.Contains(logOutput, `{"hello":"world"}`) {
 		t.Fatalf("log output missing request body: %q", logOutput)

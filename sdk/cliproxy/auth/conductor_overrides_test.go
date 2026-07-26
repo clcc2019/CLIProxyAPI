@@ -977,6 +977,65 @@ func TestManager_Execute_CodexUsageLimitFailsOverCredential(t *testing.T) {
 	}
 }
 
+func TestManager_Execute_UsageLimitMessageFailsOverWithoutExecutorMarkers(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"aa-generic-usage-limit": fmt.Errorf("HTTP 429: The usage limit has been reached"),
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-generic-usage-limit-failover"
+	limitedAuth := &Auth{ID: "aa-generic-usage-limit", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+	backupAuth := &Auth{ID: "bb-generic-usage-limit-backup", Provider: "codex", Metadata: map[string]any{"type": "codex"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(limitedAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(backupAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(limitedAuth.ID)
+		reg.UnregisterClient(backupAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), limitedAuth); errRegister != nil {
+		t.Fatalf("register limited auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), backupAuth); errRegister != nil {
+		t.Fatalf("register backup auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v, want failover success", errExecute)
+	}
+	if string(resp.Payload) != backupAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), backupAuth.ID)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{limitedAuth.ID, backupAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	m.mu.RLock()
+	stored := m.auths[limitedAuth.ID]
+	m.mu.RUnlock()
+	if stored == nil || stored.StatusMessage != "quota exhausted" {
+		t.Fatalf("limited auth status = %#v, want quota exhausted", stored)
+	}
+	if stored.LastError == nil || stored.LastError.Code != "usage_limit_reached" {
+		t.Fatalf("limited auth error = %#v, want usage_limit_reached", stored.LastError)
+	}
+}
+
 func TestManager_RetriesProxyTransportFailureWithSameAuthBeforeFailover(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1064,6 +1123,108 @@ func TestManager_RetriesProxyTransportFailureWithSameAuthBeforeFailover(t *testi
 			}
 			got := tt.calls(executor)
 			want := []string{auths[0].ID, auths[0].ID, auths[0].ID, auths[1].ID}
+			if len(got) != len(want) {
+				t.Fatalf("calls = %v, want %v", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("call %d auth = %q, want %q; all calls=%v", i, got[i], want[i], got)
+				}
+			}
+			updated, ok := manager.GetByID(auths[0].ID)
+			if !ok || updated == nil {
+				t.Fatalf("first auth %q missing after overloaded response", auths[0].ID)
+			}
+			if !AuthAvailableForModel(updated, model, time.Now()) {
+				t.Fatalf("Claude overloaded response must not put auth %q into cooldown", auths[0].ID)
+			}
+		})
+	}
+}
+
+func TestManager_ClaudeOverloadedRetriesSameAuthWithoutCredentialFailover(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*authFallbackExecutor, string, error)
+		invoke    func(context.Context, *Manager, string) error
+		calls     func(*authFallbackExecutor) []string
+	}{
+		{
+			name: "execute",
+			configure: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.executeErrors = map[string]error{authID: err}
+			},
+			invoke: func(ctx context.Context, manager *Manager, model string) error {
+				_, err := manager.Execute(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				return err
+			},
+			calls: (*authFallbackExecutor).ExecuteCalls,
+		},
+		{
+			name: "count",
+			configure: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.countErrors = map[string]error{authID: err}
+			},
+			invoke: func(ctx context.Context, manager *Manager, model string) error {
+				_, err := manager.ExecuteCount(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				return err
+			},
+			calls: (*authFallbackExecutor).CountCalls,
+		},
+		{
+			name: "stream",
+			configure: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.streamErrors = map[string]error{authID: err}
+			},
+			invoke: func(ctx context.Context, manager *Manager, model string) error {
+				_, err := manager.ExecuteStream(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				return err
+			},
+			calls: (*authFallbackExecutor).StreamCalls,
+		},
+		{
+			name: "stream bootstrap",
+			configure: func(executor *authFallbackExecutor, authID string, err error) {
+				executor.streamFirstErrors = map[string]error{authID: err}
+			},
+			invoke: func(ctx context.Context, manager *Manager, model string) error {
+				result, err := manager.ExecuteStream(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				if err != nil {
+					return err
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						return chunk.Err
+					}
+				}
+				return nil
+			},
+			calls: (*authFallbackExecutor).StreamCalls,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.SetRetryConfig(2, 0, 0)
+			executor := &authFallbackExecutor{id: "claude"}
+			manager.RegisterExecutor(executor)
+
+			base := "claude-overloaded-" + tt.name + "-" + uuid.NewString()
+			model := "test-model-" + base
+			auths := registerFallbackTestAuths(t, manager, "claude", model, "aa-"+base, "bb-"+base)
+			tt.configure(executor, auths[0].ID, &Error{HTTPStatus: 529, Message: "HTTP 529: Overloaded"})
+
+			errInvoke := tt.invoke(context.Background(), manager, model)
+			if errInvoke == nil {
+				t.Fatal("expected Claude overloaded error after retries are exhausted")
+			}
+			if status := statusCodeFromError(errInvoke); status != 529 {
+				t.Fatalf("status = %d, want 529; error=%v", status, errInvoke)
+			}
+
+			got := tt.calls(executor)
+			want := []string{auths[0].ID, auths[0].ID, auths[0].ID}
 			if len(got) != len(want) {
 				t.Fatalf("calls = %v, want %v", got, want)
 			}

@@ -287,15 +287,24 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		var param any
 		var streamUsage helps.StreamUsageBuffer
 		defer streamUsage.Publish(ctx, reporter)
-		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
+		// Bound a stalled upstream: the client carries no timeout, so a socket
+		// that stays open but stops delivering would block this read forever.
+		guardedBody, idleGuard := guardStreamIdle(httpResp.Body, providerStreamIdleTimeout)
+		defer idleGuard.StopTimer()
+		streamCompleted := false
+		errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			streamUsage.ObserveOpenAIStream(line)
+			if isOpenAIStreamTerminalLine(line) {
+				streamCompleted = true
+			}
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, line, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 			return nil
 		})
+		errRead = resolveStreamIdleError(idleGuard, errRead, streamCompleted)
 		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range doneChunks {
 			out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}

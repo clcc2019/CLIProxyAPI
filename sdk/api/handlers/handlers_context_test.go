@@ -87,6 +87,28 @@ func TestGetContextWithCancel_PreservesRequestIDFromRequestContext(t *testing.T)
 	}
 }
 
+func TestGetContextWithCancel_PreservesRequestMetadataFromRequestContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	reqCtx := logging.WithEndpoint(req.Context(), "POST /v1/chat/completions")
+	reqCtx = logging.WithClientIP(reqCtx, "203.0.113.8")
+	ginCtx.Request = req.WithContext(reqCtx)
+
+	handler := &BaseAPIHandler{}
+	cliCtx, cliCancel := handler.GetContextWithCancel(testAPIHandler{}, ginCtx, context.Background())
+	defer cliCancel()
+
+	if got := logging.GetEndpoint(cliCtx); got != "POST /v1/chat/completions" {
+		t.Fatalf("endpoint = %q, want POST /v1/chat/completions", got)
+	}
+	if got := logging.GetClientIP(cliCtx); got != "203.0.113.8" {
+		t.Fatalf("client IP = %q, want 203.0.113.8", got)
+	}
+}
+
 func BenchmarkGetContextWithCancelBackgroundParent(b *testing.B) {
 	gin.SetMode(gin.ReleaseMode)
 

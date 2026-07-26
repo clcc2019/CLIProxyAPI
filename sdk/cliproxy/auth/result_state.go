@@ -296,6 +296,18 @@ func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, reco
 // ClearAuthQuotaCooldown clears local quota cooldown state after an upstream
 // rate-limit reset credit has been redeemed successfully.
 func (m *Manager) ClearAuthQuotaCooldown(ctx context.Context, authID string) bool {
+	return m.clearAuthQuotaCooldown(ctx, authID, true)
+}
+
+// ClearAuthQuotaCooldownFromUsage clears only an auth-wide quota cooldown
+// after the provider's usage endpoint confirms that the credential has
+// headroom. Model-specific cooldowns are intentionally retained because a
+// usage response cannot establish that every model is available again.
+func (m *Manager) ClearAuthQuotaCooldownFromUsage(ctx context.Context, authID string) bool {
+	return m.clearAuthQuotaCooldown(ctx, authID, false)
+}
+
+func (m *Manager) clearAuthQuotaCooldown(ctx context.Context, authID string, clearModels bool) bool {
 	if m == nil {
 		return false
 	}
@@ -321,14 +333,16 @@ func (m *Manager) ClearAuthQuotaCooldown(ctx context.Context, authID string) boo
 			changed = true
 			authCleared = true
 		}
-		for model, state := range auth.ModelStates {
-			if model == "" || state == nil || state.Status == StatusDisabled {
-				continue
-			}
-			if modelStateHasQuotaCooldown(state) {
-				resetModelState(state, now)
-				clearedModels = append(clearedModels, model)
-				changed = true
+		if clearModels {
+			for model, state := range auth.ModelStates {
+				if model == "" || state == nil || state.Status == StatusDisabled {
+					continue
+				}
+				if modelStateHasQuotaCooldown(state) {
+					resetModelState(state, now)
+					clearedModels = append(clearedModels, model)
+					changed = true
+				}
 			}
 		}
 		if changed {
@@ -674,13 +688,30 @@ func resultErrorFromError(err error) *Error {
 	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil {
-		return cloneError(authErr)
+		resultErr := cloneError(authErr)
+		applyUsageLimitResultClassification(resultErr, err)
+		return resultErr
 	}
 	resultErr := &Error{Message: err.Error()}
 	if status := statusCodeFromError(err); status > 0 {
 		resultErr.HTTPStatus = status
 	}
+	applyUsageLimitResultClassification(resultErr, err)
 	return resultErr
+}
+
+func applyUsageLimitResultClassification(resultErr *Error, err error) {
+	if resultErr == nil || !isUsageLimitExhaustedFailure(err) {
+		return
+	}
+	if resultErr.Code == "" {
+		resultErr.Code = "usage_limit_reached"
+	}
+	// Some upstream adapters expose only a textual "HTTP 429" error. Preserve
+	// the inferred status so MarkResult records the auth as quota exhausted.
+	if resultErr.HTTPStatus == 0 {
+		resultErr.HTTPStatus = http.StatusTooManyRequests
+	}
 }
 
 // applyResultError populates both Error and AuthScoped on a Result from the

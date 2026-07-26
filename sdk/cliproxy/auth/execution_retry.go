@@ -36,6 +36,17 @@ func shouldRetryTransportErrorWithSameAuth(err *Error, retryAttempt int, retryLi
 	return retryAttempt >= 0 && retryAttempt < retryLimit && isProxyPoolTransportFailure(err)
 }
 
+// isClaudeOverloadedFailure identifies Anthropic's provider-wide transient
+// overload response. It does not indicate anything about the credential, so
+// it must never advance credential failover.
+func isClaudeOverloadedFailure(provider string, err error) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), "claude") && statusCodeFromError(err) == 529
+}
+
+func shouldRetryClaudeOverloadWithSameAuth(provider string, err error, retryAttempt int, retryLimit int) bool {
+	return retryAttempt >= 0 && retryAttempt < retryLimit && isClaudeOverloadedFailure(provider, err)
+}
+
 func logSameAuthTransportRetry(ctx context.Context, auth *Auth, provider string, model string, attempt int, maxRetries int, err error) {
 	if !log.IsLevelEnabled(log.DebugLevel) {
 		return
@@ -51,6 +62,23 @@ func logSameAuthTransportRetry(ctx context.Context, auth *Auth, provider string,
 		"retry":       attempt,
 		"max_retries": maxRetries,
 	}).WithError(err).Debug("retrying transient transport failure with same auth")
+}
+
+func logSameAuthClaudeOverloadRetry(ctx context.Context, auth *Auth, provider string, model string, attempt int, maxRetries int, err error) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"auth_id":     authID,
+		"provider":    provider,
+		"model":       model,
+		"retry":       attempt,
+		"max_retries": maxRetries,
+	}).WithError(err).Debug("retrying Claude overloaded response with same auth")
 }
 
 func borrowAuthIDSet() map[string]struct{} {

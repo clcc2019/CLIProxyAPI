@@ -225,8 +225,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					logSameAuthTransportRetry(ctx, auth, provider, resultModel, retryAttempt+1, transportRetries, errStream)
 					continue
 				}
+				if shouldRetryClaudeOverloadWithSameAuth(provider, errStream, retryAttempt, transportRetries) {
+					logSameAuthClaudeOverloadRetry(ctx, auth, provider, resultModel, retryAttempt+1, transportRetries, errStream)
+					continue
+				}
 				result.RetryAfter = retryAfterFromError(errStream)
 				m.MarkResult(ctx, result)
+				if isClaudeOverloadedFailure(provider, errStream) {
+					return nil, errStream
+				}
 				clearSelectedAuthMetadataForCredentialFailover(provider, opts.Metadata, auth.ID, errStream)
 				lastErr = errStream
 				switch poolModeRetryDecisionForError(errStream, retryAttempt, poolModeRetries) {
@@ -284,7 +291,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					logSameAuthTransportRetry(ctx, auth, provider, resultModel, retryAttempt+1, transportRetries, bootstrapErr)
 					continue
 				}
+				if shouldRetryClaudeOverloadWithSameAuth(provider, bootstrapErr, retryAttempt, transportRetries) {
+					logSameAuthClaudeOverloadRetry(ctx, auth, provider, resultModel, retryAttempt+1, transportRetries, bootstrapErr)
+					continue
+				}
 				m.MarkResult(ctx, result)
+				if isClaudeOverloadedFailure(provider, bootstrapErr) {
+					return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+				}
 				lastErr = bootstrapErr
 				switch poolModeRetryDecisionForError(bootstrapErr, retryAttempt, poolModeRetries) {
 				case poolModeRetryInvalidRequest:

@@ -27,6 +27,7 @@ var truncatedResponseBodyMarker = []byte("\n...[response body truncated]...\n")
 type RequestInfo struct {
 	URL       string              // URL is the request URL.
 	Method    string              // Method is the HTTP method (e.g., GET, POST).
+	ClientIP  string              // ClientIP is the resolved downstream client IP.
 	Headers   map[string][]string // Headers contains the request headers.
 	Body      []byte              // Body is the raw request body.
 	RequestID string              // RequestID is the unique identifier for the request.
@@ -228,13 +229,28 @@ func (w *ResponseWriterWrapper) prepareWrite(statusCode int) {
 		return
 	}
 
-	streamWriter, err := w.logger.LogStreamingRequest(
-		w.requestInfo.URL,
-		w.requestInfo.Method,
-		w.requestInfo.Headers,
-		w.requestInfo.Body,
-		w.requestInfo.RequestID,
-	)
+	var streamWriter logging.StreamingLogWriter
+	var err error
+	if loggerWithClientIP, ok := w.logger.(interface {
+		LogStreamingRequestWithClientIP(string, string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error)
+	}); ok {
+		streamWriter, err = loggerWithClientIP.LogStreamingRequestWithClientIP(
+			w.requestInfo.URL,
+			w.requestInfo.Method,
+			w.requestInfo.ClientIP,
+			w.requestInfo.Headers,
+			w.requestInfo.Body,
+			w.requestInfo.RequestID,
+		)
+	} else {
+		streamWriter, err = w.logger.LogStreamingRequest(
+			w.requestInfo.URL,
+			w.requestInfo.Method,
+			w.requestInfo.Headers,
+			w.requestInfo.Body,
+			w.requestInfo.RequestID,
+		)
+	}
 	if err != nil {
 		return
 	}
@@ -519,6 +535,32 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	if w.requestInfo == nil {
 		cleanupFileBodySources(websocketTimelineSource, apiWebsocketTimelineSource)
 		return nil
+	}
+
+	if loggerWithClientIP, ok := w.logger.(interface {
+		LogRequestWithOptionsAndSourcesWithClientIP(string, string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, *logging.FileBodySource, []byte, []byte, []byte, *logging.FileBodySource, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
+	}); ok {
+		return loggerWithClientIP.LogRequestWithOptionsAndSourcesWithClientIP(
+			w.requestInfo.URL,
+			w.requestInfo.Method,
+			w.requestInfo.ClientIP,
+			w.requestInfo.Headers,
+			requestBody,
+			statusCode,
+			headers,
+			body,
+			websocketTimeline,
+			websocketTimelineSource,
+			apiRequestBody,
+			apiResponseBody,
+			apiWebsocketTimeline,
+			apiWebsocketTimelineSource,
+			apiResponseErrors,
+			forceLog,
+			w.requestInfo.RequestID,
+			w.requestInfo.Timestamp,
+			apiResponseTimestamp,
+		)
 	}
 
 	if loggerWithSources, ok := w.logger.(interface {

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -41,6 +42,25 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 	}
 	if model.Latency.Count != 1 || model.Latency.TotalMs != 1500 || model.Latency.MinMs != 1500 || model.Latency.MaxMs != 1500 {
 		t.Fatalf("latency summary = %+v, want count=1 total=min=max=1500", model.Latency)
+	}
+}
+
+func TestRequestStatisticsRecordIncludesRequestMetadata(t *testing.T) {
+	stats := NewRequestStatistics()
+	ctx := internallogging.WithEndpoint(context.Background(), "POST /v1/chat/completions")
+	ctx = internallogging.WithClientIP(ctx, "203.0.113.8")
+
+	stats.Record(ctx, coreusage.Record{
+		APIKey: "test-key",
+		Model:  "gpt-5.4",
+	})
+
+	detail := stats.Snapshot().APIs["test-key"].Models["gpt-5.4"].Details[0]
+	if detail.Endpoint != "POST /v1/chat/completions" {
+		t.Fatalf("endpoint = %q, want POST /v1/chat/completions", detail.Endpoint)
+	}
+	if detail.ClientIP != "203.0.113.8" {
+		t.Fatalf("client_ip = %q, want 203.0.113.8", detail.ClientIP)
 	}
 }
 

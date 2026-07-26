@@ -68,6 +68,108 @@ func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVe
 	}
 }
 
+func TestApplyClaudeHeadersWithIncoming_PrefersExecutionHeaders(t *testing.T) {
+	contextHeaders := http.Header{
+		"Anthropic-Beta":    []string{"context-beta"},
+		"Anthropic-Version": []string{"context-version"},
+	}
+	request := newClaudeHeaderTestRequest(t, contextHeaders)
+	incomingHeaders := http.Header{
+		"Anthropic-Beta":    []string{"option-beta-a", "option-beta-b"},
+		"Anthropic-Version": []string{"option-version"},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-options-header"}}
+
+	applyClaudeHeadersWithIncoming(request, auth, "key-options-header", false, nil, nil, incomingHeaders)
+
+	if got := request.Header.Get("Anthropic-Version"); got != "option-version" {
+		t.Fatalf("Anthropic-Version = %q, want execution header value", got)
+	}
+	betas := request.Header.Get("Anthropic-Beta")
+	if !strings.Contains(betas, "option-beta-a,option-beta-b") {
+		t.Fatalf("Anthropic-Beta = %q, want all execution beta values", betas)
+	}
+	if strings.Contains(betas, "context-beta") {
+		t.Fatalf("Anthropic-Beta = %q, should not use the context fallback when options are present", betas)
+	}
+}
+
+func TestApplyClaudeHeadersWithIncoming_EmptyExecutionHeadersFallBackToContext(t *testing.T) {
+	contextHeaders := http.Header{
+		"Anthropic-Beta":    []string{"context-beta"},
+		"Anthropic-Version": []string{"context-version"},
+	}
+	request := newClaudeHeaderTestRequest(t, contextHeaders)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-empty-options-header"}}
+
+	applyClaudeHeadersWithIncoming(request, auth, "key-empty-options-header", false, nil, nil, http.Header{})
+
+	if got := request.Header.Get("Anthropic-Version"); got != "context-version" {
+		t.Fatalf("Anthropic-Version = %q, want Gin context fallback value", got)
+	}
+	if betas := request.Header.Get("Anthropic-Beta"); !strings.Contains(betas, "context-beta") {
+		t.Fatalf("Anthropic-Beta = %q, want Gin context fallback value", betas)
+	}
+}
+
+func TestApplyClaudeHeadersWithIncoming_PreservesClaudeCodeClientContext(t *testing.T) {
+	t.Setenv(claudeEnvRemoteContainerID, "env-container")
+	t.Setenv(claudeEnvRemoteSessionID, "env-session")
+	t.Setenv(claudeEnvClientApp, "env-app/1.0")
+	t.Setenv(claudeEnvAdditionalProtection, "true")
+
+	contextHeaders := http.Header{
+		claudeHeaderRemoteContainerID:    []string{"context-container"},
+		claudeHeaderRemoteSessionID:      []string{"context-session"},
+		claudeHeaderClientApp:            []string{"context-app/1.0"},
+		claudeHeaderAdditionalProtection: []string{"false"},
+	}
+	incomingHeaders := http.Header{
+		claudeHeaderRemoteContainerID:    []string{"request-container"},
+		claudeHeaderRemoteSessionID:      []string{"request-session"},
+		claudeHeaderClientApp:            []string{"request-app/2.0"},
+		claudeHeaderAdditionalProtection: []string{"on"},
+	}
+	request := newClaudeHeaderTestRequest(t, contextHeaders)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-client-context"}}
+
+	applyClaudeHeadersWithIncoming(request, auth, "key-client-context", false, nil, nil, incomingHeaders)
+
+	for header, want := range map[string]string{
+		claudeHeaderRemoteContainerID:    "request-container",
+		claudeHeaderRemoteSessionID:      "request-session",
+		claudeHeaderClientApp:            "request-app/2.0",
+		claudeHeaderAdditionalProtection: "true",
+	} {
+		if got := request.Header.Get(header); got != want {
+			t.Fatalf("%s = %q, want %q", header, got, want)
+		}
+	}
+}
+
+func TestApplyClaudeHeaders_UsesClaudeCodeClientContextEnvironmentDefaults(t *testing.T) {
+	t.Setenv(claudeEnvRemoteContainerID, "env-container")
+	t.Setenv(claudeEnvRemoteSessionID, "env-session")
+	t.Setenv(claudeEnvClientApp, "env-app/1.0")
+	t.Setenv(claudeEnvAdditionalProtection, "yes")
+
+	request := newClaudeHeaderTestRequest(t, http.Header{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-client-context-env"}}
+
+	applyClaudeHeaders(request, auth, "key-client-context-env", false, nil, nil)
+
+	for header, want := range map[string]string{
+		claudeHeaderRemoteContainerID:    "env-container",
+		claudeHeaderRemoteSessionID:      "env-session",
+		claudeHeaderClientApp:            "env-app/1.0",
+		claudeHeaderAdditionalProtection: "true",
+	} {
+		if got := request.Header.Get(header); got != want {
+			t.Fatalf("%s = %q, want %q", header, got, want)
+		}
+	}
+}
+
 func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
@@ -2330,6 +2432,18 @@ func TestNormalizeClaudeTemperatureForThinking_MixedCaseCoercesToOne(t *testing.
 
 	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
 		t.Fatalf("temperature = %v, want 1", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinking_RemovesTopPAndTopK(t *testing.T) {
+	payload := []byte(`{"top_p":0.9,"top_k":40,"thinking":{"type":"adaptive"}}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if gjson.GetBytes(out, "top_p").Exists() {
+		t.Fatalf("top_p should be removed when thinking is active: %s", out)
+	}
+	if gjson.GetBytes(out, "top_k").Exists() {
+		t.Fatalf("top_k should be removed when thinking is active: %s", out)
 	}
 }
 

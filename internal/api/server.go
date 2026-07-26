@@ -271,6 +271,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Concurrency limiter is opt-in via cfg.Limits.MaxInFlightRequests; when 0
 	// the middleware is a no-op so default behavior is preserved.
 	engine.Use(middleware.ConcurrencyLimitMiddleware(cfg.Limits.MaxInFlightRequests, cfg.Limits.RetryAfterSeconds))
+	// Usage detail records need the request endpoint and client IP regardless of
+	// whether file-based request logging is enabled. In particular, commercial
+	// deployments do not install RequestLoggingMiddleware.
+	engine.Use(middleware.RequestMetadataMiddleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
