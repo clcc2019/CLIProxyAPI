@@ -54,6 +54,10 @@ const (
 	xaiTokenAuthValue           = "xai-grok-cli"
 	xaiClientVersionHeader      = "x-grok-client-version"
 	xaiClientVersionValue       = "0.2.93"
+
+	// xaiRefreshMaxAttempts bounds token refresh attempts. Matches the value
+	// the Claude and Codex executors pass to their own retrying refresh calls.
+	xaiRefreshMaxAttempts = 3
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -432,7 +436,11 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	}
 	tokenEndpoint := xaiMetadataString(auth.Metadata, "token_endpoint")
 	svc := xaiauth.NewXAIAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokens(ctx, refreshToken, tokenEndpoint)
+	// Retry transient failures rather than surfacing the first network blip or
+	// 5xx as a refresh failure. RefreshTokensWithRetry returns immediately on
+	// permanent errors (invalid_grant and friends), so a rotated-away refresh
+	// token is still parked after a single attempt.
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, tokenEndpoint, xaiRefreshMaxAttempts)
 	if err != nil {
 		return nil, err
 	}

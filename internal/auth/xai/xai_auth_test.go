@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestBuildAuthorizeURLIncludesXAIRequiredParameters(t *testing.T) {
@@ -185,5 +187,87 @@ func BenchmarkTokenRequestErrorIsPermanentAuthError(b *testing.B) {
 		if !err.IsPermanentAuthError() {
 			b.Fatal("expected permanent auth error")
 		}
+	}
+}
+
+// A transient 5xx must not end the refresh. xAI rotates refresh tokens, so
+// giving up on the first blip costs the credential a failover it did not need.
+func TestRefreshTokensWithRetryRecoversFromTransientFailure(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"server_error"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"access_token":"recovered","refresh_token":"next","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	auth := NewXAIAuth(nil)
+	td, err := auth.RefreshTokensWithRetry(context.Background(), "old-refresh", server.URL, 3)
+	if err != nil {
+		t.Fatalf("expected recovery after a transient failure, got %v", err)
+	}
+	if td == nil || td.AccessToken != "recovered" {
+		t.Fatalf("unexpected token data: %+v", td)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("upstream calls = %d, want 2 (one failure, one success)", got)
+	}
+}
+
+// Permanent failures must not be retried: replaying a consumed refresh token
+// only burns quota and keeps a dead credential looking busy.
+func TestRefreshTokensWithRetryStopsOnPermanentError(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"expired"}`))
+	}))
+	defer server.Close()
+
+	auth := NewXAIAuth(nil)
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "old-refresh", server.URL, 3)
+	if err == nil {
+		t.Fatal("expected invalid_grant to fail")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("upstream calls = %d, want 1 (invalid_grant must not be retried)", got)
+	}
+	// The retry wrapper must not hide the classification the conductor parks on.
+	var permanent interface{ IsPermanentAuthError() bool }
+	if !errors.As(err, &permanent) || !permanent.IsPermanentAuthError() {
+		t.Fatalf("permanent classification lost through retry wrapper: %T: %v", err, err)
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(err, &status) || status.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status lost through retry wrapper: %T: %v", err, err)
+	}
+}
+
+// The backoff must observe cancellation so a dead request context does not sit
+// through the full retry schedule.
+func TestRefreshTokensWithRetryHonorsContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"server_error"}`))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	auth := NewXAIAuth(nil)
+	start := time.Now()
+	if _, err := auth.RefreshTokensWithRetry(ctx, "old-refresh", server.URL, 5); err == nil {
+		t.Fatal("expected an error")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("took %v; backoff ignored context cancellation", elapsed)
 	}
 }

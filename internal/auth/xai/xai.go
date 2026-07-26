@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -193,6 +194,64 @@ func (a *XAIAuth) RefreshTokens(ctx context.Context, refreshToken, tokenEndpoint
 		"refresh_token": {strings.TrimSpace(refreshToken)},
 	}
 	return a.postTokenForm(ctx, tokenEndpoint, form)
+}
+
+// RefreshTokensWithRetry refreshes an xAI access token, retrying transient
+// failures. A single network blip or upstream 5xx would otherwise surface as a
+// refresh failure and cost the credential a failover it did not need.
+//
+// Permanent failures are never retried: xAI rotates refresh tokens, so
+// replaying one that the server has already rejected as invalid_grant only
+// burns quota and keeps a dead credential looking busy. Classification is
+// delegated to tokenRequestError.IsPermanentAuthError so this stays in step
+// with the conductor's own parking decision.
+func (a *XAIAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken, tokenEndpoint string, maxRetries int) (*TokenData, error) {
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Linear backoff, matching the Claude refresh path. Waiting on
+			// ctx.Done() keeps a cancelled request from sitting through the
+			// remaining schedule.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+
+		tokenData, err := a.RefreshTokens(ctx, refreshToken, tokenEndpoint)
+		if err == nil {
+			return tokenData, nil
+		}
+		lastErr = err
+
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		if isPermanentXAIRefreshError(err) {
+			return nil, err
+		}
+		log.Warnf("xai token refresh attempt %d/%d failed: %v", attempt+1, maxRetries, err)
+	}
+
+	return nil, lastErr
+}
+
+// isPermanentXAIRefreshError reports whether err is a refusal that retrying
+// cannot fix.
+func isPermanentXAIRefreshError(err error) bool {
+	var permanent interface{ IsPermanentAuthError() bool }
+	if errors.As(err, &permanent) && permanent != nil {
+		return permanent.IsPermanentAuthError()
+	}
+	return false
 }
 
 func (a *XAIAuth) postTokenForm(ctx context.Context, tokenEndpoint string, form url.Values) (*TokenData, error) {
