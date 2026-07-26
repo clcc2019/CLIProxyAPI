@@ -47,6 +47,10 @@ type ClaudeExecutor struct {
 // Previously "proxy_" was used but this is a detectable fingerprint difference.
 const claudeToolPrefix = ""
 
+// claudeRefreshMaxAttempts bounds token refresh attempts. Matches the value the
+// Codex executor passes to its own RefreshTokensWithRetry.
+const claudeRefreshMaxAttempts = 3
+
 func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string) []byte {
 	sanitized, report := sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
 	logClaudeSignatureSanitizeReport(ctx, baseModel, report)
@@ -711,7 +715,11 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		return auth, nil
 	}
 	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokens(ctx, refreshToken)
+	// Retry transient failures rather than surfacing the first network blip or
+	// 5xx as a refresh failure. RefreshTokensWithRetry stops early on
+	// non-retryable errors, so the 429 Retry-After block and permanent
+	// invalid_grant handling keep their existing single-attempt behaviour.
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, claudeRefreshMaxAttempts)
 	if err != nil {
 		return nil, err
 	}

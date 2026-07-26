@@ -127,3 +127,82 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 		t.Fatalf("second caller observed shared token mutation: %q", got)
 	}
 }
+
+// A transient 5xx must not end the refresh: the retry loop should reach the
+// eventual success. This is what the executor gains by calling
+// RefreshTokensWithRetry instead of RefreshTokens.
+func TestRefreshTokensWithRetry_RecoversFromTransientFailure(t *testing.T) {
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+
+	var calls int32
+	auth := &ClaudeAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if atomic.AddInt32(&calls, 1) == 1 {
+					return &http.Response{
+						StatusCode: http.StatusServiceUnavailable,
+						Body:       io.NopCloser(strings.NewReader(`{"error":"temporarily unavailable"}`)),
+						Header:     make(http.Header),
+						Request:    req,
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader(`{
+						"access_token":"recovered-access",
+						"refresh_token":"recovered-refresh",
+						"token_type":"Bearer",
+						"expires_in":3600,
+						"account":{"email_address":"user@example.com"}
+					}`)),
+					Header:  make(http.Header),
+					Request: req,
+				}, nil
+			}),
+		},
+	}
+
+	td, err := auth.RefreshTokensWithRetry(context.Background(), "transient-token", 3)
+	if err != nil {
+		t.Fatalf("expected recovery after a transient failure, got %v", err)
+	}
+	if td == nil || td.AccessToken != "recovered-access" {
+		t.Fatalf("unexpected token data: %+v", td)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("upstream calls = %d, want 2 (one failure, one success)", got)
+	}
+}
+
+// Retrying must not weaken the non-retryable paths: a 429 arms the refresh
+// block, which is itself non-retryable, so the loop must stop after one attempt
+// rather than hammering an endpoint that just told us to back off.
+func TestRefreshTokensWithRetry_StopsOnNonRetryable(t *testing.T) {
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+
+	var calls int32
+	auth := &ClaudeAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				header := make(http.Header)
+				header.Set("Retry-After", "60")
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
+					Header:     header,
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	if _, err := auth.RefreshTokensWithRetry(context.Background(), "blocked-token", 3); err == nil {
+		t.Fatal("expected the 429 to surface as an error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("upstream calls = %d, want 1 (429 must not be retried)", got)
+	}
+}
