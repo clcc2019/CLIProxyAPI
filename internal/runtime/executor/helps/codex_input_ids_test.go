@@ -1,6 +1,8 @@
 package helps
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -77,5 +79,45 @@ func TestSanitizeCodexInputItemIDsLeavesUnsupportedPayloadsUnchanged(t *testing.
 		if got := string(SanitizeCodexInputItemIDs(body)); got != string(body) {
 			t.Fatalf("payload changed: got=%q want=%q", got, body)
 		}
+	}
+}
+
+func benchInputItemsBody(items int, longIDs bool) []byte {
+	var b strings.Builder
+	b.WriteString(`{"model":"gpt-5","input":[`)
+	for i := 0; i < items; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		id := fmt.Sprintf("msg_%040d", i)
+		if longIDs {
+			id = "msg_" + strings.Repeat("a", 90) + strconv.Itoa(i)
+		}
+		fmt.Fprintf(&b, `{"type":"message","id":%q,"role":"user","content":[{"type":"input_text","text":"%s"}]}`,
+			id, strings.Repeat("hello world ", 40))
+	}
+	b.WriteString(`]}`)
+	return []byte(b.String())
+}
+
+// The overwhelmingly common case: every ID is within the limit, so the whole
+// call should be a no-op that neither rebuilds nor reallocates the payload.
+func BenchmarkSanitizeCodexInputItemIDsWithinLimit(b *testing.B) {
+	body := benchInputItemsBody(200, false)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = SanitizeCodexInputItemIDs(body)
+	}
+}
+
+func BenchmarkSanitizeCodexInputItemIDsOverlong(b *testing.B) {
+	body := benchInputItemsBody(200, true)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = SanitizeCodexInputItemIDs(body)
 	}
 }
