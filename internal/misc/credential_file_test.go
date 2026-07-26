@@ -146,3 +146,38 @@ func TestSaveCredentialJSONAtomicMergesMetadata(t *testing.T) {
 		t.Errorf("email = %v, want a@b.c (metadata not merged)", got["email"])
 	}
 }
+
+// Atomic replacement swaps the path itself. When that path is a symlink the
+// link is replaced, not followed — pinned here so the behaviour is a decision
+// rather than a surprise.
+func TestWriteCredentialJSONAtomicReplacesSymlinkItself(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	link := filepath.Join(dir, "link.json")
+
+	const original = `{"owner":"target"}`
+	if err := os.WriteFile(target, []byte(original), credentialFileMode); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := WriteCredentialJSONAtomic(link, map[string]any{"owner": "link"}, ""); err != nil {
+		t.Fatalf("WriteCredentialJSONAtomic: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("path is still a symlink; the write did not replace it")
+	}
+	if raw, err := os.ReadFile(target); err != nil || string(raw) != original {
+		t.Errorf("symlink target was modified: %s (err=%v)", raw, err)
+	}
+}

@@ -32,6 +32,12 @@ const credentialDirMode = 0o700
 //
 // indent selects the JSON layout: empty for compact output, otherwise the
 // per-level indent string (for example "  ").
+//
+// If authFilePath is a symlink, the rename replaces the link itself rather than
+// writing through to its target. That is inherent to atomic replacement — there
+// is no way to both swap a file atomically and follow a link out of the
+// directory — and it is the intended behaviour here: credential files are
+// created and owned by this process inside the auth directory.
 func WriteCredentialJSONAtomic(authFilePath string, data any, indent string) error {
 	dir := filepath.Dir(authFilePath)
 	if err := os.MkdirAll(dir, credentialDirMode); err != nil {
