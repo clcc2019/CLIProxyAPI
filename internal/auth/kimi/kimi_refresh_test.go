@@ -1,0 +1,105 @@
+package kimi
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+)
+
+// countingTransport returns a fixed status and records how many round trips
+// were made, so tests can assert that permanent failures are not replayed.
+type countingTransport struct {
+	status int
+	calls  atomic.Int32
+}
+
+func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.calls.Add(1)
+	return &http.Response{
+		StatusCode: t.status,
+		Body:       io.NopCloser(strings.NewReader(`{"error":"nope"}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestRefreshErrorClassification(t *testing.T) {
+	tests := []struct {
+		name          string
+		err           *RefreshError
+		wantPermanent bool
+		wantStatus    int
+	}{
+		{"401 rejected", &RefreshError{statusCode: http.StatusUnauthorized, permanent: true}, true, 401},
+		{"403 rejected", &RefreshError{statusCode: http.StatusForbidden, permanent: true}, true, 403},
+		{"500 transient", &RefreshError{statusCode: http.StatusInternalServerError, body: "boom"}, false, 500},
+		{"429 transient", &RefreshError{statusCode: http.StatusTooManyRequests}, false, 429},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.IsPermanentAuthError(); got != tt.wantPermanent {
+				t.Errorf("IsPermanentAuthError() = %v, want %v", got, tt.wantPermanent)
+			}
+			if got := tt.err.StatusCode(); got != tt.wantStatus {
+				t.Errorf("StatusCode() = %d, want %d", got, tt.wantStatus)
+			}
+			if tt.err.Error() == "" {
+				t.Error("Error() is empty")
+			}
+		})
+	}
+
+	// A 403 must be reachable through errors.As, since that is how the
+	// conductor decides to park rather than retry. Before RefreshError existed
+	// this only worked for 401, and only by matching the literal text.
+	var target *RefreshError
+	forbidden := error(&RefreshError{statusCode: http.StatusForbidden, permanent: true})
+	if !errors.As(forbidden, &target) || !target.IsPermanentAuthError() {
+		t.Error("403 not reachable as a permanent RefreshError")
+	}
+
+	// Nil receiver must not panic.
+	var nilErr *RefreshError
+	if nilErr.Error() != "" || nilErr.StatusCode() != 0 || nilErr.IsPermanentAuthError() {
+		t.Error("nil RefreshError misbehaves")
+	}
+}
+
+// A permanent rejection must not be retried: replaying a revoked refresh token
+// only burns quota.
+func TestRefreshTokenWithRetryStopsOnPermanentRejection(t *testing.T) {
+	rt := &countingTransport{status: http.StatusForbidden}
+	client := &DeviceFlowClient{httpClient: &http.Client{Transport: rt}}
+
+	_, err := client.RefreshTokenWithRetry(context.Background(), "revoked", 3)
+	if err == nil {
+		t.Fatal("expected the 403 to surface as an error")
+	}
+	var refreshErr *RefreshError
+	if !errors.As(err, &refreshErr) || !refreshErr.IsPermanentAuthError() {
+		t.Fatalf("permanent classification lost: %T: %v", err, err)
+	}
+	if calls := rt.calls.Load(); calls != 1 {
+		t.Errorf("upstream calls = %d, want 1 (403 must not be retried)", calls)
+	}
+}
+
+// The backoff must observe cancellation rather than sitting through the
+// remaining schedule.
+func TestRefreshTokenWithRetryHonorsContextCancellation(t *testing.T) {
+	rt := &countingTransport{status: http.StatusInternalServerError}
+	client := &DeviceFlowClient{httpClient: &http.Client{Transport: rt}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := client.RefreshTokenWithRetry(ctx, "tok", 5); err == nil {
+		t.Fatal("expected an error")
+	}
+	if calls := rt.calls.Load(); calls > 1 {
+		t.Errorf("upstream calls = %d; cancelled context should stop after the first attempt", calls)
+	}
+}

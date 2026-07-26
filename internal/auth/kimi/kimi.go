@@ -5,6 +5,7 @@ package kimi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -339,6 +340,98 @@ func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode st
 }
 
 // RefreshToken exchanges a refresh token for a new access token.
+// RefreshError describes a non-OK response from the Kimi token endpoint.
+//
+// It exists so callers can act on the status rather than parse the message.
+// Previously these were bare fmt.Errorf values, which left the conductor
+// matching on the literal text "status 401": a 401 was classified as permanent
+// only by accident, and a 403 — an equally final refusal — was not classified
+// at all and would be retried on the background cadence indefinitely.
+type RefreshError struct {
+	statusCode int
+	body       string
+	permanent  bool
+}
+
+func (e *RefreshError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.permanent {
+		return fmt.Sprintf("kimi: refresh token rejected (status %d)", e.statusCode)
+	}
+	if e.body != "" {
+		return fmt.Sprintf("kimi: refresh failed with status %d: %s", e.statusCode, e.body)
+	}
+	return fmt.Sprintf("kimi: refresh failed with status %d", e.statusCode)
+}
+
+// StatusCode reports the HTTP status returned by the token endpoint.
+func (e *RefreshError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
+}
+
+// IsPermanentAuthError reports whether the credential is dead rather than
+// temporarily unavailable. 401 and 403 both mean the refresh token will not
+// start working again on its own, so the auth should be parked for an operator
+// instead of retried.
+func (e *RefreshError) IsPermanentAuthError() bool {
+	if e == nil {
+		return false
+	}
+	return e.permanent
+}
+
+// RefreshTokenWithRetry refreshes a Kimi access token, retrying transient
+// failures. A single network blip or upstream 5xx would otherwise surface as a
+// refresh failure and cost the credential a failover it did not need.
+//
+// Permanent rejections (401/403) return immediately: the refresh token has been
+// revoked or rotated away, and replaying it only burns upstream quota while
+// keeping a dead credential looking busy.
+func (c *DeviceFlowClient) RefreshTokenWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*KimiTokenData, error) {
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Linear backoff, matching the Claude and xAI refresh paths.
+			// Waiting on ctx.Done() keeps a cancelled request from sitting
+			// through the remaining schedule.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+
+		tokenData, err := c.RefreshToken(ctx, refreshToken)
+		if err == nil {
+			return tokenData, nil
+		}
+		lastErr = err
+
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		var refreshErr *RefreshError
+		if errors.As(err, &refreshErr) && refreshErr.IsPermanentAuthError() {
+			return nil, err
+		}
+		log.Warnf("kimi token refresh attempt %d/%d failed: %v", attempt+1, maxRetries, err)
+	}
+
+	return nil, lastErr
+}
+
 func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string) (*KimiTokenData, error) {
 	data := url.Values{}
 	data.Set("client_id", kimiClientID)
@@ -371,11 +464,11 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("kimi: refresh token rejected (status %d)", resp.StatusCode)
+		return nil, &RefreshError{statusCode: resp.StatusCode, permanent: true}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("kimi: refresh failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, &RefreshError{statusCode: resp.StatusCode, body: strings.TrimSpace(string(bodyBytes))}
 	}
 
 	var tokenResp struct {

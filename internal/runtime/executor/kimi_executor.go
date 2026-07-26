@@ -31,6 +31,10 @@ type KimiExecutor struct {
 	cfg *config.Config
 }
 
+// kimiRefreshMaxAttempts bounds token refresh attempts. Matches the value the
+// Claude, Codex, and xAI executors pass to their own retrying refresh calls.
+const kimiRefreshMaxAttempts = 3
+
 // NewKimiExecutor creates a new Kimi executor.
 func NewKimiExecutor(cfg *config.Config) *KimiExecutor { return &KimiExecutor{cfg: cfg} }
 
@@ -594,7 +598,11 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	}
 
 	client := kimiauth.NewDeviceFlowClientWithDeviceIDAndProxyURL(e.cfg, resolveKimiDeviceID(auth), auth.ProxyURL)
-	td, err := client.RefreshToken(ctx, refreshToken)
+	// Retry transient failures rather than surfacing the first network blip or
+	// 5xx as a refresh failure. RefreshTokenWithRetry returns immediately on a
+	// 401/403 rejection, so a revoked refresh token is still parked after a
+	// single attempt.
+	td, err := client.RefreshTokenWithRetry(ctx, refreshToken, kimiRefreshMaxAttempts)
 	if err != nil {
 		return nil, err
 	}
