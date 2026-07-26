@@ -34,6 +34,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		h.listAuthFilesFromManager(c, codexSubscriptionMode, listQuery)
 		return
 	}
+	manager.ClearExpiredQuotaCooldowns(c.Request.Context())
 	auths := manager.List()
 	files := make([]gin.H, 0, len(auths))
 	entryOpts := authFileEntryBuildOptions{RecentRequestSnapshotter: coreauth.NewRecentRequestSnapshotter(time.Now())}
@@ -47,13 +48,16 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files, "total": len(files)})
 }
 
-func (h *Handler) listAuthsForManagement(summary bool) []*coreauth.Auth {
+func (h *Handler) listAuthsForManagement(c *gin.Context, summary bool) []*coreauth.Auth {
 	if h == nil {
 		return nil
 	}
 	manager := h.authManagerSnapshot()
 	if manager == nil {
 		return nil
+	}
+	if c != nil && c.Request != nil {
+		manager.ClearExpiredQuotaCooldowns(c.Request.Context())
 	}
 	if summary {
 		return manager.ListManagementSummary()
@@ -62,7 +66,7 @@ func (h *Handler) listAuthsForManagement(summary bool) []*coreauth.Auth {
 }
 
 func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode, q authFilesListQuery) {
-	auths := h.listAuthsForManagement(q.Summary)
+	auths := h.listAuthsForManagement(c, q.Summary)
 	entrySubscriptionMode := codexSubscriptionMode
 	deferRefreshToPage := q.Paginated && codexSubscriptionMode == codexSubscriptionListRefresh
 	if deferRefreshToPage {

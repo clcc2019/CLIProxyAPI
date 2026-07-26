@@ -307,6 +307,101 @@ func (m *Manager) ClearAuthQuotaCooldownFromUsage(ctx context.Context, authID st
 	return m.clearAuthQuotaCooldown(ctx, authID, false)
 }
 
+// ClearExpiredQuotaCooldowns clears quota cooldowns whose known recovery time
+// has passed. Once the provider's reset boundary is reached, retaining the old
+// runtime state causes credential files to remain labelled "quota exhausted"
+// even though they are eligible for use again.
+//
+// Only cooldowns with an explicit NextRecoverAt are cleared. A quota error
+// without a known reset time remains intact until a successful usage check or
+// request confirms that it has recovered.
+func (m *Manager) ClearExpiredQuotaCooldowns(ctx context.Context) int {
+	if m == nil {
+		return 0
+	}
+	now := time.Now()
+	authIDs := make([]string, 0)
+	m.mu.RLock()
+	for authID, auth := range m.auths {
+		if authQuotaCooldownExpired(auth, now) || authHasExpiredModelQuotaCooldown(auth, now) {
+			authIDs = append(authIDs, authID)
+		}
+	}
+	m.mu.RUnlock()
+
+	cleared := 0
+	for _, authID := range authIDs {
+		if m.clearExpiredQuotaCooldownsForAuth(ctx, authID, now) {
+			cleared++
+		}
+	}
+	return cleared
+}
+
+func (m *Manager) clearExpiredQuotaCooldownsForAuth(ctx context.Context, authID string, now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+
+	unlockExecutionGate := m.lockAuthExecutionGate(authID)
+	persistAuthID := ""
+	var schedulerSnapshot *Auth
+	invalidateAuthAffinity := false
+	clearedModels := make([]string, 0, 4)
+
+	m.mu.Lock()
+	if auth, ok := m.auths[authID]; ok && auth != nil && auth.Status != StatusDisabled {
+		wasUnavailable := auth.Unavailable
+		authExpired := authQuotaCooldownExpired(auth, now)
+		changed := false
+		if authExpired {
+			clearAuthStateOnSuccess(auth, now)
+			changed = true
+		}
+		for model, state := range auth.ModelStates {
+			if model == "" || state == nil || state.Status == StatusDisabled || !modelQuotaCooldownExpired(state, now) {
+				continue
+			}
+			resetModelState(state, now)
+			clearedModels = append(clearedModels, model)
+			changed = true
+		}
+		if changed {
+			updateAggregatedAvailability(auth, now)
+			if !hasModelError(auth, now) {
+				auth.Status = StatusActive
+				auth.StatusMessage = ""
+				auth.LastError = nil
+			}
+			auth.UpdatedAt = now
+			persistAuthID = auth.ID
+			schedulerSnapshot = auth.CloneForScheduler()
+			invalidateAuthAffinity = wasUnavailable
+		}
+	}
+	m.mu.Unlock()
+	unlockExecutionGate()
+
+	if persistAuthID == "" {
+		return false
+	}
+	m.enqueuePersistAuthID(ctx, persistAuthID)
+	if m.scheduler != nil && schedulerSnapshot != nil {
+		m.scheduler.upsertAuth(schedulerSnapshot)
+	}
+	if invalidateAuthAffinity {
+		m.invalidateSessionAffinityForAuth(persistAuthID)
+	}
+	for _, model := range clearedModels {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(persistAuthID, model)
+	}
+	return true
+}
+
 func (m *Manager) clearAuthQuotaCooldown(ctx context.Context, authID string, clearModels bool) bool {
 	if m == nil {
 		return false
@@ -392,6 +487,32 @@ func authHasQuotaCooldown(auth *Auth) bool {
 		return code == "rate_limited" || code == "usage_limit_reached" || code == "quota_exceeded"
 	}
 	return false
+}
+
+func authQuotaCooldownExpired(auth *Auth, now time.Time) bool {
+	if auth == nil || auth.Status == StatusDisabled || auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.After(now) {
+		return false
+	}
+	return authHasQuotaCooldown(auth)
+}
+
+func authHasExpiredModelQuotaCooldown(auth *Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	for _, state := range auth.ModelStates {
+		if modelQuotaCooldownExpired(state, now) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelQuotaCooldownExpired(state *ModelState, now time.Time) bool {
+	if state == nil || state.Status == StatusDisabled || state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now) {
+		return false
+	}
+	return modelStateHasQuotaCooldown(state)
 }
 
 // authScopedCooldownActive reports whether an auth-wide cooldown is still in
@@ -621,6 +742,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Quota.Reason = ""
 		auth.Quota.NextRecoverAt = time.Time{}
 		auth.Quota.BackoffLevel = 0
+		auth.Quota.AuthScope = false
 	}
 }
 
