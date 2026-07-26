@@ -436,12 +436,34 @@ func proxyFailureCooldown(cfg *internalconfig.Config) time.Duration {
 	return cooldown
 }
 
+// proxyPoolTransportFailurePatterns marks errors that never reached a served
+// response, covering both connection *setup* failures (dial, DNS, TLS, proxy)
+// and connection *reuse* failures — a pooled connection reclaimed by the peer
+// between requests. Reuse failures matter for providers on long-lived HTTP/2
+// pools, such as Claude's uTLS transport, where an idle connection being
+// closed is routine rather than exceptional.
+//
+// Two consumers read this list, and both change behaviour when it grows:
+//   - shouldRetryTransportErrorWithSameAuth retries the request on the same
+//     credential instead of burning a failover.
+//   - recordProxyPoolResult counts the failure against the assigned proxy,
+//     so a matching error contributes to that proxy's cooldown. That path is
+//     bounded by ProxyPool.Enabled plus a configured failure threshold, but
+//     bear it in mind before adding a pattern that is not proxy-attributable.
+//
+// Matching is case-insensitive substring, and callers are gated on the error
+// carrying no HTTP status, so entries must stay specific enough not to fire on
+// an upstream response body. That is why "unexpected eof" is listed rather
+// than a bare "eof".
 var proxyPoolTransportFailurePatterns = [...]string{
+	"broken pipe",
 	"connection refused",
 	"connection reset",
 	"connection timed out",
 	"context deadline exceeded",
 	"dial tcp",
+	"http2: server sent goaway",
+	"http2: stream closed",
 	"i/o timeout",
 	"net/http: timeout",
 	"network is unreachable",
@@ -449,10 +471,12 @@ var proxyPoolTransportFailurePatterns = [...]string{
 	"proxyconnect",
 	"proxy connect",
 	"proxy connection",
+	"server closed idle connection",
 	"socks",
 	"socks5",
 	"temporary failure in name resolution",
 	"tls handshake timeout",
+	"unexpected eof",
 	"use of closed network connection",
 }
 

@@ -1137,6 +1137,84 @@ func TestProxyPoolTransportFailureMatchesMixedCaseAndJoinedFields(t *testing.T) 
 	}
 }
 
+// Connection *reuse* failures are as transient as connection *setup* failures:
+// they mean a pooled connection was reclaimed between requests, which a retry
+// on the same credential recovers from. Providers on the shared HTTP/2
+// transports (notably Claude's uTLS pool) hit these routinely.
+func TestProxyPoolTransportFailureMatchesConnectionReuseErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *Error
+	}{
+		{
+			name: "http2 goaway",
+			err:  &Error{Message: "http2: server sent GOAWAY and closed the connection"},
+		},
+		{
+			name: "http2 stream closed",
+			err:  &Error{Message: "http2: stream closed"},
+		},
+		{
+			name: "server closed idle connection",
+			err:  &Error{Message: "http: server closed idle connection"},
+		},
+		{
+			name: "broken pipe",
+			err:  &Error{Message: "write tcp 10.0.0.1:52344->1.2.3.4:443: write: broken pipe"},
+		},
+		{
+			name: "unexpected eof",
+			err:  &Error{Message: "unexpected EOF"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !isProxyPoolTransportFailure(tt.err) {
+				t.Fatal("expected connection reuse failure to be treated as a transport failure")
+			}
+		})
+	}
+}
+
+// The patterns are substring matches against a message that can carry an
+// upstream response body, so the classifier must not mistake application
+// errors for transport failures. Anything with an HTTP status came from a
+// completed round trip and is never a transport failure.
+func TestProxyPoolTransportFailureIgnoresNonTransportErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *Error
+	}{
+		{
+			name: "upstream body mentioning eof",
+			err:  &Error{HTTPStatus: 400, Message: `{"error":{"message":"unexpected EOF while parsing input"}}`},
+		},
+		{
+			name: "upstream body mentioning a broken pipe",
+			err:  &Error{HTTPStatus: 500, Message: `{"error":{"message":"broken pipe in user script"}}`},
+		},
+		{
+			name: "plain application error",
+			err:  &Error{Message: "invalid request: missing model"},
+		},
+		{
+			name: "empty error",
+			err:  &Error{},
+		},
+		{
+			name: "nil error",
+			err:  nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if isProxyPoolTransportFailure(tt.err) {
+				t.Fatal("expected non-transport error to be ignored")
+			}
+		})
+	}
+}
+
 func TestProxyPoolSuccessClearsProxyFailureCount(t *testing.T) {
 	leaseStore := &fakeProxyLeaseStore{}
 	mgr := NewManager(nil, nil, nil)
