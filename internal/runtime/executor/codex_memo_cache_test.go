@@ -133,3 +133,61 @@ func TestCodexFinalUpstreamBodyMemoIncrementalEviction(t *testing.T) {
 		t.Fatalf("memo bytes=%d exceeded budget=%d", memo.bytes, codexFinalUpstreamBodyMemoMaxBytes)
 	}
 }
+
+// The memo must never hand out its own buffer. Callers pass the result into
+// sjson helpers configured with ReplaceInPlace, which write through the slice
+// when a replacement value fits the existing span, so a shared buffer would let
+// one request's edit rewrite what every later cache hit sees.
+func TestNormalizeCodexFinalUpstreamBodyDoesNotShareCachedBuffer(t *testing.T) {
+	opts := codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	}
+	// A prompt_cache_key is present so the in-place branch is reachable, and
+	// the replacement below is the same length so sjson edits in place.
+	body := []byte(`{"model":"gpt-5","instructions":"x","stream":true,"store":false,` +
+		`"prompt_cache_key":"11111111-1111-1111-1111-111111111111",` +
+		`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+
+	// Populate the memo, then take a hit and snapshot what a hit looks like.
+	_ = normalizeCodexFinalUpstreamBody(body, "gpt-5", nil, opts)
+	first := normalizeCodexFinalUpstreamBody(body, "gpt-5", nil, opts)
+	expected := bytes.Clone(first)
+
+	// Perform the same in-place edit the request path performs.
+	edited := codexSetPromptCacheKey(first, "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")
+	if !bytes.Contains(edited, []byte("AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")) {
+		t.Fatal("edit did not apply; test no longer exercises the in-place path")
+	}
+
+	// A subsequent hit must be unaffected by that edit.
+	second := normalizeCodexFinalUpstreamBody(body, "gpt-5", nil, opts)
+	if !bytes.Equal(expected, second) {
+		t.Errorf("cached body was mutated by a downstream in-place edit\n want: %s\n got:  %s", expected, second)
+	}
+}
+
+// Two concurrent callers holding results for the same key must not alias, or
+// one request's rewrite would corrupt the other's in-flight payload.
+func TestNormalizeCodexFinalUpstreamBodyReturnsDistinctBuffers(t *testing.T) {
+	opts := codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	}
+	body := []byte(`{"model":"gpt-5","instructions":"y","stream":true,"store":false,` +
+		`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"distinct"}]}]}`)
+
+	_ = normalizeCodexFinalUpstreamBody(body, "gpt-5", nil, opts)
+	a := normalizeCodexFinalUpstreamBody(body, "gpt-5", nil, opts)
+	b := normalizeCodexFinalUpstreamBody(body, "gpt-5", nil, opts)
+
+	if len(a) == 0 || len(b) == 0 {
+		t.Fatal("expected non-empty normalized bodies")
+	}
+	if &a[0] == &b[0] {
+		t.Error("two cache hits share one backing array; an edit to either would corrupt the other")
+	}
+	if !bytes.Equal(a, b) {
+		t.Error("two cache hits for the same key returned different content")
+	}
+}

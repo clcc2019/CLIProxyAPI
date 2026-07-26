@@ -101,18 +101,30 @@ func (m *codexFinalUpstreamBodyMemo) get(baseModel string, authProvider string, 
 	return m.getWithHash(hash, baseModel, authProvider, opts, input)
 }
 
+// getWithHash returns a private copy of the cached output.
+//
+// The copy is not optional. Callers feed the result into sjson helpers
+// configured with ReplaceInPlace (see helps.optimisticJSONOptions), which write
+// through the slice whenever the replacement value fits the existing span — a
+// same-length prompt_cache_key, for instance. Handing out the memo's own buffer
+// would let one request's edit rewrite what every later cache hit observes,
+// leaking values across unrelated requests through a cache that is supposed to
+// be immutable.
+//
+// It is also cheap relative to what it protects: copying a cached body costs
+// ~4us against ~482us to recompute it, so under 1% of the memo's benefit.
 func (m *codexFinalUpstreamBodyMemo) getWithHash(hash uint64, baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
-	output := m.getSharedWithHash(hash, baseModel, authProvider, opts, input)
+	output := m.getEntryOutputWithHash(hash, baseModel, authProvider, opts, input)
 	if output == nil {
 		return nil
 	}
 	return bytes.Clone(output)
 }
 
-// getSharedWithHash returns the memo-owned immutable output. It is reserved for
-// the final request preparation path, whose downstream JSON edits always
-// allocate a new buffer and never write through the returned slice.
-func (m *codexFinalUpstreamBodyMemo) getSharedWithHash(hash uint64, baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
+// getEntryOutputWithHash returns the memo-owned buffer itself. It is unexported
+// and has exactly one caller — getWithHash — so that every path out of this
+// cache is a copy. Do not return its result to callers; see getWithHash.
+func (m *codexFinalUpstreamBodyMemo) getEntryOutputWithHash(hash uint64, baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
 	if m == nil || len(input) == 0 {
 		return nil
 	}
@@ -332,7 +344,7 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 	}
 	authProvider := codexFinalUpstreamBodyMemoAuthProvider(auth, baseModel)
 	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, authProvider, opts, body)
-	if cached := globalCodexFinalUpstreamBodyMemo.getSharedWithHash(hash, baseModel, authProvider, opts, body); cached != nil {
+	if cached := globalCodexFinalUpstreamBodyMemo.getWithHash(hash, baseModel, authProvider, opts, body); cached != nil {
 		return cached
 	}
 
