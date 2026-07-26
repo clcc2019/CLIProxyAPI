@@ -4,11 +4,6 @@
 package codex
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 )
 
@@ -56,29 +51,6 @@ func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
 func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "codex"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
-	}
-
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-
-	// Merge metadata using helper
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
-	if errMerge != nil {
-		return fmt.Errorf("failed to merge metadata: %w", errMerge)
-	}
-
-	if err = json.NewEncoder(f).Encode(data); err != nil {
-		return fmt.Errorf("failed to write token to file: %w", err)
-	}
-	return nil
-
+	return misc.SaveCredentialJSONAtomic(authFilePath, ts, ts.Metadata, "")
 }
