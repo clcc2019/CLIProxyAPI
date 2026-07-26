@@ -1,7 +1,7 @@
 package cache
 
 import (
-	"sort"
+	"container/heap"
 	"strings"
 	"sync"
 	"time"
@@ -223,22 +223,29 @@ func evictOldestCodexReasoningReplayEntries(count int) {
 	if count <= 0 || len(codexReasoningReplayEntries) == 0 {
 		return
 	}
-	type candidate struct {
-		key       string
-		timestamp time.Time
+	if count > len(codexReasoningReplayEntries) {
+		count = len(codexReasoningReplayEntries)
 	}
-	candidates := make([]candidate, 0, len(codexReasoningReplayEntries))
+
+	// Single-pass eviction: scan once and keep a max-heap of the `count` oldest
+	// entries by Timestamp. Sorting a snapshot of the whole map instead cost
+	// O(n log n) plus an n-sized allocation to discard all but `count` keys —
+	// all while holding codexReasoningReplayMu, which every Get/Set/Delete on
+	// this cache contends on. Mirrors enforceGroupEntryLimitLocked.
+	h := make(oldestHeap, 0, count)
 	for key, entry := range codexReasoningReplayEntries {
-		candidates = append(candidates, candidate{key: key, timestamp: entry.Timestamp})
+		if len(h) < count {
+			heap.Push(&h, oldestEntry{key: key, ts: entry.Timestamp})
+			continue
+		}
+		// h[0] is the *newest* among the oldest `count` seen so far (max-heap).
+		if entry.Timestamp.Before(h[0].ts) {
+			h[0] = oldestEntry{key: key, ts: entry.Timestamp}
+			heap.Fix(&h, 0)
+		}
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].timestamp.Before(candidates[j].timestamp)
-	})
-	if count > len(candidates) {
-		count = len(candidates)
-	}
-	for i := 0; i < count; i++ {
-		delete(codexReasoningReplayEntries, candidates[i].key)
+	for _, item := range h {
+		delete(codexReasoningReplayEntries, item.key)
 	}
 }
 

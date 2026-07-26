@@ -3,7 +3,9 @@ package cache
 import (
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func validCodexReasoningReplayEncryptedContentForTest(seed byte) string {
@@ -69,5 +71,77 @@ func TestCodexReasoningReplayCacheBatchEvictsWhenFull(t *testing.T) {
 	codexReasoningReplayMu.Unlock()
 	if gotLen >= CodexReasoningReplayCacheMaxEntries {
 		t.Fatalf("cache entries = %d, want batch eviction below max %d", gotLen, CodexReasoningReplayCacheMaxEntries)
+	}
+}
+
+// Eviction must remove exactly the N oldest entries by Timestamp — the heap
+// rewrite is only correct if it picks the same victims a full sort would.
+func TestEvictOldestCodexReasoningReplayEntriesRemovesOldest(t *testing.T) {
+	codexReasoningReplayMu.Lock()
+	defer codexReasoningReplayMu.Unlock()
+	codexReasoningReplayEntries = make(map[string]codexReasoningReplayEntry)
+
+	base := time.Now()
+	const total = 50
+	for i := 0; i < total; i++ {
+		codexReasoningReplayEntries[strconv.Itoa(i)] = codexReasoningReplayEntry{
+			Items:     [][]byte{[]byte(`{"type":"reasoning"}`)},
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+		}
+	}
+
+	const evict = 20
+	evictOldestCodexReasoningReplayEntries(evict)
+
+	if got := len(codexReasoningReplayEntries); got != total-evict {
+		t.Fatalf("entry count = %d, want %d", got, total-evict)
+	}
+	// Keys 0..evict-1 are the oldest and must be gone; evict..total-1 must stay.
+	for i := 0; i < total; i++ {
+		_, present := codexReasoningReplayEntries[strconv.Itoa(i)]
+		if wantPresent := i >= evict; present != wantPresent {
+			t.Errorf("key %d present=%v, want %v", i, present, wantPresent)
+		}
+	}
+}
+
+func TestEvictOldestCodexReasoningReplayEntriesBounds(t *testing.T) {
+	codexReasoningReplayMu.Lock()
+	defer codexReasoningReplayMu.Unlock()
+
+	// Evicting more than the cache holds must drain it, not panic.
+	codexReasoningReplayEntries = map[string]codexReasoningReplayEntry{
+		"a": {Timestamp: time.Now()},
+		"b": {Timestamp: time.Now()},
+	}
+	evictOldestCodexReasoningReplayEntries(10)
+	if got := len(codexReasoningReplayEntries); got != 0 {
+		t.Errorf("over-eviction left %d entries, want 0", got)
+	}
+
+	// Non-positive counts and an empty cache are no-ops.
+	codexReasoningReplayEntries = map[string]codexReasoningReplayEntry{"a": {Timestamp: time.Now()}}
+	evictOldestCodexReasoningReplayEntries(0)
+	evictOldestCodexReasoningReplayEntries(-1)
+	if got := len(codexReasoningReplayEntries); got != 1 {
+		t.Errorf("no-op eviction changed cache to %d entries, want 1", got)
+	}
+	codexReasoningReplayEntries = make(map[string]codexReasoningReplayEntry)
+	evictOldestCodexReasoningReplayEntries(5)
+}
+
+func BenchmarkEvictOldestCodexReasoningReplayEntries(b *testing.B) {
+	base := time.Now()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		codexReasoningReplayEntries = make(map[string]codexReasoningReplayEntry, CodexReasoningReplayCacheMaxEntries)
+		for j := 0; j <= CodexReasoningReplayCacheMaxEntries; j++ {
+			codexReasoningReplayEntries[strconv.Itoa(j)] = codexReasoningReplayEntry{
+				Timestamp: base.Add(time.Duration(j) * time.Millisecond),
+			}
+		}
+		b.StartTimer()
+		evictOldestCodexReasoningReplayEntries(CodexReasoningReplayCacheEvictBatchSize)
 	}
 }
