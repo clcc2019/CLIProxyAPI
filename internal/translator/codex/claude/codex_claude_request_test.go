@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -579,4 +580,39 @@ func validCodexReasoningSignature() string {
 	raw[0] = 0x80
 	raw[8] = 1
 	return base64.URLEncoding.EncodeToString(raw)
+}
+
+func benchClaudeRequest(messages int) []byte {
+	var b strings.Builder
+	b.WriteString(`{"model":"m","system":"sys","messages":[`)
+	for i := 0; i < messages; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		switch i % 3 {
+		case 0:
+			fmt.Fprintf(&b, `{"role":"user","content":[{"type":"text","text":"%s"}]}`, strings.Repeat("q ", 50))
+		case 1:
+			fmt.Fprintf(&b, `{"role":"assistant","content":[{"type":"tool_use","id":"call_%d","name":"run","input":{"cmd":"ls"}}]}`, i)
+		default:
+			fmt.Fprintf(&b, `{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_%d","content":"%s"}]}`, i-1, strings.Repeat("out ", 50))
+		}
+	}
+	b.WriteString(`],"tools":[{"name":"run","input_schema":{"type":"object"}}]}`)
+	return []byte(b.String())
+}
+
+// Codex replays the full transcript each turn, so this should scale linearly
+// with message count rather than quadratically.
+func BenchmarkConvertClaudeRequestToCodex(b *testing.B) {
+	for _, messages := range []int{25, 50, 100, 200} {
+		req := benchClaudeRequest(messages)
+		b.Run(fmt.Sprintf("messages=%d", messages), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = ConvertClaudeRequestToCodex("m", req, false)
+			}
+		})
+	}
 }

@@ -57,6 +57,15 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 
+		// Collect input items locally and install them in one write below.
+		// Appending each item with sjson "input.-1" instead rebuilt the entire
+		// template per item, so a conversation of n items copied O(n²) bytes —
+		// and Codex replays the whole transcript every turn.
+		inputItems := make([][]byte, 0, len(messageResults))
+		appendInputItem := func(item []byte) {
+			inputItems = append(inputItems, item)
+		}
+
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
@@ -76,7 +85,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 			flushMessage := func() {
 				if hasContent {
-					template, _ = sjson.SetRawBytes(template, "input.-1", message)
+					appendInputItem(message)
 					message = newMessage()
 					contentIndex = 0
 					hasContent = false
@@ -114,7 +123,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				flushMessage()
 				reasoningItem := []byte(`{"type":"reasoning","summary":[],"content":null}`)
 				reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", signature)
-				template, _ = sjson.SetRawBytes(template, "input.-1", reasoningItem)
+				appendInputItem(reasoningItem)
 			}
 
 			messageContentsResult := messageResult.Get("content")
@@ -156,11 +165,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						if callID != "" {
 							toolKindByCallID[callID] = toolKind
 						}
-						template, _ = sjson.SetRawBytes(template, "input.-1", codexClaudeToolUseToInputItem(messageContentResult, callID, toolUseName, toolKind, toolNameMap))
+						appendInputItem(codexClaudeToolUseToInputItem(messageContentResult, callID, toolUseName, toolKind, toolNameMap))
 					case "tool_result":
 						flushMessage()
 						callID := shortenCodexCallIDIfNeeded(messageContentResult.Get("tool_use_id").String())
-						template, _ = sjson.SetRawBytes(template, "input.-1", codexClaudeToolResultToInputItem(messageContentResult, callID, toolKindByCallID[callID]))
+						appendInputItem(codexClaudeToolResultToInputItem(messageContentResult, callID, toolKindByCallID[callID]))
 					}
 				}
 				flushMessage()
@@ -170,20 +179,27 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			}
 		}
 
+		if len(inputItems) > 0 {
+			template, _ = sjson.SetRawBytes(template, "input", codexRawJSONArray(inputItems))
+		}
 	}
 
 	// Convert tools declarations to the expected format for the Codex API.
 	toolsResult := rootResult.Get("tools")
 	if toolsResult.IsArray() {
+		// Establish the "tools" key before "tool_choice" so the emitted key
+		// order matches what downstream consumers have always seen; the real
+		// array replaces this placeholder in one write below.
 		template, _ = sjson.SetRawBytes(template, "tools", []byte(`[]`))
 		webSearchToolNames := buildClaudeWebSearchToolNameSet(toolsResult)
 		template, _ = sjson.SetRawBytes(template, "tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames))
 		toolResults := toolsResult.Array()
+		toolItems := make([][]byte, 0, len(toolResults))
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
 			if isClaudeWebSearchToolType(toolResult.Get("type").String()) {
-				template, _ = sjson.SetRawBytes(template, "tools.-1", convertClaudeWebSearchToolToCodex(toolResult))
+				toolItems = append(toolItems, convertClaudeWebSearchToolToCodex(toolResult))
 				continue
 			}
 			tool := []byte(toolResult.Raw)
@@ -204,8 +220,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			tool, _ = sjson.DeleteBytes(tool, "cache_control")
 			tool, _ = sjson.DeleteBytes(tool, "defer_loading")
 			tool, _ = sjson.SetBytes(tool, "strict", false)
-			template, _ = sjson.SetRawBytes(template, "tools.-1", tool)
+			toolItems = append(toolItems, tool)
 		}
+		template, _ = sjson.SetRawBytes(template, "tools", codexRawJSONArray(toolItems))
 	}
 
 	// Default to parallel tool calls unless tool_choice explicitly disables them.
@@ -605,6 +622,27 @@ func convertClaudeWebSearchToolToCodex(tool gjson.Result) []byte {
 		out, _ = sjson.SetRawBytes(out, "user_location", []byte(userLocation.Raw))
 	}
 	return out
+}
+
+// codexRawJSONArray joins pre-serialized JSON values into a single JSON array,
+// sizing the buffer up front. Building the array this way and installing it with
+// one sjson write costs a single copy of the payload, whereas appending each
+// element with an "input.-1"/"tools.-1" path rebuilds the whole document per
+// element.
+func codexRawJSONArray(items [][]byte) []byte {
+	size := 2 + len(items) // brackets plus separators
+	for _, item := range items {
+		size += len(item)
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	for i, item := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item...)
+	}
+	return append(out, ']')
 }
 
 // codexDataURL builds a "data:<mime>;base64,<data>" URL without fmt.Sprintf.
