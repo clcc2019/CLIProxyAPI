@@ -48,9 +48,30 @@ type ConvertCodexResponseToClaudeParams struct {
 }
 
 type pendingCodexFunctionCall struct {
-	CallID                    string
-	Arguments                 string
+	CallID string
+	// arguments accumulates the function-call argument deltas, which arrive one
+	// SSE event at a time. A strings.Builder appends in amortized O(1); the
+	// string concatenation this replaced re-copied everything accumulated so
+	// far on every event, making a tool call with a large argument payload
+	// (a diff, a file body) quadratic in the number of deltas.
+	arguments                 strings.Builder
 	HasReceivedArgumentsDelta bool
+}
+
+// appendArguments accumulates one argument delta.
+func (p *pendingCodexFunctionCall) appendArguments(delta string) {
+	p.arguments.WriteString(delta)
+}
+
+// setArguments replaces any accumulated arguments with s.
+func (p *pendingCodexFunctionCall) setArguments(s string) {
+	p.arguments.Reset()
+	p.arguments.WriteString(s)
+}
+
+// Arguments returns the accumulated function-call arguments.
+func (p *pendingCodexFunctionCall) Arguments() string {
+	return p.arguments.String()
 }
 
 // reverseToolNameMap returns the short→original tool name mapping for the
@@ -254,8 +275,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 					template = buildClaudeToolUseStart(blockIndex, id, name)
 					output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
 					params.HasToolCall = true
-					if pending.Arguments != "" {
-						inputRaw = pending.Arguments
+					if args := pending.Arguments(); args != "" {
+						inputRaw = args
 					}
 					if inputRaw != "{}" && inputRaw != "" {
 						template = buildClaudeInputJSONDelta(blockIndex, inputRaw)
@@ -304,7 +325,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.function_call_arguments.delta" {
 		if pending, _ := pendingCodexFunctionCallForKey(params, codexArgumentsFunctionCallKey(params, rootResult)); pending != nil {
 			pending.HasReceivedArgumentsDelta = true
-			pending.Arguments += rootResult.Get("delta").String()
+			pending.appendArguments(rootResult.Get("delta").String())
 			return [][]byte{output}
 		}
 		params.HasReceivedArgumentsDelta = true
@@ -314,7 +335,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.function_call_arguments.done" {
 		if pending, _ := pendingCodexFunctionCallForKey(params, codexArgumentsFunctionCallKey(params, rootResult)); pending != nil {
 			if !pending.HasReceivedArgumentsDelta {
-				pending.Arguments = rootResult.Get("arguments").String()
+				pending.setArguments(rootResult.Get("arguments").String())
 			}
 			return [][]byte{output}
 		}
@@ -644,8 +665,8 @@ func appendPendingCodexFunctionCallsFromTerminal(output []byte, params *ConvertC
 			deletePendingCodexFunctionCallAliases(params, keys)
 			return true
 		}
-		if pending.Arguments != "" {
-			inputRaw = pending.Arguments
+		if args := pending.Arguments(); args != "" {
+			inputRaw = args
 		}
 		blockIndex := params.BlockIndex
 		template := buildClaudeToolUseStart(blockIndex, id, name)

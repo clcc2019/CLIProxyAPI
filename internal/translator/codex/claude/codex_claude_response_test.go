@@ -1150,3 +1150,36 @@ func findClaudeStreamMessageDelta(outputs [][]byte) (gjson.Result, bool) {
 	}
 	return gjson.Result{}, false
 }
+
+func TestPendingCodexFunctionCallArguments(t *testing.T) {
+	var p pendingCodexFunctionCall
+
+	if got := p.Arguments(); got != "" {
+		t.Errorf("zero value Arguments() = %q, want empty", got)
+	}
+
+	// Deltas concatenate in arrival order.
+	p.appendArguments(`{"path":`)
+	p.appendArguments(`"a.go"`)
+	p.appendArguments(`}`)
+	if got, want := p.Arguments(), `{"path":"a.go"}`; got != want {
+		t.Errorf("after appends Arguments() = %q, want %q", got, want)
+	}
+
+	// Arguments() is non-destructive: the done-event handler reads it more
+	// than once across the tool_use start and delta emission.
+	if got, want := p.Arguments(), `{"path":"a.go"}`; got != want {
+		t.Errorf("second Arguments() = %q, want %q", got, want)
+	}
+
+	// setArguments replaces rather than appends (the arguments.done path).
+	p.setArguments(`{"replaced":true}`)
+	if got, want := p.Arguments(), `{"replaced":true}`; got != want {
+		t.Errorf("after setArguments Arguments() = %q, want %q", got, want)
+	}
+
+	p.setArguments("")
+	if got := p.Arguments(); got != "" {
+		t.Errorf("after setArguments(\"\") Arguments() = %q, want empty", got)
+	}
+}
