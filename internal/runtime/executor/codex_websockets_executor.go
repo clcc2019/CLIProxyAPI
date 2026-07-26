@@ -100,7 +100,16 @@ var globalCodexWebsocketSessionStore = &codexWebsocketSessionStore{
 }
 
 type codexWebsocketSession struct {
-	sessionID string
+	// sessionID and reuseKey identify which logical execution session this
+	// object is currently bound to. That binding is mutable: unparking rehomes
+	// a session (and its live connection) onto a new sessionID under
+	// sessionsMu, while resetSessionForReuseKey rebinds reuseKey under reqMu,
+	// and the readUpstreamLoop goroutine — which outlives a park — reads both
+	// under connMu or while holding no lock at all for logging. Four access
+	// paths guarded by three different mutexes provide no mutual exclusion, so
+	// these are atomics rather than plain fields; see setIdentity/sessionIDOf.
+	sessionIDValue atomic.Value
+	reuseKeyValue  atomic.Value
 
 	reqMu sync.Mutex
 
@@ -145,11 +154,48 @@ type codexWebsocketSession struct {
 	lastProbeUnixNano    atomic.Int64
 	openedUnixNano       atomic.Int64
 
-	reuseKey  string
 	parkTimer *time.Timer
 
 	upstreamDisconnectMu sync.Mutex
 	upstreamDisconnectCh chan error
+}
+
+// sessionID returns the execution session this object is currently bound to.
+func (s *codexWebsocketSession) sessionID() string {
+	if s == nil {
+		return ""
+	}
+	value, _ := s.sessionIDValue.Load().(string)
+	return value
+}
+
+// reuseKey returns the connection reuse key this object is currently bound to.
+func (s *codexWebsocketSession) reuseKey() string {
+	if s == nil {
+		return ""
+	}
+	value, _ := s.reuseKeyValue.Load().(string)
+	return value
+}
+
+func (s *codexWebsocketSession) setSessionID(sessionID string) {
+	if s != nil {
+		s.sessionIDValue.Store(sessionID)
+	}
+}
+
+func (s *codexWebsocketSession) setReuseKey(reuseKey string) {
+	if s != nil {
+		s.reuseKeyValue.Store(reuseKey)
+	}
+}
+
+// newCodexWebsocketSession builds a session bound to the given identity.
+func newCodexWebsocketSession(sessionID, reuseKey string) *codexWebsocketSession {
+	sess := &codexWebsocketSession{}
+	sess.setSessionID(sessionID)
+	sess.setReuseKey(reuseKey)
+	return sess
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
@@ -1384,11 +1430,11 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		if prepared.sess != nil {
 			prepared.sess.reqMu.Lock()
 			prepared.sessionLocked = true
-			if prepared.reuseKey != "" && prepared.sess.reuseKey != "" && prepared.sess.reuseKey != prepared.reuseKey {
+			if prepared.reuseKey != "" && prepared.sess.reuseKey() != "" && prepared.sess.reuseKey() != prepared.reuseKey {
 				e.resetSessionForReuseKey(prepared.sess, prepared.reuseKey, "reuse_key_changed")
 			}
-			if prepared.reuseKey != "" && prepared.sess.reuseKey == "" {
-				prepared.sess.reuseKey = prepared.reuseKey
+			if prepared.reuseKey != "" && prepared.sess.reuseKey() == "" {
+				prepared.sess.setReuseKey(prepared.reuseKey)
 			}
 			prepared.httpFallback = prepared.sess.httpFallbackActive()
 			if !prepared.httpFallback {
@@ -3045,7 +3091,7 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 	// orthogonal to park/unpark traffic which now has its own lock.
 	store.sessionsMu.RLock()
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
-		if reuseKey == "" || sess.reuseKey == reuseKey {
+		if reuseKey == "" || sess.reuseKey() == reuseKey {
 			store.sessionsMu.RUnlock()
 			return sess
 		}
@@ -3075,15 +3121,15 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey 
 				sess.parkTimer = nil
 			}
 			store.parkedMu.Unlock()
-			sess.sessionID = sessionID
-			sess.reuseKey = reuseKey
+			sess.setSessionID(sessionID)
+			sess.setReuseKey(reuseKey)
 			store.sessions[sessionID] = sess
 			store.sessionsMu.Unlock()
 			return sess
 		}
 		store.parkedMu.Unlock()
 	}
-	sess := &codexWebsocketSession{sessionID: sessionID, reuseKey: reuseKey}
+	sess := newCodexWebsocketSession(sessionID, reuseKey)
 	store.sessions[sessionID] = sess
 	store.sessionsMu.Unlock()
 	return sess
@@ -3094,7 +3140,7 @@ func (e *CodexWebsocketsExecutor) resetSessionForReuseKey(sess *codexWebsocketSe
 		return
 	}
 	reuseKey = strings.TrimSpace(reuseKey)
-	if reuseKey == "" || sess.reuseKey == reuseKey {
+	if reuseKey == "" || sess.reuseKey() == reuseKey {
 		return
 	}
 	reason = strings.TrimSpace(reason)
@@ -3106,7 +3152,7 @@ func (e *CodexWebsocketsExecutor) resetSessionForReuseKey(sess *codexWebsocketSe
 	conn := sess.conn
 	authID := sess.authID
 	wsURL := sess.wsURL
-	sessionID := sess.sessionID
+	sessionID := sess.sessionID()
 	sess.conn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
@@ -3116,7 +3162,7 @@ func (e *CodexWebsocketsExecutor) resetSessionForReuseKey(sess *codexWebsocketSe
 	sess.proxyPolicy = ""
 	sess.connMu.Unlock()
 
-	sess.reuseKey = reuseKey
+	sess.setReuseKey(reuseKey)
 	sess.forceHTTPFallback.Store(false)
 	sess.turnState.Store("")
 	sess.turnStateScope.Store("")
@@ -3214,7 +3260,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	proxyPolicy := codexWebsocketProxyPolicyFingerprint(e.cfg, auth)
 
 	if staleConn, staleAuthID, staleWSURL, reason := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, proxyPolicy); staleConn != nil {
-		logCodexWebsocketDisconnected(sess.sessionID, staleAuthID, staleWSURL, reason, nil)
+		logCodexWebsocketDisconnected(sess.sessionID(), staleAuthID, staleWSURL, reason, nil)
 		if errClose := staleConn.Close(); errClose != nil {
 			log.Errorf("codex websockets executor: close stale websocket error: %v", errClose)
 		}
@@ -3279,7 +3325,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.markOpened(time.Now())
 	sess.markProbe(time.Now())
 	go e.readUpstreamLoop(sess, conn)
-	logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
+	logCodexWebsocketConnected(sess.sessionID(), authID, wsURL)
 	return conn, resp, nil
 }
 
@@ -3370,7 +3416,7 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 	current := sess.conn
 	authID := sess.authID
 	wsURL := sess.wsURL
-	sessionID := sess.sessionID
+	sessionID := sess.sessionID()
 	if current == nil || current != conn {
 		sess.connMu.Unlock()
 		return
@@ -3441,7 +3487,7 @@ func (e *CodexWebsocketsExecutor) ResetExecutionSession(sessionID string) {
 
 	store.parkedMu.Lock()
 	for reuseKey, sess := range store.parked {
-		if sess == nil || strings.TrimSpace(sess.sessionID) != sessionID {
+		if sess == nil || strings.TrimSpace(sess.sessionID()) != sessionID {
 			continue
 		}
 		delete(store.parked, reuseKey)
@@ -3515,7 +3561,7 @@ func (e *CodexWebsocketsExecutor) parkExecutionSession(sess *codexWebsocketSessi
 	if sess.httpFallbackActive() {
 		return false
 	}
-	reuseKey := strings.TrimSpace(sess.reuseKey)
+	reuseKey := strings.TrimSpace(sess.reuseKey())
 	if reuseKey == "" {
 		return false
 	}
@@ -3619,7 +3665,7 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
-	sessionID := sess.sessionID
+	sessionID := sess.sessionID()
 	sess.connMu.Unlock()
 
 	if conn == nil {

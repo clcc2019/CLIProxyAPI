@@ -492,7 +492,7 @@ func TestPrepareCodexWebsocketRequestBuildsSharedRequestState(t *testing.T) {
 	if got := prepared.wsHeaders.Get(codexHeaderWindowID); got != "session-1:0" {
 		t.Fatalf("%s = %q, want %q", codexHeaderWindowID, got, "session-1:0")
 	}
-	if prepared.sess == nil || prepared.sess.sessionID != "session-1" {
+	if prepared.sess == nil || prepared.sess.sessionID() != "session-1" {
 		t.Fatalf("session = %#v, want session-1", prepared.sess)
 	}
 }
@@ -546,8 +546,8 @@ func TestPrepareCodexWebsocketRequestBuildsReusableKeyForPromptCache(t *testing.
 	if prepared.sess == nil {
 		t.Fatal("expected session to be created")
 	}
-	if prepared.sess.reuseKey != wantReuseKey {
-		t.Fatalf("session reuseKey = %q, want %q", prepared.sess.reuseKey, wantReuseKey)
+	if prepared.sess.reuseKey() != wantReuseKey {
+		t.Fatalf("session reuseKey = %q, want %q", prepared.sess.reuseKey(), wantReuseKey)
 	}
 }
 
@@ -855,7 +855,7 @@ func TestPrepareCodexWebsocketRequestClearsIncrementalStateWhenReuseKeyChanges(t
 		newCacheKey+":0",
 		codexWebsocketProxyPolicyFingerprint(executor.cfg, auth),
 	)
-	if got := prepared.sess.reuseKey; got != wantReuseKey {
+	if got := prepared.sess.reuseKey(); got != wantReuseKey {
 		t.Fatalf("session reuseKey = %q, want new cache key", got)
 	}
 	if got := prepared.sess.lastResponseID; got != "" {
@@ -2672,7 +2672,7 @@ func TestEnsureUpstreamConnRedialsRecentlyActiveBrokenConnection(t *testing.T) {
 	}
 
 	executor := NewCodexWebsocketsExecutor(nil)
-	sess := &codexWebsocketSession{sessionID: "session-redial"}
+	sess := newCodexWebsocketSession("session-redial", "")
 	sess.conn = staleConn
 	sess.readerConn = staleConn
 	sess.lastActivityUnixNano.Store(time.Now().UnixNano())
@@ -2755,7 +2755,7 @@ func TestEnsureUpstreamConnRequiresPongBeforeIdleReuse(t *testing.T) {
 
 			wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 			executor := NewCodexWebsocketsExecutor(nil)
-			sess := &codexWebsocketSession{sessionID: "session-idle-probe"}
+			sess := newCodexWebsocketSession("session-idle-probe", "")
 			defer closeCodexWebsocketSession(sess, "test_cleanup")
 
 			firstConn, _, err := executor.ensureUpstreamConn(context.Background(), nil, sess, "auth-1", wsURL, http.Header{})
@@ -2865,8 +2865,8 @@ func TestCloseExecutionSessionParksReusableSessionAndReattaches(t *testing.T) {
 	if sess2 != sess1 {
 		t.Fatal("expected parked session to be reattached")
 	}
-	if sess2.sessionID != "exec-2" {
-		t.Fatalf("sessionID = %q, want exec-2", sess2.sessionID)
+	if sess2.sessionID() != "exec-2" {
+		t.Fatalf("sessionID = %q, want exec-2", sess2.sessionID())
 	}
 
 	reusedConn, _, err := executor.ensureUpstreamConn(context.Background(), nil, sess2, "auth-1", wsURL, http.Header{})
@@ -5396,10 +5396,7 @@ func TestCodexWebsocketParkExecutionSessionCapsParkedSessions(t *testing.T) {
 	})
 
 	for i := 0; i < codexResponsesWebsocketMaxParked+2; i++ {
-		sess := &codexWebsocketSession{
-			sessionID: fmt.Sprintf("session-%d", i),
-			reuseKey:  fmt.Sprintf("reuse-%d", i),
-		}
+		sess := newCodexWebsocketSession(fmt.Sprintf("session-%d", i), fmt.Sprintf("reuse-%d", i))
 		sess.lastActivityUnixNano.Store(int64(i + 1))
 		if !executor.parkExecutionSession(sess) {
 			t.Fatalf("parkExecutionSession(%d) = false, want true", i)
@@ -5429,10 +5426,7 @@ func TestCodexWebsocketParkExecutionSessionSkipsExpiringSession(t *testing.T) {
 		executor.closeAllExecutionSessions("test_cleanup")
 	})
 
-	sess := &codexWebsocketSession{
-		sessionID: "session-expiring",
-		reuseKey:  "reuse-expiring",
-	}
+	sess := newCodexWebsocketSession("session-expiring", "reuse-expiring")
 	sess.markOpened(time.Now().Add(-codexResponsesWebsocketMaxLifetime + codexResponsesWebsocketParkTTL/2))
 
 	if executor.parkExecutionSession(sess) {

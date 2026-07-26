@@ -469,7 +469,7 @@ func TestCodexWebsocketReconnectRefreshesAssertionAndRotatesInvalidTask(t *testi
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 
 	executor := NewCodexWebsocketsExecutor(nil)
-	sess := &codexWebsocketSession{sessionID: "agent-reconnect"}
+	sess := newCodexWebsocketSession("agent-reconnect", "")
 	headers := http.Header{"Authorization": {"AgentAssertion stale-must-not-be-reused"}}
 	var readCh chan codexWebsocketRead
 	conn, _, err := executor.retrySessionWebsocketRequestWithReason(
