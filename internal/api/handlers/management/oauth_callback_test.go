@@ -52,6 +52,40 @@ func TestPostOAuthCallbackCreatesMissingAuthDir(t *testing.T) {
 	}
 }
 
+func TestPostOAuthCallbackAcceptsCallbackURLWithoutScheme(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	state := "callback-without-scheme"
+	RegisterOAuthSession(state, "codex")
+	defer CompleteOAuthSession(state)
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	router := gin.New()
+	router.POST("/v0/management/oauth-callback", h.PostOAuthCallback)
+
+	body := `{"provider":"codex","redirect_url":"localhost:1455/auth/callback?state=callback-without-scheme&code=test-code"}`
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/oauth-callback", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	data, errRead := os.ReadFile(filepath.Join(authDir, ".oauth-codex-"+state+".oauth"))
+	if errRead != nil {
+		t.Fatalf("read callback file: %v", errRead)
+	}
+	var payload oauthCallbackFilePayload
+	if errUnmarshal := json.Unmarshal(data, &payload); errUnmarshal != nil {
+		t.Fatalf("decode callback file: %v", errUnmarshal)
+	}
+	if payload.State != state || payload.Code != "test-code" {
+		t.Fatalf("unexpected callback payload: %+v", payload)
+	}
+}
+
 func TestWriteOAuthCallbackFileForPendingSessionCreatesMissingAuthDirForCallbackProviders(t *testing.T) {
 	providers := []string{"anthropic", "codex", "xai"}
 	for _, provider := range providers {
@@ -103,6 +137,27 @@ func TestWaitForOAuthCallbackFileReadsAndRemovesPayload(t *testing.T) {
 	}
 	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
 		t.Fatalf("callback file stat error = %v, want not exist", errStat)
+	}
+}
+
+func TestWaitForOAuthCallbackFileRejectsMalformedPayloadWithoutDeletingIt(t *testing.T) {
+	authDir := t.TempDir()
+	state := "malformed-callback-state"
+	RegisterOAuthSession(state, "codex")
+	defer CompleteOAuthSession(state)
+
+	fileName := ".oauth-codex-" + state + ".oauth"
+	path := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(path, []byte(`{"code":`), 0o600); errWrite != nil {
+		t.Fatalf("write malformed callback: %v", errWrite)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	if _, errWait := h.waitForOAuthCallbackFile("codex", state, fileName, time.Second); errWait == nil {
+		t.Fatal("waitForOAuthCallbackFile succeeded for malformed payload")
+	}
+	if _, errStat := os.Stat(path); errStat != nil {
+		t.Fatalf("malformed callback file should remain for diagnosis: %v", errStat)
 	}
 }
 

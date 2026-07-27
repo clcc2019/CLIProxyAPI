@@ -220,6 +220,34 @@ func TestOAuthCallbackRouteWritesPendingSessionFile(t *testing.T) {
 	}
 }
 
+func TestOAuthCallbackRouteReportsCallbackPersistenceFailure(t *testing.T) {
+	server := newTestServer(t)
+	state := "server-callback-write-failure"
+	managementHandlers.RegisterOAuthSession(state, "codex")
+	t.Cleanup(func() { managementHandlers.CompleteOAuthSession(state) })
+
+	blockedAuthDir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedAuthDir, []byte("blocked"), 0o600); err != nil {
+		t.Fatalf("create blocking auth path: %v", err)
+	}
+	server.cfg.AuthDir = blockedAuthDir
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/callback?state="+state+"&code=test-code", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusInternalServerError, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "could not be saved") {
+		t.Fatalf("failure response did not explain callback persistence failure: %s", rr.Body.String())
+	}
+	_, status, completed, ok := managementHandlers.GetOAuthSessionDetails(state)
+	if !ok || completed || status != "Failed to persist OAuth callback" {
+		t.Fatalf("unexpected OAuth session after failed callback: status=%q completed=%t ok=%t", status, completed, ok)
+	}
+}
+
 func TestNewServer_ConfiguresInboundHTTPServerLimits(t *testing.T) {
 	server := newTestServer(t)
 

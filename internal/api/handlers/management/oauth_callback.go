@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -46,22 +47,26 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	errMsg := strings.TrimSpace(req.Error)
 
 	if rawRedirect := strings.TrimSpace(req.RedirectURL); rawRedirect != "" {
-		u, errParse := url.Parse(rawRedirect)
+		callback, errParse := parseOAuthCallbackRedirect(rawRedirect)
 		if errParse != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid redirect_url"})
-			return
-		}
-		q := u.Query()
-		if state == "" {
-			state = strings.TrimSpace(q.Get("state"))
-		}
-		if code == "" {
-			code = strings.TrimSpace(q.Get("code"))
-		}
-		if errMsg == "" {
-			errMsg = strings.TrimSpace(q.Get("error"))
+			// Explicit callback fields are authoritative, so an optional
+			// redirect_url without OAuth parameters must not discard them.
+			if state == "" || (code == "" && errMsg == "") {
+				c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid redirect_url"})
+				return
+			}
+		} else {
+			if state == "" {
+				state = callback.State
+			}
+			if code == "" {
+				code = callback.Code
+			}
 			if errMsg == "" {
-				errMsg = strings.TrimSpace(q.Get("error_description"))
+				errMsg = callback.Error
+				if errMsg == "" {
+					errMsg = callback.ErrorDescription
+				}
 			}
 		}
 	}
@@ -113,4 +118,40 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// parseOAuthCallbackRedirect accepts the same callback forms as the CLI
+// (including a host:port URL pasted without a scheme). A state-only callback
+// is also useful when code/error was supplied in a separate request field.
+func parseOAuthCallbackRedirect(input string) (*misc.OAuthCallback, error) {
+	callback, callbackErr := misc.ParseOAuthCallback(input)
+	if callbackErr == nil {
+		return callback, nil
+	}
+
+	candidate := strings.TrimSpace(input)
+	if !strings.Contains(candidate, "://") {
+		if strings.HasPrefix(candidate, "?") {
+			candidate = "http://localhost" + candidate
+		} else if strings.ContainsAny(candidate, "/?#") || strings.Contains(candidate, ":") {
+			candidate = "http://" + candidate
+		} else if strings.Contains(candidate, "=") {
+			candidate = "http://localhost/?" + candidate
+		}
+	}
+	parsedURL, errParse := url.Parse(candidate)
+	if errParse != nil {
+		return nil, callbackErr
+	}
+
+	state := strings.TrimSpace(parsedURL.Query().Get("state"))
+	if state == "" && parsedURL.Fragment != "" {
+		if fragment, errFragment := url.ParseQuery(parsedURL.Fragment); errFragment == nil {
+			state = strings.TrimSpace(fragment.Get("state"))
+		}
+	}
+	if state == "" {
+		return nil, callbackErr
+	}
+	return &misc.OAuthCallback{State: state}, nil
 }

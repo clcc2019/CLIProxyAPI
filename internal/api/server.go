@@ -40,6 +40,7 @@ import (
 )
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+const oauthCallbackFailureHTML = `<html><head><meta charset="utf-8"><title>Authentication failed</title></head><body><h1>Authentication callback could not be saved.</h1><p>Return to CLIProxyAPI and start the sign-in process again.</p></body></html>`
 
 const (
 	inboundReadHeaderTimeout = 30 * time.Second
@@ -504,8 +505,17 @@ func (s *Server) oauthCallbackRouteHandler(provider string) gin.HandlerFunc {
 		if errStr == "" {
 			errStr = c.Query("error_description")
 		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, provider, state, code, errStr)
+		if state == "" || (code == "" && errStr == "") {
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.String(http.StatusBadRequest, oauthCallbackFailureHTML)
+			return
+		}
+		if _, err := managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, provider, state, code, errStr); err != nil {
+			log.WithError(err).WithFields(log.Fields{"provider": provider, "state": state}).Error("failed to persist OAuth callback")
+			managementHandlers.SetOAuthSessionError(state, "Failed to persist OAuth callback")
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.String(http.StatusInternalServerError, oauthCallbackFailureHTML)
+			return
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)

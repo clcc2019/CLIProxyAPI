@@ -74,10 +74,28 @@ func (h *Handler) waitForOAuthCallbackFile(provider, state, fileName string, tim
 		authDir := h.authDirSnapshot()
 		data, errRead := readAuthDirFileAt(authDir, fileName)
 		if errRead == nil {
-			var payload map[string]string
-			_ = json.Unmarshal(data, &payload)
+			var payload oauthCallbackFilePayload
+			if errDecode := json.Unmarshal(data, &payload); errDecode != nil {
+				return nil, fmt.Errorf("decode OAuth callback: %w", errDecode)
+			}
+			payload.Code = strings.TrimSpace(payload.Code)
+			payload.State = strings.TrimSpace(payload.State)
+			payload.Error = strings.TrimSpace(payload.Error)
+			if payload.State == "" {
+				return nil, fmt.Errorf("OAuth callback is missing state")
+			}
+			if payload.Code == "" && payload.Error == "" {
+				return nil, fmt.Errorf("OAuth callback is missing code or error")
+			}
 			_ = os.Remove(filepath.Join(authDir, fileName))
-			return payload, nil
+			return map[string]string{
+				"code":  payload.Code,
+				"state": payload.State,
+				"error": payload.Error,
+			}, nil
+		}
+		if !errors.Is(errRead, os.ErrNotExist) {
+			return nil, fmt.Errorf("read OAuth callback: %w", errRead)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -203,7 +221,6 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 		fmt.Println("You can now use Claude services through this CLI")
 		CompleteOAuthSession(state)
-		CompleteOAuthSessionsByProvider("anthropic")
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
@@ -352,7 +369,6 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 		fmt.Println("You can now use Codex services through this CLI")
 		CompleteOAuthSession(state)
-		CompleteOAuthSessionsByProvider("codex")
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
@@ -519,7 +535,6 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		}
 
 		CompleteOAuthSession(state)
-		CompleteOAuthSessionsByProvider("xai")
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use xAI services through this CLI")
 	}()
@@ -598,7 +613,6 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use Kimi services through this CLI")
 		CompleteOAuthSession(state)
-		CompleteOAuthSessionsByProvider("kimi")
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})

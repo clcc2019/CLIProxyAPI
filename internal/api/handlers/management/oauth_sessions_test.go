@@ -32,6 +32,21 @@ func TestOAuthSessionStoreCompletionIsRetainedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestOAuthSessionStoreCompletionDoesNotCancelOtherProviderSessions(t *testing.T) {
+	store := newOAuthSessionStore(time.Minute)
+	store.Register("first-codex-state", "codex")
+	store.Register("second-codex-state", "codex")
+
+	store.Complete("first-codex-state")
+
+	if store.IsPending("first-codex-state", "codex") {
+		t.Fatal("completed OAuth session remained pending")
+	}
+	if !store.IsPending("second-codex-state", "codex") {
+		t.Fatal("completing one OAuth session cancelled another pending session")
+	}
+}
+
 func TestGetOAuthSessionHidesCompletedSession(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
 	replaceOAuthSessionStoreForTest(t, store)

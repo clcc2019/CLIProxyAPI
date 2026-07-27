@@ -1,14 +1,14 @@
 package management
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 )
 
 const (
@@ -300,19 +300,15 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
 	filePath := filepath.Join(authDir, fileName)
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		return "", fmt.Errorf("create oauth callback dir: %w", err)
-	}
 	payload := oauthCallbackFilePayload{
 		Code:  strings.TrimSpace(code),
 		State: strings.TrimSpace(state),
 		Error: strings.TrimSpace(errorMessage),
 	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal oauth callback payload: %w", err)
-	}
-	if err := os.WriteFile(filePath, data, 0o600); err != nil {
+	// The waiter polls for this file concurrently. Publish it atomically so it
+	// can never consume an empty or partially-written callback and fail the
+	// subsequent token exchange.
+	if err := misc.WriteCredentialJSONAtomic(filePath, payload, ""); err != nil {
 		return "", fmt.Errorf("write oauth callback file: %w", err)
 	}
 	return filePath, nil
