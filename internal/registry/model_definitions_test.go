@@ -115,6 +115,7 @@ func TestStaticProviderModelsIncludeLatestSyncedModels(t *testing.T) {
 		models []*ModelInfo
 		id     string
 	}{
+		{name: "claude opus 5", models: GetClaudeModels(), id: "claude-opus-5"},
 		{name: "claude sonnet 5", models: GetClaudeModels(), id: "claude-sonnet-5"},
 		{name: "claude fable 5", models: GetClaudeModels(), id: "claude-fable-5"},
 		{name: "codex plus spark", models: GetCodexPlusModels(), id: "gpt-5.3-codex-spark"},
@@ -272,6 +273,22 @@ func TestParseCodexClientModelCatalogPreservesEmbeddedCapabilitiesWhenRemoteFiel
 		if got.ServiceTiers[i] != want.ServiceTiers[i] {
 			t.Fatalf("partial remote service tiers = %#v, want %#v", got.ServiceTiers, want.ServiceTiers)
 		}
+	}
+}
+
+func TestParseCodexClientModelCatalogAcceptsStandardOpenAIList(t *testing.T) {
+	models, err := ParseCodexClientModelCatalog([]byte(`{"object":"list","data":[{"id":"gpt-5.6-sol","object":"model"},{"id":"  "},{"id":"custom-codex-model"}]}`), GetCodexProModels())
+	if err != nil {
+		t.Fatalf("ParseCodexClientModelCatalog: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("model count = %d, want 2", len(models))
+	}
+	if models[0].ID != "gpt-5.6-sol" || models[1].ID != "custom-codex-model" {
+		t.Fatalf("model IDs = %q, %q", models[0].ID, models[1].ID)
+	}
+	if models[0].CodexCapabilities == nil {
+		t.Fatal("known model should retain embedded Codex capabilities")
 	}
 }
 

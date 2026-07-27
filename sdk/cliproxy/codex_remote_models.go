@@ -35,10 +35,10 @@ func (s *Service) refreshCodexRemoteCatalog(ctx context.Context, auth *coreauth.
 	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.Disabled {
 		return nil
 	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || codexServiceAuthIsAPIKey(auth) {
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
-	if !codexServiceHasAccessToken(auth) && !codexServiceAuthIsAgentIdentity(auth) {
+	if !codexServiceHasAccessToken(auth) && !codexServiceAuthIsAgentIdentity(auth) && !codexServiceAuthIsAPIKey(auth) {
 		return nil
 	}
 	baseURL := codexServiceBaseURL(auth)

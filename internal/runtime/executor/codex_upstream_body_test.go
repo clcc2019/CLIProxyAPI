@@ -106,6 +106,49 @@ func TestNormalizeCodexFinalUpstreamBody_DefaultsNullResponsesInputToArray(t *te
 	}
 }
 
+func TestNormalizeCodexFinalUpstreamBody_NormalizesCompatibilityInputShapes(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantCount int
+		wantText  string
+	}{
+		{name: "string", input: `"hello world"`, wantCount: 1, wantText: "hello world"},
+		{name: "whitespace string", input: `"  "`, wantCount: 0},
+		{name: "single message object", input: `{"type":"message","role":"user","content":"hello object"}`, wantCount: 1, wantText: "hello object"},
+		{name: "array", input: `[{"type":"message","role":"user","content":"already an array"}]`, wantCount: 1, wantText: "already an array"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"client-alias","input":` + tt.input + `}`)
+			gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+				requestKind:                 codexFinalUpstreamResponses,
+				streamMode:                  codexStreamFieldTrue,
+				store:                       false,
+				suppressDefaultInstructions: true,
+			})
+
+			input := gjson.GetBytes(gotBody, "input")
+			if !input.IsArray() {
+				t.Fatalf("input should be an array; body=%s", gotBody)
+			}
+			if got := len(input.Array()); got != tt.wantCount {
+				t.Fatalf("input length = %d, want %d; body=%s", got, tt.wantCount, gotBody)
+			}
+			if tt.wantText == "" {
+				return
+			}
+			if got := input.Get("0.content").String(); got != tt.wantText {
+				t.Fatalf("input text = %q, want %q; body=%s", got, tt.wantText, gotBody)
+			}
+			if got := input.Get("0.role").String(); got != "user" {
+				t.Fatalf("input role = %q, want user; body=%s", got, gotBody)
+			}
+		})
+	}
+}
+
 func TestCodexMatchesAzureResponsesBaseURL(t *testing.T) {
 	tests := []struct {
 		name string

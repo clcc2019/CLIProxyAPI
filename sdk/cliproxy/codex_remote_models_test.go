@@ -105,6 +105,44 @@ func TestRefreshCodexRemoteCatalogUsesAccountScopedModels(t *testing.T) {
 	}
 }
 
+func TestRefreshCodexRemoteCatalogUsesStandardOpenAIListForAPIKeyAuth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if got := req.URL.Path; got != "/models" {
+			t.Errorf("path = %q, want /models", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-5.6-sol"},{"id":"custom-codex-model"}]}`))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexRemoteModelsTestExecutor{})
+	service := &Service{coreManager: manager}
+	auth := &coreauth.Auth{
+		ID:       "auth-api-key-catalog",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "sk-test",
+			"base_url":  server.URL,
+		},
+	}
+	if err := service.refreshCodexRemoteCatalog(context.Background(), auth); err != nil {
+		t.Fatalf("refreshCodexRemoteCatalog: %v", err)
+	}
+
+	models := service.codexModelsFromRemoteCatalog(auth, registry.GetCodexProModels())
+	ids := make(map[string]bool, len(models))
+	for _, model := range models {
+		if model != nil {
+			ids[model.ID] = true
+		}
+	}
+	if !ids["gpt-5.6-sol"] || !ids["custom-codex-model"] {
+		t.Fatalf("remote API-key models should retain both discovered IDs: %#v", models)
+	}
+}
+
 func TestCodexRemoteCatalogDoesNotCrossAuthSourceChanges(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

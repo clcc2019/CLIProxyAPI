@@ -2662,6 +2662,13 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 	return dialer
 }
 
+// NewProxyAwareWebsocketDialer returns a WebSocket dialer that honors the
+// credential-level and global proxy settings used by upstream executors. It is
+// shared by raw WebSocket endpoints whose protocol is not a Responses stream.
+func NewProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
+	return newProxyAwareWebsocketDialer(cfg, auth)
+}
+
 func codexWebsocketDialerCacheKey(cfg *config.Config, auth *cliproxyauth.Auth) string {
 	return codexWebsocketProxyPolicyFingerprint(cfg, auth) + "\x00" + misc.CustomRootCAsEnvFingerprint()
 }

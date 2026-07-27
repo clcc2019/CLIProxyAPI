@@ -328,6 +328,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	body = codexEnsureFinalUpstreamBodyDefaults(body, capabilities, capabilitiesKnown, opts)
 	body = normalizeCodexFinalUpstreamTools(body)
 	body = normalizeCodexFinalUpstreamText(body, &capabilities)
+	body = normalizeCodexFinalUpstreamInputShape(body)
 	body = normalizeCodexFinalUpstreamInputItems(body, opts)
 	body = normalizeCodexFinalUpstreamInputItemIDs(body, opts)
 	body = normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body, auth)
@@ -473,6 +474,46 @@ func normalizeCodexFinalUpstreamInputItems(body []byte, opts codexFinalUpstreamB
 		return codexcommon.NormalizeResponseInputItems(body)
 	}
 	return codexcommon.NormalizeFullTranscriptResponseInputItems(body)
+}
+
+// normalizeCodexFinalUpstreamInputShape makes compatibility input forms valid
+// for the Codex Responses upstream, which requires input to be an array.
+func normalizeCodexFinalUpstreamInputShape(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || input.IsArray() || input.Type == gjson.Null {
+		return body
+	}
+
+	var normalized []byte
+	switch {
+	case input.Type == gjson.String:
+		text := input.String()
+		if strings.TrimSpace(text) == "" {
+			normalized = []byte("[]")
+		} else {
+			encodedText, err := json.Marshal(text)
+			if err != nil {
+				return body
+			}
+			normalized = make([]byte, 0, len(encodedText)+48)
+			normalized = append(normalized, `[{"type":"message","role":"user","content":`...)
+			normalized = append(normalized, encodedText...)
+			normalized = append(normalized, '}', ']')
+		}
+	case input.IsObject():
+		normalized = make([]byte, 0, len(input.Raw)+2)
+		normalized = append(normalized, '[')
+		normalized = append(normalized, input.Raw...)
+		normalized = append(normalized, ']')
+	default:
+		return body
+	}
+
+	updated, err := helps.SetRawJSONBytes(body, "input", normalized)
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 func normalizeCodexFinalUpstreamInputItemIDs(body []byte, opts codexFinalUpstreamBodyOptions) []byte {

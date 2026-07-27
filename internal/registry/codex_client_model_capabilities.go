@@ -9,6 +9,14 @@ import (
 
 type codexClientModelCapabilityPayload struct {
 	Models []codexClientModelCapability `json:"models"`
+	Data   []codexClientModelListEntry  `json:"data"`
+}
+
+// codexClientModelListEntry is the subset returned by the standard OpenAI
+// GET /v1/models response. Custom API-key upstreams commonly expose this
+// envelope instead of Codex's richer models/slug catalog.
+type codexClientModelListEntry struct {
+	ID string `json:"id"`
 }
 
 type codexClientModelCapability struct {
@@ -52,6 +60,14 @@ func ParseCodexClientModelCatalog(data []byte, fallback []*ModelInfo) ([]*ModelI
 	var payload codexClientModelCapabilityPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, fmt.Errorf("parse Codex model catalog: %w", err)
+	}
+	if payload.Models == nil && len(payload.Data) > 0 {
+		payload.Models = make([]codexClientModelCapability, 0, len(payload.Data))
+		for _, entry := range payload.Data {
+			if id := strings.TrimSpace(entry.ID); id != "" {
+				payload.Models = append(payload.Models, codexClientModelCapability{Slug: id})
+			}
+		}
 	}
 
 	fallbackByID := make(map[string]*ModelInfo, len(fallback))

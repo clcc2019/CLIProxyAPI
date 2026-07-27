@@ -30,6 +30,28 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+func TestClaudeBaseModelNormalizesClaudeCodeLongContextSuffix(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "lowercase suffix", model: "claude-opus-5[1m]", want: "claude-opus-5"},
+		{name: "uppercase suffix", model: "claude-opus-5[1M]", want: "claude-opus-5"},
+		{name: "duplicated suffix", model: "claude-opus-5[1m][1M]", want: "claude-opus-5"},
+		{name: "thinking suffix", model: "claude-opus-5[1m](high)", want: "claude-opus-5"},
+		{name: "selector in the middle", model: "claude-opus-5[1m]-preview", want: "claude-opus-5[1m]-preview"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := claudeBaseModel(tt.model); got != tt.want {
+				t.Fatalf("claudeBaseModel(%q) = %q, want %q", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
 func resetClaudeDeviceProfileCache() {
 	helps.ResetClaudeDeviceProfileCache()
 }

@@ -49,6 +49,7 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 - OAuthログインによるGrok Buildサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
 - ストリーミング、非ストリーミング、および対応環境でのWebSocketレスポンス
+- 設定済みの OpenAI 互換プロバイダー向け `GET /v1/realtime?model=...` GPT Realtime WebSocket プロキシ
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
 - ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、Grok）

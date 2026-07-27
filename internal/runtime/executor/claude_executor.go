@@ -44,6 +44,20 @@ type ClaudeExecutor struct {
 	cfg *config.Config
 }
 
+const claudeCodeLongContextModelSuffix = "[1m]"
+
+// claudeBaseModel removes Claude Code's client-side [1m] context selector
+// before routing to an upstream, including duplicate selectors leaked by a
+// forwarding chain.
+func claudeBaseModel(model string) string {
+	baseModel := thinking.ParseSuffix(model).ModelName
+	for len(baseModel) > len(claudeCodeLongContextModelSuffix) &&
+		strings.EqualFold(baseModel[len(baseModel)-len(claudeCodeLongContextModelSuffix):], claudeCodeLongContextModelSuffix) {
+		baseModel = baseModel[:len(baseModel)-len(claudeCodeLongContextModelSuffix)]
+	}
+	return baseModel
+}
+
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
 // Previously "proxy_" was used but this is a detectable fingerprint difference.
 const claudeToolPrefix = ""
@@ -172,7 +186,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := claudeBaseModel(req.Model)
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -362,7 +376,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := claudeBaseModel(req.Model)
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -603,7 +617,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 }
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := claudeBaseModel(req.Model)
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {

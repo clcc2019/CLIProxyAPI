@@ -51,6 +51,7 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - Grok Build support via OAuth login
 - Amp CLI and IDE extensions support with provider routing
 - Streaming, non-streaming, and WebSocket responses where supported
+- OpenAI Realtime WebSocket proxy at `GET /v1/realtime?model=...` for configured OpenAI-compatible providers
 - Function calling/tools support
 - Multimodal input support (text and images)
 - Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Grok)
