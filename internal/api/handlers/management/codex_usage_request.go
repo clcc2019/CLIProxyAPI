@@ -158,6 +158,9 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 		payload, status, err := h.doCodexUsageRequest(requestCtx, client, auth, accessToken, accountID)
 		if err == nil {
 			h.clearCodexUsageOutage(auth)
+			if strings.EqualFold(codexUsagePlanType(auth), "free") || codexUsagePayloadIsFreePlan(payload) {
+				h.refreshCodexPlusOneMonthFreeEligibility(requestCtx, client, auth, accessToken)
+			}
 			return payload, status, nil
 		}
 		if ctx.Err() == nil && codexUsageTransientFailure(status, err) {

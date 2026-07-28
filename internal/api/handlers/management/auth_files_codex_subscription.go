@@ -24,8 +24,15 @@ import (
 )
 
 var codexAccountsCheckURL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+var codexPlusOneMonthFreeCouponURL = "https://chatgpt.com/backend-api/promo_campaign/check_coupon"
 
 const codexAccountsCheckUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+const (
+	codexPlusOneMonthFreeCoupon              = "plus-1-month-free"
+	codexPlusOneMonthFreeEligibilityKey      = "plus_one_month_free_eligible"
+	codexPlusOneMonthFreePromotionTargetPath = "/backend-api/promo_campaign/check_coupon"
+)
 
 type codexSubscriptionCacheEntry struct {
 	info      codexAccountSubscriptionInfo
@@ -93,6 +100,9 @@ func applyCodexSubscriptionSnapshot(entry gin.H, auth *coreauth.Auth) {
 	if days, ok := codexSubscriptionDisplayActiveDaysValue(auth.Metadata); ok {
 		entry["subscription_active_days"] = days
 	}
+	if eligible, ok := codexPlusOneMonthFreeEligibility(auth.Metadata); ok {
+		entry[codexPlusOneMonthFreeEligibilityKey] = eligible
+	}
 }
 
 func applyCodexSubscriptionSnapshotSummary(entry gin.H, auth *coreauth.Auth) {
@@ -113,6 +123,9 @@ func applyCodexSubscriptionSnapshotSummary(entry gin.H, auth *coreauth.Auth) {
 	}
 	if days, ok := codexSubscriptionDisplayActiveDaysValue(auth.Metadata); ok {
 		entry["subscription_active_days"] = days
+	}
+	if eligible, ok := codexPlusOneMonthFreeEligibility(auth.Metadata); ok {
+		entry[codexPlusOneMonthFreeEligibilityKey] = eligible
 	}
 }
 
@@ -562,6 +575,14 @@ func codexSubscriptionBackfillShouldPersist(original, updated *coreauth.Auth) bo
 			return true
 		}
 	}
+	if eligible, ok := codexPlusOneMonthFreeEligibility(updated.Metadata); ok {
+		if original == nil {
+			return true
+		}
+		if existing, exists := codexPlusOneMonthFreeEligibility(original.Metadata); !exists || existing != eligible {
+			return true
+		}
+	}
 	return false
 }
 
@@ -604,6 +625,9 @@ func codexSubscriptionBackfillHasPersistableData(metadata map[string]any) bool {
 		if strings.TrimSpace(valueAsString(metadata[key])) != "" {
 			return true
 		}
+	}
+	if _, ok := codexPlusOneMonthFreeEligibility(metadata); ok {
+		return true
 	}
 	return false
 }
@@ -709,7 +733,35 @@ func applyCodexSubscriptionBackfillDocument(doc map[string]any, metadata map[str
 		doc["email"] = value
 		changed = true
 	}
+	if eligible, ok := codexPlusOneMonthFreeEligibility(metadata); ok {
+		if existing, exists := codexPlusOneMonthFreeEligibility(doc); !exists || existing != eligible {
+			doc[codexPlusOneMonthFreeEligibilityKey] = eligible
+			changed = true
+		}
+	}
 	return changed
+}
+
+func codexPlusOneMonthFreeEligibility(metadata map[string]any) (bool, bool) {
+	if len(metadata) == 0 {
+		return false, false
+	}
+	return boolLikeValue(metadata[codexPlusOneMonthFreeEligibilityKey])
+}
+
+func applyCodexPlusOneMonthFreeEligibility(auth *coreauth.Auth, eligible bool) (*coreauth.Auth, bool) {
+	if auth == nil {
+		return auth, false
+	}
+	if existing, ok := codexPlusOneMonthFreeEligibility(auth.Metadata); ok && existing == eligible {
+		return auth, false
+	}
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	updated.Metadata[codexPlusOneMonthFreeEligibilityKey] = eligible
+	return updated, true
 }
 
 func codexAuthMetadataString(metadata map[string]any, keys ...string) string {
@@ -953,6 +1005,68 @@ func (h *Handler) fetchCodexAccountSubscriptionInfo(ctx context.Context, accessT
 		return nil, err
 	}
 	return parseCodexAccountSubscriptionInfo(result, orgID), nil
+}
+
+func (h *Handler) refreshCodexPlusOneMonthFreeEligibility(ctx context.Context, client *http.Client, auth *coreauth.Auth, accessToken string) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || strings.TrimSpace(accessToken) == "" {
+		return
+	}
+	eligible, err := h.fetchCodexPlusOneMonthFreeEligibility(ctx, client, auth, accessToken)
+	if err != nil {
+		log.WithError(err).WithField("auth_id", auth.ID).Debug("failed to check Codex free Plus promotion eligibility")
+		return
+	}
+	updated, changed := applyCodexPlusOneMonthFreeEligibility(auth, eligible)
+	if changed {
+		h.persistCodexSubscriptionBackfill(ctx, updated)
+	}
+}
+
+func (h *Handler) fetchCodexPlusOneMonthFreeEligibility(ctx context.Context, client *http.Client, auth *coreauth.Auth, accessToken string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexPlusOneMonthFreeCouponURL, nil)
+	if err != nil {
+		return false, err
+	}
+	query := req.URL.Query()
+	query.Set("coupon", codexPlusOneMonthFreeCoupon)
+	query.Set("is_coupon_from_query_param", "true")
+	req.URL.RawQuery = query.Encode()
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/?promo_campaign="+codexPlusOneMonthFreeCoupon)
+	req.Header.Set("User-Agent", codexUsageRequestUserAgent(h, auth))
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("X-OpenAI-Target-Path", codexPlusOneMonthFreePromotionTargetPath)
+	req.Header.Set("X-OpenAI-Target-Route", codexPlusOneMonthFreePromotionTargetPath)
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return false, fmt.Errorf("Codex free Plus promotion check failed with status %d: %s", resp.StatusCode, truncateForLog(string(util.RedactSensitiveLogBytes(body)), 200))
+	}
+	var result struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, fmt.Errorf("decode Codex free Plus promotion response: %w", err)
+	}
+	return strings.EqualFold(strings.TrimSpace(result.State), "eligible"), nil
 }
 
 func parseCodexAccountSubscriptionInfo(result map[string]any, orgID string) *codexAccountSubscriptionInfo {

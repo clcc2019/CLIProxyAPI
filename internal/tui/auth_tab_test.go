@@ -48,3 +48,26 @@ func TestAuthTabRenderDetailIncludesLastErrorAndModelState(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthTabRenderDetailShowsPlusOneMonthFreeEligibility(t *testing.T) {
+	previousLocale := CurrentLocale()
+	SetLocale("en")
+	t.Cleanup(func() { SetLocale(previousLocale) })
+
+	model := newAuthTabModel(nil)
+	detail := model.renderDetail(map[string]any{
+		"name":                         "codex-auth.json",
+		"plus_one_month_free_eligible": true,
+	})
+	if !strings.Contains(detail, "One-month Plus") || !strings.Contains(detail, "Eligible") {
+		t.Fatalf("renderDetail() did not show promotion eligibility:\n%s", detail)
+	}
+
+	content := authTabModel{files: []map[string]any{{
+		"name":                         "codex-auth.json",
+		"plus_one_month_free_eligible": true,
+	}}}.renderContent()
+	if !strings.Contains(content, "1-mo Plus free") {
+		t.Fatalf("renderContent() did not show promotion badge:\n%s", content)
+	}
+}

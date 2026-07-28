@@ -822,6 +822,9 @@ func TestGetCodexUsageFreeAccountWithoutAccountID(t *testing.T) {
 	originalURL := codexUsageURL
 	codexUsageURL = server.URL
 	t.Cleanup(func() { codexUsageURL = originalURL })
+	originalCouponURL := codexPlusOneMonthFreeCouponURL
+	codexPlusOneMonthFreeCouponURL = server.URL
+	t.Cleanup(func() { codexPlusOneMonthFreeCouponURL = originalCouponURL })
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{
@@ -860,6 +863,118 @@ func TestGetCodexUsageFreeAccountWithoutAccountID(t *testing.T) {
 	}
 	if _, ok := payload["rate_limit"].(map[string]any); !ok {
 		t.Fatalf("rate_limit missing from payload: %#v", payload)
+	}
+}
+
+func TestGetCodexUsageFreeAccountPersistsPlusOneMonthFreeEligibility(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	var usageRequests, promotionRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/usage":
+			usageRequests++
+			if got := r.Header.Get("Authorization"); got != "Bearer free-access-token" {
+				t.Fatalf("usage Authorization = %q, want bearer access token", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"plan_type": "free",
+				"rate_limit": {"secondary_window": {"used_percent": 25, "limit_window_seconds": 604800}}
+			}`))
+		case "/promo":
+			promotionRequests++
+			if got := r.URL.Query().Get("coupon"); got != codexPlusOneMonthFreeCoupon {
+				t.Fatalf("coupon = %q, want %q", got, codexPlusOneMonthFreeCoupon)
+			}
+			if got := r.URL.Query().Get("is_coupon_from_query_param"); got != "true" {
+				t.Fatalf("is_coupon_from_query_param = %q, want true", got)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer free-access-token" {
+				t.Fatalf("promotion Authorization = %q, want bearer access token", got)
+			}
+			if got := r.Header.Get("Origin"); got != "https://chatgpt.com" {
+				t.Fatalf("promotion Origin = %q, want ChatGPT origin", got)
+			}
+			if got := r.Header.Get("X-OpenAI-Target-Path"); got != codexPlusOneMonthFreePromotionTargetPath {
+				t.Fatalf("promotion target path = %q, want %q", got, codexPlusOneMonthFreePromotionTargetPath)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"coupon":"plus-1-month-free","state":"eligible","redemption":{"redeemed":false}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	originalUsageURL := codexUsageURL
+	codexUsageURL = server.URL + "/usage"
+	t.Cleanup(func() { codexUsageURL = originalUsageURL })
+	originalCouponURL := codexPlusOneMonthFreeCouponURL
+	codexPlusOneMonthFreeCouponURL = server.URL + "/promo"
+	t.Cleanup(func() { codexPlusOneMonthFreeCouponURL = originalCouponURL })
+
+	authDir := t.TempDir()
+	path := writeAuthTestFile(t, authDir, "free.json", `{
+		"type":"codex",
+		"access_token":"free-access-token",
+		"plan_type":"free"
+	}`)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "free.json",
+		FileName: "free.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "free-access-token",
+			"plan_type":    "free",
+		},
+		Attributes: map[string]string{"path": path},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=free.json", nil)
+	h.GetCodexUsage(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if usageRequests != 1 || promotionRequests != 1 {
+		t.Fatalf("usage requests = %d, promotion requests = %d, want one each", usageRequests, promotionRequests)
+	}
+	updated, ok := manager.GetByID("free.json")
+	if !ok {
+		t.Fatal("updated auth is missing from manager")
+	}
+	if eligible, known := codexPlusOneMonthFreeEligibility(updated.Metadata); !known || !eligible {
+		t.Fatalf("manager eligibility = (%v, %v), want (true, true)", eligible, known)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted auth file: %v", err)
+	}
+	persisted := map[string]any{}
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("decode persisted auth file: %v", err)
+	}
+	if eligible, known := codexPlusOneMonthFreeEligibility(persisted); !known || !eligible {
+		t.Fatalf("persisted eligibility = (%v, %v), want (true, true)", eligible, known)
+	}
+}
+
+func TestCodexSubscriptionBackfillUpdatesPlusOneMonthFreeEligibility(t *testing.T) {
+	doc := map[string]any{codexPlusOneMonthFreeEligibilityKey: true}
+	metadata := map[string]any{codexPlusOneMonthFreeEligibilityKey: false}
+	if !applyCodexSubscriptionBackfillDocument(doc, metadata) {
+		t.Fatal("expected promotion eligibility backfill to change document")
+	}
+	if eligible, known := codexPlusOneMonthFreeEligibility(doc); !known || eligible {
+		t.Fatalf("backfilled eligibility = (%v, %v), want (false, true)", eligible, known)
 	}
 }
 
