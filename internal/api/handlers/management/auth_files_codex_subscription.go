@@ -1007,18 +1007,53 @@ func (h *Handler) fetchCodexAccountSubscriptionInfo(ctx context.Context, accessT
 	return parseCodexAccountSubscriptionInfo(result, orgID), nil
 }
 
-func (h *Handler) refreshCodexPlusOneMonthFreeEligibility(ctx context.Context, client *http.Client, auth *coreauth.Auth, accessToken string) {
+// refreshCodexPlusOneMonthFreeEligibility resolves the one-month Plus offer once
+// for a Free Codex credential. A known false value is just as final as true, so
+// neither result should cause another upstream promotion request.
+func (h *Handler) refreshCodexPlusOneMonthFreeEligibility(ctx context.Context, client *http.Client, auth *coreauth.Auth, accessToken string) *coreauth.Auth {
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || strings.TrimSpace(accessToken) == "" {
-		return
+		return auth
+	}
+	if _, known := codexPlusOneMonthFreeEligibility(auth.Metadata); known {
+		return auth
 	}
 	eligible, err := h.fetchCodexPlusOneMonthFreeEligibility(ctx, client, auth, accessToken)
 	if err != nil {
 		log.WithError(err).WithField("auth_id", auth.ID).Debug("failed to check Codex free Plus promotion eligibility")
-		return
+		return auth
 	}
 	updated, changed := applyCodexPlusOneMonthFreeEligibility(auth, eligible)
 	if changed {
 		h.persistCodexSubscriptionBackfill(ctx, updated)
+	}
+	return updated
+}
+
+// enrichCodexUsageWithPlusOneMonthFreeEligibility keeps the quota response and
+// auth-file snapshot in sync. It is also used for cached quota reads, where the
+// usual upstream usage request would otherwise not get a chance to fill a
+// missing promotion field.
+func (h *Handler) enrichCodexUsageWithPlusOneMonthFreeEligibility(ctx context.Context, client *http.Client, auth *coreauth.Auth, accessToken string, payload gin.H) {
+	if payload == nil || auth == nil {
+		return
+	}
+	if _, known := boolLikeValue(payload[codexPlusOneMonthFreeEligibilityKey]); known {
+		return
+	}
+	if !strings.EqualFold(codexUsagePlanType(auth), "free") && !codexUsagePayloadIsFreePlan(payload) {
+		return
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+		if h != nil {
+			client.Transport = h.codexUsageTransport(auth)
+		}
+	}
+	updated := h.refreshCodexPlusOneMonthFreeEligibility(ctx, client, auth, accessToken)
+	if eligible, known := codexPlusOneMonthFreeEligibility(updated.Metadata); known {
+		// Do not use setCodexUsageFieldIfMissing here: false is a meaningful
+		// persisted answer and must be returned to management clients.
+		payload[codexPlusOneMonthFreeEligibilityKey] = eligible
 	}
 }
 

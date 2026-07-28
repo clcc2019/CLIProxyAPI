@@ -162,6 +162,7 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 	now := time.Now()
 	if cacheKey != "" && !opts.force {
 		if payload, _, ok := h.loadCodexUsageCache(ctx, cache, cacheKey, now, false); ok {
+			h.enrichCodexUsageWithPlusOneMonthFreeEligibility(ctx, nil, auth, codexUsageAccessToken(auth), payload)
 			h.syncCodexUsageQuotaCooldown(ctx, auth, payload)
 			return payload, http.StatusOK, nil
 		}
@@ -215,6 +216,7 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 	// caller its own map because response handlers may enrich the payload.
 	payload := cloneGinH(res.payload)
 	if res.err == nil {
+		h.enrichCodexUsageWithPlusOneMonthFreeEligibility(ctx, nil, auth, codexUsageAccessToken(auth), payload)
 		h.syncCodexUsageQuotaCooldown(ctx, auth, payload)
 	}
 	return payload, res.status, res.err

@@ -947,6 +947,31 @@ func TestGetCodexUsageFreeAccountPersistsPlusOneMonthFreeEligibility(t *testing.
 	if usageRequests != 1 || promotionRequests != 1 {
 		t.Fatalf("usage requests = %d, promotion requests = %d, want one each", usageRequests, promotionRequests)
 	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode usage payload: %v", err)
+	}
+	if eligible, ok := payload[codexPlusOneMonthFreeEligibilityKey].(bool); !ok || !eligible {
+		t.Fatalf("usage response eligibility = %#v, want true", payload[codexPlusOneMonthFreeEligibilityKey])
+	}
+	entry, ok := payload["auth_file"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth_file = %#v, want object", payload["auth_file"])
+	}
+	if eligible, ok := entry[codexPlusOneMonthFreeEligibilityKey].(bool); !ok || !eligible {
+		t.Fatalf("auth_file eligibility = %#v, want true", entry[codexPlusOneMonthFreeEligibilityKey])
+	}
+
+	secondRec := httptest.NewRecorder()
+	secondCtx, _ := gin.CreateTestContext(secondRec)
+	secondCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files/codex-usage?name=free.json&codex_usage=refresh", nil)
+	h.GetCodexUsage(secondCtx)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("expected second status %d, got %d with body %s", http.StatusOK, secondRec.Code, secondRec.Body.String())
+	}
+	if usageRequests != 2 || promotionRequests != 1 {
+		t.Fatalf("usage requests = %d, promotion requests = %d after refresh, want two usage requests and one promotion request", usageRequests, promotionRequests)
+	}
 	updated, ok := manager.GetByID("free.json")
 	if !ok {
 		t.Fatal("updated auth is missing from manager")

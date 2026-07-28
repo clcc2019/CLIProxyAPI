@@ -158,9 +158,7 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 		payload, status, err := h.doCodexUsageRequest(requestCtx, client, auth, accessToken, accountID)
 		if err == nil {
 			h.clearCodexUsageOutage(auth)
-			if strings.EqualFold(codexUsagePlanType(auth), "free") || codexUsagePayloadIsFreePlan(payload) {
-				h.refreshCodexPlusOneMonthFreeEligibility(requestCtx, client, auth, accessToken)
-			}
+			h.enrichCodexUsageWithPlusOneMonthFreeEligibility(requestCtx, client, auth, accessToken, payload)
 			return payload, status, nil
 		}
 		if ctx.Err() == nil && codexUsageTransientFailure(status, err) {
@@ -480,6 +478,11 @@ func mergeCodexUsageLocalFields(payload gin.H, auth *coreauth.Auth) {
 	}
 	if days, ok := codexSubscriptionDisplayActiveDaysValue(auth.Metadata); ok {
 		setCodexUsageFieldIfMissing(payload, "subscription_active_days", days)
+	}
+	if eligible, ok := codexPlusOneMonthFreeEligibility(auth.Metadata); ok {
+		// This is a boolean result, so an explicit false must not be dropped by
+		// the generic empty-value helper above.
+		payload[codexPlusOneMonthFreeEligibilityKey] = eligible
 	}
 	mergeCodexUsageJWTFields(payload, codexAuthMetadataString(auth.Metadata, "id_token", "idToken"))
 	mergeCodexUsageJWTFields(payload, codexUsageAccessToken(auth))
