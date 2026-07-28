@@ -1003,6 +1003,34 @@ func TestCodexSubscriptionBackfillUpdatesPlusOneMonthFreeEligibility(t *testing.
 	}
 }
 
+func TestRefreshCodexPlusOneMonthFreeEligibilitySkipsKnownResult(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "known eligibility must not query the promotion endpoint", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	originalCouponURL := codexPlusOneMonthFreeCouponURL
+	codexPlusOneMonthFreeCouponURL = server.URL
+	t.Cleanup(func() { codexPlusOneMonthFreeCouponURL = originalCouponURL })
+
+	h := &Handler{}
+	for _, eligible := range []bool{true, false} {
+		auth := &coreauth.Auth{
+			Provider: "codex",
+			Metadata: map[string]any{
+				codexPlusOneMonthFreeEligibilityKey: eligible,
+			},
+		}
+		if got := h.refreshCodexPlusOneMonthFreeEligibility(context.Background(), server.Client(), auth, "access-token"); got != auth {
+			t.Fatalf("known eligibility %v returned a different auth instance", eligible)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("promotion requests = %d, want 0 for known eligibility", requests)
+	}
+}
+
 func TestGetCodexUsageMarksAuthScopedQuotaCooldown(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
