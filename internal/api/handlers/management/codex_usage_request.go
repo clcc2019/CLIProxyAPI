@@ -158,9 +158,6 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 		payload, status, err := h.doCodexUsageRequest(requestCtx, client, auth, accessToken, accountID)
 		if err == nil {
 			h.clearCodexUsageOutage(auth)
-			// Use the original request context for the separate promotion lookup.
-			// requestCtx may be almost expired after a slow quota request.
-			h.enrichCodexUsageWithPlusOneMonthFreeEligibility(ctx, client, auth, accessToken, payload)
 			return payload, status, nil
 		}
 		if ctx.Err() == nil && codexUsageTransientFailure(status, err) {
@@ -480,11 +477,6 @@ func mergeCodexUsageLocalFields(payload gin.H, auth *coreauth.Auth) {
 	}
 	if days, ok := codexSubscriptionDisplayActiveDaysValue(auth.Metadata); ok {
 		setCodexUsageFieldIfMissing(payload, "subscription_active_days", days)
-	}
-	if eligible, ok := codexPlusOneMonthFreeEligibility(auth.Metadata); ok {
-		// This is a boolean result, so an explicit false must not be dropped by
-		// the generic empty-value helper above.
-		payload[codexPlusOneMonthFreeEligibilityKey] = eligible
 	}
 	mergeCodexUsageJWTFields(payload, codexAuthMetadataString(auth.Metadata, "id_token", "idToken"))
 	mergeCodexUsageJWTFields(payload, codexUsageAccessToken(auth))

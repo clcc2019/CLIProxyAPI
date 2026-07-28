@@ -180,9 +180,6 @@ func (h *Handler) refreshAuthFileEntryFromDiskWithRoot(ctx context.Context, root
 	if until, ok := codexSubscriptionUntilValue(updated.Metadata); ok {
 		updatedEntry["subscription_expires_at"] = until
 	}
-	if eligible, ok := codexPlusOneMonthFreeEligibility(updated.Metadata); ok {
-		updatedEntry[codexPlusOneMonthFreeEligibilityKey] = eligible
-	}
 	if claims := extractCodexIDTokenClaims(updated); claims != nil {
 		updatedEntry["id_token"] = claims
 		applyCodexSubscriptionFromClaims(updatedEntry, claims)

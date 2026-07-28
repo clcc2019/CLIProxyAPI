@@ -223,9 +223,6 @@ func (m authTabModel) renderContent() string {
 		row := fmt.Sprintf("%s%s %-24s %-12s %-28s %s",
 			cursor, statusIcon, displayName, channel, displayEmail, statusText)
 		sb.WriteString(rowStyle.Render(row))
-		if eligible, known := authPlusOneMonthFreeEligibility(f); known && eligible {
-			sb.WriteString(successStyle.Render("  ✦ " + T("auth_plus_one_month_badge")))
-		}
 		sb.WriteString("\n")
 
 		// Delete confirmation
@@ -312,18 +309,6 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		sb.WriteString(line)
 		sb.WriteString("\n")
 	}
-	if eligible, known := authPlusOneMonthFreeEligibility(f); known {
-		statusStyle := lipgloss.NewStyle().Foreground(colorMuted)
-		status := T("auth_plus_one_month_ineligible")
-		if eligible {
-			statusStyle = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
-			status = T("auth_plus_one_month_eligible")
-		}
-		sb.WriteString(fmt.Sprintf("    │ %s %s\n",
-			labelStyle.Render(fmt.Sprintf("%-12s:", T("auth_plus_one_month_free"))),
-			statusStyle.Render(status)))
-	}
-
 	if detail := renderAuthErrorDetail(f, labelStyle, valueStyle); detail != "" {
 		sb.WriteString(detail)
 	}
@@ -428,22 +413,6 @@ func getAnyString(m map[string]any, key string) string {
 		return ""
 	}
 	return fmt.Sprintf("%v", v)
-}
-
-func authPlusOneMonthFreeEligibility(f map[string]any) (bool, bool) {
-	v, ok := f["plus_one_month_free_eligible"]
-	if !ok || v == nil {
-		return false, false
-	}
-	switch value := v.(type) {
-	case bool:
-		return value, true
-	case string:
-		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
-		return parsed, err == nil
-	default:
-		return false, false
-	}
 }
 
 func max(a, b int) int {
