@@ -900,6 +900,12 @@ func TestGetCodexUsageFreeAccountPersistsPlusOneMonthFreeEligibility(t *testing.
 			if got := r.Header.Get("X-OpenAI-Target-Path"); got != codexPlusOneMonthFreePromotionTargetPath {
 				t.Fatalf("promotion target path = %q, want %q", got, codexPlusOneMonthFreePromotionTargetPath)
 			}
+			if got := r.Header.Get("OAI-Device-ID"); got != "saved-device-id" {
+				t.Fatalf("promotion OAI-Device-ID = %q, want saved device id", got)
+			}
+			if got := r.Header.Get("OAI-Client-Version"); got != "saved-client-version" {
+				t.Fatalf("promotion OAI-Client-Version = %q, want saved client version", got)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"coupon":"plus-1-month-free","state":"eligible","redemption":{"redeemed":false}}`))
 		default:
@@ -929,6 +935,10 @@ func TestGetCodexUsageFreeAccountPersistsPlusOneMonthFreeEligibility(t *testing.
 			"type":         "codex",
 			"access_token": "free-access-token",
 			"plan_type":    "free",
+			"headers": map[string]any{
+				"oai-device-id":      "saved-device-id",
+				"oai-client-version": "saved-client-version",
+			},
 		},
 		Attributes: map[string]string{"path": path},
 	}); err != nil {

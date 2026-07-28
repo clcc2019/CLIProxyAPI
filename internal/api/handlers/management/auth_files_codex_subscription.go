@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -1049,7 +1050,15 @@ func (h *Handler) enrichCodexUsageWithPlusOneMonthFreeEligibility(ctx context.Co
 			client.Transport = h.codexUsageTransport(auth)
 		}
 	}
-	updated := h.refreshCodexPlusOneMonthFreeEligibility(ctx, client, auth, accessToken)
+	// The quota request has its own deadline. Do not reuse it here: a successful
+	// but slow quota request could otherwise leave no time at all to persist the
+	// promotion result.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	promotionCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	updated := h.refreshCodexPlusOneMonthFreeEligibility(promotionCtx, client, auth, accessToken)
 	if eligible, known := codexPlusOneMonthFreeEligibility(updated.Metadata); known {
 		// Do not use setCodexUsageFieldIfMissing here: false is a meaningful
 		// persisted answer and must be returned to management clients.
@@ -1069,11 +1078,16 @@ func (h *Handler) fetchCodexPlusOneMonthFreeEligibility(ctx context.Context, cli
 	query.Set("coupon", codexPlusOneMonthFreeCoupon)
 	query.Set("is_coupon_from_query_param", "true")
 	req.URL.RawQuery = query.Encode()
+	applyCodexPlusOneMonthFreeClientHeaders(req, auth)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	req.Header.Set("Origin", "https://chatgpt.com")
 	req.Header.Set("Referer", "https://chatgpt.com/?promo_campaign="+codexPlusOneMonthFreeCoupon)
-	req.Header.Set("User-Agent", codexUsageRequestUserAgent(h, auth))
+	if strings.TrimSpace(req.Header.Get("User-Agent")) == "" {
+		// This is a ChatGPT web promotion endpoint, rather than a Codex CLI API.
+		// Use the same browser-compatible user agent as the account-check flow.
+		req.Header.Set("User-Agent", codexAccountsCheckUserAgent)
+	}
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -1102,6 +1116,78 @@ func (h *Handler) fetchCodexPlusOneMonthFreeEligibility(ctx context.Context, cli
 		return false, fmt.Errorf("decode Codex free Plus promotion response: %w", err)
 	}
 	return strings.EqualFold(strings.TrimSpace(result.State), "eligible"), nil
+}
+
+// applyCodexPlusOneMonthFreeClientHeaders carries over safe browser-profile
+// headers saved with a credential. The promotion endpoint may require a device
+// and client identity even though the regular quota endpoint does not.
+func applyCodexPlusOneMonthFreeClientHeaders(req *http.Request, auth *coreauth.Auth) {
+	if req == nil {
+		return
+	}
+	for _, headerName := range []string{
+		"Accept-Language",
+		"OAI-Client-Build-Number",
+		"OAI-Client-Version",
+		"OAI-Device-ID",
+		"OAI-Language",
+		"OAI-Session-ID",
+		"Priority",
+		"User-Agent",
+		"X-OAI-Is-Client-Observation",
+		"X-OAI-Is-Pending-Updates",
+	} {
+		if value := codexPlusOneMonthFreeClientHeaderValue(auth, headerName); value != "" {
+			req.Header.Set(headerName, value)
+		}
+	}
+	if strings.TrimSpace(req.Header.Get("OAI-Device-ID")) == "" {
+		req.Header.Set("OAI-Device-ID", codexPlusOneMonthFreeClientUUID(auth, "device"))
+	}
+	if strings.TrimSpace(req.Header.Get("OAI-Session-ID")) == "" {
+		req.Header.Set("OAI-Session-ID", codexPlusOneMonthFreeClientUUID(auth, "session"))
+	}
+}
+
+func codexPlusOneMonthFreeClientHeaderValue(auth *coreauth.Auth, headerName string) string {
+	if auth == nil {
+		return ""
+	}
+	if value := authFileHeaderValue(authFileMetadataHeaders(auth.Metadata), headerName); value != "" {
+		return value
+	}
+	for key, value := range auth.Attributes {
+		key = strings.TrimSpace(key)
+		if len(key) > len("header:") && strings.HasPrefix(strings.ToLower(key), "header:") &&
+			strings.EqualFold(strings.TrimSpace(key[len("header:"):]), headerName) {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	for _, key := range []string{
+		strings.ReplaceAll(strings.ToLower(headerName), "-", "_"),
+		strings.ReplaceAll(headerName, "-", ""),
+	} {
+		if value := strings.TrimSpace(valueAsString(auth.Metadata[key])); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexPlusOneMonthFreeClientUUID(auth *coreauth.Auth, purpose string) string {
+	identity := ""
+	if auth != nil {
+		identity = strings.TrimSpace(auth.ID)
+		if identity == "" {
+			identity = strings.TrimSpace(auth.FileName)
+		}
+	}
+	if identity == "" {
+		identity = "anonymous"
+	}
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("cliproxyapi/codex-plus-promotion/"+purpose+"/"+identity)).String()
 }
 
 func parseCodexAccountSubscriptionInfo(result map[string]any, orgID string) *codexAccountSubscriptionInfo {

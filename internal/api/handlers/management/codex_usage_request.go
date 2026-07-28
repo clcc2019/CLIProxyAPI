@@ -158,7 +158,9 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 		payload, status, err := h.doCodexUsageRequest(requestCtx, client, auth, accessToken, accountID)
 		if err == nil {
 			h.clearCodexUsageOutage(auth)
-			h.enrichCodexUsageWithPlusOneMonthFreeEligibility(requestCtx, client, auth, accessToken, payload)
+			// Use the original request context for the separate promotion lookup.
+			// requestCtx may be almost expired after a slow quota request.
+			h.enrichCodexUsageWithPlusOneMonthFreeEligibility(ctx, client, auth, accessToken, payload)
 			return payload, status, nil
 		}
 		if ctx.Err() == nil && codexUsageTransientFailure(status, err) {
