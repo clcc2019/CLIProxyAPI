@@ -75,6 +75,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()
 	cfg.SanitizePayloadRules()
+	if err := cfg.ValidateCredentialWeights(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
 }

@@ -184,6 +184,7 @@ func (s *RequestStatistics) restorePersistedState(state persistedStatisticsState
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.aggregateRevision.Add(1)
 
 	s.totalRequests.Store(snapshot.TotalRequests)
 	s.successCount.Store(snapshot.SuccessCount)

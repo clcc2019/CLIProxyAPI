@@ -162,6 +162,45 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestSynthesizeAuthFile_AppliesAndValidatesWeight(t *testing.T) {
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: t.TempDir(),
+		Now:     time.Now(),
+	}
+	for _, tc := range []struct {
+		name       string
+		weightJSON string
+		wantWeight string
+		wantAuth   bool
+	}{
+		{name: "integer", weightJSON: "5", wantWeight: "5", wantAuth: true},
+		{name: "numeric string", weightJSON: `"3"`, wantWeight: "3", wantAuth: true},
+		{name: "zero", weightJSON: "0", wantWeight: "0", wantAuth: true},
+		{name: "negative", weightJSON: "-1", wantWeight: "0", wantAuth: true},
+		{name: "fraction", weightJSON: "1.5", wantAuth: false},
+		{name: "too large", weightJSON: "1000001", wantAuth: false},
+		{name: "non numeric", weightJSON: `"abc"`, wantAuth: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(`{"type":"claude","weight":` + tc.weightJSON + `}`)
+			auths := SynthesizeAuthFile(ctx, filepath.Join(ctx.AuthDir, tc.name+".json"), data)
+			if !tc.wantAuth {
+				if len(auths) != 0 {
+					t.Fatalf("SynthesizeAuthFile() auths = %#v, want none", auths)
+				}
+				return
+			}
+			if len(auths) != 1 {
+				t.Fatalf("SynthesizeAuthFile() auth count = %d, want 1", len(auths))
+			}
+			if got := auths[0].Attributes[coreauth.AttributeWeight]; got != tc.wantWeight {
+				t.Fatalf("weight attribute = %q, want %q", got, tc.wantWeight)
+			}
+		})
+	}
+}
+
 func TestFileSynthesizer_Synthesize_CodexAuthFileUserAgentOverride(t *testing.T) {
 	tempDir := t.TempDir()
 

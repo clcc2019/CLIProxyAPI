@@ -22,6 +22,28 @@ func mustDefaultTransport(t *testing.T) *http.Transport {
 	return transport
 }
 
+func assertPooledTransportSettings(t *testing.T, transport *http.Transport) {
+	t.Helper()
+	if transport == nil {
+		t.Fatal("expected transport, got nil")
+	}
+	if transport.MaxIdleConns != DefaultMaxIdleConns {
+		t.Fatalf("MaxIdleConns = %d, want %d", transport.MaxIdleConns, DefaultMaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != DefaultMaxIdleConnsPerHost {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want %d", transport.MaxIdleConnsPerHost, DefaultMaxIdleConnsPerHost)
+	}
+	if transport.MaxConnsPerHost != 0 {
+		t.Fatalf("MaxConnsPerHost = %d, want unlimited", transport.MaxConnsPerHost)
+	}
+	if transport.IdleConnTimeout != DefaultIdleConnTimeout {
+		t.Fatalf("IdleConnTimeout = %v, want %v", transport.IdleConnTimeout, DefaultIdleConnTimeout)
+	}
+	if !transport.ForceAttemptHTTP2 {
+		t.Fatal("expected ForceAttemptHTTP2 to be enabled")
+	}
+}
+
 func TestParse(t *testing.T) {
 	t.Parallel()
 
@@ -107,13 +129,9 @@ func TestBuildHTTPTransportHTTPProxy(t *testing.T) {
 		t.Fatalf("proxy URL = %v, want http://proxy.example.com:8080", proxyURL)
 	}
 
+	assertPooledTransportSettings(t, transport)
+
 	defaultTransport := mustDefaultTransport(t)
-	if transport.ForceAttemptHTTP2 != defaultTransport.ForceAttemptHTTP2 {
-		t.Fatalf("ForceAttemptHTTP2 = %v, want %v", transport.ForceAttemptHTTP2, defaultTransport.ForceAttemptHTTP2)
-	}
-	if transport.IdleConnTimeout != defaultTransport.IdleConnTimeout {
-		t.Fatalf("IdleConnTimeout = %v, want %v", transport.IdleConnTimeout, defaultTransport.IdleConnTimeout)
-	}
 	if transport.TLSHandshakeTimeout != defaultTransport.TLSHandshakeTimeout {
 		t.Fatalf("TLSHandshakeTimeout = %v, want %v", transport.TLSHandshakeTimeout, defaultTransport.TLSHandshakeTimeout)
 	}
@@ -159,13 +177,9 @@ func TestBuildHTTPTransportSOCKS5ProxyInheritsDefaultTransportSettings(t *testin
 		t.Fatal("expected SOCKS5 transport to bypass http proxy function")
 	}
 
+	assertPooledTransportSettings(t, transport)
+
 	defaultTransport := mustDefaultTransport(t)
-	if transport.ForceAttemptHTTP2 != defaultTransport.ForceAttemptHTTP2 {
-		t.Fatalf("ForceAttemptHTTP2 = %v, want %v", transport.ForceAttemptHTTP2, defaultTransport.ForceAttemptHTTP2)
-	}
-	if transport.IdleConnTimeout != defaultTransport.IdleConnTimeout {
-		t.Fatalf("IdleConnTimeout = %v, want %v", transport.IdleConnTimeout, defaultTransport.IdleConnTimeout)
-	}
 	if transport.TLSHandshakeTimeout != defaultTransport.TLSHandshakeTimeout {
 		t.Fatalf("TLSHandshakeTimeout = %v, want %v", transport.TLSHandshakeTimeout, defaultTransport.TLSHandshakeTimeout)
 	}

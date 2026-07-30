@@ -16,12 +16,14 @@ import (
 )
 
 const (
-	// DefaultMaxIdleConns keeps more upstream connections warm across auths and models.
-	DefaultMaxIdleConns = 512
+	// DefaultMaxIdleConns keeps enough upstream connections warm for high fan-out
+	// across credentials, models, and proxy routes.
+	DefaultMaxIdleConns = 1024
 	// DefaultMaxIdleConnsPerHost raises Go's default of 2, which is too low for a proxy service.
-	DefaultMaxIdleConnsPerHost = 64
-	// DefaultIdleConnTimeout matches Go's default while documenting the shared pool policy.
-	DefaultIdleConnTimeout = 90 * time.Second
+	DefaultMaxIdleConnsPerHost = 128
+	// DefaultIdleConnTimeout retains hot upstream connections across short bursts
+	// without retaining them indefinitely.
+	DefaultIdleConnTimeout = 2 * time.Minute
 	// DefaultDialTimeout bounds outbound connection setup through proxy dialers.
 	DefaultDialTimeout = 30 * time.Second
 	// DefaultDialKeepAlive matches Go's default TCP keep-alive behavior.

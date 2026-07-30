@@ -60,6 +60,11 @@ type Handler struct {
 	// and keeps a brief stale copy for transient ChatGPT backend 5xx spikes.
 	// Lazily allocated under h.mu by codexUsageHandlerCache.
 	codexUsageCache *codexUsageCache
+	// aggregatedUsageCache memoises the serialized aggregate dashboard response
+	// for a very short period. It is keyed by the statistics instance and its
+	// aggregate revision, so writes invalidate it immediately.
+	// Lazily allocated under h.mu by aggregatedUsageHandlerCache.
+	aggregatedUsageCache *aggregatedUsageCache
 	// codexUpstreamSlots bounds aggregate management traffic to ChatGPT's
 	// usage and account endpoints. The web UI may refresh many credentials at
 	// once, so leaving this unbounded amplifies one click into a proxy burst.

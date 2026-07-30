@@ -97,6 +97,11 @@ type RequestStatistics struct {
 	successCount  atomic.Int64
 	failureCount  atomic.Int64
 	totalTokens   atomic.Int64
+	// aggregateRevision changes with every mutation that can affect an
+	// AggregatedUsageSnapshot. Management handlers use it to invalidate their
+	// short-lived serialized aggregate response cache without copying snapshots
+	// on the request-recording hot path.
+	aggregateRevision atomic.Uint64
 
 	apis map[string]*apiStats
 
@@ -288,6 +293,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.aggregateRevision.Add(1)
 
 	s.totalRequests.Add(1)
 	if success {
@@ -500,6 +506,7 @@ func (s *RequestStatistics) ApplyDetailRetentionLimit(limit int) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.aggregateRevision.Add(1)
 
 	for _, stats := range s.apis {
 		if stats == nil {
@@ -852,6 +859,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.aggregateRevision.Add(1)
 
 	seen := make(map[string]struct{})
 	for apiName, stats := range s.apis {
@@ -916,6 +924,7 @@ func (s *RequestStatistics) MergeImportedAggregatedSnapshot(snapshot AggregatedU
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.aggregateRevision.Add(1)
 
 	if s.importedAggregateHashes == nil {
 		s.importedAggregateHashes = make(map[string]struct{})
@@ -1005,6 +1014,7 @@ func (s *RequestStatistics) UpsertImportedDetailedSnapshot(sourceID string, snap
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.aggregateRevision.Add(1)
 
 	if s.importedDetailedSources == nil {
 		s.importedDetailedSources = make(map[string]StatisticsSnapshot)
@@ -1041,6 +1051,7 @@ func (s *RequestStatistics) UpsertImportedAggregatedSnapshot(sourceID string, sn
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.aggregateRevision.Add(1)
 
 	if s.importedAggregateSource == nil {
 		s.importedAggregateSource = make(map[string]AggregatedUsageSnapshot)

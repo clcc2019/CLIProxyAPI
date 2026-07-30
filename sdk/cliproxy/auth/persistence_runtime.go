@@ -102,6 +102,7 @@ var refreshPreservedAttributeKeys = []string{
 	"path",
 	"source",
 	"priority",
+	AttributeWeight,
 	"note",
 	"proxy_url",
 	"excluded_models",

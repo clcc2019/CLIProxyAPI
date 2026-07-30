@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -69,6 +71,10 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	if errDecode != nil {
 		return nil
 	}
+	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
+		log.WithError(errWeight).WithField("path", fullPath).Warn("skipping auth file with invalid credential weight")
+		return nil
+	}
 	t, _ := metadata["type"].(string)
 	if t == "" {
 		return nil
@@ -92,6 +98,10 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		a.Label = a.Provider
 	}
 	if !isSupportedSynthesizedAuthProvider(a.Provider) {
+		return nil
+	}
+	if errWeight := coreauth.ApplyAuthWeightMetadata(a, metadata); errWeight != nil {
+		log.WithError(errWeight).WithField("path", fullPath).Warn("skipping auth file with invalid credential weight")
 		return nil
 	}
 	authKind := strings.TrimSpace(a.Attributes["auth_kind"])

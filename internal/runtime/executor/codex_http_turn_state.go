@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"container/list"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,24 +12,37 @@ import (
 )
 
 const (
-	codexHTTPTurnStateTTL             = 2 * time.Hour
-	codexHTTPTurnStateCleanupInterval = 64
+	codexHTTPTurnStateTTL        = 2 * time.Hour
+	codexHTTPTurnStateMaxEntries = 4096
 )
 
 type codexHTTPTurnStateEntry struct {
 	state    string
 	scope    string
 	lastSeen time.Time
+	element  *list.Element
 }
 
 type codexHTTPTurnStateStore struct {
 	mu         sync.Mutex
-	entries    map[string]codexHTTPTurnStateEntry
-	cleanupOps uint64
+	entries    map[string]*codexHTTPTurnStateEntry
+	recency    *list.List // newest key at the front; protected by mu
+	maxEntries int
 }
 
 func newCodexHTTPTurnStateStore() *codexHTTPTurnStateStore {
-	return &codexHTTPTurnStateStore{entries: make(map[string]codexHTTPTurnStateEntry)}
+	return newCodexHTTPTurnStateStoreWithLimit(codexHTTPTurnStateMaxEntries)
+}
+
+func newCodexHTTPTurnStateStoreWithLimit(maxEntries int) *codexHTTPTurnStateStore {
+	if maxEntries <= 0 {
+		maxEntries = codexHTTPTurnStateMaxEntries
+	}
+	return &codexHTTPTurnStateStore{
+		entries:    make(map[string]*codexHTTPTurnStateEntry),
+		recency:    list.New(),
+		maxEntries: maxEntries,
+	}
 }
 
 func (e *CodexExecutor) applyCodexHTTPTurnState(auth *cliproxyauth.Auth, executionSessionID string, headers http.Header) {
@@ -185,15 +199,17 @@ func (s *codexHTTPTurnStateStore) get(key string, scope string, now time.Time) s
 	defer s.mu.Unlock()
 	s.cleanupLocked(now)
 	entry, ok := s.entries[key]
-	if !ok || entry.scope != scope {
+	if !ok || entry == nil || entry.scope != scope {
 		return ""
 	}
 	if now.Sub(entry.lastSeen) > codexHTTPTurnStateTTL {
-		delete(s.entries, key)
+		s.removeEntryLocked(key, entry)
 		return ""
 	}
 	entry.lastSeen = now
-	s.entries[key] = entry
+	if entry.element != nil {
+		s.recency.MoveToFront(entry.element)
+	}
 	return entry.state
 }
 
@@ -210,11 +226,25 @@ func (s *codexHTTPTurnStateStore) put(key string, scope string, state string, no
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupLocked(now)
-	s.entries[key] = codexHTTPTurnStateEntry{
+	if existing := s.entries[key]; existing != nil {
+		existing.state = state
+		existing.scope = scope
+		existing.lastSeen = now
+		if existing.element != nil {
+			s.recency.MoveToFront(existing.element)
+		}
+		return
+	}
+	for len(s.entries) >= s.maxEntries {
+		s.removeOldestLocked()
+	}
+	entry := &codexHTTPTurnStateEntry{
 		state:    state,
 		scope:    scope,
 		lastSeen: now,
 	}
+	entry.element = s.recency.PushFront(key)
+	s.entries[key] = entry
 }
 
 func (s *codexHTTPTurnStateStore) delete(key string, scope string, state string) {
@@ -227,10 +257,10 @@ func (s *codexHTTPTurnStateStore) delete(key string, scope string, state string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.entries[key]
-	if !ok || entry.scope != scope || entry.state != state {
+	if !ok || entry == nil || entry.scope != scope || entry.state != state {
 		return
 	}
-	delete(s.entries, key)
+	s.removeEntryLocked(key, entry)
 }
 
 func (s *codexHTTPTurnStateStore) deleteExecutionSession(sessionID string) {
@@ -241,9 +271,9 @@ func (s *codexHTTPTurnStateStore) deleteExecutionSession(sessionID string) {
 	suffix := "|" + sessionID
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for key := range s.entries {
+	for key, entry := range s.entries {
 		if strings.HasSuffix(key, suffix) {
-			delete(s.entries, key)
+			s.removeEntryLocked(key, entry)
 		}
 	}
 }
@@ -253,22 +283,57 @@ func (s *codexHTTPTurnStateStore) clear() {
 		return
 	}
 	s.mu.Lock()
-	s.entries = make(map[string]codexHTTPTurnStateEntry)
-	s.cleanupOps = 0
+	s.entries = make(map[string]*codexHTTPTurnStateEntry)
+	s.recency.Init()
 	s.mu.Unlock()
 }
 
 func (s *codexHTTPTurnStateStore) cleanupLocked(now time.Time) {
-	if s == nil {
+	if s == nil || s.recency == nil {
 		return
 	}
-	s.cleanupOps++
-	if s.cleanupOps%codexHTTPTurnStateCleanupInterval != 0 {
-		return
-	}
-	for key, entry := range s.entries {
-		if now.Sub(entry.lastSeen) > codexHTTPTurnStateTTL {
-			delete(s.entries, key)
+	for {
+		oldest := s.recency.Back()
+		if oldest == nil {
+			return
 		}
+		key, _ := oldest.Value.(string)
+		entry := s.entries[key]
+		if entry == nil {
+			s.recency.Remove(oldest)
+			continue
+		}
+		if now.Sub(entry.lastSeen) <= codexHTTPTurnStateTTL {
+			return
+		}
+		s.removeEntryLocked(key, entry)
+	}
+}
+
+func (s *codexHTTPTurnStateStore) removeOldestLocked() {
+	if s == nil || s.recency == nil {
+		return
+	}
+	oldest := s.recency.Back()
+	if oldest == nil {
+		return
+	}
+	key, _ := oldest.Value.(string)
+	entry := s.entries[key]
+	if entry == nil {
+		s.recency.Remove(oldest)
+		return
+	}
+	s.removeEntryLocked(key, entry)
+}
+
+func (s *codexHTTPTurnStateStore) removeEntryLocked(key string, entry *codexHTTPTurnStateEntry) {
+	if s == nil || entry == nil {
+		return
+	}
+	delete(s.entries, key)
+	if s.recency != nil && entry.element != nil {
+		s.recency.Remove(entry.element)
+		entry.element = nil
 	}
 }

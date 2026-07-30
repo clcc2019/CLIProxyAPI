@@ -61,6 +61,105 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	}
 }
 
+func TestWeightedRoundRobinSelectorPick_DistributesAndSkipsNonPositiveWeights(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{AttributeWeight: "5"}},
+		{ID: "b", Attributes: map[string]string{AttributeWeight: "1"}},
+		{ID: "zero", Attributes: map[string]string{AttributeWeight: "0"}},
+		{ID: "negative", Attributes: map[string]string{AttributeWeight: "-10"}},
+	}
+	counts := make(map[string]int)
+	for i := 0; i < 60; i++ {
+		got, err := selector.Pick(context.Background(), "codex", "model", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 50 || counts["b"] != 10 || counts["zero"] != 0 || counts["negative"] != 0 {
+		t.Fatalf("weighted picks = %#v, want a:b = 50:10 and no non-positive picks", counts)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_ResetsCreditsWhenWeightsChange(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	authA := &Auth{ID: "a", Attributes: map[string]string{AttributeWeight: "1000000"}}
+	authB := &Auth{ID: "b", Attributes: map[string]string{AttributeWeight: "1"}}
+	auths := []*Auth{authA, authB}
+	for i := 0; i < 20; i++ {
+		if _, err := selector.Pick(context.Background(), "codex", "model", cliproxyexecutor.Options{}, auths); err != nil {
+			t.Fatalf("warmup Pick() #%d error = %v", i, err)
+		}
+	}
+
+	authA.Attributes[AttributeWeight] = "1"
+	counts := make(map[string]int)
+	for i := 0; i < 12; i++ {
+		got, err := selector.Pick(context.Background(), "codex", "model", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() after weight change #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 6 || counts["b"] != 6 {
+		t.Fatalf("picks after weight change = %#v, want a:b = 6:6", counts)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_PreservesPriorityAndWebsocketPreference(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	priorityAuths := []*Auth{
+		{ID: "high", Attributes: map[string]string{"priority": "10", AttributeWeight: "1"}},
+		{ID: "low", Attributes: map[string]string{"priority": "0", AttributeWeight: "100"}},
+	}
+	for i := 0; i < 4; i++ {
+		got, err := selector.Pick(context.Background(), "codex", "model", cliproxyexecutor.Options{}, priorityAuths)
+		if err != nil || got == nil || got.ID != "high" {
+			t.Fatalf("priority Pick() #%d = %#v, %v; want high", i, got, err)
+		}
+	}
+
+	websocketAuths := []*Auth{
+		{ID: "http", Attributes: map[string]string{"priority": "10", AttributeWeight: "100"}},
+		{ID: "ws", Attributes: map[string]string{"priority": "0", "websockets": "true", AttributeWeight: "1"}},
+	}
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	for i := 0; i < 4; i++ {
+		got, err := selector.Pick(ctx, "codex", "model", cliproxyexecutor.Options{}, websocketAuths)
+		if err != nil || got == nil || got.ID != "ws" {
+			t.Fatalf("websocket Pick() #%d = %#v, %v; want ws", i, got, err)
+		}
+	}
+}
+
+func TestSessionAffinitySelectorWeightedRebindsWhenWeightBecomesZero(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&WeightedRoundRobinSelector{})
+	defer selector.Stop()
+	authA := &Auth{ID: "auth-a", Attributes: map[string]string{AttributeWeight: "1"}}
+	authB := &Auth{ID: "auth-b", Attributes: map[string]string{AttributeWeight: "1"}}
+	auths := []*Auth{authA, authB}
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_00000000-0000-0000-0000-000000000000"}}`)}
+
+	first, err := selector.Pick(context.Background(), "codex", "model", opts, auths)
+	if err != nil || first == nil || first.ID != "auth-a" {
+		t.Fatalf("first Pick() = %#v, %v; want auth-a", first, err)
+	}
+	authA.Attributes[AttributeWeight] = "0"
+	second, err := selector.Pick(context.Background(), "codex", "model", opts, auths)
+	if err != nil || second == nil || second.ID != "auth-b" {
+		t.Fatalf("rebound Pick() = %#v, %v; want auth-b", second, err)
+	}
+}
+
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	t.Parallel()
 

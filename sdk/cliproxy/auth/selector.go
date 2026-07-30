@@ -37,6 +37,21 @@ type RoundRobinSelector struct {
 	maxKeys int
 }
 
+// WeightedRoundRobinSelector provides smooth weighted round-robin selection.
+//
+// The scheduler mirrors these semantics for managed request routing, while this
+// implementation remains the standalone selector fallback and testable core.
+type WeightedRoundRobinSelector struct {
+	mu      sync.Mutex
+	states  map[string]*smoothWeightedState
+	maxKeys int
+}
+
+type smoothWeightedState struct {
+	current map[string]int64
+	weights map[string]int64
+}
+
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
@@ -344,6 +359,126 @@ func (s *RoundRobinSelector) loadCursors() *sync.Map {
 	return s.cursors.Load()
 }
 
+func positiveWeightAuths(auths []*Auth) []*Auth {
+	weightedCandidates := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth != nil && authWeight(auth) > 0 {
+			weightedCandidates = append(weightedCandidates, auth)
+		}
+	}
+	return weightedCandidates
+}
+
+// Pick selects the next available auth using smooth weighted round-robin.
+func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	available, err := getAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	key := provider + ":" + canonicalModelKey(model)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.states == nil {
+		s.states = make(map[string]*smoothWeightedState)
+	}
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+	if _, ok := s.states[key]; !ok && len(s.states) >= limit {
+		s.states = make(map[string]*smoothWeightedState)
+	}
+	state := s.states[key]
+	if state == nil {
+		state = &smoothWeightedState{}
+		s.states[key] = state
+	}
+	weights := authWeightVector(available)
+	state.prepare(weights)
+	picked := pickSmoothWeightedAuth(available, state.current)
+	if picked == nil {
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
+	}
+	return picked, nil
+}
+
+func (s *smoothWeightedState) prepare(weights map[string]int64) {
+	if s.current == nil || !weightVectorsEqual(s.weights, weights) {
+		s.current = make(map[string]int64)
+	}
+	s.weights = weights
+}
+
+func weightVectorsEqual(left, right map[string]int64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for authID, weight := range left {
+		if right[authID] != weight {
+			return false
+		}
+	}
+	return true
+}
+
+func authWeightVector(auths []*Auth) map[string]int64 {
+	weights := make(map[string]int64, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if weight := authWeight(auth); weight > 0 {
+			weights[auth.ID] = weight
+		}
+	}
+	return weights
+}
+
+func pickSmoothWeightedAuth(auths []*Auth, current map[string]int64) *Auth {
+	active := make(map[string]struct{}, len(auths))
+	var picked *Auth
+	var pickedCurrent int64
+	var totalWeight int64
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		weight := authWeight(auth)
+		if weight <= 0 {
+			continue
+		}
+		active[auth.ID] = struct{}{}
+		current[auth.ID] = saturatingAddInt64(current[auth.ID], weight)
+		totalWeight = saturatingAddInt64(totalWeight, weight)
+		if picked == nil || current[auth.ID] > pickedCurrent {
+			picked = auth
+			pickedCurrent = current[auth.ID]
+		}
+	}
+	for authID := range current {
+		if _, ok := active[authID]; !ok {
+			delete(current, authID)
+		}
+	}
+	if picked == nil {
+		return nil
+	}
+	current[picked.ID] = saturatingAddInt64(current[picked.ID], -totalWeight)
+	return picked
+}
+
+func saturatingAddInt64(value, delta int64) int64 {
+	if delta > 0 && value > math.MaxInt64-delta {
+		return math.MaxInt64
+	}
+	if delta < 0 && value < math.MinInt64-delta {
+		return math.MinInt64
+	}
+	return value + delta
+}
+
 // Pick selects the first available auth for the provider in a deterministic manner.
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
@@ -526,7 +661,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// would serialize every request and defeat the purpose of sharding work
 	// across sessions.
 	now := time.Now()
-	available, err := getAvailableAuthsWithoutWebsocketPreference(auths, provider, model, now)
+	availabilityCandidates := auths
+	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
+		availabilityCandidates = positiveWeightAuths(auths)
+	}
+	available, err := getAvailableAuthsWithoutWebsocketPreference(availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}

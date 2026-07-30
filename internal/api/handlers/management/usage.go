@@ -104,16 +104,12 @@ func (h *Handler) GetAggregatedUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	snapshot := h.aggregatedUsageSnapshot(time.Now().UTC())
-	failedRequests := int64(0)
-	if allWindow, ok := snapshot.Windows["all"]; ok {
-		failedRequests = allWindow.FailureCount
+	payload, err := h.aggregatedUsageResponse(time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode aggregate usage statistics"})
+		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"usage":           snapshot,
-		"failed_requests": failedRequests,
-	})
+	c.Data(http.StatusOK, "application/json; charset=utf-8", payload)
 }
 
 // ExportUsageStatistics returns an aggregated usage export plus a summary snapshot for import compatibility.

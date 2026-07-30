@@ -9,9 +9,16 @@ import (
 
 func configuredCredentialSelector(strategy string, sessionAffinity bool, sessionAffinityTTL string) coreauth.Selector {
 	var selector coreauth.Selector
-	if !sessionAffinity && isFillFirstStrategy(strategy) {
-		selector = &coreauth.FillFirstSelector{}
-	} else {
+	switch normalizeRoutingStrategy(strategy) {
+	case "weighted-round-robin":
+		selector = &coreauth.WeightedRoundRobinSelector{}
+	case "fill-first":
+		if !sessionAffinity {
+			selector = &coreauth.FillFirstSelector{}
+		} else {
+			selector = &coreauth.RoundRobinSelector{}
+		}
+	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
 
@@ -32,6 +39,9 @@ func configuredCredentialSelector(strategy string, sessionAffinity bool, session
 }
 
 func normalizeRoutingStrategy(strategy string) string {
+	if isWeightedRoundRobinStrategy(strategy) {
+		return "weighted-round-robin"
+	}
 	if isFillFirstStrategy(strategy) {
 		return "fill-first"
 	}
@@ -39,10 +49,27 @@ func normalizeRoutingStrategy(strategy string) string {
 }
 
 func effectiveRoutingStrategy(strategy string, sessionAffinity bool) string {
-	if sessionAffinity {
+	normalized := normalizeRoutingStrategy(strategy)
+	if sessionAffinity && normalized != "weighted-round-robin" {
 		return "round-robin"
 	}
-	return normalizeRoutingStrategy(strategy)
+	return normalized
+}
+
+func isWeightedRoundRobinStrategy(strategy string) bool {
+	strategy = strings.TrimSpace(strategy)
+	switch {
+	case strings.EqualFold(strategy, "weighted-round-robin"):
+		return true
+	case strings.EqualFold(strategy, "weightedroundrobin"):
+		return true
+	case strings.EqualFold(strategy, "weighted"):
+		return true
+	case strings.EqualFold(strategy, "wrr"):
+		return true
+	default:
+		return false
+	}
 }
 
 func isFillFirstStrategy(strategy string) bool {

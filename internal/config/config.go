@@ -289,7 +289,7 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
@@ -412,6 +412,10 @@ type ClaudeKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/claude-sonnet-4").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -467,6 +471,10 @@ type CodexKey struct {
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
@@ -554,6 +562,10 @@ type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 }
@@ -636,6 +648,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if err := cfg.normalizeLoadedConfig(configFile); err != nil {
 		return nil, err
 	}
+	if err := cfg.ValidateCredentialWeights(); err != nil {
+		if optional {
+			return &Config{}, nil
+		}
+		return nil, err
+	}
 
 	// NOTE: Legacy migration persistence is intentionally disabled together with
 	// startup legacy migration to keep startup read-only for config.yaml.
@@ -659,6 +677,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
+	if cfg != nil {
+		if err := cfg.ValidateCredentialWeights(); err != nil {
+			return fmt.Errorf("validate credential weights: %w", err)
+		}
+	}
 	persistCfg := cfg
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)

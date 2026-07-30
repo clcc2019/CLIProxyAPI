@@ -408,7 +408,7 @@ func (l *authInFlightLease) release() {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
 		return true
 	default:
 		return false

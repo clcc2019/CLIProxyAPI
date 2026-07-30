@@ -18,11 +18,25 @@ func NewConfigSynthesizer() *ConfigSynthesizer {
 	return &ConfigSynthesizer{}
 }
 
+func addWeightToAttrs(weight *int, attrs map[string]string) {
+	if weight == nil || attrs == nil {
+		return
+	}
+	normalized := *weight
+	if normalized <= 0 {
+		normalized = 0
+	}
+	attrs[coreauth.AttributeWeight] = strconv.Itoa(normalized)
+}
+
 // Synthesize generates Auth entries from config API keys.
 func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 32)
 	if ctx == nil || ctx.Config == nil {
 		return out, nil
+	}
+	if err := ctx.Config.ValidateCredentialWeights(); err != nil {
+		return nil, fmt.Errorf("synthesize config API key auths: %w", err)
 	}
 
 	// Claude API Keys
@@ -62,6 +76,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
+		addWeightToAttrs(ck.Weight, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -117,6 +132,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
+		addWeightToAttrs(ck.Weight, attrs)
 		if ck.BaseURL != "" {
 			attrs["base_url"] = ck.BaseURL
 		}
@@ -190,6 +206,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			addWeightToAttrs(entry.Weight, attrs)
 			if key != "" {
 				attrs["api_key"] = key
 			}

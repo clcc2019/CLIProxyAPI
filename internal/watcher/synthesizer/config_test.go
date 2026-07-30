@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestNewConfigSynthesizer(t *testing.T) {
@@ -409,5 +410,51 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)
 		}
+	}
+}
+
+func TestConfigSynthesizer_AppliesCredentialWeights(t *testing.T) {
+	claudeWeight := 5
+	codexWeight := 0
+	compatWeight := -3
+	synth := NewConfigSynthesizer()
+	auths, err := synth.Synthesize(&SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{{APIKey: "claude-weighted", Weight: &claudeWeight}, {APIKey: "claude-default"}},
+			CodexKey:  []config.CodexKey{{APIKey: "codex-weighted", Weight: &codexWeight}},
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:          "compat",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "compat-weighted", Weight: &compatWeight}},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+
+	weights := make(map[string]string, len(auths))
+	for _, auth := range auths {
+		weights[auth.Attributes["api_key"]] = auth.Attributes[coreauth.AttributeWeight]
+	}
+	if weights["claude-weighted"] != "5" || weights["codex-weighted"] != "0" || weights["compat-weighted"] != "0" {
+		t.Fatalf("synthesized weights = %#v, want explicit 5, 0, 0", weights)
+	}
+	if _, ok := weights["claude-default"]; !ok || weights["claude-default"] != "" {
+		t.Fatalf("omitted weight must not be written, got %#v", weights)
+	}
+}
+
+func TestConfigSynthesizer_RejectsWeightAboveMaximum(t *testing.T) {
+	weight := config.MaxCredentialWeight + 1
+	synth := NewConfigSynthesizer()
+	_, err := synth.Synthesize(&SynthesisContext{
+		Config:      &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "claude", Weight: &weight}}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err == nil {
+		t.Fatal("Synthesize() error = nil, want invalid weight error")
 	}
 }

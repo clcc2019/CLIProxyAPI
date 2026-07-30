@@ -236,6 +236,15 @@ type aggregatedUsageCredentialAccumulator struct {
 }
 
 func (s *RequestStatistics) AggregatedUsageSnapshot(now time.Time) AggregatedUsageSnapshot {
+	snapshot, _ := s.AggregatedUsageSnapshotWithRevision(now)
+	return snapshot
+}
+
+// AggregatedUsageSnapshotWithRevision returns an aggregate snapshot and the
+// revision of the aggregate state used to produce it. The two values are read
+// while holding the same read lock, so callers can safely use the revision as
+// a cache validator for the returned snapshot.
+func (s *RequestStatistics) AggregatedUsageSnapshotWithRevision(now time.Time) (AggregatedUsageSnapshot, uint64) {
 	now = now.UTC()
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -245,16 +254,32 @@ func (s *RequestStatistics) AggregatedUsageSnapshot(now time.Time) AggregatedUsa
 		Windows:     make(map[string]AggregatedUsageWindow, len(aggregatedUsageWindowConfigs)),
 	}
 	if s == nil {
-		return result
-	}
-
-	accumulators := make(map[string]*aggregatedUsageWindowAccumulator, len(aggregatedUsageWindowConfigs))
-	for _, cfg := range aggregatedUsageWindowConfigs {
-		accumulators[cfg.key] = newAggregatedUsageWindowAccumulator(cfg, now)
+		return result, 0
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	result = s.aggregatedUsageSnapshotLocked(now, result)
+	return result, s.aggregateRevision.Load()
+}
+
+// AggregatedUsageRevision returns the current revision of state included in
+// aggregate usage snapshots. It is primarily useful for short-lived response
+// caches; callers needing a snapshot should prefer AggregatedUsageSnapshot or
+// AggregatedUsageSnapshotWithRevision.
+func (s *RequestStatistics) AggregatedUsageRevision() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.aggregateRevision.Load()
+}
+
+func (s *RequestStatistics) aggregatedUsageSnapshotLocked(now time.Time, result AggregatedUsageSnapshot) AggregatedUsageSnapshot {
+	accumulators := make(map[string]*aggregatedUsageWindowAccumulator, len(aggregatedUsageWindowConfigs))
+	for _, cfg := range aggregatedUsageWindowConfigs {
+		accumulators[cfg.key] = newAggregatedUsageWindowAccumulator(cfg, now)
+	}
 
 	globalModelNames := make(map[string]struct{})
 	for _, record := range s.aggregateRecords {

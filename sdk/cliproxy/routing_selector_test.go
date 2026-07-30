@@ -52,6 +52,52 @@ func TestConfiguredCredentialSelectorFillFirstWithoutSessionAffinity(t *testing.
 	}
 }
 
+func TestConfiguredCredentialSelectorWeightedRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	selector := configuredCredentialSelector("wrr", false, "")
+	auths := []*coreauth.Auth{
+		{ID: "auth-a", Attributes: map[string]string{coreauth.AttributeWeight: "5"}},
+		{ID: "auth-b", Attributes: map[string]string{coreauth.AttributeWeight: "1"}},
+	}
+	counts := make(map[string]int)
+	for i := 0; i < 6; i++ {
+		got, err := selector.Pick(context.Background(), "claude", "model", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+	if counts["auth-a"] != 5 || counts["auth-b"] != 1 {
+		t.Fatalf("weighted picks = %#v, want auth-a:auth-b = 5:1", counts)
+	}
+}
+
+func TestConfiguredCredentialSelectorSessionAffinityUsesWeightedFallback(t *testing.T) {
+	t.Parallel()
+
+	selector := configuredCredentialSelector("weighted-round-robin", true, "1h")
+	if stoppable, ok := selector.(interface{ Stop() }); ok {
+		defer stoppable.Stop()
+	}
+	auths := []*coreauth.Auth{
+		{ID: "auth-a", Attributes: map[string]string{coreauth.AttributeWeight: "5"}},
+		{ID: "auth-b", Attributes: map[string]string{coreauth.AttributeWeight: "1"}},
+	}
+	counts := make(map[string]int)
+	for i := 0; i < 6; i++ {
+		payload := []byte(fmt.Sprintf(`{"metadata":{"user_id":"user_xxx_account__session_%08d-0000-0000-0000-000000000000"}}`, i))
+		got, err := selector.Pick(context.Background(), "claude", "model", cliproxyexecutor.Options{OriginalRequest: payload}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+	if counts["auth-a"] != 5 || counts["auth-b"] != 1 {
+		t.Fatalf("weighted session picks = %#v, want auth-a:auth-b = 5:1", counts)
+	}
+}
+
 func TestEffectiveRoutingStrategySessionAffinityNormalizesToRoundRobin(t *testing.T) {
 	t.Parallel()
 
@@ -60,6 +106,22 @@ func TestEffectiveRoutingStrategySessionAffinityNormalizesToRoundRobin(t *testin
 	}
 	if got := effectiveRoutingStrategy("fill-first", false); got != "fill-first" {
 		t.Fatalf("effectiveRoutingStrategy(fill-first, false) = %q, want fill-first", got)
+	}
+	if got := effectiveRoutingStrategy("weighted-round-robin", true); got != "weighted-round-robin" {
+		t.Fatalf("effectiveRoutingStrategy(weighted-round-robin, true) = %q, want weighted-round-robin", got)
+	}
+}
+
+func TestIsWeightedRoundRobinStrategyAliases(t *testing.T) {
+	t.Parallel()
+
+	for _, strategy := range []string{"weighted-round-robin", " WeightedRoundRobin ", "weighted", "WRR"} {
+		if !isWeightedRoundRobinStrategy(strategy) {
+			t.Fatalf("isWeightedRoundRobinStrategy(%q) = false, want true", strategy)
+		}
+	}
+	if isWeightedRoundRobinStrategy("round-robin") {
+		t.Fatal("round-robin must not match weighted-round-robin")
 	}
 }
 

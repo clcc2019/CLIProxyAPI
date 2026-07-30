@@ -796,6 +796,7 @@ func cloneAuthAttributesForScheduler(src map[string]string) map[string]string {
 		dst[key] = value
 	}
 	add("priority")
+	add(AttributeWeight)
 	add("websockets")
 	add("compat_name")
 	add("provider_key")
@@ -825,6 +826,7 @@ func cloneAuthAttributesForManagementSummary(src map[string]string) map[string]s
 		"last_refreshed_at",
 		"lastRefreshedAt",
 		"priority",
+		AttributeWeight,
 		"note",
 		"header:User-Agent",
 		"user_agent",
