@@ -377,6 +377,8 @@ func codexFinalUpstreamBodyMemoAuthProvider(auth *cliproxyauth.Auth, baseModel s
 	buf = strconv.AppendBool(buf, capabilities.SupportsImageDetailOriginal)
 	buf = append(buf, capabilities.DefaultReasoningLevel...)
 	buf = append(buf, 0)
+	buf = append(buf, strings.Join(capabilities.SupportedReasoningLevels, ",")...)
+	buf = append(buf, 0)
 	buf = append(buf, capabilities.DefaultVerbosity...)
 	buf = append(buf, 0)
 	buf = append(buf, strings.Join(capabilities.ServiceTiers, ",")...)

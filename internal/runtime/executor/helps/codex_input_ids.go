@@ -13,19 +13,19 @@ import (
 
 const codexInputItemIDLimit = 64
 
-// SanitizeCodexInputItemIDs removes encrypted reasoning items whose IDs exceed
-// the Codex limit and deterministically shortens other overlong input item IDs.
+// SanitizeCodexInputItemIDs removes legacy item IDs that the official Codex
+// client no longer sends, removes encrypted reasoning items whose valid IDs
+// exceed the Codex limit, and deterministically shortens other overlong valid
+// input item IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
 		return body
 	}
 
-	// Overlong IDs are the exception, not the rule: a well-behaved client sends
-	// IDs comfortably under the limit, so the common case is a no-op. Detect
-	// that with one scan before allocating the maps and the rebuilt item slice
-	// below, which otherwise reserialize the whole input array to produce a
-	// payload identical to the one we were given.
+	// Invalid and overlong IDs are exceptional, so detect them with one scan
+	// before allocating maps and rebuilding the input array. This preserves the
+	// allocation-free no-op path for the normal case.
 	if !codexInputItemIDsNeedSanitizing(input) {
 		return body
 	}
@@ -41,7 +41,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 			continue
 		}
 		id := itemID.String()
-		if !codexInputItemIDTooLong(id) {
+		if codexInputItemIDHasPrefix(id) && !codexInputItemIDTooLong(id) {
 			occupied[id] = struct{}{}
 		}
 	}
@@ -59,7 +59,13 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		itemID := item.Get("id")
 		if itemID.Type == gjson.String {
 			id := itemID.String()
-			if codexInputItemIDTooLong(id) {
+			if !codexInputItemIDHasPrefix(id) {
+				next, err := sjson.DeleteBytes([]byte(raw), "id")
+				if err == nil {
+					raw = string(next)
+					changed = true
+				}
+			} else if codexInputItemIDTooLong(id) {
 				shortened, ok := mapped[id]
 				if !ok {
 					shortened = shortenCodexInputItemID(id)
@@ -93,21 +99,27 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 	return updated
 }
 
-// codexInputItemIDsNeedSanitizing reports whether any input item carries an ID
-// longer than the Codex limit. Both mutations performed by
-// SanitizeCodexInputItemIDs — dropping encrypted reasoning items and shortening
-// IDs — are gated on an overlong ID, so this is the exact precondition for the
-// function doing any work at all.
+// codexInputItemIDsNeedSanitizing reports whether an input item carries an
+// empty, legacy/unprefixed, or overlong ID.
 func codexInputItemIDsNeedSanitizing(input gjson.Result) bool {
-	overlong := false
+	needsSanitizing := false
 	input.ForEach(func(_, item gjson.Result) bool {
-		if itemID := item.Get("id"); itemID.Type == gjson.String && codexInputItemIDTooLong(itemID.String()) {
-			overlong = true
+		if itemID := item.Get("id"); itemID.Type == gjson.String && (!codexInputItemIDHasPrefix(itemID.String()) || codexInputItemIDTooLong(itemID.String())) {
+			needsSanitizing = true
 			return false
 		}
 		return true
 	})
-	return overlong
+	return needsSanitizing
+}
+
+// codexInputItemIDHasPrefix reports the compatibility rule used by codex-rs:
+// an outbound response item ID needs a non-empty prefix and suffix separated by
+// an underscore. Deserialization remains permissive; only the upstream request
+// is normalized.
+func codexInputItemIDHasPrefix(id string) bool {
+	prefix, suffix, found := strings.Cut(id, "_")
+	return found && prefix != "" && suffix != ""
 }
 
 // codexInputItemIDTooLong reports whether id exceeds the Codex input item ID
@@ -122,7 +134,7 @@ func shouldDropCodexEncryptedReasoningItem(item gjson.Result) bool {
 		return false
 	}
 	itemID := item.Get("id")
-	if itemID.Type != gjson.String || !codexInputItemIDTooLong(itemID.String()) {
+	if itemID.Type != gjson.String || !codexInputItemIDHasPrefix(itemID.String()) || !codexInputItemIDTooLong(itemID.String()) {
 		return false
 	}
 	encryptedContent := item.Get("encrypted_content")

@@ -179,13 +179,10 @@ func codexResponsesClientMetadataEntries(dst []codexClientMetadataEntry, target 
 }
 
 func codexClientMetadataSessionIDValue(target http.Header, source http.Header, turnMetadata string) string {
-	if value := firstNonEmptyHeaderValue(target, source, codexHeaderSessionID); value != "" {
+	if value := codexSessionIdentityHeaderValue(target); value != "" {
 		return value
 	}
-	if value := firstNonEmptyHeaderValue(target, source, codexHeaderOfficialSessionID); value != "" {
-		return value
-	}
-	if value := firstNonEmptyHeaderValue(target, source, "X-Session-ID"); value != "" {
+	if value := codexSessionIdentityHeaderValue(source); value != "" {
 		return value
 	}
 	if turnMetadata == "" {
@@ -195,13 +192,10 @@ func codexClientMetadataSessionIDValue(target http.Header, source http.Header, t
 }
 
 func codexClientMetadataThreadIDValue(target http.Header, source http.Header, turnMetadata string) string {
-	if value := firstNonEmptyHeaderValue(target, source, codexHeaderThreadID); value != "" {
+	if value := codexThreadIdentityHeaderValue(target); value != "" {
 		return value
 	}
-	if value := firstNonEmptyHeaderValue(target, source, codexHeaderOfficialThreadID); value != "" {
-		return value
-	}
-	if value := firstNonEmptyHeaderValue(target, source, "X-Thread-ID"); value != "" {
+	if value := codexThreadIdentityHeaderValue(source); value != "" {
 		return value
 	}
 	if turnMetadata == "" {
@@ -235,9 +229,15 @@ func codexEnsureResponsesIdentityHeaders(target http.Header, source http.Header)
 	ensureHeaderWithPriority(target, source, codexWireHeaderMemgenRequest, "", "")
 	ensureHeaderWithPriority(target, source, codexHeaderWindowID, "", "")
 	if trimHeaderValue(target, codexHeaderWindowID) == "" {
-		windowKey := firstNonEmptyHeaderValue(target, source, codexHeaderThreadID)
+		windowKey := codexThreadIdentityHeaderValue(target)
 		if windowKey == "" {
-			windowKey = trimHeaderValue(target, codexHeaderSessionID)
+			windowKey = codexThreadIdentityHeaderValue(source)
+		}
+		if windowKey == "" {
+			windowKey = codexSessionIdentityHeaderValue(target)
+		}
+		if windowKey == "" {
+			windowKey = codexSessionIdentityHeaderValue(source)
 		}
 		if windowKey != "" {
 			if windowID := codexCurrentWindowID(windowKey); windowID != "" {

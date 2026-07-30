@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -304,4 +305,97 @@ func TestRefreshCodexRemoteCatalogCollapsesConcurrentRequests(t *testing.T) {
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1 coalesced request", got)
 	}
+}
+
+func TestCodexResponseModelsETagRefreshesCatalogOnlyWhenChanged(t *testing.T) {
+	var calls atomic.Int32
+	var catalogETag atomic.Value
+	catalogETag.Store("catalog-v1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/models" {
+			t.Errorf("path = %q, want /models", req.URL.Path)
+		}
+		calls.Add(1)
+		w.Header().Set(codexRemoteCatalogETagHeader, catalogETag.Load().(string))
+		_, _ = w.Write([]byte(`{"models":[{"slug":"etag-catalog-model","use_responses_lite":true}]}`))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexRemoteModelsTestExecutor{})
+	auth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-response-etag",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "test-key",
+			"base_url":  server.URL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	service := &Service{coreManager: manager}
+	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
+
+	service.observeCodexResponseMetadata(context.Background(), auth, runtimeexecutor.CodexResponseMetadata{ModelsETag: "catalog-v1"})
+	waitForCodexRemoteCatalogCalls(t, &calls, 1)
+	entry := loadCodexRemoteCatalogEntry(t, service, auth.ID)
+	if entry.etag != "catalog-v1" {
+		t.Fatalf("cached ETag = %q, want catalog-v1", entry.etag)
+	}
+	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); !containsModelID(ids, "etag-catalog-model") {
+		t.Fatalf("refreshed registry models = %#v, want etag-catalog-model", ids)
+	}
+
+	service.observeCodexResponseMetadata(context.Background(), auth, runtimeexecutor.CodexResponseMetadata{ModelsETag: "catalog-v1"})
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("matching ETag upstream calls = %d, want 1", got)
+	}
+
+	catalogETag.Store("catalog-v2")
+	service.observeCodexResponseMetadata(context.Background(), auth, runtimeexecutor.CodexResponseMetadata{ModelsETag: "catalog-v2"})
+	waitForCodexRemoteCatalogCalls(t, &calls, 2)
+	if entry := loadCodexRemoteCatalogEntry(t, service, auth.ID); entry.etag != "catalog-v2" {
+		t.Fatalf("refreshed cached ETag = %q, want catalog-v2", entry.etag)
+	}
+}
+
+func waitForCodexRemoteCatalogCalls(t *testing.T, calls *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if got := calls.Load(); got >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("catalog calls = %d, want at least %d", calls.Load(), want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func loadCodexRemoteCatalogEntry(t *testing.T, service *Service, authID string) codexRemoteCatalogCacheEntry {
+	t.Helper()
+	cached, ok := service.codexRemoteCatalogs.Load(authID)
+	if !ok {
+		t.Fatalf("catalog entry for %q was not cached", authID)
+	}
+	entry, ok := cached.(codexRemoteCatalogCacheEntry)
+	if !ok {
+		t.Fatalf("catalog entry type = %T, want codexRemoteCatalogCacheEntry", cached)
+	}
+	return entry
+}
+
+func containsModelID(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }

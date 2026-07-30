@@ -37,6 +37,25 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	}
 }
 
+func TestUsageReporterCodexResponseMetadataUsesActualModel(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5-requested", nil)
+	reporter.SetCodexResponseMetadata("gpt-5-safe", true)
+	record := reporter.buildRecordWithFailure(usage.Detail{InputTokens: 1, OutputTokens: 2}, false, usage.Failure{}, nil)
+
+	if record.Model != "gpt-5-safe" {
+		t.Fatalf("usage model = %q, want gpt-5-safe", record.Model)
+	}
+	if record.RequestedModel != "gpt-5-requested" || record.Alias != "gpt-5-requested" {
+		t.Fatalf("requested model fields = (%q, %q), want gpt-5-requested", record.RequestedModel, record.Alias)
+	}
+	if record.ResponseModel != "gpt-5-safe" {
+		t.Fatalf("response model = %q, want gpt-5-safe", record.ResponseModel)
+	}
+	if !record.ReasoningIncluded {
+		t.Fatal("reasoning included = false, want true")
+	}
+}
+
 func TestParseOpenAIUsageResponses(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7,"cache_creation_tokens":3},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail := ParseOpenAIUsage(data)

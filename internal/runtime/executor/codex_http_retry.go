@@ -80,15 +80,20 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 		}
 		if err == nil && !codexShouldRetryHTTPStatus(httpResp) {
 			codexPublishRateLimitsFromHeaders(ctx, auth, httpResp.Header)
+			e.observeCodexResponseHeaders(ctx, auth, httpResp.Header)
 			return httpResp, nil
 		}
 		if attempt >= codexHTTPMaxRequestRetries {
 			if httpResp != nil {
 				codexPublishRateLimitsFromHeaders(ctx, auth, httpResp.Header)
+				e.observeCodexResponseHeaders(ctx, auth, httpResp.Header)
 			}
 			return httpResp, err
 		}
 		if encoding != "" && !encodingIsZstd {
+			if httpResp != nil {
+				e.observeCodexResponseHeaders(ctx, auth, httpResp.Header)
+			}
 			return httpResp, err
 		}
 		if err != nil {

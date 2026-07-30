@@ -55,7 +55,7 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 		codexEnsureCompactTurnMetadataHeader(headers, ginHeaders, codexTurnMetadataDefaults{
 			installationID: installationID,
 			sessionID:      sessionID,
-			threadID:       trimHeaderValue(headers, codexHeaderThreadID),
+			threadID:       codexThreadIdentityHeaderValue(headers),
 			turnID:         uuid.NewString(),
 			sandbox:        codexDefaultSandboxTag,
 			windowID:       trimHeaderValue(headers, codexHeaderWindowID),
@@ -66,7 +66,7 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 			installationID: installationID,
 			requestKind:    codexTurnRequestKind,
 			sessionID:      sessionID,
-			threadID:       trimHeaderValue(headers, codexHeaderThreadID),
+			threadID:       codexThreadIdentityHeaderValue(headers),
 			turnID:         uuid.NewString(),
 			sandbox:        codexDefaultSandboxTag,
 			windowID:       trimHeaderValue(headers, codexHeaderWindowID),

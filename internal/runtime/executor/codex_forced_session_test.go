@@ -40,11 +40,11 @@ func TestForcedUpstreamSessionOverridesCallerOwnedCodexSession(t *testing.T) {
 	}
 
 	headers := call.prepared.httpReq.Header
-	if got := headers.Get(codexHeaderSessionID); got != "new-upstream-session" {
-		t.Fatalf("%s = %q, want new-upstream-session", codexHeaderSessionID, got)
+	if got := headers.Get(codexHeaderOfficialSessionID); got != "new-upstream-session" {
+		t.Fatalf("%s = %q, want new-upstream-session", codexHeaderOfficialSessionID, got)
 	}
-	if got := headers.Get(codexHeaderThreadID); got != "new-upstream-session" {
-		t.Fatalf("%s = %q, want new-upstream-session", codexHeaderThreadID, got)
+	if got := headers.Get(codexHeaderOfficialThreadID); got != "new-upstream-session" {
+		t.Fatalf("%s = %q, want new-upstream-session", codexHeaderOfficialThreadID, got)
 	}
 	if got := headers.Get("X-Client-Request-Id"); got != "new-upstream-session" {
 		t.Fatalf("X-Client-Request-Id = %q, want new-upstream-session", got)

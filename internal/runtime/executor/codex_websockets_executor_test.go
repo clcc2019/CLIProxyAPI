@@ -3,6 +3,8 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -31,7 +33,7 @@ import (
 )
 
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
-	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
+	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg_1"}]}`)
 
 	wsReqBody := buildCodexWebsocketRequestBody(body, "")
 
@@ -41,7 +43,7 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	if got := gjson.GetBytes(wsReqBody, "previous_response_id").String(); got != "resp-1" {
 		t.Fatalf("previous_response_id = %s, want resp-1", got)
 	}
-	if gjson.GetBytes(wsReqBody, "input.0.id").String() != "msg-1" {
+	if gjson.GetBytes(wsReqBody, "input.0.id").String() != "msg_1" {
 		t.Fatalf("input item id mismatch")
 	}
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got == "response.append" {
@@ -66,6 +68,93 @@ func TestBuildCodexResponsesWebsocketURLFastPathPreservesRequestURI(t *testing.T
 	}
 	if got != "wss://chatgpt.com/backend-api/codex/responses?model=gpt-5.4" {
 		t.Fatalf("websocket URL = %q, want wss://chatgpt.com/backend-api/codex/responses?model=gpt-5.4", got)
+	}
+}
+
+func TestDialCodexWebsocketCompressesNegotiatedFrames(t *testing.T) {
+	type frameHeader struct {
+		first, second byte
+		extensions    string
+		err           error
+	}
+
+	frameCh := make(chan frameHeader, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			frameCh <- frameHeader{err: errors.New("response writer does not support hijacking")}
+			return
+		}
+		conn, buffered, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			frameCh <- frameHeader{err: fmt.Errorf("hijack websocket request: %w", errHijack)}
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		key := r.Header.Get("Sec-WebSocket-Key")
+		if key == "" {
+			frameCh <- frameHeader{err: errors.New("missing Sec-WebSocket-Key")}
+			return
+		}
+		digest := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+		if _, errWrite := fmt.Fprintf(
+			buffered,
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\nSec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n\r\n",
+			base64.StdEncoding.EncodeToString(digest[:]),
+		); errWrite != nil {
+			frameCh <- frameHeader{err: fmt.Errorf("write websocket upgrade response: %w", errWrite)}
+			return
+		}
+		if errFlush := buffered.Flush(); errFlush != nil {
+			frameCh <- frameHeader{err: fmt.Errorf("flush websocket upgrade response: %w", errFlush)}
+			return
+		}
+
+		var header [2]byte
+		if _, errRead := io.ReadFull(buffered, header[:]); errRead != nil {
+			frameCh <- frameHeader{err: fmt.Errorf("read websocket frame header: %w", errRead)}
+			return
+		}
+		frameCh <- frameHeader{
+			first:      header[0],
+			second:     header[1],
+			extensions: r.Header.Get("Sec-WebSocket-Extensions"),
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexWebsocketsExecutor(&config.Config{})
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, errDial := executor.dialCodexWebsocket(context.Background(), nil, wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dialCodexWebsocket() error = %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("Codex permessage-deflate payload ", 32))); errWrite != nil {
+		t.Fatalf("WriteMessage() error = %v", errWrite)
+	}
+
+	select {
+	case frame := <-frameCh:
+		if frame.err != nil {
+			t.Fatal(frame.err)
+		}
+		if !strings.Contains(strings.ToLower(frame.extensions), "permessage-deflate") {
+			t.Fatalf("Sec-WebSocket-Extensions = %q, want permessage-deflate", frame.extensions)
+		}
+		if got := frame.first & 0x0f; got != websocket.TextMessage {
+			t.Fatalf("frame opcode = %d, want text", got)
+		}
+		if frame.first&0x40 == 0 {
+			t.Fatalf("frame first byte = 0x%02x, want RSV1 compression bit set", frame.first)
+		}
+		if frame.second&0x80 == 0 {
+			t.Fatalf("frame second byte = 0x%02x, want client mask bit set", frame.second)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket frame")
 	}
 }
 
@@ -322,7 +411,7 @@ func TestBuildCodexWebsocketRequestBodyRepairsNullInput(t *testing.T) {
 }
 
 func TestBuildCodexWebsocketRetryWithoutPreviousResponseDropsExplicitID(t *testing.T) {
-	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
+	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg_1"}]}`)
 
 	wsReqBody := buildCodexWebsocketRetryWithoutPreviousResponse(body, `{"turn_id":"turn-1"}`, time.UnixMilli(1234))
 
@@ -332,8 +421,8 @@ func TestBuildCodexWebsocketRetryWithoutPreviousResponseDropsExplicitID(t *testi
 	if got := gjson.GetBytes(wsReqBody, "previous_response_id"); got.Exists() {
 		t.Fatalf("retry body should omit previous_response_id: %s", wsReqBody)
 	}
-	if got := gjson.GetBytes(wsReqBody, "input.0.id").String(); got != "msg-1" {
-		t.Fatalf("input item id = %q, want msg-1; body=%s", got, wsReqBody)
+	if got := gjson.GetBytes(wsReqBody, "input.0.id").String(); got != "msg_1" {
+		t.Fatalf("input item id = %q, want msg_1; body=%s", got, wsReqBody)
 	}
 	if got := gjson.GetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata").String(); got != `{"turn_id":"turn-1"}` {
 		t.Fatalf("turn metadata = %q, want turn-1 metadata; body=%s", got, wsReqBody)
@@ -344,8 +433,8 @@ func TestBuildCodexWebsocketRetryWithoutPreviousResponseDropsExplicitID(t *testi
 }
 
 func TestBuildCodexWebsocketSendRetryBodyDropsOnlyInternalPreviousResponseID(t *testing.T) {
-	fullBody := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"},{"type":"message","id":"msg-2"}]}`)
-	incrementalBody := []byte(`{"type":"response.create","model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`)
+	fullBody := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg_1"},{"type":"message","id":"msg_2"}]}`)
+	incrementalBody := []byte(`{"type":"response.create","model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg_2"}]}`)
 
 	retryBody := buildCodexWebsocketSendRetryBody(fullBody, incrementalBody, "", time.UnixMilli(1234))
 
@@ -372,7 +461,7 @@ func TestCodexShouldRetryWithoutPreviousResponseWhenContextCanBeReplayed(t *test
 	messageOnlyErrorPayload := []byte(`{"type":"error","status":400,"error":{"message":"Previous response with id 'resp_038d5107ec6cc78c016a1fb143ac088191b14e6ca3097c696e' not found."}}`)
 	noToolCallPayload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"No tool call found for function call output with call_id call_Rx1FW4RrRF9C1SyH2xxBVtEn."}}`)
 	noCustomToolCallPayload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"No tool call found for custom tool call output with call_id call_jzaeS5GDDushxTKTsXR9CTWL."}}`)
-	fullBody := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
+	fullBody := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg_1"},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
 	internalIncremental := []byte(`{"type":"response.create","model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
 
 	if !codexShouldRetryWithoutPreviousResponse(fullBody, internalIncremental, errorPayload) {
@@ -403,7 +492,7 @@ func TestCodexShouldRetryWithoutPreviousResponseWhenContextCanBeReplayed(t *test
 }
 
 func TestBuildCodexWebsocketRequestBodyIncludesClientMetadata(t *testing.T) {
-	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"}]}`)
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg_1"}]}`)
 
 	wsReqBody := buildCodexWebsocketRequestBody(body, `{"turn_id":"turn-1","sandbox":"none"}`)
 
@@ -479,9 +568,6 @@ func TestPrepareCodexWebsocketRequestBuildsSharedRequestState(t *testing.T) {
 	}
 	if got := prepared.executionSessionID; got != "session-1" {
 		t.Fatalf("executionSessionID = %q, want %q", got, "session-1")
-	}
-	if got := prepared.wsHeaders.Get(codexHeaderSessionID); got != "session-1" {
-		t.Fatalf("%s = %q, want %q", codexHeaderSessionID, got, "session-1")
 	}
 	if got := prepared.wsHeaders.Get(codexHeaderOfficialSessionID); got != "session-1" {
 		t.Fatalf("%s = %q, want %q", codexHeaderOfficialSessionID, got, "session-1")
@@ -727,8 +813,8 @@ func TestPrepareCodexWebsocketRequestDerivesPromptCacheForOpenAIChat(t *testing.
 	if promptCacheKey == "" {
 		t.Fatalf("prompt_cache_key should be derived for OpenAI chat websocket request: %s", string(prepared.wsReqBody))
 	}
-	if got := prepared.wsHeaders.Get("Session_id"); got != promptCacheKey {
-		t.Fatalf("Session_id = %q, want prompt_cache_key %q", got, promptCacheKey)
+	if got := prepared.wsHeaders.Get(codexHeaderOfficialSessionID); got != promptCacheKey {
+		t.Fatalf("Session-Id = %q, want prompt_cache_key %q", got, promptCacheKey)
 	}
 	if !strings.Contains(prepared.reuseKey, "|"+promptCacheKey+"|") {
 		t.Fatalf("reuseKey = %q, want to include prompt_cache_key %q", prepared.reuseKey, promptCacheKey)
@@ -778,11 +864,11 @@ func TestPrepareCodexWebsocketRequestUsesOfficialThreadHeaderForPromptCache(t *t
 	if got := gjson.GetBytes(prepared.wsReqBody, "prompt_cache_key").String(); got != "official-thread" {
 		t.Fatalf("prompt_cache_key = %q, want official-thread; body=%s", got, prepared.wsReqBody)
 	}
-	if got := prepared.wsHeaders.Get(codexHeaderSessionID); got != "official-session" {
-		t.Fatalf("%s = %q, want official-session", codexHeaderSessionID, got)
+	if got := prepared.wsHeaders.Get(codexHeaderOfficialSessionID); got != "official-session" {
+		t.Fatalf("%s = %q, want official-session", codexHeaderOfficialSessionID, got)
 	}
-	if got := prepared.wsHeaders.Get(codexHeaderThreadID); got != "official-thread" {
-		t.Fatalf("%s = %q, want official-thread", codexHeaderThreadID, got)
+	if got := prepared.wsHeaders.Get(codexHeaderOfficialThreadID); got != "official-thread" {
+		t.Fatalf("%s = %q, want official-thread", codexHeaderOfficialThreadID, got)
 	}
 	if !strings.HasSuffix(prepared.reuseKey, "|official-thread|official-thread:0") {
 		t.Fatalf("reuseKey = %q, want prompt cache key and window official-thread", prepared.reuseKey)
@@ -1767,53 +1853,14 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	}
 	assertGeneratedCodexTurnMetadata(t, headers.Get("X-Codex-Turn-Metadata"))
 	assertCodexTurnMetadataString(t, headers.Get("X-Codex-Turn-Metadata"), "window_id", headers.Get(codexHeaderWindowID))
-	if got := headers.Get("Session_id"); got == "" {
-		t.Fatal("Session_id should be generated by default")
+	if got := headers.Get(codexHeaderOfficialSessionID); got == "" {
+		t.Fatalf("%s should be generated by default", codexHeaderOfficialSessionID)
 	}
-	if got := headers.Get(codexHeaderOfficialSessionID); got != headers.Get("Session_id") {
-		t.Fatalf("%s = %q, want Session_id %q", codexHeaderOfficialSessionID, got, headers.Get("Session_id"))
+	if got := headers.Get(codexHeaderOfficialThreadID); got != headers.Get(codexHeaderOfficialSessionID) {
+		t.Fatalf("%s = %q, want %s %q", codexHeaderOfficialThreadID, got, codexHeaderOfficialSessionID, headers.Get(codexHeaderOfficialSessionID))
 	}
-	if got := headers.Get(codexHeaderOfficialThreadID); got != headers.Get(codexHeaderThreadID) {
-		t.Fatalf("%s = %q, want %s %q", codexHeaderOfficialThreadID, got, codexHeaderThreadID, headers.Get(codexHeaderThreadID))
-	}
-	if got := headers.Get("X-Client-Request-Id"); got != headers.Get("Session_id") {
-		t.Fatalf("X-Client-Request-Id = %q, want Session_id %q", got, headers.Get("Session_id"))
-	}
-}
-
-func TestCodexWebsocketResponseProcessedFeatureMatching(t *testing.T) {
-	headers := http.Header{}
-	headers.Add("X-Codex-Beta-Features", " other-feature , RESPONSES_WEBSOCKET_RESPONSE_PROCESSED ")
-
-	if !codexWebsocketResponseProcessedEnabled(headers) {
-		t.Fatal("expected response.processed feature to match case-insensitively")
-	}
-}
-
-func BenchmarkCodexWebsocketResponseProcessedFeatureMatching(b *testing.B) {
-	headers := http.Header{}
-	headers.Add("X-Codex-Beta-Features", " other-feature , RESPONSES_WEBSOCKET_RESPONSE_PROCESSED ")
-
-	b.ReportAllocs()
-	for b.Loop() {
-		if !codexWebsocketResponseProcessedEnabled(headers) {
-			b.Fatal("expected response.processed feature to match")
-		}
-	}
-}
-
-func TestCodexWebsocketShouldSendResponseProcessedSkipsGenerateFalse(t *testing.T) {
-	headers := http.Header{}
-	headers.Set("X-Codex-Beta-Features", codexBetaFeatureResponseProcessed)
-
-	if codexWebsocketShouldSendResponseProcessed(headers, []byte(`{"type":"response.create","generate":false}`)) {
-		t.Fatal("response.processed should not be sent for generate=false prewarm requests")
-	}
-	if !codexWebsocketShouldSendResponseProcessed(headers, []byte(`{"type":"response.create"}`)) {
-		t.Fatal("response.processed should be sent when feature is enabled and generate is absent")
-	}
-	if !codexWebsocketShouldSendResponseProcessed(headers, []byte(`{"type":"response.create","generate":null}`)) {
-		t.Fatal("response.processed should be sent unless generate is explicitly false")
+	if got := headers.Get("X-Client-Request-Id"); got != headers.Get(codexHeaderOfficialSessionID) {
+		t.Fatalf("X-Client-Request-Id = %q, want %s %q", got, codexHeaderOfficialSessionID, headers.Get(codexHeaderOfficialSessionID))
 	}
 }
 
@@ -1930,12 +1977,6 @@ func TestApplyCodexWebsocketHeadersPreservesOfficialSessionHeaders(t *testing.T)
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, nil, "", nil)
 
-	if got := headers.Get(codexHeaderSessionID); got != "official-session" {
-		t.Fatalf("%s = %q, want official-session", codexHeaderSessionID, got)
-	}
-	if got := headers.Get(codexHeaderThreadID); got != "official-thread" {
-		t.Fatalf("%s = %q, want official-thread", codexHeaderThreadID, got)
-	}
 	if got := headers.Get(codexHeaderOfficialSessionID); got != "official-session" {
 		t.Fatalf("%s = %q, want official-session", codexHeaderOfficialSessionID, got)
 	}
@@ -2095,8 +2136,8 @@ func TestApplyCodexWebsocketHeadersUsesDerivedSessionHeadersWithoutForwardingCon
 	if gotConversation := got.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
-	if gotSession := got.Get("Session_id"); gotSession != "conv-1" {
-		t.Fatalf("Session_id = %q, want %q", gotSession, "conv-1")
+	if gotSession := got.Get(codexHeaderOfficialSessionID); gotSession != "conv-1" {
+		t.Fatalf("Session-Id = %q, want %q", gotSession, "conv-1")
 	}
 	if gotRequestID := got.Get("X-Client-Request-Id"); gotRequestID != "conv-1" {
 		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, "conv-1")
@@ -2401,8 +2442,8 @@ func TestApplyCodexHeadersUsesDerivedSessionHeadersWithoutForwardingConversation
 	if gotConversation := req.Header.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
-	if gotSession := req.Header.Get("Session_id"); gotSession != "conv-1" {
-		t.Fatalf("Session_id = %q, want %q", gotSession, "conv-1")
+	if gotSession := req.Header.Get(codexHeaderOfficialSessionID); gotSession != "conv-1" {
+		t.Fatalf("Session-Id = %q, want %q", gotSession, "conv-1")
 	}
 	if gotRequestID := req.Header.Get("X-Client-Request-Id"); gotRequestID != "conv-1" {
 		t.Fatalf("X-Client-Request-Id = %q, want conv-1", gotRequestID)
@@ -2506,17 +2547,14 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 	}
 	assertGeneratedCodexTurnMetadata(t, req.Header.Get("X-Codex-Turn-Metadata"))
 	assertCodexTurnMetadataString(t, req.Header.Get("X-Codex-Turn-Metadata"), "window_id", req.Header.Get(codexHeaderWindowID))
-	if got := req.Header.Get("Session_id"); got == "" {
-		t.Fatal("Session_id should be generated by default")
+	if got := req.Header.Get(codexHeaderOfficialSessionID); got == "" {
+		t.Fatalf("%s should be generated by default", codexHeaderOfficialSessionID)
 	}
-	if got := req.Header.Get(codexHeaderOfficialSessionID); got != req.Header.Get("Session_id") {
-		t.Fatalf("%s = %q, want Session_id %q", codexHeaderOfficialSessionID, got, req.Header.Get("Session_id"))
+	if got := req.Header.Get(codexHeaderOfficialThreadID); got != req.Header.Get(codexHeaderOfficialSessionID) {
+		t.Fatalf("%s = %q, want %s %q", codexHeaderOfficialThreadID, got, codexHeaderOfficialSessionID, req.Header.Get(codexHeaderOfficialSessionID))
 	}
-	if got := req.Header.Get(codexHeaderOfficialThreadID); got != req.Header.Get(codexHeaderThreadID) {
-		t.Fatalf("%s = %q, want %s %q", codexHeaderOfficialThreadID, got, codexHeaderThreadID, req.Header.Get(codexHeaderThreadID))
-	}
-	if got := req.Header.Get("X-Client-Request-Id"); got != req.Header.Get(codexHeaderThreadID) {
-		t.Fatalf("X-Client-Request-Id = %q, want %s %q", got, codexHeaderThreadID, req.Header.Get(codexHeaderThreadID))
+	if got := req.Header.Get("X-Client-Request-Id"); got != req.Header.Get(codexHeaderOfficialThreadID) {
+		t.Fatalf("X-Client-Request-Id = %q, want %s %q", got, codexHeaderOfficialThreadID, req.Header.Get(codexHeaderOfficialThreadID))
 	}
 }
 
@@ -2532,12 +2570,6 @@ func TestApplyCodexHeadersPreservesOfficialSessionHeaders(t *testing.T) {
 
 	applyCodexHeaders(req, nil, "oauth-token", true, nil)
 
-	if got := req.Header.Get(codexHeaderSessionID); got != "official-session" {
-		t.Fatalf("%s = %q, want official-session", codexHeaderSessionID, got)
-	}
-	if got := req.Header.Get(codexHeaderThreadID); got != "official-thread" {
-		t.Fatalf("%s = %q, want official-thread", codexHeaderThreadID, got)
-	}
 	if got := req.Header.Get(codexHeaderOfficialSessionID); got != "official-session" {
 		t.Fatalf("%s = %q, want official-session", codexHeaderOfficialSessionID, got)
 	}
@@ -2566,8 +2598,8 @@ func TestApplyCodexHeadersCompactKeepsHeadersLeanByDefault(t *testing.T) {
 	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, misc.CodexCLIVersion)
 	}
-	if got := req.Header.Get(codexHeaderSessionID); got == "" {
-		t.Fatal("Session_id should be generated for compact requests")
+	if got := req.Header.Get(codexHeaderOfficialSessionID); got == "" {
+		t.Fatalf("%s should be generated for compact requests", codexHeaderOfficialSessionID)
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "" {
 		t.Fatalf("X-Client-Request-Id = %q, want empty", got)
@@ -2616,8 +2648,8 @@ func TestApplyCodexHeadersUsesTurnMetadataSessionIDWhenMissing(t *testing.T) {
 
 	applyCodexHeaders(req, nil, "oauth-token", true, nil)
 
-	if got := req.Header.Get(codexHeaderSessionID); got != "turn-session-1" {
-		t.Fatalf("%s = %q, want %q", codexHeaderSessionID, got, "turn-session-1")
+	if got := req.Header.Get(codexHeaderOfficialSessionID); got != "turn-session-1" {
+		t.Fatalf("%s = %q, want %q", codexHeaderOfficialSessionID, got, "turn-session-1")
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "turn-session-1" {
 		t.Fatalf("X-Client-Request-Id = %q, want turn-session-1", got)
@@ -4085,9 +4117,6 @@ func testCodexWebsocketsExecuteStreamRetriesFullRequestWhenPreviousResponseMissi
 				serverErr <- fmt.Errorf("ReadMessage(%d) error: %w", i+1, errRead)
 				return
 			}
-			if gjson.GetBytes(payload, "type").String() == "response.processed" {
-				continue
-			}
 			received <- append([]byte(nil), payload...)
 
 			switch i {
@@ -4422,9 +4451,6 @@ func TestCodexWebsocketsExecuteStreamClearsIncrementalStateAfterUpstreamError(t 
 			_, payload, errRead := conn.ReadMessage()
 			if errRead != nil {
 				return
-			}
-			if gjson.GetBytes(payload, "type").String() == "response.processed" {
-				continue
 			}
 			received <- append([]byte(nil), payload...)
 			switch requests.Add(1) {
@@ -5299,10 +5325,11 @@ func TestCodexWebsocketsExecuteRefreshesAfterUnauthorizedHandshake(t *testing.T)
 	}
 }
 
-func TestCodexWebsocketsExecuteStreamSendsResponseProcessedWhenFeatureEnabled(t *testing.T) {
+func TestCodexWebsocketsExecuteStreamDoesNotSendResponseProcessed(t *testing.T) {
 	var (
-		upgrader  = websocket.Upgrader{}
-		processed = make(chan []byte, 1)
+		upgrader        = websocket.Upgrader{}
+		unexpectedFrame = make(chan []byte, 1)
+		readDone        = make(chan struct{}, 1)
 	)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5330,19 +5357,20 @@ func TestCodexWebsocketsExecuteStreamSendsResponseProcessedWhenFeatureEnabled(t 
 			return
 		}
 
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 		_, payload, errRead := conn.ReadMessage()
-		if errRead != nil {
-			t.Errorf("ReadMessage() response.processed error = %v", errRead)
-			return
+		if errRead == nil {
+			unexpectedFrame <- append([]byte(nil), payload...)
 		}
-		processed <- append([]byte(nil), payload...)
+		readDone <- struct{}{}
 	}))
 	defer server.Close()
 
 	executor := NewCodexWebsocketsExecutor(&config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
-			BetaFeatures: codexBetaFeatureResponseProcessed,
+			// Preserve the obsolete flag in the request to prove it cannot enable
+			// the removed response.processed control message.
+			BetaFeatures: "responses_websocket_response_processed",
 		},
 	})
 	auth := &cliproxyauth.Auth{
@@ -5373,15 +5401,11 @@ func TestCodexWebsocketsExecuteStreamSendsResponseProcessedWhenFeatureEnabled(t 
 	}
 
 	select {
-	case payload := <-processed:
-		if got := gjson.GetBytes(payload, "type").String(); got != "response.processed" {
-			t.Fatalf("processed type = %q, want response.processed; payload=%s", got, payload)
-		}
-		if got := gjson.GetBytes(payload, "response_id").String(); got != "resp_1" {
-			t.Fatalf("response_id = %q, want resp_1; payload=%s", got, payload)
-		}
+	case payload := <-unexpectedFrame:
+		t.Fatalf("unexpected upstream WebSocket control frame after completion: %s", payload)
+	case <-readDone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for response.processed")
+		t.Fatal("timeout waiting to verify that no response.processed frame was sent")
 	}
 }
 

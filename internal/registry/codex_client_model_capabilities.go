@@ -25,11 +25,14 @@ type codexClientModelCapability struct {
 	SupportsReasoningSummaries        *bool   `json:"supports_reasoning_summaries"`
 	SupportsReasoningSummaryParameter *bool   `json:"supports_reasoning_summary_parameter"`
 	DefaultReasoningLevel             *string `json:"default_reasoning_level"`
-	SupportVerbosity                  *bool   `json:"support_verbosity"`
-	DefaultVerbosity                  *string `json:"default_verbosity"`
-	UseResponsesLite                  *bool   `json:"use_responses_lite"`
-	SupportsImageDetailOriginal       *bool   `json:"supports_image_detail_original"`
-	ServiceTiers                      []struct {
+	SupportedReasoningLevels          []struct {
+		Effort string `json:"effort"`
+	} `json:"supported_reasoning_levels"`
+	SupportVerbosity            *bool   `json:"support_verbosity"`
+	DefaultVerbosity            *string `json:"default_verbosity"`
+	UseResponsesLite            *bool   `json:"use_responses_lite"`
+	SupportsImageDetailOriginal *bool   `json:"supports_image_detail_original"`
+	ServiceTiers                []struct {
 		ID string `json:"id"`
 	} `json:"service_tiers"`
 	DefaultServiceTier *string `json:"default_service_tier"`
@@ -45,6 +48,7 @@ type CodexClientModelCapabilities struct {
 	SupportsReasoningSummaries        bool
 	SupportsReasoningSummaryParameter bool
 	DefaultReasoningLevel             string
+	SupportedReasoningLevels          []string
 	SupportsVerbosity                 bool
 	DefaultVerbosity                  string
 	UseResponsesLite                  bool
@@ -242,6 +246,23 @@ func overlayCodexClientModelCapabilities(base CodexClientModelCapabilities, mode
 	if model.DefaultReasoningLevel != nil {
 		base.DefaultReasoningLevel = strings.TrimSpace(*model.DefaultReasoningLevel)
 	}
+	if model.SupportedReasoningLevels != nil {
+		levels := make([]string, 0, len(model.SupportedReasoningLevels))
+		seen := make(map[string]struct{}, len(model.SupportedReasoningLevels))
+		for _, level := range model.SupportedReasoningLevels {
+			effort := strings.TrimSpace(level.Effort)
+			if effort == "" {
+				continue
+			}
+			key := strings.ToLower(effort)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			levels = append(levels, effort)
+		}
+		base.SupportedReasoningLevels = levels
+	}
 	if model.SupportVerbosity != nil {
 		base.SupportsVerbosity = *model.SupportVerbosity
 	}
@@ -270,6 +291,9 @@ func overlayCodexClientModelCapabilities(base CodexClientModelCapabilities, mode
 }
 
 func cloneCodexClientModelCapabilities(capabilities CodexClientModelCapabilities) CodexClientModelCapabilities {
+	if len(capabilities.SupportedReasoningLevels) > 0 {
+		capabilities.SupportedReasoningLevels = append([]string(nil), capabilities.SupportedReasoningLevels...)
+	}
 	if len(capabilities.ServiceTiers) > 0 {
 		capabilities.ServiceTiers = append([]string(nil), capabilities.ServiceTiers...)
 	}

@@ -39,8 +39,6 @@ func TestCodexSetSessionIdentityHeadersKeepsSlicesIndependent(t *testing.T) {
 
 	headers[codexHeaderOfficialSessionID] = append(headers[codexHeaderOfficialSessionID], "extra")
 	for key, want := range map[string]string{
-		codexHeaderSessionID:         "session-1",
-		codexHeaderThreadID:          "thread-1",
 		codexHeaderOfficialSessionID: "session-1",
 		codexHeaderOfficialThreadID:  "thread-1",
 		"X-Client-Request-Id":        "request-1",
@@ -54,19 +52,23 @@ func TestCodexSetSessionIdentityHeadersKeepsSlicesIndependent(t *testing.T) {
 func TestCodexSetSessionIdentityHeadersUpdatesExistingValues(t *testing.T) {
 	headers := http.Header{
 		codexHeaderSessionID:  {"old-session", "extra"},
+		codexHeaderThreadID:   {"old-thread", "extra"},
 		"X-Client-Request-Id": {"old-request", "extra"},
 	}
 	codexSetSessionIdentityHeaders(headers, "session-2", "thread-2", "request-2")
 
 	for key, want := range map[string]string{
-		codexHeaderSessionID:         "session-2",
-		codexHeaderThreadID:          "thread-2",
 		codexHeaderOfficialSessionID: "session-2",
 		codexHeaderOfficialThreadID:  "thread-2",
 		"X-Client-Request-Id":        "request-2",
 	} {
 		if got := headers.Values(key); len(got) != 1 || got[0] != want {
 			t.Fatalf("%s = %q, want [%q]", key, got, want)
+		}
+	}
+	for _, key := range []string{codexHeaderSessionID, codexHeaderThreadID} {
+		if got := headers.Values(key); len(got) != 0 {
+			t.Fatalf("%s = %q, want absent", key, got)
 		}
 	}
 }

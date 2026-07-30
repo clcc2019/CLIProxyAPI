@@ -63,10 +63,10 @@ func codexWindowStateKey(headers http.Header) string {
 	if headers == nil {
 		return ""
 	}
-	if threadID := trimHeaderValue(headers, codexHeaderThreadID); threadID != "" {
+	if threadID := codexThreadIdentityHeaderValue(headers); threadID != "" {
 		return threadID
 	}
-	return trimHeaderValue(headers, codexHeaderSessionID)
+	return codexSessionIdentityHeaderValue(headers)
 }
 
 // shardFor returns the shard that owns sessionID. The FNV-1a hash is cheap and

@@ -39,7 +39,6 @@ import (
 
 const (
 	codexResponsesWebsocketBetaHeaderValue    = "responses_websockets=2026-02-06"
-	codexBetaFeatureResponseProcessed         = "responses_websocket_response_processed"
 	codexClientMetadataWSStreamRequestStartMS = "x-codex-ws-stream-request-start-ms"
 	codexResponsesWebsocketIdleTimeout        = 5 * time.Minute
 	// Rotate before the documented 60 minute upstream connection limit so the
@@ -199,8 +198,14 @@ func newCodexWebsocketSession(sessionID, reuseKey string) *codexWebsocketSession
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
+	return NewCodexWebsocketsExecutorWithResponseObserver(cfg, nil)
+}
+
+// NewCodexWebsocketsExecutorWithResponseObserver creates a WebSocket Codex
+// executor whose embedded HTTP fallback observes the same response metadata.
+func NewCodexWebsocketsExecutorWithResponseObserver(cfg *config.Config, observer CodexResponseObserver) *CodexWebsocketsExecutor {
 	return &CodexWebsocketsExecutor{
-		CodexExecutor: NewCodexExecutor(cfg),
+		CodexExecutor: NewCodexExecutorWithResponseObserver(cfg, observer),
 		store:         globalCodexWebsocketSessionStore,
 	}
 }
@@ -760,6 +765,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, attempt.failure(ctx, e, auth)
 	}
 	conn := attempt.conn
+	reporter.SetCodexResponseMetadata(
+		codexResponseHeaderValue(attempt.responseHeaders, codexHeaderOpenAIModel),
+		codexResponseHeaderPresent(attempt.responseHeaders, codexHeaderReasoningIncluded),
+	)
 	if sess == nil {
 		defer func() {
 			reason := "completed"
@@ -847,7 +856,7 @@ readLoop:
 		if sess != nil {
 			sess.rememberTurnStateEvent(payload)
 		}
-		if codexPublishRateLimitsFromEvent(ctx, auth, payload) {
+		if codexConsumesUpstreamControlEvent(ctx, auth, payload) {
 			continue
 		}
 
@@ -893,6 +902,7 @@ readLoop:
 		}
 
 		payload, eventType := normalizeCodexWebsocketCompletion(payload)
+		reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(payload), false)
 		events := usageWarningFilter.Filter(eventType, payload)
 		if len(events) == 0 {
 			continue
@@ -946,6 +956,7 @@ readLoop:
 				eventType = codexEventCompleted
 			}
 			if eventType == codexEventCompleted {
+				reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(payload), false)
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
@@ -956,9 +967,6 @@ readLoop:
 				var param any
 				out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
 				resp = cliproxyexecutor.Response{Payload: out}
-				if codexWebsocketShouldSendResponseProcessed(wsHeaders, wsReqBody) {
-					e.sendCodexWebsocketResponseProcessed(ctx, sess, conn, gjson.GetBytes(payload, "response.id").String())
-				}
 				return resp, nil
 			}
 		}
@@ -1053,6 +1061,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	conn := attempt.conn
 	upstreamHeaders := attempt.responseHeaders
+	reporter.SetCodexResponseMetadata(
+		codexResponseHeaderValue(upstreamHeaders, codexHeaderOpenAIModel),
+		codexResponseHeaderPresent(upstreamHeaders, codexHeaderReasoningIncluded),
+	)
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
@@ -1188,7 +1200,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if sess != nil {
 				sess.rememberTurnStateEvent(payload)
 			}
-			if codexPublishRateLimitsFromEvent(ctx, auth, payload) {
+			if codexConsumesUpstreamControlEvent(ctx, auth, payload) {
 				continue
 			}
 
@@ -1242,6 +1254,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			payload, eventType := normalizeCodexWebsocketCompletion(payload)
+			reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(payload), false)
 			events := usageWarningFilter.Filter(eventType, payload)
 			if len(events) == 0 {
 				continue
@@ -1305,6 +1318,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					eventType = codexEventCompleted
 				}
 				if eventType == codexEventCompleted || eventType == "response.done" {
+					reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(payload), false)
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -1329,9 +1343,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					if sess != nil {
 						sess.rememberLogicalRequest(body)
 						sess.rememberCompletedResponse(payload)
-					}
-					if codexWebsocketShouldSendResponseProcessed(wsHeaders, wsReqBody) {
-						e.sendCodexWebsocketResponseProcessed(ctx, sess, conn, gjson.GetBytes(payload, "response.id").String())
 					}
 					return
 				}
@@ -1393,6 +1404,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		return nil, err
 	}
 	wsHeaders = applyCodexWebsocketHeadersForRequestKind(ctx, wsHeaders, auth, authorization, e.cfg, codexWebsocketTurnMetadataRequestKind(body))
+	// See the HTTP path: normal header preparation accepts caller aliases, so
+	// restore a forced session only after that normalization is complete.
+	codexApplyForcedUpstreamSessionHeaders(ctx, wsHeaders)
 	codexApplyModelHeaderOverrides(wsHeaders, baseModel)
 	codexApplyResponsesLiteHeader(wsHeaders, baseModel, auth)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(wsHeaders, responsesAPIClientMetadata)
@@ -1487,7 +1501,7 @@ func codexEnsureExecutionSessionHeader(headers http.Header, source http.Header, 
 	if firstNonEmptyHeaderValue(headers, source, "Conversation_id") != "" {
 		return
 	}
-	codexSetSingleHeaderValue(headers, codexHeaderSessionID, executionSessionID)
+	codexSetSingleHeaderValue(headers, codexHeaderOfficialSessionID, executionSessionID)
 }
 
 func codexWebsocketReusableKey(_ sdktranslator.Format, authID string, wsURL string, body []byte) string {
@@ -1709,9 +1723,6 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	}
 	if conn != nil {
 		conn.SetReadLimit(codexResponsesWebsocketReadLimit)
-		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
-		// Negotiating permessage-deflate is fine; we just don't compress outbound messages.
-		conn.EnableWriteCompression(false)
 	}
 	return conn, resp, err
 }
@@ -1725,62 +1736,6 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(codexResponsesWebsocketWriteTO))
 	return conn.WriteMessage(websocket.TextMessage, payload)
-}
-
-func codexWebsocketResponseProcessedEnabled(headers http.Header) bool {
-	if headers == nil {
-		return false
-	}
-	for _, raw := range headers.Values("X-Codex-Beta-Features") {
-		if commaSeparatedValueContainsFold(raw, codexBetaFeatureResponseProcessed) {
-			return true
-		}
-	}
-	return false
-}
-
-func commaSeparatedValueContainsFold(value, target string) bool {
-	for {
-		token, remaining, found := strings.Cut(value, ",")
-		if strings.EqualFold(strings.TrimSpace(token), target) {
-			return true
-		}
-		if !found {
-			return false
-		}
-		value = remaining
-	}
-}
-
-func codexWebsocketShouldSendResponseProcessed(headers http.Header, requestBody []byte) bool {
-	if !codexWebsocketResponseProcessedEnabled(headers) {
-		return false
-	}
-	generate := gjson.GetBytes(requestBody, "generate")
-	return generate.Type != gjson.False
-}
-
-func buildCodexWebsocketResponseProcessedRequest(responseID string) []byte {
-	responseID = strings.TrimSpace(responseID)
-	if responseID == "" {
-		return nil
-	}
-	payload := make([]byte, 0, len(responseID)+48)
-	payload = append(payload, `{"type":"response.processed","response_id":`...)
-	payload = strconv.AppendQuote(payload, responseID)
-	payload = append(payload, '}')
-	return payload
-}
-
-func (e *CodexWebsocketsExecutor) sendCodexWebsocketResponseProcessed(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, responseID string) {
-	payload := buildCodexWebsocketResponseProcessedRequest(responseID)
-	if len(payload) == 0 {
-		return
-	}
-	if err := writeCodexWebsocketMessage(sess, conn, payload); err != nil {
-		helps.RecordAPIWebsocketError(ctx, e.cfg, "response_processed", err)
-		log.Debugf("codex websockets executor: send response.processed failed: %v", err)
-	}
 }
 
 func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []byte {
@@ -2845,10 +2800,10 @@ func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Conte
 			threadFallbackValue = resolution.threadHeaderID
 		}
 		if sessionHeaderValue := codexPromptCacheSessionHeaderValue(ctx, sessionFallbackValue); sessionHeaderValue != "" {
-			codexSetSingleHeaderValue(headers, codexHeaderSessionID, sessionHeaderValue)
+			codexSetSingleHeaderValue(headers, codexHeaderOfficialSessionID, sessionHeaderValue)
 		}
 		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, threadFallbackValue); threadHeaderValue != "" {
-			codexSetSingleHeaderValue(headers, codexHeaderThreadID, threadHeaderValue)
+			codexSetSingleHeaderValue(headers, codexHeaderOfficialThreadID, threadHeaderValue)
 		}
 	}
 
@@ -2913,7 +2868,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 		installationID: installationID,
 		requestKind:    strings.TrimSpace(requestKind),
 		sessionID:      sessionID,
-		threadID:       trimHeaderValue(headers, codexHeaderThreadID),
+		threadID:       codexThreadIdentityHeaderValue(headers),
 		turnID:         uuid.NewString(),
 		sandbox:        codexDefaultSandboxTag,
 		windowID:       trimHeaderValue(headers, codexHeaderWindowID),

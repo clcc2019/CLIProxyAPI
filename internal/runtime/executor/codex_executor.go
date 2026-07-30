@@ -73,10 +73,11 @@ func codexEncryptedContentErrorBody(result codexNonStreamHTTPResult) []byte {
 // CodexExecutor executes Codex requests and reuses per-proxy auth services for refresh flows.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type CodexExecutor struct {
-	cfg            *config.Config
-	codexAuthCache sync.Map
-	httpTurnState  *codexHTTPTurnStateStore
-	responseDedupe helps.InFlightGroup[codexNonStreamHTTPResult]
+	cfg              *config.Config
+	responseObserver CodexResponseObserver
+	codexAuthCache   sync.Map
+	httpTurnState    *codexHTTPTurnStateStore
+	responseDedupe   helps.InFlightGroup[codexNonStreamHTTPResult]
 	// refreshDedupe serialises concurrent token refreshes per auth.ID. Without
 	// it multiple in-flight requests sharing an expired access_token would each
 	// call RefreshTokensWithRetry with the same refresh_token; OpenAI treats
@@ -85,7 +86,17 @@ type CodexExecutor struct {
 }
 
 func NewCodexExecutor(cfg *config.Config) *CodexExecutor {
-	return &CodexExecutor{cfg: cfg, httpTurnState: newCodexHTTPTurnStateStore()}
+	return NewCodexExecutorWithResponseObserver(cfg, nil)
+}
+
+// NewCodexExecutorWithResponseObserver creates a Codex executor that reports
+// server response metadata to the supplied observer.
+func NewCodexExecutorWithResponseObserver(cfg *config.Config, observer CodexResponseObserver) *CodexExecutor {
+	return &CodexExecutor{
+		cfg:              cfg,
+		responseObserver: observer,
+		httpTurnState:    newCodexHTTPTurnStateStore(),
+	}
 }
 
 func (e *CodexExecutor) Identifier() string { return "codex" }
@@ -195,6 +206,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	reasoningReplayApplied = recovery.reasoningReplayApplied
 	result := attempt.result
 	usageOwner := attempt.usageOwner
+	reporter.SetCodexResponseMetadata(
+		codexResponseHeaderValue(result.headers, codexHeaderOpenAIModel),
+		codexResponseHeaderPresent(result.headers, codexHeaderReasoningIncluded),
+	)
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
 		codexPublishRateLimitsFromErrorBody(ctx, auth, result.body)
@@ -202,6 +217,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	if len(result.completedData) > 0 {
+		reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(result.completedData), false)
 		cacheCodexReasoningReplayFromCompleted(replayScope, result.completedData)
 		if usageOwner {
 			if detail, ok := helps.ParseCodexUsage(result.completedData); ok {
@@ -342,6 +358,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	result := attempt.result
 	usageOwner := attempt.usageOwner
 	call := attempt.call
+	reporter.SetCodexResponseMetadata(
+		codexResponseHeaderValue(result.headers, codexHeaderOpenAIModel),
+		codexResponseHeaderPresent(result.headers, codexHeaderReasoningIncluded),
+	)
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
 		codexPublishRateLimitsFromErrorBody(ctx, auth, result.body)
@@ -350,6 +370,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 	data := result.body
 	if usageOwner {
+		reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(data), false)
 		reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 		reporter.EnsurePublished(ctx)
 		codexAdvanceWindowGeneration(codexWindowStateKey(call.prepared.httpReq.Header))
@@ -484,6 +505,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	call := attempt.call
 	body = attempt.body
 	httpResp := attempt.response
+	reporter.SetCodexResponseMetadata(
+		codexResponseHeaderValue(httpResp.Header, codexHeaderOpenAIModel),
+		codexResponseHeaderPresent(httpResp.Header, codexHeaderReasoningIncluded),
+	)
 	reasoningReplayApplied = recovery.reasoningReplayApplied
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	releaseUpstreamCtxOnReturn = false
@@ -538,6 +563,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return
 				}
 				httpResp = retryResp
+				reporter.SetCodexResponseMetadata(
+					codexResponseHeaderValue(httpResp.Header, codexHeaderOpenAIModel),
+					codexResponseHeaderPresent(httpResp.Header, codexHeaderReasoningIncluded),
+				)
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 				e.rememberCodexHTTPTurnState(auth, call.prepared, httpResp.Header)
 				if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
@@ -584,6 +613,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			usageWarningFilter := newCodexUsageWarningStreamFilter()
 			terminalFailure := false
 			var terminalFailureErr error
+			var retryableResponseFailedErr error
 			emittedPayload := false
 			completedStreamObserved := false
 			// pendingTerminalErr captures the terminal upstream error observed
@@ -619,8 +649,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return nil
 				}
 				eventType := codexEventType(eventData)
-				if eventType == "codex.rate_limits" {
-					codexPublishRateLimitsFromEvent(upstreamCtx, auth, eventData)
+				reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(eventData), false)
+				if codexConsumesUpstreamControlEvent(upstreamCtx, auth, eventData) {
 					return nil
 				}
 				events := usageWarningFilter.Filter(eventType, eventData)
@@ -637,6 +667,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						codexPublishRateLimitsFromErrorBody(upstreamCtx, auth, eventData)
 						if eventType == "response.failed" {
 							clearCodexReasoningReplayOnInvalidSignature(replayScope, reasoningReplayApplied, terminalErr.StatusCode(), normalizeCodexResponseFailedErrorBody(eventData))
+							if !emittedPayload && codexResponseFailedEventIsRetryable(eventData) {
+								// codex-rs treats an otherwise unclassified response.failed as
+								// a retryable logical-turn error. Do not forward it: the next
+								// attempt replaces this pre-output turn atomically.
+								retryableResponseFailedErr = terminalErr
+								return terminalErr
+							}
 						}
 						terminalFailure = true
 						terminalFailureErr = terminalErr
@@ -670,6 +707,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
 						completedStreamObserved = true
 						stopAfterForward = true
+						reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(completed.data), false)
 						if detail, ok := helps.ParseCodexUsage(completed.data); ok {
 							reporter.Publish(upstreamCtx, detail)
 						}
@@ -724,6 +762,27 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if retryPrepared {
 					continue
 				}
+			}
+			if retryableResponseFailedErr != nil {
+				if streamAttempt < codexHTTPMaxStreamReadRetries {
+					helps.LogWithRequestID(ctx).Debugf("codex executor: retrying stream after retryable response.failed (attempt=%d/%d): %v", streamAttempt+1, codexHTTPMaxStreamReadRetries, retryableResponseFailedErr)
+					if errSleep := codexSleepBeforeHTTPRetry(upstreamCtx, streamAttempt+1); errSleep != nil {
+						if codexRequestContextDone(ctx, errSleep) {
+							return
+						}
+						codexRecordAPIResponseError(ctx, e.cfg, errSleep)
+						reporter.PublishFailureWithError(upstreamCtx, errSleep)
+						_ = send(cliproxyexecutor.StreamChunk{Err: errSleep})
+						reporter.EnsurePublished(upstreamCtx)
+						return
+					}
+					continue
+				}
+				codexRecordAPIResponseError(ctx, e.cfg, retryableResponseFailedErr)
+				reporter.PublishFailureWithError(upstreamCtx, retryableResponseFailedErr)
+				_ = send(cliproxyexecutor.StreamChunk{Err: retryableResponseFailedErr})
+				reporter.EnsurePublished(upstreamCtx)
+				return
 			}
 			if codexShouldRetryStreamRead(ctx, errRead, emittedPayload, completedStreamObserved, pendingTerminalErr, terminalFailure, streamAttempt) {
 				helps.LogWithRequestID(ctx).Debugf("codex executor: retrying stream after transport read error (attempt=%d/%d): %v", streamAttempt+1, codexHTTPMaxStreamReadRetries, errRead)

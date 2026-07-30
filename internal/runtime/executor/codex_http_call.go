@@ -178,6 +178,10 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 		return codexPreparedHTTPCall{}, err
 	}
 	profileHeaders := applyCodexHeadersForRequestKindWithGinHeaders(prepared.httpReq, auth, authorization, stream, e.cfg, requestKind, ginHeaders)
+	// Header preparation intentionally consumes inbound session aliases. Apply
+	// a forced session again afterwards so caller-owned aliases cannot replace
+	// the forced upstream continuity chain.
+	codexApplyForcedUpstreamSessionHeaders(ctx, prepared.httpReq.Header)
 	codexApplyModelHeaderOverrides(prepared.httpReq.Header, baseModel)
 	codexApplyResponsesLiteHeader(prepared.httpReq.Header, baseModel, auth)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)

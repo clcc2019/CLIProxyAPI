@@ -44,6 +44,7 @@ func (e *CodexWebsocketsExecutor) connectPreparedCodexWebsocket(
 	if attempt.response != nil {
 		attempt.responseHeaders = attempt.response.Header.Clone()
 		codexPublishRateLimitsFromHeaders(ctx, auth, attempt.response.Header)
+		e.CodexExecutor.observeCodexResponseHeaders(ctx, auth, attempt.response.Header)
 	}
 	if attempt.err != nil {
 		attempt.responseBody = websocketHandshakeBody(attempt.response)

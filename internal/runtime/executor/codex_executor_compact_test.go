@@ -144,8 +144,8 @@ func TestCodexExecutorCompactUsesCompactOnlyBodyFields(t *testing.T) {
 	if got := gotHeaders.Get("X-Client-Request-Id"); got != "" {
 		t.Fatalf("X-Client-Request-Id should not be sent by default to responses/compact: %q", got)
 	}
-	if got := gotHeaders.Get(codexHeaderSessionID); got == "" {
-		t.Fatalf("%s should be present on responses/compact", codexHeaderSessionID)
+	if got := gotHeaders.Get(codexHeaderOfficialSessionID); got == "" {
+		t.Fatalf("%s should be present on responses/compact", codexHeaderOfficialSessionID)
 	}
 	if got := gotHeaders.Get(codexHeaderInstallationID); got == "" {
 		t.Fatalf("%s should be present on responses/compact", codexHeaderInstallationID)
@@ -401,8 +401,8 @@ func TestCodexExecutorCompactUsesTurnMetadataSessionIDWhenHeaderMissing(t *testi
 		t.Fatalf("compact Execute error: %v", err)
 	}
 
-	if got := gotHeaders.Get(codexHeaderSessionID); got != "turn-session-1" {
-		t.Fatalf("%s = %q, want %q", codexHeaderSessionID, got, "turn-session-1")
+	if got := gotHeaders.Get(codexHeaderOfficialSessionID); got != "turn-session-1" {
+		t.Fatalf("%s = %q, want %q", codexHeaderOfficialSessionID, got, "turn-session-1")
 	}
 	if got := gotHeaders.Get(codexHeaderWindowID); got != "turn-session-1:0" {
 		t.Fatalf("%s = %q, want %q", codexHeaderWindowID, got, "turn-session-1:0")
@@ -422,8 +422,8 @@ func TestCodexExecutorCompactUsesTurnMetadataSessionIDWhenHeaderMissing(t *testi
 		t.Fatalf("NewRequestWithContext() error: %v", err)
 	}
 	applyCodexHeaders(nextReq, nil, "oauth-token", true, nil)
-	if got := nextReq.Header.Get(codexHeaderSessionID); got != "turn-session-1" {
-		t.Fatalf("next %s = %q, want %q", codexHeaderSessionID, got, "turn-session-1")
+	if got := nextReq.Header.Get(codexHeaderOfficialSessionID); got != "turn-session-1" {
+		t.Fatalf("next %s = %q, want %q", codexHeaderOfficialSessionID, got, "turn-session-1")
 	}
 	if got := nextReq.Header.Get(codexHeaderWindowID); got != "turn-session-1:1" {
 		t.Fatalf("next %s = %q, want %q", codexHeaderWindowID, got, "turn-session-1:1")

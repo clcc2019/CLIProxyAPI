@@ -83,11 +83,15 @@ func codexApplyForcedUpstreamSessionHeaders(ctx context.Context, headers http.He
 	if sessionID == "" || headers == nil {
 		return
 	}
-	codexSetSingleHeaderValue(headers, codexHeaderSessionID, sessionID)
-	codexSetSingleHeaderValue(headers, codexHeaderOfficialSessionID, sessionID)
-	codexSetSingleHeaderValue(headers, codexHeaderThreadID, sessionID)
-	codexSetSingleHeaderValue(headers, codexHeaderOfficialThreadID, sessionID)
-	codexSetSingleHeaderValue(headers, "X-Client-Request-Id", sessionID)
+	codexSetSessionIdentityHeaders(headers, sessionID, sessionID, sessionID)
+	// A forced upstream session starts a new continuity chain. Do not carry a
+	// caller-owned turn state or window generation into that chain.
+	headers.Del(codexHeaderTurnState)
+	headers.Del(codexHeaderWindowID)
+	windowID := codexCurrentWindowID(sessionID)
+	if windowID != "" {
+		codexSetSingleHeaderValue(headers, codexHeaderWindowID, windowID)
+	}
 	codexSetSingleHeaderValue(headers, codexHeaderTurnMetadata, codexBuildTurnMetadataHeader(
 		"",
 		sessionID,
@@ -98,7 +102,7 @@ func codexApplyForcedUpstreamSessionHeaders(ctx context.Context, headers http.He
 		"",
 		uuid.NewString(),
 		codexDefaultSandboxTag,
-		"",
+		windowID,
 		0,
 	))
 	headers.Del("Conversation_id")

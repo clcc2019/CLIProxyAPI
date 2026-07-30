@@ -175,6 +175,36 @@ func parseCodexStreamTerminalError(eventType string, eventData []byte) (statusEr
 	}
 }
 
+// codexResponseFailedEventIsRetryable mirrors codex-rs's Responses SSE
+// classification: an unrecognised response.failed represents a transient
+// response-stream failure, while the named API failures below are terminal.
+//
+// Keep encrypted-content verification failures terminal as well. They are
+// handled by the reasoning-replay recovery path before this decision point;
+// retrying the unchanged body after that recovery is exhausted cannot help.
+func codexResponseFailedEventIsRetryable(eventData []byte) bool {
+	if codexReasoningReplayInvalidSignatureError(eventData) {
+		return false
+	}
+
+	body := codexTerminalErrorBody(eventData, "response.error")
+	if len(body) == 0 {
+		// The official client represents a response.failed without a parsable
+		// response.error as a stream failure, which is retryable.
+		return true
+	}
+	if isCodexUsageLimitError(body) || codexTerminalErrorIsContextLength(body) {
+		return false
+	}
+
+	switch codexErrorCode(body) {
+	case "invalid_prompt", "bio_policy", "cyber_policy", "server_is_overloaded", "slow_down":
+		return false
+	default:
+		return true
+	}
+}
+
 func codexStreamIdleTimeoutErr() statusErr {
 	return statusErr{code: http.StatusRequestTimeout, msg: "stream error: idle timeout waiting for SSE"}
 }

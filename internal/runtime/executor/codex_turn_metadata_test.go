@@ -201,7 +201,12 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 		"turn_started_at_unix_ms":                 "client-start",
 		"forked_from_thread_id":                   "client-fork",
 		"parent_thread_id":                        "client-parent",
+		"parent_turn_id":                          "client-parent-turn",
 		"subagent_kind":                           "client-subagent",
+		"thread_source":                           "client-source",
+		"sandbox":                                 "client-sandbox",
+		"workspaces":                              "client-workspaces",
+		"code_mode_tool_names":                    "client-tools",
 		codexRequestKindMetadataPath:              "client-kind",
 		codexCompactionMetadataPath:               "client-compaction",
 		codexWindowIDMetadataPath:                 "client-window",
@@ -225,6 +230,8 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 		"forked_from_thread_id":      "fork-1",
 		"parent_thread_id":           "parent-1",
 		"subagent_kind":              "review",
+		"thread_source":              "user",
+		"sandbox":                    codexDefaultSandboxTag,
 		codexRequestKindMetadataPath: codexTurnRequestKind,
 		codexWindowIDMetadataPath:    "window-1",
 	} {
@@ -238,6 +245,9 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 	for _, key := range []string{
 		codexCompactionMetadataPath,
 		"installation_id",
+		"parent_turn_id",
+		"workspaces",
+		"code_mode_tool_names",
 		codexClientMetadataInstallationID,
 		codexWSClientMetadataTraceparent,
 		codexWSClientMetadataResponsesLite,
@@ -254,6 +264,9 @@ func TestCodexResponsesAPIClientMetadataFromBodyFiltersNonMergeableKeys(t *testi
 		"client_metadata":{
 			"origin":"cli",
 			"session_id":"client-session",
+			"parent_turn_id":"client-parent-turn",
+			"workspaces":"client-workspaces",
+			"code_mode_tool_names":"client-tools",
 			"x-codex-installation-id":"install-1",
 			"ws_request_header_traceparent":"trace-1"
 		}

@@ -747,7 +747,7 @@ func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities *registry.Co
 		return helps.EditJSONBytes(body, helps.SetRawJSONEdit("reasoning", rawReasoning))
 	}
 
-	edits := make([]helps.JSONEdit, 0, 2)
+	edits := make([]helps.JSONEdit, 0, 3)
 	if !capabilities.SupportsReasoningSummaryParameter && reasoning.Get("summary").Exists() {
 		edits = append(edits, helps.DeleteJSONEdit("reasoning.summary"))
 	}
@@ -758,6 +758,7 @@ func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities *registry.Co
 	}
 	if effort.Type == gjson.String && !effortBlank && !preserveExplicitEffort {
 		requestEffort := codexReasoningEffortForRequest(effort.String())
+		requestEffort = codexSupportedReasoningEffortForRequest(requestEffort, capabilities.SupportedReasoningLevels)
 		if requestEffort != effort.String() {
 			edits = append(edits, helps.SetJSONEdit("reasoning.effort", requestEffort))
 		}
@@ -766,6 +767,27 @@ func normalizeCodexFinalUpstreamReasoning(body []byte, capabilities *registry.Co
 		return body
 	}
 	return helps.EditJSONBytes(body, edits...)
+}
+
+// codexSupportedReasoningEffortForRequest follows the official model switch
+// fallback: a requested effort absent from the catalog is replaced with the
+// middle supported level. Keeping the server-advertised order matters because
+// it is the client's compatibility fallback, not a lexical ordering.
+func codexSupportedReasoningEffortForRequest(requested string, supported []string) string {
+	if len(supported) == 0 {
+		return requested
+	}
+	for _, level := range supported {
+		if strings.EqualFold(codexReasoningEffortForRequest(level), requested) {
+			return requested
+		}
+	}
+	for _, level := range supported[(len(supported)-1)/2:] {
+		if level = strings.TrimSpace(level); level != "" {
+			return codexReasoningEffortForRequest(level)
+		}
+	}
+	return requested
 }
 
 func normalizeCodexFinalUpstreamReasoningEffortForModel(body []byte, baseModel string) []byte {

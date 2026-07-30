@@ -33,8 +33,8 @@ var codexDedupeIgnoredHeaders = map[string]struct{}{
 var codexDedupeRelevantHeaders = []string{
 	codexHeaderChatGPTAccountID,
 	codexWireHeaderOpenAIBeta,
-	"Session_id",
-	codexHeaderThreadID,
+	codexHeaderOfficialSessionID,
+	codexHeaderOfficialThreadID,
 	codexHeaderTurnState,
 	"X-Codex-Beta-Features",
 	"X-Codex-Installation-Id",
@@ -127,10 +127,10 @@ func (e *CodexExecutor) prepareCodexRequestWithKindBodyOptions(ctx context.Conte
 			threadFallbackValue = resolution.threadHeaderID
 		}
 		if sessionHeaderValue := codexPromptCacheSessionHeaderValue(ctx, sessionFallbackValue); sessionHeaderValue != "" {
-			codexSetSingleHeaderValue(httpReq.Header, codexHeaderSessionID, sessionHeaderValue)
+			codexSetSingleHeaderValue(httpReq.Header, codexHeaderOfficialSessionID, sessionHeaderValue)
 		}
 		if threadHeaderValue := codexPromptCacheThreadHeaderValue(ctx, threadFallbackValue); threadHeaderValue != "" {
-			codexSetSingleHeaderValue(httpReq.Header, codexHeaderThreadID, threadHeaderValue)
+			codexSetSingleHeaderValue(httpReq.Header, codexHeaderOfficialThreadID, threadHeaderValue)
 		}
 	}
 	codexApplyForcedUpstreamSessionHeaders(ctx, httpReq.Header)

@@ -244,23 +244,11 @@ func codexSetSessionIdentityHeaders(target http.Header, sessionID string, thread
 	if target == nil {
 		return
 	}
-	requestIDMissing := requestID == "" || len(target["X-Client-Request-Id"]) == 0
-	if len(target[codexHeaderSessionID]) == 0 &&
-		len(target[codexHeaderThreadID]) == 0 &&
-		len(target[codexHeaderOfficialSessionID]) == 0 &&
-		len(target[codexHeaderOfficialThreadID]) == 0 &&
-		requestIDMissing {
-		values := []string{sessionID, threadID, sessionID, threadID, requestID}
-		target[codexHeaderSessionID] = values[0:1:1]
-		target[codexHeaderThreadID] = values[1:2:2]
-		target[codexHeaderOfficialSessionID] = values[2:3:3]
-		target[codexHeaderOfficialThreadID] = values[3:4:4]
-		if requestID != "" {
-			target["X-Client-Request-Id"] = values[4:5:5]
-		}
-		return
-	}
-	codexSetPairedSingleHeaderValues(target, codexHeaderSessionID, sessionID, codexHeaderThreadID, threadID)
+	// codex-rs accepts legacy underscore spellings on input, but emits only
+	// the standard hyphenated session headers. Drop any inbound legacy values
+	// here so the upstream request has the same observable header shape.
+	target.Del(codexHeaderSessionID)
+	target.Del(codexHeaderThreadID)
 	if requestID != "" {
 		codexSetTripleSingleHeaderValues(
 			target,
@@ -271,6 +259,29 @@ func codexSetSessionIdentityHeaders(target http.Header, sessionID string, thread
 		return
 	}
 	codexSetPairedSingleHeaderValues(target, codexHeaderOfficialSessionID, sessionID, codexHeaderOfficialThreadID, threadID)
+}
+
+// codexSessionIdentityHeaderValue and codexThreadIdentityHeaderValue accept
+// historical inbound aliases, but prefer the wire spelling emitted by
+// codex-rs. Use them after request preparation so internal follow-on state
+// (window IDs, cache keys, and metadata) does not depend on removed legacy
+// headers.
+func codexSessionIdentityHeaderValue(headers http.Header) string {
+	for _, key := range []string{codexHeaderOfficialSessionID, codexHeaderSessionID, "X-Session-ID"} {
+		if value := strings.TrimSpace(codexHeaderGet(headers, key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexThreadIdentityHeaderValue(headers http.Header) string {
+	for _, key := range []string{codexHeaderOfficialThreadID, codexHeaderThreadID, "X-Thread-ID"} {
+		if value := strings.TrimSpace(codexHeaderGet(headers, key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func firstNonEmptyHeaderValue(target http.Header, source http.Header, key string) string {

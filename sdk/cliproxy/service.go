@@ -124,6 +124,9 @@ type Service struct {
 	// codexRemoteCatalogRefreshes collapses concurrent refreshes for the same
 	// auth source so auth watcher and refresh callbacks cannot stampede /models.
 	codexRemoteCatalogRefreshes singleflight.Group
+	// codexRemoteCatalogObservedETags suppresses duplicate background refreshes
+	// while a response-advertised catalog ETag is already being resolved.
+	codexRemoteCatalogObservedETags sync.Map
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -354,6 +357,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	}
 	GlobalModelRegistry().UnregisterClient(id)
 	s.codexRemoteCatalogs.Delete(id)
+	s.codexRemoteCatalogObservedETags.Delete(id)
 	removed, err := s.coreManager.Remove(ctx, id)
 	if err != nil {
 		log.Errorf("failed to remove auth %s: %v", id, err)
@@ -440,7 +444,7 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 				}
 			}
 		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutorWithResponseObserver(s.cfg, s.observeCodexResponseMetadata))
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.

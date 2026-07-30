@@ -26,6 +26,8 @@ type UsageReporter struct {
 	executorType         string
 	model                string
 	alias                string
+	serverModel          string
+	reasoningIncluded    bool
 	authID               string
 	authIndex            string
 	authType             string
@@ -97,6 +99,22 @@ func (r *UsageReporter) CaptureModelReasoningEffort(payloads ...[]byte) {
 			r.modelReasoningEffort = effort
 			return
 		}
+	}
+}
+
+// SetCodexResponseMetadata records the server-selected model and the
+// X-Reasoning-Included header for the usage record. A server model is billed
+// and aggregated as the actual model while alias/requested-model fields retain
+// the client-visible request.
+func (r *UsageReporter) SetCodexResponseMetadata(serverModel string, reasoningIncluded bool) {
+	if r == nil {
+		return
+	}
+	if serverModel = strings.TrimSpace(serverModel); serverModel != "" {
+		r.serverModel = serverModel
+	}
+	if reasoningIncluded {
+		r.reasoningIncluded = true
 	}
 }
 
@@ -321,11 +339,18 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, ErrorMessage: usageErrorMessage(err)}
 	}
+	actualModel := strings.TrimSpace(model)
+	if r.serverModel != "" {
+		actualModel = r.serverModel
+	}
 	return usage.Record{
 		Provider:             r.provider,
 		ExecutorType:         r.executorType,
-		Model:                model,
+		Model:                actualModel,
 		Alias:                r.alias,
+		RequestedModel:       r.alias,
+		ResponseModel:        r.serverModel,
+		ReasoningIncluded:    r.reasoningIncluded,
 		ModelReasoningEffort: r.modelReasoningEffort,
 		Source:               r.source,
 		APIKey:               r.apiKey,

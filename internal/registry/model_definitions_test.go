@@ -163,6 +163,9 @@ func TestCodexClientModelCapabilitiesForModelUsesEmbeddedCatalog(t *testing.T) {
 	if capabilities.DefaultReasoningLevel != "medium" {
 		t.Fatalf("default reasoning level = %q, want medium", capabilities.DefaultReasoningLevel)
 	}
+	if len(capabilities.SupportedReasoningLevels) == 0 {
+		t.Fatal("gpt-5.4 should expose the embedded supported reasoning levels")
+	}
 	if !capabilities.SupportsVerbosity {
 		t.Fatal("gpt-5.4 should support verbosity")
 	}
@@ -209,7 +212,7 @@ func TestCodexClientModelCapabilitiesIncludeGPT56(t *testing.T) {
 }
 
 func TestParseCodexClientModelCatalogPreservesAccountScopedResponsesLite(t *testing.T) {
-	models, err := ParseCodexClientModelCatalog([]byte(`{"models":[{"slug":"gpt-5.6-sol","display_name":"Account Sol","context_window":123456,"supports_parallel_tool_calls":false,"use_responses_lite":false}]}`), GetCodexProModels())
+	models, err := ParseCodexClientModelCatalog([]byte(`{"models":[{"slug":"gpt-5.6-sol","display_name":"Account Sol","context_window":123456,"supports_parallel_tool_calls":false,"use_responses_lite":false,"supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"medium"},{"effort":"high"}]}]}`), GetCodexProModels())
 	if err != nil {
 		t.Fatalf("ParseCodexClientModelCatalog: %v", err)
 	}
@@ -225,6 +228,9 @@ func TestParseCodexClientModelCatalogPreservesAccountScopedResponsesLite(t *test
 	}
 	if model.CodexCapabilities.UseResponsesLite {
 		t.Fatal("account catalog should override the embedded responses_lite=true value")
+	}
+	if got, want := model.CodexCapabilities.SupportedReasoningLevels, []string{"low", "medium", "high"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("account catalog supported reasoning levels = %#v, want %#v", got, want)
 	}
 
 	registry := GetGlobalRegistry()
@@ -265,6 +271,14 @@ func TestParseCodexClientModelCatalogPreservesEmbeddedCapabilitiesWhenRemoteFiel
 		got.SupportsImageDetailOriginal != want.SupportsImageDetailOriginal ||
 		got.DefaultServiceTier != want.DefaultServiceTier {
 		t.Fatalf("partial remote capabilities = %#v, want embedded %#v", *got, want)
+	}
+	if len(got.SupportedReasoningLevels) != len(want.SupportedReasoningLevels) {
+		t.Fatalf("partial remote supported reasoning levels = %#v, want %#v", got.SupportedReasoningLevels, want.SupportedReasoningLevels)
+	}
+	for i := range want.SupportedReasoningLevels {
+		if got.SupportedReasoningLevels[i] != want.SupportedReasoningLevels[i] {
+			t.Fatalf("partial remote supported reasoning levels = %#v, want %#v", got.SupportedReasoningLevels, want.SupportedReasoningLevels)
+		}
 	}
 	if len(got.ServiceTiers) != len(want.ServiceTiers) {
 		t.Fatalf("partial remote service tiers = %#v, want %#v", got.ServiceTiers, want.ServiceTiers)

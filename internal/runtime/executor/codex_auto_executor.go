@@ -26,9 +26,15 @@ type CodexAutoExecutor struct {
 }
 
 func NewCodexAutoExecutor(cfg *config.Config) *CodexAutoExecutor {
+	return NewCodexAutoExecutorWithResponseObserver(cfg, nil)
+}
+
+// NewCodexAutoExecutorWithResponseObserver applies one response observer to
+// both the HTTP and WebSocket Codex transports.
+func NewCodexAutoExecutorWithResponseObserver(cfg *config.Config, observer CodexResponseObserver) *CodexAutoExecutor {
 	return &CodexAutoExecutor{
-		httpExec: NewCodexExecutor(cfg),
-		wsExec:   NewCodexWebsocketsExecutor(cfg),
+		httpExec: NewCodexExecutorWithResponseObserver(cfg, observer),
+		wsExec:   NewCodexWebsocketsExecutorWithResponseObserver(cfg, observer),
 	}
 }
 

@@ -12,19 +12,23 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
-	codexRemoteCatalogTTL      = 5 * time.Minute
-	codexRemoteCatalogTimeout  = 15 * time.Second
-	codexRemoteCatalogMaxBytes = 8 << 20
+	codexRemoteCatalogTTL        = 5 * time.Minute
+	codexRemoteCatalogTimeout    = 15 * time.Second
+	codexRemoteCatalogMaxBytes   = 8 << 20
+	codexRemoteCatalogETagHeader = "ETag"
 )
 
 type codexRemoteCatalogCacheEntry struct {
 	payload   []byte
 	fetchedAt time.Time
 	sourceKey string
+	etag      string
 }
 
 func (entry codexRemoteCatalogCacheEntry) fresh(now time.Time, sourceKey string) bool {
@@ -32,30 +36,47 @@ func (entry codexRemoteCatalogCacheEntry) fresh(now time.Time, sourceKey string)
 }
 
 func (s *Service) refreshCodexRemoteCatalog(ctx context.Context, auth *coreauth.Auth) error {
+	_, err := s.refreshCodexRemoteCatalogWithETag(ctx, auth, "")
+	return err
+}
+
+// refreshCodexRemoteCatalogWithETag mirrors the official Codex client: a
+// response ETag that differs from the cached /models ETag forces one online
+// refresh, while a matching ETag only renews the five-minute cache lifetime.
+func (s *Service) refreshCodexRemoteCatalogWithETag(ctx context.Context, auth *coreauth.Auth, responseETag string) (bool, error) {
 	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.Disabled {
-		return nil
+		return false, nil
 	}
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		return nil
+		return false, nil
 	}
 	if !codexServiceHasAccessToken(auth) && !codexServiceAuthIsAgentIdentity(auth) && !codexServiceAuthIsAPIKey(auth) {
-		return nil
+		return false, nil
 	}
+	responseETag = strings.TrimSpace(responseETag)
 	baseURL := codexServiceBaseURL(auth)
 	sourceKey := codexRemoteCatalogSourceKey(auth, baseURL)
 	now := time.Now()
 	if cached, ok := s.codexRemoteCatalogs.Load(auth.ID); ok {
-		if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) {
-			return nil
+		if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) && (responseETag == "" || entry.etag == responseETag) {
+			if responseETag != "" {
+				entry.fetchedAt = now
+				s.codexRemoteCatalogs.Store(auth.ID, entry)
+			}
+			return false, nil
 		}
 	}
 
 	flightKey := auth.ID + "\x00" + sourceKey
-	_, err, _ := s.codexRemoteCatalogRefreshes.Do(flightKey, func() (any, error) {
+	value, err, _ := s.codexRemoteCatalogRefreshes.Do(flightKey, func() (any, error) {
 		now = time.Now()
 		if cached, ok := s.codexRemoteCatalogs.Load(auth.ID); ok {
-			if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) {
-				return nil, nil
+			if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) && (responseETag == "" || entry.etag == responseETag) {
+				if responseETag != "" {
+					entry.fetchedAt = now
+					s.codexRemoteCatalogs.Store(auth.ID, entry)
+				}
+				return false, nil
 			}
 		}
 
@@ -106,10 +127,69 @@ func (s *Service) refreshCodexRemoteCatalog(ctx context.Context, auth *coreauth.
 			payload:   append([]byte(nil), body...),
 			fetchedAt: time.Now(),
 			sourceKey: sourceKey,
+			etag:      strings.TrimSpace(resp.Header.Get(codexRemoteCatalogETagHeader)),
 		})
-		return nil, nil
+		return true, nil
 	})
-	return err
+	if err != nil {
+		return false, err
+	}
+	refreshed, _ := value.(bool)
+	return refreshed, nil
+}
+
+// observeCodexResponseMetadata schedules model catalog refreshes after the
+// upstream response headers are available. It deliberately does not hold up
+// body streaming; the response itself remains valid with the old catalog.
+func (s *Service) observeCodexResponseMetadata(_ context.Context, auth *coreauth.Auth, metadata executor.CodexResponseMetadata) {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.Disabled {
+		return
+	}
+	etag := strings.TrimSpace(metadata.ModelsETag)
+	if etag == "" || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+
+	baseURL := codexServiceBaseURL(auth)
+	sourceKey := codexRemoteCatalogSourceKey(auth, baseURL)
+	if cached, ok := s.codexRemoteCatalogs.Load(auth.ID); ok {
+		if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(time.Now(), sourceKey) && entry.etag == etag {
+			entry.fetchedAt = time.Now()
+			s.codexRemoteCatalogs.Store(auth.ID, entry)
+			return
+		}
+	}
+
+	observation := sourceKey + "\x00" + etag
+	if previous, loaded := s.codexRemoteCatalogObservedETags.Load(auth.ID); loaded {
+		if previous == observation {
+			return
+		}
+		s.codexRemoteCatalogObservedETags.Store(auth.ID, observation)
+	} else {
+		s.codexRemoteCatalogObservedETags.Store(auth.ID, observation)
+	}
+	authID := auth.ID
+	go func() {
+		current, ok := s.latestAuthForModelRegistration(authID)
+		if !ok || current.Disabled || !strings.EqualFold(strings.TrimSpace(current.Provider), "codex") {
+			return
+		}
+		refreshed, err := s.refreshCodexRemoteCatalogWithETag(context.Background(), current, etag)
+		if err != nil {
+			if previous, loaded := s.codexRemoteCatalogObservedETags.Load(authID); loaded && previous == observation {
+				s.codexRemoteCatalogObservedETags.Delete(authID)
+			}
+			log.Debugf("failed to refresh Codex model catalog after response ETag for %s: %v", authID, err)
+			return
+		}
+		if refreshed {
+			s.refreshModelRegistrationForAuth(current)
+		}
+		if previous, loaded := s.codexRemoteCatalogObservedETags.Load(authID); loaded && previous == observation {
+			s.codexRemoteCatalogObservedETags.Delete(authID)
+		}
+	}()
 }
 
 func (s *Service) codexModelsFromRemoteCatalog(auth *coreauth.Auth, fallback []*ModelInfo) []*ModelInfo {

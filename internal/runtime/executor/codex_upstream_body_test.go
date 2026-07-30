@@ -617,6 +617,30 @@ func TestNormalizeCodexFinalUpstreamReasoning_MapsUltraToOfficialRequestEffort(t
 	})
 }
 
+func TestNormalizeCodexFinalUpstreamReasoningFallsBackToCatalogSupportedLevel(t *testing.T) {
+	capabilities := registry.CodexClientModelCapabilities{
+		SupportedReasoningLevels: []string{"low", "medium", "high"},
+	}
+
+	gotBody := normalizeCodexFinalUpstreamReasoning([]byte(`{"reasoning":{"effort":"xhigh"}}`), &capabilities, false)
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "medium" {
+		t.Fatalf("unsupported reasoning.effort = %q, want catalog midpoint medium; body=%s", got, gotBody)
+	}
+
+	preservedBody := normalizeCodexFinalUpstreamReasoning([]byte(`{"reasoning":{"effort":"xhigh"}}`), &capabilities, true)
+	if got := gjson.GetBytes(preservedBody, "reasoning.effort").String(); got != "xhigh" {
+		t.Fatalf("preserved reasoning.effort = %q, want xhigh; body=%s", got, preservedBody)
+	}
+
+	ultraCapabilities := registry.CodexClientModelCapabilities{
+		SupportedReasoningLevels: []string{"low", "ultra"},
+	}
+	ultraBody := normalizeCodexFinalUpstreamReasoning([]byte(`{"reasoning":{"effort":"ultra"}}`), &ultraCapabilities, false)
+	if got := gjson.GetBytes(ultraBody, "reasoning.effort").String(); got != "max" {
+		t.Fatalf("catalog-supported ultra reasoning.effort = %q, want max; body=%s", got, ultraBody)
+	}
+}
+
 func TestNormalizeCodexFinalUpstreamBodyPreservesCodexReasoningSummaryDelivery(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5.4",

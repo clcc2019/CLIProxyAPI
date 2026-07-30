@@ -71,8 +71,8 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
-	if gotSession := httpReq.Header.Get("Session_id"); gotSession != expectedKey {
-		t.Fatalf("Session_id = %q, want %q", gotSession, expectedKey)
+	if gotSession := httpReq.Header.Get(codexHeaderOfficialSessionID); gotSession != expectedKey {
+		t.Fatalf("Session-Id = %q, want %q", gotSession, expectedKey)
 	}
 
 	httpReq2, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, req, rawJSON)
@@ -170,7 +170,7 @@ func assertPreparedSessionID(t *testing.T, executor *CodexExecutor, ctx context.
 	if err != nil {
 		t.Fatalf("cacheHelper error: %v", err)
 	}
-	return httpReq.Header.Get(codexHeaderSessionID)
+	return httpReq.Header.Get(codexHeaderOfficialSessionID)
 }
 
 func TestHashCodexFinalUpstreamBodyMemoKeyIsDeterministicAndDistinguishing(t *testing.T) {
@@ -285,8 +285,8 @@ func TestCodexExecutorCacheHelper_ConversationHeadersBecomePromptCacheKey(t *tes
 		if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != tc.value {
 			t.Fatalf("%s: prompt_cache_key = %q, want %q; body=%s", tc.name, got, tc.value, body)
 		}
-		if got := httpReq.Header.Get(codexHeaderSessionID); got != tc.value {
-			t.Fatalf("%s: Session_id = %q, want %q", tc.name, got, tc.value)
+		if got := httpReq.Header.Get(codexHeaderOfficialSessionID); got != tc.value {
+			t.Fatalf("%s: Session-Id = %q, want %q", tc.name, got, tc.value)
 		}
 	}
 }
@@ -312,11 +312,11 @@ func TestCodexExecutorCacheHelper_OfficialThreadHeaderBecomesPromptCacheKey(t *t
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "official-thread" {
 		t.Fatalf("prompt_cache_key = %q, want official-thread; body=%s", got, body)
 	}
-	if got := httpReq.Header.Get(codexHeaderSessionID); got != "official-session" {
-		t.Fatalf("%s = %q, want official-session", codexHeaderSessionID, got)
+	if got := httpReq.Header.Get(codexHeaderOfficialSessionID); got != "official-session" {
+		t.Fatalf("%s = %q, want official-session", codexHeaderOfficialSessionID, got)
 	}
-	if got := httpReq.Header.Get(codexHeaderThreadID); got != "official-thread" {
-		t.Fatalf("%s = %q, want official-thread", codexHeaderThreadID, got)
+	if got := httpReq.Header.Get(codexHeaderOfficialThreadID); got != "official-thread" {
+		t.Fatalf("%s = %q, want official-thread", codexHeaderOfficialThreadID, got)
 	}
 }
 
@@ -340,11 +340,11 @@ func TestCodexExecutorCacheHelper_TurnMetadataThreadBecomesPromptCacheKey(t *tes
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "meta-thread" {
 		t.Fatalf("prompt_cache_key = %q, want meta-thread; body=%s", got, body)
 	}
-	if got := httpReq.Header.Get(codexHeaderSessionID); got != "meta-session" {
-		t.Fatalf("%s = %q, want meta-session", codexHeaderSessionID, got)
+	if got := httpReq.Header.Get(codexHeaderOfficialSessionID); got != "meta-session" {
+		t.Fatalf("%s = %q, want meta-session", codexHeaderOfficialSessionID, got)
 	}
-	if got := httpReq.Header.Get(codexHeaderThreadID); got != "meta-thread" {
-		t.Fatalf("%s = %q, want meta-thread", codexHeaderThreadID, got)
+	if got := httpReq.Header.Get(codexHeaderOfficialThreadID); got != "meta-thread" {
+		t.Fatalf("%s = %q, want meta-thread", codexHeaderOfficialThreadID, got)
 	}
 }
 
@@ -366,11 +366,11 @@ func TestCodexExecutorCacheHelper_BodyTurnMetadataThreadBecomesPromptCacheKey(t 
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "body-thread" {
 		t.Fatalf("prompt_cache_key = %q, want body-thread; body=%s", got, body)
 	}
-	if got := httpReq.Header.Get(codexHeaderSessionID); got != "body-session" {
-		t.Fatalf("%s = %q, want body-session", codexHeaderSessionID, got)
+	if got := httpReq.Header.Get(codexHeaderOfficialSessionID); got != "body-session" {
+		t.Fatalf("%s = %q, want body-session", codexHeaderOfficialSessionID, got)
 	}
-	if got := httpReq.Header.Get(codexHeaderThreadID); got != "body-thread" {
-		t.Fatalf("%s = %q, want body-thread", codexHeaderThreadID, got)
+	if got := httpReq.Header.Get(codexHeaderOfficialThreadID); got != "body-thread" {
+		t.Fatalf("%s = %q, want body-thread", codexHeaderOfficialThreadID, got)
 	}
 }
 
@@ -394,11 +394,11 @@ func TestCodexExecutorCacheHelper_BodyPromptCacheKeyBeatsConversationHeader(t *t
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "body-cache" {
 		t.Fatalf("prompt_cache_key = %q, want body-cache; body=%s", got, body)
 	}
-	if got := httpReq.Header.Get(codexHeaderSessionID); got != "body-cache" {
-		t.Fatalf("Session_id = %q, want body-cache", got)
+	if got := httpReq.Header.Get(codexHeaderOfficialSessionID); got != "body-cache" {
+		t.Fatalf("Session-Id = %q, want body-cache", got)
 	}
-	if got := httpReq.Header.Get(codexHeaderThreadID); got != "body-cache" {
-		t.Fatalf("Thread_id = %q, want body-cache", got)
+	if got := httpReq.Header.Get(codexHeaderOfficialThreadID); got != "body-cache" {
+		t.Fatalf("Thread-Id = %q, want body-cache", got)
 	}
 }
 
@@ -433,11 +433,11 @@ func TestPrepareCodexHTTPCallPreservesOfficialCLIIdentityHeaders(t *testing.T) {
 	if got := gjson.GetBytes(call.prepared.body, "prompt_cache_key").String(); got != "cli-thread" {
 		t.Fatalf("prompt_cache_key = %q, want cli-thread; body=%s", got, call.prepared.body)
 	}
-	if got := call.prepared.httpReq.Header.Get(codexHeaderSessionID); got != "cli-session" {
-		t.Fatalf("Session_id = %q, want cli-session", got)
+	if got := call.prepared.httpReq.Header.Get(codexHeaderOfficialSessionID); got != "cli-session" {
+		t.Fatalf("Session-Id = %q, want cli-session", got)
 	}
-	if got := call.prepared.httpReq.Header.Get(codexHeaderThreadID); got != "cli-thread" {
-		t.Fatalf("Thread_id = %q, want cli-thread", got)
+	if got := call.prepared.httpReq.Header.Get(codexHeaderOfficialThreadID); got != "cli-thread" {
+		t.Fatalf("Thread-Id = %q, want cli-thread", got)
 	}
 	if got := call.prepared.httpReq.Header.Get("X-Client-Request-Id"); got != "cli-thread" {
 		t.Fatalf("X-Client-Request-Id = %q, want cli-thread", got)
@@ -477,12 +477,6 @@ func TestPrepareCodexHTTPCallUsesOfficialThreadHeaderForPromptCache(t *testing.T
 	if got := gjson.GetBytes(call.prepared.body, "prompt_cache_key").String(); got != "official-thread" {
 		t.Fatalf("prompt_cache_key = %q, want official-thread; body=%s", got, call.prepared.body)
 	}
-	if got := call.prepared.httpReq.Header.Get(codexHeaderSessionID); got != "official-session" {
-		t.Fatalf("%s = %q, want official-session", codexHeaderSessionID, got)
-	}
-	if got := call.prepared.httpReq.Header.Get(codexHeaderThreadID); got != "official-thread" {
-		t.Fatalf("%s = %q, want official-thread", codexHeaderThreadID, got)
-	}
 	if got := call.prepared.httpReq.Header.Get(codexHeaderOfficialSessionID); got != "official-session" {
 		t.Fatalf("%s = %q, want official-session", codexHeaderOfficialSessionID, got)
 	}
@@ -491,6 +485,12 @@ func TestPrepareCodexHTTPCallUsesOfficialThreadHeaderForPromptCache(t *testing.T
 	}
 	if got := call.prepared.httpReq.Header.Get("X-Client-Request-Id"); got != "official-thread" {
 		t.Fatalf("X-Client-Request-Id = %q, want official-thread", got)
+	}
+	if got := call.prepared.httpReq.Header.Get(codexHeaderSessionID); got != "" {
+		t.Fatalf("%s = %q, want omitted", codexHeaderSessionID, got)
+	}
+	if got := call.prepared.httpReq.Header.Get(codexHeaderThreadID); got != "" {
+		t.Fatalf("%s = %q, want omitted", codexHeaderThreadID, got)
 	}
 }
 
@@ -667,11 +667,11 @@ func TestCodexExecutorCacheHelper_CompactUsesCallerProvidedPromptCacheKeyAsSessi
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "caller-owned-id" {
 		t.Fatalf("prompt_cache_key = %q, want caller-owned-id; body=%s", got, body)
 	}
-	if got := httpReq.Header.Get(codexHeaderSessionID); got != "caller-owned-id" {
-		t.Fatalf("Session_id = %q, want %q", got, "caller-owned-id")
+	if got := httpReq.Header.Get(codexHeaderOfficialSessionID); got != "caller-owned-id" {
+		t.Fatalf("Session-Id = %q, want %q", got, "caller-owned-id")
 	}
-	if got := httpReq.Header.Get(codexHeaderThreadID); got != "caller-owned-id" {
-		t.Fatalf("Thread_id = %q, want %q", got, "caller-owned-id")
+	if got := httpReq.Header.Get(codexHeaderOfficialThreadID); got != "caller-owned-id" {
+		t.Fatalf("Thread-Id = %q, want %q", got, "caller-owned-id")
 	}
 }
 
@@ -685,7 +685,7 @@ func TestCodexExecutorCacheHelper_CompactUsesExplicitConversationHintSessionID(t
 	expected := assertPromptCacheKey(t, executor, ctx, "openai-response", req, payload)
 	got := assertPreparedSessionID(t, executor, ctx, "openai-response", "https://example.com/responses/compact", req, payload)
 	if got != expected {
-		t.Fatalf("Session_id = %q, want prompt-cache-derived id %q", got, expected)
+		t.Fatalf("Session-Id = %q, want prompt-cache-derived id %q", got, expected)
 	}
 }
 
@@ -793,11 +793,11 @@ func TestCodexExecutorCacheHelper_ExecutionSessionBecomesPromptCacheKey(t *testi
 	if got := gjson.GetBytes(bodyWithSession, "prompt_cache_key").String(); got != "exec-session-1" {
 		t.Fatalf("prompt_cache_key = %q, want exec-session-1; body=%s", got, bodyWithSession)
 	}
-	if got := prepared.httpReq.Header.Get(codexHeaderSessionID); got != "exec-session-1" {
-		t.Fatalf("%s = %q, want exec-session-1", codexHeaderSessionID, got)
+	if got := prepared.httpReq.Header.Get(codexHeaderOfficialSessionID); got != "exec-session-1" {
+		t.Fatalf("%s = %q, want exec-session-1", codexHeaderOfficialSessionID, got)
 	}
-	if got := prepared.httpReq.Header.Get(codexHeaderThreadID); got != "exec-session-1" {
-		t.Fatalf("%s = %q, want exec-session-1", codexHeaderThreadID, got)
+	if got := prepared.httpReq.Header.Get(codexHeaderOfficialThreadID); got != "exec-session-1" {
+		t.Fatalf("%s = %q, want exec-session-1", codexHeaderOfficialThreadID, got)
 	}
 	if without := gjson.GetBytes(bodyWithoutSession, "prompt_cache_key").String(); without == "exec-session-1" {
 		t.Fatalf("request without execution session unexpectedly used execution prompt_cache_key: %s", bodyWithoutSession)
@@ -886,18 +886,18 @@ func TestHashCodexDedupeHeaders_IgnoresTraceAndTimingHeaders(t *testing.T) {
 
 func TestHashCodexDedupeHeaders_DistinguishesRelevantHeaders(t *testing.T) {
 	left := http.Header{
-		"Session_id":              []string{"session-a"},
-		"OpenAI-Beta":             []string{"responses=v1"},
-		"X-Codex-Beta-Features":   []string{"beta-a"},
-		"X-Codex-Installation-Id": []string{"installation-1"},
-		misc.CodexResidencyHeader: []string{"us"},
+		codexHeaderOfficialSessionID: []string{"session-a"},
+		"OpenAI-Beta":                []string{"responses=v1"},
+		"X-Codex-Beta-Features":      []string{"beta-a"},
+		"X-Codex-Installation-Id":    []string{"installation-1"},
+		misc.CodexResidencyHeader:    []string{"us"},
 	}
 	right := http.Header{
-		"Session_id":              []string{"session-b"},
-		"OpenAI-Beta":             []string{"responses=v1"},
-		"X-Codex-Beta-Features":   []string{"beta-a"},
-		"X-Codex-Installation-Id": []string{"installation-1"},
-		misc.CodexResidencyHeader: []string{"us"},
+		codexHeaderOfficialSessionID: []string{"session-b"},
+		"OpenAI-Beta":                []string{"responses=v1"},
+		"X-Codex-Beta-Features":      []string{"beta-a"},
+		"X-Codex-Installation-Id":    []string{"installation-1"},
+		misc.CodexResidencyHeader:    []string{"us"},
 	}
 
 	if leftHash, rightHash := hashCodexDedupeHeaders(left), hashCodexDedupeHeaders(right); leftHash == rightHash {

@@ -681,6 +681,82 @@ func TestCodexExecutorExecuteStream_ResponseFailedBeforePayloadReturnsStatusErro
 	}
 }
 
+func TestCodexExecutorExecuteStream_RetriesGenericResponseFailedBeforePayload(t *testing.T) {
+	var upstreamCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if upstreamCalls == 1 {
+			_, _ = w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","error":{"type":"server_error","message":"temporary upstream failure"}}}` + "\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_2","object":"response","created_at":0,"status":"completed","model":"gpt-5.4-mini","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var received bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		_, _ = received.Write(chunk.Payload)
+	}
+	if upstreamCalls != 2 {
+		t.Fatalf("upstream calls = %d, want 2", upstreamCalls)
+	}
+	if strings.Contains(received.String(), "response.failed") {
+		t.Fatalf("retryable response.failed leaked downstream: %q", received.String())
+	}
+	if !strings.Contains(received.String(), "response.completed") {
+		t.Fatalf("missing completed response: %q", received.String())
+	}
+}
+
+func TestCodexResponseFailedEventIsRetryableFollowsOfficialClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		errorJSON string
+		retryable bool
+	}{
+		{name: "generic", errorJSON: `{"type":"server_error","message":"temporary failure"}`, retryable: true},
+		{name: "context", errorJSON: `{"code":"context_length_exceeded"}`, retryable: false},
+		{name: "quota", errorJSON: `{"code":"insufficient_quota"}`, retryable: false},
+		{name: "usage not included", errorJSON: `{"code":"usage_not_included"}`, retryable: false},
+		{name: "cyber policy", errorJSON: `{"code":"cyber_policy"}`, retryable: false},
+		{name: "invalid prompt", errorJSON: `{"code":"invalid_prompt"}`, retryable: false},
+		{name: "bio policy", errorJSON: `{"code":"bio_policy"}`, retryable: false},
+		{name: "overloaded", errorJSON: `{"code":"server_is_overloaded"}`, retryable: false},
+		{name: "slow down", errorJSON: `{"code":"slow_down"}`, retryable: false},
+		{name: "invalid signature", errorJSON: `{"code":"invalid_encrypted_content"}`, retryable: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := []byte(`{"type":"response.failed","response":{"error":` + tc.errorJSON + `}}`)
+			if got := codexResponseFailedEventIsRetryable(event); got != tc.retryable {
+				t.Fatalf("codexResponseFailedEventIsRetryable() = %t, want %t; event=%s", got, tc.retryable, event)
+			}
+		})
+	}
+}
+
 func TestCodexExecutorExecute_ResponseFailedAggregateReturnsStatusError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

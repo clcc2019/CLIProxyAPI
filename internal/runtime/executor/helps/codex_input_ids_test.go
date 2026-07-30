@@ -10,9 +10,9 @@ import (
 )
 
 func TestSanitizeCodexInputItemIDsBoundaries(t *testing.T) {
-	id64 := strings.Repeat("a", 64)
-	id65 := strings.Repeat("b", 65)
-	unicode65 := strings.Repeat("界", 65)
+	id64 := "msg_" + strings.Repeat("a", 60)
+	id65 := "msg_" + strings.Repeat("b", 61)
+	unicode65 := "msg_" + strings.Repeat("界", 65)
 	body := []byte(`{"input":[{"id":"` + id64 + `"},{"id":"` + id65 + `"},{"id":"` + unicode65 + `"}]}`)
 
 	got := SanitizeCodexInputItemIDs(body)
@@ -27,10 +27,30 @@ func TestSanitizeCodexInputItemIDsBoundaries(t *testing.T) {
 	}
 }
 
+func TestSanitizeCodexInputItemIDsDropsLegacyIDs(t *testing.T) {
+	body := []byte(`{"input":[` +
+		`{"id":"msg_valid"},` +
+		`{"id":"018f9e15-7a6a-7000-8000-000000000001"},` +
+		`{"id":""},` +
+		`{"id":"_suffix"},` +
+		`{"id":"prefix_"}` +
+		`]}`)
+
+	got := SanitizeCodexInputItemIDs(body)
+	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != "msg_valid" {
+		t.Fatalf("prefixed ID changed: %q", actual)
+	}
+	for _, path := range []string{"input.1.id", "input.2.id", "input.3.id", "input.4.id"} {
+		if gjson.GetBytes(got, path).Exists() {
+			t.Fatalf("legacy ID at %s was retained: %s", path, got)
+		}
+	}
+}
+
 func TestSanitizeCodexInputItemIDsDropsOverlongEncryptedReasoningItem(t *testing.T) {
 	longReasoningID := "rs_" + strings.Repeat("a", 64)
 	shortReasoningID := "rs_" + strings.Repeat("b", 48)
-	longCallID := strings.Repeat("call-item-", 8)
+	longCallID := "fc_" + strings.Repeat("call-item-", 8)
 	body := []byte(`{"input":[` +
 		`{"type":"message","id":"msg-1","role":"user","content":"before"},` +
 		`{"type":"reasoning","id":"` + longReasoningID + `","encrypted_content":"gAAAA-encrypted","summary":[{"type":"summary_text","text":"drop me"}]},` +
@@ -42,6 +62,9 @@ func TestSanitizeCodexInputItemIDsDropsOverlongEncryptedReasoningItem(t *testing
 	input := gjson.GetBytes(got, "input").Array()
 	if len(input) != 3 {
 		t.Fatalf("input length = %d, want 3: %s", len(input), got)
+	}
+	if input[0].Get("id").Exists() {
+		t.Fatalf("legacy message ID was retained: %s", input[0].Raw)
 	}
 	if gotID := input[1].Get("id").String(); gotID != shortReasoningID {
 		t.Fatalf("short encrypted reasoning id changed: %q", gotID)
@@ -63,7 +86,7 @@ func TestSanitizeCodexInputItemIDsShortensOverlongReasoningWithoutEncryptedConte
 }
 
 func TestSanitizeCodexInputItemIDsAvoidsExistingIDCollision(t *testing.T) {
-	longID := strings.Repeat("grok-item-", 10)
+	longID := "fc_" + strings.Repeat("grok-item-", 10)
 	collision := shortenCodexInputItemID(longID)
 	body := []byte(`{"input":[{"id":"` + longID + `"},{"id":"` + collision + `"}]}`)
 	first := SanitizeCodexInputItemIDs(body)
@@ -75,7 +98,7 @@ func TestSanitizeCodexInputItemIDsAvoidsExistingIDCollision(t *testing.T) {
 }
 
 func TestSanitizeCodexInputItemIDsLeavesUnsupportedPayloadsUnchanged(t *testing.T) {
-	for _, body := range [][]byte{[]byte(`not-json`), []byte(`{"input":{"id":"item-1"}}`), []byte(`{"input":[1,{"id":2},{"id":"item-1"}]}`)} {
+	for _, body := range [][]byte{[]byte(`not-json`), []byte(`{"input":{"id":"item-1"}}`), []byte(`{"input":[1,{"id":2},{"id":"msg_1"}]}`)} {
 		if got := string(SanitizeCodexInputItemIDs(body)); got != string(body) {
 			t.Fatalf("payload changed: got=%q want=%q", got, body)
 		}

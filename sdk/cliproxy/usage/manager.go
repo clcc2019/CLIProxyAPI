@@ -18,9 +18,18 @@ const DefaultServiceTier = "default"
 type Record struct {
 	Provider string
 	// ExecutorType stores the concrete executor type that handled the request.
-	ExecutorType         string
-	Model                string
-	Alias                string
+	ExecutorType string
+	Model        string
+	Alias        string
+	// RequestedModel preserves the client-visible requested model even when
+	// Model is updated to the server-selected model from an upstream response.
+	RequestedModel string
+	// ResponseModel is the model explicitly reported by the upstream server.
+	// It is empty when the upstream did not provide one.
+	ResponseModel string
+	// ReasoningIncluded reports that the upstream already accounted for prior
+	// reasoning tokens. It follows the presence semantics of X-Reasoning-Included.
+	ReasoningIncluded    bool
 	ModelReasoningEffort string
 	APIKey               string
 	AuthID               string
