@@ -155,7 +155,7 @@ func TestRecentRequestsSnapshotEmptyReturnsTwentyBuckets(t *testing.T) {
 		}
 		expectedBucketID := baseBucketID + int64(i)
 		start := time.Unix(expectedBucketID*recentRequestBucketSeconds, 0).In(time.Local)
-		end := start.Add(10 * time.Minute)
+		end := start.Add(5 * time.Minute)
 		expected := start.Format("15:04") + "-" + end.Format("15:04")
 		if bucket.Time != expected {
 			t.Fatalf("bucket[%d] time = %q, want %q", i, bucket.Time, expected)
@@ -183,7 +183,7 @@ func TestRecentRequestsSnapshotIncludesCounts(t *testing.T) {
 
 func TestRecentRequestsSnapshotBucketAdvanceMovesCounts(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).In(time.Local)
-	next := now.Add(10 * time.Minute)
+	next := now.Add(5 * time.Minute)
 	a := &Auth{}
 
 	a.recordRecentRequest(now, true)

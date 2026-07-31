@@ -79,7 +79,7 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 			m.mu.RUnlock()
 			return managerRefreshOutcome{auth: auth.Clone()}, nil
 		}
-		if current.Disabled || current.Status == StatusDisabled {
+		if current.IsDisabled() {
 			currentClone := current.Clone()
 			m.mu.RUnlock()
 			return managerRefreshOutcome{auth: currentClone}, nil

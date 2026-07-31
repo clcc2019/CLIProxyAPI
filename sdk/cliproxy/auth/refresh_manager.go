@@ -210,7 +210,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 }
 
 func authRefreshSuppressed(auth *Auth) bool {
-	return auth == nil || auth.Disabled || auth.Status == StatusDisabled || hasUnauthorizedAuthFailure(auth)
+	return auth == nil || auth.IsDisabled() || hasUnauthorizedAuthFailure(auth)
 }
 
 func authPreferredInterval(a *Auth) time.Duration {

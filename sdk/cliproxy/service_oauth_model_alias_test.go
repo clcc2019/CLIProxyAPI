@@ -30,6 +30,30 @@ func TestApplyOAuthModelAlias_Rename(t *testing.T) {
 	}
 }
 
+func TestApplyOAuthModelAlias_MatchesProviderFacingName(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "provider-gpt-5", Alias: "public-gpt-5"},
+			},
+		},
+	}
+	models := []*ModelInfo{
+		{ID: "catalog-gpt-5", Name: "provider-gpt-5"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(out))
+	}
+	if out[0].ID != "public-gpt-5" {
+		t.Fatalf("expected model id %q, got %q", "public-gpt-5", out[0].ID)
+	}
+	if out[0].Name != "provider-gpt-5" {
+		t.Fatalf("expected provider-facing name %q, got %q", "provider-gpt-5", out[0].Name)
+	}
+}
+
 func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{

@@ -113,7 +113,7 @@ type Auth struct {
 }
 
 const (
-	recentRequestBucketSeconds int64 = 10 * 60
+	recentRequestBucketSeconds int64 = 5 * 60
 	recentRequestBucketCount         = 20
 )
 
@@ -474,7 +474,7 @@ func (a *Auth) ApplyRuntimeState(state AuthRuntimeState) {
 	a.Failed = state.Failed
 	a.applyRecentRequestState(state.RecentRequests)
 
-	if a.Disabled || a.Status == StatusDisabled {
+	if a.IsDisabled() {
 		return
 	}
 	if state.Status != "" && state.Status != StatusDisabled {

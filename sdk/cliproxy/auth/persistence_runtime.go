@@ -56,7 +56,7 @@ func preserveRuntimeState(existing, auth *Auth) {
 	// cooldown written by a concurrent usage probe. Preserve an active auth-wide
 	// quota block so the metadata update cannot revive the credential before its
 	// known reset time.
-	if !auth.Disabled && auth.Status != StatusDisabled && authScopedQuotaCooldownActive(existing, time.Now()) {
+	if !auth.IsDisabled() && authScopedQuotaCooldownActive(existing, time.Now()) {
 		auth.Status = existing.Status
 		auth.StatusMessage = existing.StatusMessage
 		auth.Unavailable = existing.Unavailable

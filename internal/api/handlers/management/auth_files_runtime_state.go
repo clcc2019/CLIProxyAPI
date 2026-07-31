@@ -175,7 +175,7 @@ func applyAuthFileRuntimeStateSummaryEntry(entry gin.H, state coreauth.AuthRunti
 
 func authFileRecentRequestsFromRuntimeState(state coreauth.AuthRuntimeState, now time.Time) []coreauth.RecentRequestBucket {
 	const (
-		bucketSeconds int64 = 10 * 60
+		bucketSeconds int64 = 5 * 60
 		bucketCount         = 20
 	)
 	if len(state.RecentRequests) == 0 {

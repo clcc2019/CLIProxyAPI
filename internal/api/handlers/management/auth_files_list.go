@@ -233,7 +233,7 @@ func authFileTypeCountEntry(auth *coreauth.Auth) gin.H {
 		"name":         name,
 		"type":         strings.TrimSpace(auth.Provider),
 		"provider":     strings.TrimSpace(auth.Provider),
-		"disabled":     auth.Disabled,
+		"disabled":     auth.IsDisabled(),
 		"status":       auth.Status,
 		"runtime_only": runtimeOnly,
 		"source":       "memory",
@@ -660,7 +660,7 @@ func authFileListDisabled(auth *coreauth.Auth) bool {
 	if auth == nil {
 		return false
 	}
-	return auth.Disabled || auth.Status == coreauth.StatusDisabled
+	return auth.IsDisabled()
 }
 
 func authFileListTimestampMs(value any) int64 {

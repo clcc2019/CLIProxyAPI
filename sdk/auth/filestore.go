@@ -66,7 +66,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		return "", err
 	}
 
-	if auth.Disabled {
+	if auth.IsDisabled() {
 		if _, statErr := scopedPath.stat(); os.IsNotExist(statErr) {
 			return "", nil
 		}

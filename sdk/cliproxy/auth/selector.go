@@ -168,9 +168,9 @@ func canonicalModelKey(model string) string {
 	parsed := thinking.ParseSuffix(model)
 	modelName := strings.TrimSpace(parsed.ModelName)
 	if modelName == "" {
-		return model
+		return strings.ToLower(model)
 	}
-	return modelName
+	return strings.ToLower(modelName)
 }
 
 func authWebsocketsEnabled(auth *Auth) bool {
@@ -494,7 +494,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}
-	if auth.Disabled || auth.Status == StatusDisabled {
+	if auth.IsDisabled() {
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if hasUnauthorizedAuthFailure(auth) && auth.Unavailable && auth.NextRetryAfter.After(now) {

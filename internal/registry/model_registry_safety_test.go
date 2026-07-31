@@ -54,6 +54,39 @@ func TestGetModelInfoReturnsClone(t *testing.T) {
 	}
 }
 
+func TestClientSupportsModelMatchesProviderName(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-name", "openai-compatibility", []*ModelInfo{{
+		ID:   "public-model",
+		Name: "upstream-model",
+	}})
+
+	if !r.ClientSupportsModel("client-name", "public-model") {
+		t.Fatal("expected client-facing model ID to be supported")
+	}
+	if !r.ClientSupportsModel("client-name", "UPSTREAM-MODEL") {
+		t.Fatal("expected provider-facing model name to be supported case-insensitively")
+	}
+	if r.ClientSupportsModel("client-name", "other-model") {
+		t.Fatal("unexpected support for an unregistered model")
+	}
+
+	r.SetModelQuotaExceeded("client-name", "upstream-model")
+	r.mutex.RLock()
+	_, quotaMarked := r.models["public-model"].QuotaExceededClients["client-name"]
+	r.mutex.RUnlock()
+	if !quotaMarked {
+		t.Fatal("provider-facing name should resolve for quota tracking")
+	}
+	r.ClearModelQuotaExceeded("client-name", "upstream-model")
+	r.mutex.RLock()
+	_, quotaStillMarked := r.models["public-model"].QuotaExceededClients["client-name"]
+	r.mutex.RUnlock()
+	if quotaStillMarked {
+		t.Fatal("provider-facing name should resolve for quota clearing")
+	}
+}
+
 func TestLookupModelHeaderOverridesUsesProviderSpecificModelWithoutCloning(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-global", "openai", []*ModelInfo{{

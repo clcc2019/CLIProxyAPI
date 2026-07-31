@@ -11,12 +11,15 @@ func (m *Manager) rebuildAPIKeyModelAliasFromRuntimeConfig() {
 	if m == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Load the config after taking m.mu. A concurrent SetConfig can otherwise
+	// publish a newer config while an older pre-lock load is waiting, allowing
+	// the older alias table to overwrite the newer one after the reload.
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 }
 
@@ -34,6 +37,9 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			continue
 		}
 		if strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		if auth.IsDisabled() {
 			continue
 		}
 		kind, _ := auth.AccountInfo()
@@ -67,9 +73,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			}
 		}
 
-		if len(byAlias) > 0 {
-			out[auth.ID] = byAlias
-		}
+		// Keep an empty entry as well. It distinguishes a registered API-key
+		// auth with no configured aliases from an auth that is absent from the
+		// snapshot, allowing request-time misses to avoid a full Config scan.
+		out[auth.ID] = byAlias
 	}
 
 	m.apiKeyModelAlias.Store(out)
@@ -82,42 +89,44 @@ func compileAPIKeyModelAliasForModels[T interface {
 	if out == nil {
 		return
 	}
+	addLookup := func(key, resolved string, allowBaseFallback bool) {
+		key = strings.TrimSpace(key)
+		resolved = strings.TrimSpace(resolved)
+		if key == "" || resolved == "" {
+			return
+		}
+		exactKey := strings.ToLower(key)
+		if _, exists := out[exactKey]; !exists {
+			out[exactKey] = resolved
+		}
+
+		// A suffix-qualified alias is intentionally not collapsed into its base
+		// name. That would make foo(high) and foo(low) depend on config order.
+		parsed := thinking.ParseSuffix(key)
+		if !allowBaseFallback || !parsed.HasSuffix {
+			return
+		}
+		baseKey := strings.ToLower(strings.TrimSpace(parsed.ModelName))
+		if baseKey != "" {
+			if _, exists := out[baseKey]; !exists {
+				out[baseKey] = resolved
+			}
+		}
+	}
+
 	for i := range models {
 		alias := strings.TrimSpace(models[i].GetAlias())
 		name := strings.TrimSpace(models[i].GetName())
 		if alias == "" || name == "" {
 			continue
 		}
-		aliasKey := strings.ToLower(thinking.ParseSuffix(alias).ModelName)
-		if aliasKey == "" {
-			aliasKey = strings.ToLower(alias)
-		}
-		// Config priority: first alias wins.
-		if _, exists := out[aliasKey]; exists {
-			continue
-		}
-		out[aliasKey] = name
-		// Also allow direct lookup by upstream name (case-insensitive), so lookups on already-upstream
-		// models remain a cheap no-op.
-		nameKey := strings.ToLower(thinking.ParseSuffix(name).ModelName)
-		if nameKey == "" {
-			nameKey = strings.ToLower(name)
-		}
-		if nameKey != "" {
-			if _, exists := out[nameKey]; !exists {
-				out[nameKey] = name
-			}
-		}
-		// Preserve config suffix priority by seeding a base-name lookup when name already has suffix.
-		nameResult := thinking.ParseSuffix(name)
-		if nameResult.HasSuffix {
-			baseKey := strings.ToLower(strings.TrimSpace(nameResult.ModelName))
-			if baseKey != "" {
-				if _, exists := out[baseKey]; !exists {
-					out[baseKey] = name
-				}
-			}
-		}
+		// Config priority: first exact alias wins. Base fallback is only
+		// synthesized for an alias without a suffix.
+		addLookup(alias, name, false)
+		// Direct upstream names remain cheap no-ops. Keep suffix-qualified names
+		// exact so an upstream high-effort entry cannot satisfy a low-effort
+		// request through the shared base key.
+		addLookup(name, name, false)
 	}
 }
 

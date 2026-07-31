@@ -147,6 +147,10 @@ func makeSingleRouteAwareCacheKey(routeKey, provider string) (singleRouteAwareCa
 	return singleRouteAwareCacheKey{routeKey: routeKey, provider: provider}, true
 }
 
+func routeAwareCacheModelKey(routeModel string) string {
+	return strings.ToLower(strings.TrimSpace(routeModel))
+}
+
 func makeMixedRouteAwareCacheKey(routeKey string, providers []string) (mixedRouteAwareCacheKey, bool) {
 	if routeKey == "" || len(providers) == 0 || len(providers) > len((mixedRouteAwareCacheKey{}).providers) {
 		return mixedRouteAwareCacheKey{}, false
@@ -162,6 +166,10 @@ func makeMixedRouteAwareCacheKey(routeKey string, providers []string) (mixedRout
 func (m *Manager) routeAwareSelectionRequiredWithKey(auth *Auth, routeModel, routeKey string) bool {
 	if auth == nil || routeModel == "" || routeKey == "" {
 		return false
+	}
+	registryRef := registry.GetGlobalRegistry()
+	if len(registryRef.GetModelIDsForClient(auth.ID)) > 0 && !m.authSupportsRouteModel(registryRef, auth, routeModel) {
+		return true
 	}
 	prefix := strings.TrimSpace(auth.Prefix)
 	prefixRewrite := prefix != "" && strings.HasPrefix(routeModel, prefix+"/")
@@ -193,7 +201,7 @@ func (m *Manager) oauthModelAliasChannelForAuth(auth *Auth) string {
 	case "claude", "codex":
 		if auth.Attributes != nil {
 			authKind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"]))
-			if authKind == "apikey" {
+			if authKind == "apikey" || authKind == "api_key" {
 				return ""
 			}
 			if authKind != "" {
@@ -219,7 +227,7 @@ func (m *Manager) mixedLegacySelectionRequired(providers []string, routeModel st
 	if routeKey == "" {
 		return false
 	}
-	cacheKey, cacheable := makeMixedRouteAwareCacheKey(routeKey, providers)
+	cacheKey, cacheable := makeMixedRouteAwareCacheKey(routeAwareCacheModelKey(routeModel), providers)
 	if cacheable {
 		if _, ok := m.routeAwareMixedCache.Load(cacheKey); ok {
 			return false
@@ -232,7 +240,7 @@ func (m *Manager) mixedLegacySelectionRequired(providers []string, routeModel st
 	required := false
 	m.mu.RLock()
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if candidate == nil || candidate.IsDisabled() {
 			continue
 		}
 		if _, ok := providerSet[strings.TrimSpace(strings.ToLower(candidate.Provider))]; !ok {
@@ -261,7 +269,7 @@ func (m *Manager) singleLegacySelectionRequired(provider, routeModel string, tri
 	if routeKey == "" {
 		return false
 	}
-	cacheKey, cacheable := makeSingleRouteAwareCacheKey(routeKey, provider)
+	cacheKey, cacheable := makeSingleRouteAwareCacheKey(routeAwareCacheModelKey(routeModel), provider)
 	if cacheable {
 		if _, ok := m.routeAwareSingleCache.Load(cacheKey); ok {
 			return false
@@ -271,7 +279,7 @@ func (m *Manager) singleLegacySelectionRequired(provider, routeModel string, tri
 	provider = strings.TrimSpace(provider)
 	m.mu.RLock()
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled || candidate.Provider != provider {
+		if candidate == nil || candidate.IsDisabled() || candidate.Provider != provider {
 			continue
 		}
 		if _, used := tried[candidate.ID]; used {
@@ -311,7 +319,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
-		if candidate.Provider != provider || candidate.Disabled {
+		if candidate == nil || candidate.IsDisabled() || candidate.Provider != provider {
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
@@ -555,7 +563,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if candidate == nil || candidate.IsDisabled() {
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {

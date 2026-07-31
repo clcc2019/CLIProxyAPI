@@ -130,7 +130,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			auth.indexAssigned = existing.indexAssigned
 		}
 		preserveRuntimeState(existing, auth)
-		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+		if !existing.IsDisabled() && !auth.IsDisabled() {
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 				auth.ModelStates = existing.ModelStates
 			}

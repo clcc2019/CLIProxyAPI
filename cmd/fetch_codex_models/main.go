@@ -165,7 +165,7 @@ func main() {
 
 func findCodexAuth(auths []*coreauth.Auth) *coreauth.Auth {
 	for _, auth := range auths {
-		if auth == nil || auth.Disabled {
+		if auth == nil || auth.IsDisabled() {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {

@@ -26,6 +26,9 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 
 	ctx := context.Background()
 	_, _ = mgr.Register(ctx, &Auth{ID: "a1", Provider: "claude", Attributes: map[string]string{"api_key": "k", "base_url": "https://example.com"}})
+	if !mgr.hasAPIKeyModelAliasSnapshot("a1") {
+		t.Fatal("registered API-key auth should have an alias snapshot")
+	}
 
 	tests := []struct {
 		name   string
@@ -63,6 +66,66 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 				t.Errorf("lookupAPIKeyUpstreamModel(%q, %q) = %q, want %q", tt.authID, tt.input, resolved, tt.want)
 			}
 		})
+	}
+}
+
+func TestLookupAPIKeyUpstreamModel_PreservesExactSuffixAliases(t *testing.T) {
+	cfg := &internalconfig.Config{
+		ClaudeKey: []internalconfig.ClaudeKey{{
+			APIKey: "k",
+			Models: []internalconfig.ClaudeModel{
+				{Name: "claude-upstream-high", Alias: "claude-public(high)"},
+				{Name: "claude-upstream-low", Alias: "claude-public(low)"},
+			},
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	_, _ = mgr.Register(context.Background(), &Auth{
+		ID:       "suffix-auth",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key": "k",
+		},
+	})
+
+	for input, want := range map[string]string{
+		"claude-public(high)": "claude-upstream-high(high)",
+		"claude-public(low)":  "claude-upstream-low(low)",
+		"claude-public":       "",
+	} {
+		if got := mgr.lookupAPIKeyUpstreamModel("suffix-auth", input); got != want {
+			t.Errorf("lookupAPIKeyUpstreamModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestLookupAPIKeyUpstreamModel_DoesNotCollapseSuffixQualifiedNames(t *testing.T) {
+	cfg := &internalconfig.Config{
+		ClaudeKey: []internalconfig.ClaudeKey{{
+			APIKey: "k",
+			Models: []internalconfig.ClaudeModel{
+				{Name: "claude-upstream(high)", Alias: "claude-public(high)"},
+			},
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	_, _ = mgr.Register(context.Background(), &Auth{
+		ID:       "suffix-name-auth",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key": "k",
+		},
+	})
+
+	if got := mgr.lookupAPIKeyUpstreamModel("suffix-name-auth", "claude-upstream(low)"); got != "" {
+		t.Fatalf("lookupAPIKeyUpstreamModel() = %q, want no cross-suffix match", got)
+	}
+	if got := mgr.lookupAPIKeyUpstreamModel("suffix-name-auth", "claude-upstream(high)"); got != "claude-upstream(high)" {
+		t.Fatalf("lookupAPIKeyUpstreamModel() = %q, want exact upstream name", got)
 	}
 }
 

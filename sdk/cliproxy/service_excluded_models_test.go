@@ -1,9 +1,11 @@
 package cliproxy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -88,6 +90,111 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 	}
 	if !seenGlobalExcluded {
 		t.Fatal("expected global excluded model to be present when attribute override is set")
+	}
+}
+
+func TestRegisterModelsForAuth_APIKeyExcludedModelsMatchUpstreamNameWithAlias(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			ClaudeKey: []config.ClaudeKey{{
+				APIKey: "claude-api-key",
+				Models: []internalconfig.ClaudeModel{
+					{Name: "claude-upstream-a", Alias: "claude-public-a"},
+					{Name: "claude-upstream-b", Alias: "claude-public-b"},
+				},
+				ExcludedModels: []string{"claude-upstream-a"},
+			}},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-claude-api-key-alias-exclusion",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "claude-api-key",
+		},
+	}
+
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { registry.UnregisterClient(auth.ID) })
+
+	service.registerModelsForAuth(auth)
+	models := registry.GetModelsForClient(auth.ID)
+	seen := make(map[string]*ModelInfo, len(models))
+	for _, model := range models {
+		if model != nil {
+			seen[model.ID] = model
+		}
+	}
+	if _, ok := seen["claude-public-a"]; ok {
+		t.Fatal("upstream-name exclusion must remove the aliased public model")
+	}
+	if model := seen["claude-public-b"]; model == nil || model.Name != "claude-upstream-b" {
+		t.Fatalf("expected remaining model to retain upstream identity, got %#v", model)
+	}
+}
+
+func TestRegisterModelsForAuth_StatusDisabledDoesNotRegisterModels(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-status-disabled",
+		Provider: "claude",
+		Status:   coreauth.StatusDisabled,
+	}
+	registry := internalregistry.GetGlobalRegistry()
+	registry.RegisterClient(auth.ID, "claude", []*ModelInfo{{ID: "stale-model"}})
+	t.Cleanup(func() { registry.UnregisterClient(auth.ID) })
+
+	service.registerModelsForAuth(auth)
+	if models := registry.GetModelsForClient(auth.ID); len(models) != 0 {
+		t.Fatalf("status-disabled auth still has registered models: %#v", models)
+	}
+}
+
+func TestApplyConfigUpdate_RefreshesConfigDependentModelRegistrations(t *testing.T) {
+	const authID = "auth-config-reload-models"
+	service := &Service{
+		cfg: &config.Config{
+			ClaudeKey: []config.ClaudeKey{{
+				APIKey: "claude-api-key",
+				Models: []internalconfig.ClaudeModel{{Name: "claude-upstream-v1", Alias: "claude-public-v1"}},
+			}},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "claude-api-key",
+		},
+	}
+	if _, err := service.coreManager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(authID)
+	t.Cleanup(func() { registry.UnregisterClient(authID) })
+
+	service.registerModelsForAuth(auth)
+	if models := registry.GetModelsForClient(authID); len(models) != 1 || models[0].ID != "claude-public-v1" {
+		t.Fatalf("initial registered models = %#v, want claude-public-v1", models)
+	}
+
+	service.applyConfigUpdate(&config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "claude-api-key",
+			Models: []internalconfig.ClaudeModel{{Name: "claude-upstream-v2", Alias: "claude-public-v2"}},
+		}},
+	})
+
+	models := registry.GetModelsForClient(authID)
+	if len(models) != 1 || models[0].ID != "claude-public-v2" || models[0].Name != "claude-upstream-v2" {
+		t.Fatalf("reloaded registered models = %#v, want v2 alias/upstream", models)
 	}
 }
 

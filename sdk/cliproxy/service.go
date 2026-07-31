@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -305,7 +306,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	var applied *coreauth.Auth
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
-		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+		if !existing.IsDisabled() && !auth.IsDisabled() {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
@@ -320,7 +321,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	if err != nil {
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
 		current, ok := s.coreManager.GetByID(auth.ID)
-		if !ok || current.Disabled {
+		if !ok || current.IsDisabled() {
 			GlobalModelRegistry().UnregisterClient(auth.ID)
 			return
 		}
@@ -434,6 +435,9 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	if s == nil || s.coreManager == nil || a == nil {
 		return
 	}
+	if a.IsDisabled() {
+		return
+	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
 		if !forceReplace {
 			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
@@ -445,12 +449,6 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 			}
 		}
 		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutorWithResponseObserver(s.cfg, s.observeCodexResponseMetadata))
-		return
-	}
-	// Skip disabled auth entries when (re)binding executors.
-	// Disabled auths can linger during config reloads (e.g., removed OpenAI-compat entries)
-	// and must not override active provider executors.
-	if a.Disabled {
 		return
 	}
 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
@@ -514,12 +512,12 @@ func executorRebindKeyForAuth(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
+	if auth.IsDisabled() {
+		return ""
+	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if provider == "codex" {
 		return "codex"
-	}
-	if auth.Disabled {
-		return ""
 	}
 	if compatProviderKey, compatName, isCompat := openAICompatInfoFromAuth(auth); isCompat {
 		key := strings.ToLower(strings.TrimSpace(compatProviderKey))
@@ -595,11 +593,28 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	if s.coreManager != nil {
 		s.coreManager.SetConfig(newCfg)
 		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		s.refreshModelRegistrationsForConfig()
 	}
 	if newCfg.Home.Enabled {
 		s.registerHomeExecutors()
 	}
 	s.rebindExecutors()
+}
+
+// refreshModelRegistrationsForConfig reapplies the current config-dependent
+// model view to every auth after a hot reload. Runtime alias tables are updated
+// by Manager.SetConfig, but the global registry and scheduler supported-model
+// snapshots are maintained separately and must be refreshed as well.
+func (s *Service) refreshModelRegistrationsForConfig() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	for _, auth := range s.coreManager.List() {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		s.refreshModelRegistrationForAuth(auth)
+	}
 }
 
 func forceHomeRuntimeConfig(cfg *config.Config) {
@@ -915,7 +930,7 @@ func (s *Service) Run(ctx context.Context) error {
 		refreshed := 0
 		for provider := range providerSet {
 			for _, auth := range s.coreManager.ListByProvider(provider) {
-				if auth == nil || auth.ID == "" || auth.Disabled {
+				if auth == nil || auth.ID == "" || auth.IsDisabled() {
 					continue
 				}
 				if s.refreshModelRegistrationForAuth(auth) {
@@ -1121,11 +1136,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
 		return
 	}
-	if a.Disabled {
+	if a.IsDisabled() {
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
-	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
+	authKind := normalizeAuthKind(a.Attributes["auth_kind"])
 	if authKind == "" {
 		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
 			authKind = "apikey"
@@ -1290,14 +1305,14 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 		return false
 	}
 
-	if !current.Disabled {
+	if !current.IsDisabled() {
 		s.ensureExecutorsForAuth(current)
 	}
 	s.registerModelsForAuth(current)
 	s.coreManager.ReconcileRegistryModelStates(context.Background(), current.ID)
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
-	if !ok || latest.Disabled {
+	if !ok || latest.IsDisabled() {
 		GlobalModelRegistry().UnregisterClient(current.ID)
 		s.coreManager.RefreshSchedulerEntry(current.ID)
 		return false
@@ -1405,6 +1420,18 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 	return cfg.OAuthExcludedModels[providerKey]
 }
 
+// normalizeAuthKind keeps the two API-key spellings used by auth metadata on
+// the same routing channel. Auth files historically used both "apikey" and
+// "api_key"; treating them differently makes per-key exclusions and OAuth
+// alias selection depend on how the auth record was serialized.
+func normalizeAuthKind(authKind string) string {
+	authKind = strings.ToLower(strings.TrimSpace(authKind))
+	if authKind == "api_key" {
+		return "apikey"
+	}
+	return authKind
+}
+
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 	if len(models) == 0 || len(excluded) == 0 {
 		return models
@@ -1425,10 +1452,9 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		if model == nil {
 			continue
 		}
-		modelID := strings.ToLower(strings.TrimSpace(model.ID))
 		blocked := false
 		for _, pattern := range patterns {
-			if matchWildcard(pattern, modelID) {
+			if matchWildcard(pattern, model.ID) || matchWildcard(pattern, model.Name) {
 				blocked = true
 				break
 			}
@@ -1484,53 +1510,7 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 
 // matchWildcard performs case-insensitive wildcard matching where '*' matches any substring.
 func matchWildcard(pattern, value string) bool {
-	if pattern == "" {
-		return false
-	}
-
-	firstStar := strings.IndexByte(pattern, '*')
-	if firstStar < 0 {
-		return pattern == value
-	}
-
-	lastStar := strings.LastIndexByte(pattern, '*')
-	if prefix := pattern[:firstStar]; prefix != "" {
-		if !strings.HasPrefix(value, prefix) {
-			return false
-		}
-		value = value[len(prefix):]
-	}
-
-	if suffix := pattern[lastStar+1:]; suffix != "" {
-		if !strings.HasSuffix(value, suffix) {
-			return false
-		}
-		value = value[:len(value)-len(suffix)]
-	}
-
-	if firstStar < lastStar {
-		middle := pattern[firstStar+1 : lastStar]
-		for middle != "" {
-			segment, rest, found := strings.Cut(middle, "*")
-			middle = rest
-			if segment == "" {
-				if !found {
-					break
-				}
-				continue
-			}
-			idx := strings.Index(value, segment)
-			if idx < 0 {
-				return false
-			}
-			value = value[idx+len(segment):]
-			if !found {
-				break
-			}
-		}
-	}
-
-	return true
+	return internalconfig.MatchModelPattern(pattern, value)
 }
 
 type modelEntry interface {
@@ -1563,6 +1543,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		models = append(models, &ModelInfo{
 			ID:          modelID,
+			Name:        strings.TrimSpace(model.Name),
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     compat.Name,
@@ -1603,6 +1584,7 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		}
 		info := &ModelInfo{
 			ID:          alias,
+			Name:        name,
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     ownedBy,
@@ -1707,6 +1689,12 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		}
 		key := strings.ToLower(id)
 		entries := forward[key]
+		matchedByID := len(entries) > 0
+		if !matchedByID {
+			if providerName := strings.TrimSpace(model.Name); providerName != "" {
+				entries = forward[strings.ToLower(providerName)]
+			}
+		}
 		if len(entries) == 0 {
 			if _, exists := seen[key]; exists {
 				continue
@@ -1746,7 +1734,11 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 			seen[aliasKey] = struct{}{}
 			clone := *model
 			clone.ID = mappedID
-			if clone.Name != "" {
+			// ID aliases historically also rewrite the conventional
+			// "models/<id>" metadata. When the alias matched the
+			// provider-facing Name instead, retain that field so the
+			// registry can continue resolving the real upstream model.
+			if matchedByID && clone.Name != "" {
 				clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
 			}
 			out = append(out, &clone)

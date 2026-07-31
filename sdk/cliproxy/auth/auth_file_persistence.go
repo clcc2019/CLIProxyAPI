@@ -9,6 +9,6 @@ func PrepareAuthFileMetadataForSave(auth *Auth) map[string]any {
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
-	auth.Metadata["disabled"] = auth.Disabled
+	auth.Metadata["disabled"] = auth.IsDisabled()
 	return auth.Metadata
 }

@@ -36,8 +36,10 @@ func BuildAuthChangeDetails(oldAuth, newAuth *coreauth.Auth) []string {
 	}
 
 	// Compare disabled
-	if oldAuth.Disabled != newAuth.Disabled {
-		changes = append(changes, fmt.Sprintf("disabled: %t -> %t", oldAuth.Disabled, newAuth.Disabled))
+	oldDisabled := oldAuth.IsDisabled()
+	newDisabled := newAuth.IsDisabled()
+	if oldDisabled != newDisabled {
+		changes = append(changes, fmt.Sprintf("disabled: %t -> %t", oldDisabled, newDisabled))
 	}
 
 	return changes

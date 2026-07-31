@@ -562,7 +562,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !ok || selectedAuth == nil {
 					return
 				}
-				if selectedAuth.Disabled || selectedAuth.Unavailable || selectedAuth.Status == coreauth.StatusDisabled {
+				if selectedAuth.IsDisabled() || selectedAuth.Unavailable {
 					return
 				}
 				if responsesWebsocketAuthSupportsIncrementalInput(selectedAuth) {
@@ -1326,7 +1326,7 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketPinnedAuthReusable(authID 
 	if !ok || auth == nil {
 		return false
 	}
-	if auth.Disabled || auth.Unavailable || auth.Status == coreauth.StatusDisabled {
+	if auth.IsDisabled() || auth.Unavailable {
 		return false
 	}
 	return responsesWebsocketAuthSupportsIncrementalInput(auth)
@@ -1403,7 +1403,7 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 		return false
 	}
 	return h.AuthManager.AnyAvailableAuthForModel(providers, modelKey, func(auth *coreauth.Auth) bool {
-		if auth == nil || auth.Disabled || auth.Unavailable || auth.Status == coreauth.StatusDisabled {
+		if auth == nil || auth.IsDisabled() || auth.Unavailable {
 			return false
 		}
 		return responsesWebsocketAuthSupportsIncrementalInput(auth)

@@ -40,6 +40,9 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 	if resolved := m.lookupAPIKeyUpstreamModel(auth.ID, requestedModel); resolved != "" {
 		return resolved
 	}
+	if m.hasAPIKeyModelAliasSnapshot(auth.ID) {
+		return requestedModel
+	}
 
 	// Slow path: scan config for the matching credential entry and resolve alias.
 	// This acts as a safety net if mappings are stale or auth.ID is missing.
@@ -64,6 +67,23 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		return upstreamModel
 	}
 	return requestedModel
+}
+
+func (m *Manager) hasAPIKeyModelAliasSnapshot(authID string) bool {
+	if m == nil {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+	raw := m.apiKeyModelAlias.Load()
+	table, _ := raw.(apiKeyModelAliasTable)
+	if table == nil {
+		return false
+	}
+	_, exists := table[authID]
+	return exists
 }
 
 // APIKeyConfigEntry is a generic interface for API key configurations.

@@ -354,7 +354,7 @@ func (m *Manager) clearExpiredQuotaCooldownsForAuth(ctx context.Context, authID 
 	clearedModels := make([]string, 0, 4)
 
 	m.mu.Lock()
-	if auth, ok := m.auths[authID]; ok && auth != nil && auth.Status != StatusDisabled {
+	if auth, ok := m.auths[authID]; ok && auth != nil && !auth.IsDisabled() {
 		wasUnavailable := auth.Unavailable
 		authExpired := authQuotaCooldownExpired(auth, now)
 		changed := false
@@ -419,7 +419,7 @@ func (m *Manager) clearAuthQuotaCooldown(ctx context.Context, authID string, cle
 	clearedModels := make([]string, 0, 4)
 
 	m.mu.Lock()
-	if auth, ok := m.auths[authID]; ok && auth != nil && auth.Status != StatusDisabled {
+	if auth, ok := m.auths[authID]; ok && auth != nil && !auth.IsDisabled() {
 		wasUnavailable := auth.Unavailable
 		changed := false
 		authCleared := false
@@ -490,7 +490,7 @@ func authHasQuotaCooldown(auth *Auth) bool {
 }
 
 func authQuotaCooldownExpired(auth *Auth, now time.Time) bool {
-	if auth == nil || auth.Status == StatusDisabled || auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.After(now) {
+	if auth == nil || auth.IsDisabled() || auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.After(now) {
 		return false
 	}
 	return authHasQuotaCooldown(auth)

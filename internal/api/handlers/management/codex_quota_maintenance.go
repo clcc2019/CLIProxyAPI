@@ -228,7 +228,7 @@ func codexQuotaMaintenanceAuthEligible(auth *coreauth.Auth) bool {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return false
 	}
-	return !auth.Disabled && auth.Status != coreauth.StatusDisabled
+	return !auth.IsDisabled()
 }
 
 func (h *Handler) maintainCodexQuotaForAuth(ctx context.Context, auth *coreauth.Auth, now time.Time) {

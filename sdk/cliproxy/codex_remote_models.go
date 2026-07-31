@@ -44,7 +44,7 @@ func (s *Service) refreshCodexRemoteCatalog(ctx context.Context, auth *coreauth.
 // response ETag that differs from the cached /models ETag forces one online
 // refresh, while a matching ETag only renews the five-minute cache lifetime.
 func (s *Service) refreshCodexRemoteCatalogWithETag(ctx context.Context, auth *coreauth.Auth, responseETag string) (bool, error) {
-	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.Disabled {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.IsDisabled() {
 		return false, nil
 	}
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
@@ -142,7 +142,7 @@ func (s *Service) refreshCodexRemoteCatalogWithETag(ctx context.Context, auth *c
 // upstream response headers are available. It deliberately does not hold up
 // body streaming; the response itself remains valid with the old catalog.
 func (s *Service) observeCodexResponseMetadata(_ context.Context, auth *coreauth.Auth, metadata executor.CodexResponseMetadata) {
-	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.Disabled {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.IsDisabled() {
 		return
 	}
 	etag := strings.TrimSpace(metadata.ModelsETag)
@@ -172,7 +172,7 @@ func (s *Service) observeCodexResponseMetadata(_ context.Context, auth *coreauth
 	authID := auth.ID
 	go func() {
 		current, ok := s.latestAuthForModelRegistration(authID)
-		if !ok || current.Disabled || !strings.EqualFold(strings.TrimSpace(current.Provider), "codex") {
+		if !ok || current.IsDisabled() || !strings.EqualFold(strings.TrimSpace(current.Provider), "codex") {
 			return
 		}
 		refreshed, err := s.refreshCodexRemoteCatalogWithETag(context.Background(), current, etag)

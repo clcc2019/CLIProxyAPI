@@ -941,7 +941,7 @@ func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
 	}
 	authID := strings.TrimSpace(auth.ID)
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
-	if authID == "" || providerKey == "" || auth.Disabled {
+	if authID == "" || providerKey == "" || auth.IsDisabled() {
 		s.removeAuthLocked(authID)
 		return
 	}
@@ -1004,17 +1004,25 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 	if authID == "" {
 		return nil
 	}
-	modelIDs := registry.GetGlobalRegistry().GetModelIDsForClient(authID)
-	if len(modelIDs) == 0 {
+	modelInfos := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	if len(modelInfos) == 0 {
 		return nil
 	}
-	set := make(map[string]struct{}, len(modelIDs))
-	for _, modelID := range modelIDs {
-		modelKey := canonicalModelKey(modelID)
-		if modelKey == "" {
+	set := make(map[string]struct{}, len(modelInfos)*2)
+	for _, modelInfo := range modelInfos {
+		if modelInfo == nil {
 			continue
 		}
-		set[modelKey] = struct{}{}
+		for _, modelName := range []string{modelInfo.ID, modelInfo.Name} {
+			modelKey := canonicalModelKey(modelName)
+			if modelKey == "" {
+				continue
+			}
+			set[modelKey] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil
 	}
 	return set
 }

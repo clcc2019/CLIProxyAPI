@@ -30,15 +30,20 @@ func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) strin
 	if len(byAlias) == 0 {
 		return ""
 	}
-	key := strings.ToLower(thinking.ParseSuffix(requestedModel).ModelName)
-	if key == "" {
-		key = strings.ToLower(requestedModel)
+	requestResult := thinking.ParseSuffix(requestedModel)
+	keys := []string{strings.ToLower(requestedModel)}
+	baseKey := strings.ToLower(strings.TrimSpace(requestResult.ModelName))
+	if baseKey != "" && baseKey != keys[0] {
+		keys = append(keys, baseKey)
 	}
-	resolved := strings.TrimSpace(byAlias[key])
-	if resolved == "" {
-		return ""
+	for _, key := range keys {
+		resolved := strings.TrimSpace(byAlias[key])
+		if resolved == "" {
+			continue
+		}
+		return preserveRequestedModelSuffix(requestedModel, resolved)
 	}
-	return preserveRequestedModelSuffix(requestedModel, resolved)
+	return ""
 }
 
 func isAPIKeyAuth(auth *Auth) bool {
@@ -138,32 +143,25 @@ func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedMode
 	if requestedModel == "" {
 		return nil
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		cfg = &internalconfig.Config{}
-	}
 	providerKey := ""
 	compatName := ""
 	if auth.Attributes != nil {
 		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
-	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
+	rawSnapshot := m.openAICompatRuntime.Load()
+	snapshot, _ := rawSnapshot.(*openAICompatRuntimeSnapshot)
+	entry := snapshot.resolve(providerKey, compatName, auth.Provider)
 	if entry == nil {
 		return nil
 	}
-	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+	return entry.resolveModelPool(requestedModel)
 }
 
 func (m *Manager) apiKeyPoolModeRetries(auth *Auth) int {
 	if m == nil || auth == nil {
 		return 0
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		return 0
-	}
-
 	if isOpenAICompatAPIKeyAuth(auth) {
 		providerKey := ""
 		compatName := ""
@@ -171,13 +169,19 @@ func (m *Manager) apiKeyPoolModeRetries(auth *Auth) int {
 			providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 			compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 		}
-		entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
-		if entry != nil && entry.PoolMode {
+		rawSnapshot := m.openAICompatRuntime.Load()
+		snapshot, _ := rawSnapshot.(*openAICompatRuntimeSnapshot)
+		entry := snapshot.resolve(providerKey, compatName, auth.Provider)
+		if entry != nil && entry.poolMode {
 			return apiKeyPoolModeRetryCount
 		}
 	}
 
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && isAPIKeyAuth(auth) {
+		cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+		if cfg == nil {
+			return 0
+		}
 		entry := resolveCodexAPIKeyConfig(cfg, auth)
 		if entry != nil && entry.PoolMode {
 			return apiKeyPoolModeRetryCount
@@ -346,7 +350,7 @@ func (m *Manager) clonePickedAuthForExecution(provider string, selected *Auth) (
 }
 
 func executionAuthIsStale(providerKey string, auth *Auth) bool {
-	if auth == nil || providerKey == "" || auth.Disabled || auth.Status == StatusDisabled {
+	if auth == nil || providerKey == "" || auth.IsDisabled() {
 		return true
 	}
 	return !strings.EqualFold(strings.TrimSpace(auth.Provider), providerKey)
@@ -433,13 +437,21 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	if registryRef == nil || auth == nil {
 		return true
 	}
+	routeModel = strings.TrimSpace(routeModel)
 	routeKey := canonicalModelKey(routeModel)
 	if routeKey == "" {
+		return true
+	}
+	if registryRef.ClientSupportsModel(auth.ID, routeModel) {
 		return true
 	}
 	if registryRef.ClientSupportsModel(auth.ID, routeKey) {
 		return true
 	}
-	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
-	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
+	selectionModel := m.selectionModelForAuth(auth, routeModel)
+	if selectionModel != "" && registryRef.ClientSupportsModel(auth.ID, selectionModel) {
+		return true
+	}
+	selectionKey := canonicalModelKey(selectionModel)
+	return selectionKey != "" && registryRef.ClientSupportsModel(auth.ID, selectionKey)
 }

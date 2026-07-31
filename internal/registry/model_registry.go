@@ -748,9 +748,17 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 //   - clientID: The client that exceeded quota
 //   - modelID: The model that exceeded quota
 func (r *ModelRegistry) SetModelQuotaExceeded(clientID, modelID string) {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return
+	}
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.ensureAvailableModelsCacheLocked()
+	if resolved, ok := r.resolveClientModelIDLocked(clientID, modelID); ok {
+		modelID = resolved
+	}
 
 	if registration, exists := r.models[modelID]; exists {
 		now := time.Now()
@@ -765,9 +773,17 @@ func (r *ModelRegistry) SetModelQuotaExceeded(clientID, modelID string) {
 //   - clientID: The client to clear quota status for
 //   - modelID: The model to clear quota status for
 func (r *ModelRegistry) ClearModelQuotaExceeded(clientID, modelID string) {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return
+	}
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.ensureAvailableModelsCacheLocked()
+	if resolved, ok := r.resolveClientModelIDLocked(clientID, modelID); ok {
+		modelID = resolved
+	}
 
 	if registration, exists := r.models[modelID]; exists {
 		delete(registration.QuotaExceededClients, clientID)
@@ -788,6 +804,9 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.ensureAvailableModelsCacheLocked()
+	if resolved, ok := r.resolveClientModelIDLocked(clientID, modelID); ok {
+		modelID = resolved
+	}
 
 	registration, exists := r.models[modelID]
 	if !exists || registration == nil {
@@ -820,6 +839,9 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.ensureAvailableModelsCacheLocked()
+	if resolved, ok := r.resolveClientModelIDLocked(clientID, modelID); ok {
+		modelID = resolved
+	}
 
 	registration, exists := r.models[modelID]
 	if !exists || registration == nil || registration.SuspendedClients == nil {
@@ -835,6 +857,9 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.
+// Both the client-facing ID and provider-facing Name are accepted. A model
+// alias can therefore be used consistently by route selection even when a
+// caller already has the upstream model name.
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
 	modelID = strings.TrimSpace(modelID)
@@ -856,7 +881,39 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		}
 	}
 
+	for _, info := range r.clientModelInfos[clientID] {
+		if info != nil && strings.EqualFold(strings.TrimSpace(info.Name), modelID) {
+			return true
+		}
+	}
+
 	return false
+}
+
+// resolveClientModelIDLocked maps either a client-facing ID or a
+// provider-facing Name to the registered ID for one client. Callers must hold
+// r.mutex for at least a read lock.
+func (r *ModelRegistry) resolveClientModelIDLocked(clientID, modelID string) (string, bool) {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return "", false
+	}
+	models := r.clientModels[clientID]
+	infos := r.clientModelInfos[clientID]
+	for _, registeredID := range models {
+		registeredID = strings.TrimSpace(registeredID)
+		if registeredID == "" {
+			continue
+		}
+		if strings.EqualFold(registeredID, modelID) {
+			return registeredID, true
+		}
+		if info := infos[registeredID]; info != nil && strings.EqualFold(strings.TrimSpace(info.Name), modelID) {
+			return registeredID, true
+		}
+	}
+	return "", false
 }
 
 // GetAvailableModels returns all models that have at least one available client

@@ -17,3 +17,10 @@ const (
 	// StatusDisabled marks the auth as intentionally disabled.
 	StatusDisabled Status = "disabled"
 )
+
+// IsDisabled reports whether an auth must be excluded from routing and model
+// registration. Disabled is kept as a separate flag for backward compatibility;
+// both representations have the same routing semantics.
+func (a *Auth) IsDisabled() bool {
+	return a == nil || a.Disabled || a.Status == StatusDisabled
+}

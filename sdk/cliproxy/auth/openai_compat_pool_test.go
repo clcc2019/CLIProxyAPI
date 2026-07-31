@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -360,6 +361,64 @@ func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 			t.Fatalf("pool[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
+}
+
+func TestOpenAICompatRuntimeSnapshotIsImmutableAndRefreshes(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:     "pool",
+			PoolMode: true,
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "upstream-v1", Alias: "public-model"},
+				{Name: "upstream-high", Alias: "public-model(high)"},
+				{Name: "upstream-direct"},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	auth := &Auth{
+		Provider: "pool",
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+
+	assertPool := func(want []string, wantRetries int) {
+		t.Helper()
+		if got := m.resolveOpenAICompatUpstreamModelPool(auth, "public-model"); !reflect.DeepEqual(got, want) {
+			t.Fatalf("resolved model pool = %v, want %v", got, want)
+		}
+		if got := m.apiKeyPoolModeRetries(auth); got != wantRetries {
+			t.Fatalf("pool-mode retries = %d, want %d", got, wantRetries)
+		}
+	}
+	assertPool([]string{"upstream-v1"}, apiKeyPoolModeRetryCount)
+	if got := m.resolveOpenAICompatUpstreamModelPool(auth, "public-model(high)"); !reflect.DeepEqual(got, []string{"upstream-high(high)"}) {
+		t.Fatalf("suffix-qualified model pool = %v, want upstream-high(high)", got)
+	}
+	if got := m.resolveOpenAICompatUpstreamModelPool(auth, "upstream-direct"); !reflect.DeepEqual(got, []string{"upstream-direct"}) {
+		t.Fatalf("direct upstream model pool = %v, want upstream-direct", got)
+	}
+
+	// Mutating the caller's config after SetConfig must not mutate the runtime
+	// snapshot observed by request-time routing.
+	cfg.OpenAICompatibility[0].Models[0].Name = "mutated-after-publish"
+	cfg.OpenAICompatibility[0].PoolMode = false
+	assertPool([]string{"upstream-v1"}, apiKeyPoolModeRetryCount)
+
+	m.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{{
+				Name:  "upstream-v2",
+				Alias: "public-model",
+			}},
+		}},
+	})
+	assertPool([]string{"upstream-v2"}, 0)
 }
 
 func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {

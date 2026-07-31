@@ -206,6 +206,10 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
 
+	// openAICompatRuntime stores the immutable OpenAI-compat routing snapshot used
+	// by API-key model-pool and retry decisions.
+	openAICompatRuntime atomic.Value
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
@@ -274,6 +278,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
+	manager.openAICompatRuntime.Store(buildOpenAICompatRuntimeSnapshot(nil))
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.persistEnabled.Store(store != nil)
 	manager.scheduler = newAuthScheduler(selector)
@@ -472,14 +477,19 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		return
 	}
 
-	supportedModelIDs := registry.GetGlobalRegistry().GetModelIDsForClient(authID)
-	supported := make(map[string]struct{}, len(supportedModelIDs))
-	for _, modelID := range supportedModelIDs {
-		modelKey := canonicalModelKey(modelID)
-		if modelKey == "" {
+	supportedModelInfos := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	supported := make(map[string]struct{}, len(supportedModelInfos)*2)
+	for _, modelInfo := range supportedModelInfos {
+		if modelInfo == nil {
 			continue
 		}
-		supported[modelKey] = struct{}{}
+		for _, modelName := range []string{modelInfo.ID, modelInfo.Name} {
+			modelKey := canonicalModelKey(modelName)
+			if modelKey == "" {
+				continue
+			}
+			supported[modelKey] = struct{}{}
+		}
 	}
 
 	var snapshot *Auth
@@ -498,6 +508,10 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if baseModel == "" {
 				baseModel = strings.TrimSpace(modelKey)
 			}
+			registryModel := strings.TrimSpace(modelKey)
+			if registryModel == "" {
+				registryModel = baseModel
+			}
 			if _, supportedModel := supported[baseModel]; !supportedModel {
 				// Drop state for models that disappeared from the current registry
 				// snapshot. Keeping them around leaks stale errors into auth-level
@@ -505,7 +519,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				delete(auth.ModelStates, modelKey)
 				changed = true
 				if state != nil && state.Quota.Exceeded {
-					quotaModelsToClear = append(quotaModelsToClear, baseModel)
+					quotaModelsToClear = append(quotaModelsToClear, registryModel)
 				}
 				continue
 			}
@@ -518,12 +532,12 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if shouldPreserveModelStateOnReconcile(state, now) {
 				schedulerRefresh = true
 				if state.Quota.Exceeded {
-					quotaModelsToRestore = append(quotaModelsToRestore, baseModel)
+					quotaModelsToRestore = append(quotaModelsToRestore, registryModel)
 				}
 				continue
 			}
 			if state.Quota.Exceeded {
-				quotaModelsToClear = append(quotaModelsToClear, baseModel)
+				quotaModelsToClear = append(quotaModelsToClear, registryModel)
 			}
 			resetModelState(state, now)
 			changed = true
@@ -687,7 +701,9 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
+	openAICompatRuntime := buildOpenAICompatRuntimeSnapshot(cfg)
 	m.runtimeConfig.Store(cfg)
+	m.openAICompatRuntime.Store(openAICompatRuntime)
 	m.configurePreviousResponseAffinity(cfg)
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()

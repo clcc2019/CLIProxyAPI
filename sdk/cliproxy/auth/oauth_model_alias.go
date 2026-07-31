@@ -381,6 +381,9 @@ func modelAliasChannel(auth *Auth) string {
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	authKind = strings.ToLower(strings.TrimSpace(authKind))
+	if authKind == "api_key" {
+		authKind = "apikey"
+	}
 	switch provider {
 	case "claude":
 		if authKind == "apikey" {

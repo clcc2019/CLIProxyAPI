@@ -466,6 +466,15 @@ func TestPrepareAuthFileMetadataForSaveSetsDisabled(t *testing.T) {
 	}
 }
 
+func TestPrepareAuthFileMetadataForSaveTreatsDisabledStatusAsDisabled(t *testing.T) {
+	auth := &Auth{Status: StatusDisabled}
+
+	metadata := PrepareAuthFileMetadataForSave(auth)
+	if disabled, ok := metadata["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("metadata disabled = %#v, want true", metadata["disabled"])
+	}
+}
+
 func TestPrepareAuthFileMetadataForSaveCreatesMetadata(t *testing.T) {
 	auth := &Auth{}
 	metadata := PrepareAuthFileMetadataForSave(auth)

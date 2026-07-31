@@ -22,7 +22,7 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	}
 	auth.EnsureIndex()
 	runtimeOnly := isRuntimeOnlyAuth(auth)
-	if runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
+	if runtimeOnly && auth.IsDisabled() {
 		return nil
 	}
 	path := strings.TrimSpace(authAttribute(auth, "path"))
@@ -42,7 +42,7 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 		"label":          auth.Label,
 		"status":         auth.Status,
 		"status_message": auth.StatusMessage,
-		"disabled":       auth.Disabled,
+		"disabled":       auth.IsDisabled(),
 		"unavailable":    auth.Unavailable,
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
@@ -115,7 +115,7 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 				entry["modtime"] = info.ModTime()
 			} else if os.IsNotExist(err) {
 				// Hide file-backed credentials removed from disk but still lingering in memory.
-				removedByManagement := auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")
+				removedByManagement := auth.IsDisabled() || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")
 				if !runtimeOnly && (h.isManagedAuthFilePath(path) || removedByManagement) {
 					return nil
 				}

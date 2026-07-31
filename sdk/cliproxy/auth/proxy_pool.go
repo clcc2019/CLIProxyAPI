@@ -190,7 +190,7 @@ func (m *Manager) shouldReleaseProxyLeaseForAuth(auth *Auth) bool {
 	if cfg == nil || !cfg.ProxyPool.Enabled {
 		return true
 	}
-	return cfg.ProxyPool.ReleaseOnAuthDisabled && (auth.Disabled || auth.Status == StatusDisabled)
+	return cfg.ProxyPool.ReleaseOnAuthDisabled && auth.IsDisabled()
 }
 
 func (m *Manager) shouldReleaseProxyLeaseForResult(result Result) bool {
@@ -231,7 +231,7 @@ func proxyPoolAuthSnapshotFromAuth(auth *Auth) proxyPoolAuthSnapshot {
 		priority: authPriority(auth),
 		status:   auth.Status,
 		assigned: authProxyPoolAssigned(auth),
-		disabled: auth.Disabled,
+		disabled: auth.IsDisabled(),
 		apiKey:   proxyPoolAuthIsAPIKey(auth),
 		freePlan: isFreeCodexAuth(auth),
 	}
@@ -567,7 +567,7 @@ func proxyPoolCanAssign(cfg *internalconfig.Config, auth *Auth) bool {
 		proxyURL: strings.TrimSpace(auth.ProxyURL),
 		status:   auth.Status,
 		assigned: authProxyPoolAssigned(auth),
-		disabled: auth.Disabled,
+		disabled: auth.IsDisabled(),
 		apiKey:   proxyPoolAuthIsAPIKey(auth),
 		freePlan: isFreeCodexAuth(auth),
 	})

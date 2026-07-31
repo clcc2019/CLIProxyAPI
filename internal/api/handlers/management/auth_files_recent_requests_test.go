@@ -192,7 +192,7 @@ func TestListAuthFilesSummaryOmitsHeavyRuntimeFields(t *testing.T) {
 func TestMergeAuthFileEntryGroupKeepsNonZeroRecentRequests(t *testing.T) {
 	zeroBuckets := make([]coreauth.RecentRequestBucket, 20)
 	activeBuckets := make([]coreauth.RecentRequestBucket, 20)
-	activeBuckets[19] = coreauth.RecentRequestBucket{Time: "10:00-10:10", Success: 3, Failed: 1}
+	activeBuckets[19] = coreauth.RecentRequestBucket{Time: "10:00-10:05", Success: 3, Failed: 1}
 
 	merged := mergeAuthFileEntryGroup([]gin.H{
 		{
