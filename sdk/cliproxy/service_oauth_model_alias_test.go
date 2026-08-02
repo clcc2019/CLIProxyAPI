@@ -114,3 +114,26 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 		t.Fatalf("expected forked model name %q, got %q", "models/g5-2", out[2].Name)
 	}
 }
+
+func TestApplyOAuthModelAlias_EffortOnlyRuleKeepsSingleModel(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {{
+				Name:            "gpt-5.6-sol",
+				Alias:           "gpt-5.6-sol",
+				ReasoningEffort: map[string]string{"max": "xhigh"},
+			}},
+		},
+	}
+	models := []*ModelInfo{{ID: "gpt-5.6-sol", Name: "models/gpt-5.6-sol"}}
+
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("expected effort-only rule to keep one listed model, got %d", len(out))
+	}
+	if out[0].ID != "gpt-5.6-sol" || out[0].Name != "models/gpt-5.6-sol" {
+		t.Fatalf("effort-only rule changed listed model: %#v", out[0])
+	}
+}

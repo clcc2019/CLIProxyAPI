@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestCodexAuthenticatorRefreshLeadIsFiveDays(t *testing.T) {
@@ -54,6 +55,33 @@ func TestBuildAuthRecordPersistsConfiguredUserAgent(t *testing.T) {
 	}
 	if _, ok := record.Attributes["header:Originator"]; ok {
 		t.Fatal("Attributes[header:Originator] should not persist default originator")
+	}
+}
+
+func TestBuildAuthRecordMarksConfiguredInstallationIDExplicit(t *testing.T) {
+	authenticator := NewCodexAuthenticator()
+	authSvc := &codex.CodexAuth{}
+	bundle := &codex.CodexAuthBundle{
+		TokenData: codex.CodexTokenData{
+			Email:        "codex@example.com",
+			AccessToken:  "access-token",
+			RefreshToken: "refresh-token",
+		},
+		LastRefresh: "2026-03-31T00:00:00Z",
+	}
+	record, err := authenticator.buildAuthRecord(authSvc, bundle, &LoginOptions{
+		Metadata: map[string]string{"installation_id": "installation-explicit"},
+	})
+	if err != nil {
+		t.Fatalf("buildAuthRecord() error = %v", err)
+	}
+
+	got := coreauth.PrepareCodexInstallationIDForSave(
+		record,
+		[]byte(`{"type":"codex","installation_id":"installation-existing"}`),
+	)
+	if got != "installation-explicit" {
+		t.Fatalf("installation ID = %q, want explicit login option", got)
 	}
 }
 

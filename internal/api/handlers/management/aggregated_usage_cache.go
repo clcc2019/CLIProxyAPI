@@ -66,19 +66,7 @@ func (h *Handler) aggregatedUsageHandlerCache() *aggregatedUsageCache {
 	if h == nil {
 		return nil
 	}
-	h.mu.RLock()
-	cache := h.aggregatedUsageCache
-	h.mu.RUnlock()
-	if cache != nil {
-		return cache
-	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.aggregatedUsageCache == nil {
-		h.aggregatedUsageCache = &aggregatedUsageCache{}
-	}
-	return h.aggregatedUsageCache
+	return &h.aggregatedUsageCache
 }
 
 func (h *Handler) aggregatedUsageResponse(now time.Time) ([]byte, error) {

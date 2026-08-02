@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // OAuth configuration constants for OpenAI Codex
@@ -35,6 +36,12 @@ const (
 type CodexAuth struct {
 	httpClient *http.Client
 }
+
+// codexRefreshGroup prevents concurrent callers from exchanging the same
+// rotating refresh token more than once. This is intentionally scoped to the
+// provider package so callers using separate CodexAuth instances still share
+// the in-flight refresh.
+var codexRefreshGroup singleflight.Group
 
 // NewCodexAuth creates a new CodexAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
@@ -229,7 +236,27 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
+	result, err, _ := codexRefreshGroup.Do(refreshToken, func() (any, error) {
+		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+	})
+	if err != nil {
+		return nil, err
+	}
+	tokenData, ok := result.(*CodexTokenData)
+	if !ok || tokenData == nil {
+		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
+	}
+	// singleflight shares the result pointer with every waiter. Return a
+	// caller-owned snapshot so one executor cannot race another by mutating it.
+	cloned := *tokenData
+	return &cloned, nil
+}
+
+func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
 	requestBody, err := json.Marshal(codexRefreshTokenRequest{
 		ClientID:     ClientID,
 		GrantType:    "refresh_token",

@@ -26,14 +26,22 @@ type LoginOptions struct {
 	Prompt func(prompt string) (string, error)
 }
 
-// DoCodexLogin triggers the Codex OAuth flow through the shared authentication manager.
-// It initiates the OAuth authentication process for OpenAI Codex services and saves
-// the authentication tokens to the configured auth directory.
+// DoCodexLogin triggers the default Codex login flow through the shared
+// authentication manager. Codex device login is the default ceremony.
 //
 // Parameters:
 //   - cfg: The application configuration
 //   - options: Login options including browser behavior and prompts
 func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
+	doCodexLogin(cfg, options, "")
+}
+
+// DoCodexBrowserLogin explicitly selects the legacy localhost callback flow.
+func DoCodexBrowserLogin(cfg *config.Config, options *LoginOptions) {
+	doCodexLogin(cfg, options, sdkAuth.CodexLoginModeBrowser)
+}
+
+func doCodexLogin(cfg *config.Config, options *LoginOptions, mode string) {
 	if options == nil {
 		options = &LoginOptions{}
 	}
@@ -45,9 +53,14 @@ func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
 
 	manager := newAuthManager()
 
+	var metadata map[string]string
+	if mode != "" {
+		metadata = map[string]string{sdkAuth.CodexLoginModeMetadataKey: mode}
+	}
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
+		Metadata:     metadata,
 		Prompt:       promptFn,
 	}
 

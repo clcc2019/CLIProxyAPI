@@ -47,7 +47,7 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 ## 功能特性
 
 - 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex/Grok 兼容的 API 端点
-- 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
+- 新增 OpenAI Codex（GPT 系列）OAuth 支持，默认使用设备码登录，并保留浏览器回调登录
 - 新增 Claude Code 支持（OAuth 登录）
 - 新增 Grok Build 支持（OAuth 登录）
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应

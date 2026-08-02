@@ -127,7 +127,9 @@ redis:
 proxy-url: ""
 
 # Proxy pool assigns stable Redis-backed proxy leases to auth-file credentials
-# that do not have an explicit proxy_url/proxy-url configured. Redis must be enabled.
+# that do not have an explicit proxy_url/proxy-url configured. New OAuth login
+# flows also rotate through this list and keep one proxy for the whole flow.
+# Redis must be enabled for persistent auth-file leases.
 # Codex Free-plan auth files do not consume pool leases.
 proxy-pool:
   enabled: false
@@ -375,6 +377,12 @@ image-stream-data-interval-timeout-seconds: 0
 #         medium: high
 #         high: max
 #         xhigh: max
+#     # Name and alias may be identical for a Codex effort-only rule. This keeps
+#     # the public/upstream model ID unchanged and only rewrites matched efforts.
+#     - name: "gpt-5.6-sol"
+#       alias: "gpt-5.6-sol"
+#       reasoning-effort:
+#         max: xhigh
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"

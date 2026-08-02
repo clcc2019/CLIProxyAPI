@@ -321,7 +321,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-	return e.ClaudeExecutor.CountTokens(ctx, auth, req, opts)
+	return e.ClaudeExecutor.countTokensUpstream(ctx, auth, req, opts)
 }
 
 func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
@@ -606,7 +606,7 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		return auth, nil
 	}
 
-	client := kimiauth.NewDeviceFlowClientWithDeviceIDAndProxyURL(e.cfg, resolveKimiDeviceID(auth), auth.ProxyURL)
+	client := kimiauth.NewTokenRefreshClient(e.cfg, resolveKimiDeviceID(auth), auth.ProxyURL)
 	// Retry transient failures rather than surfacing the first network blip or
 	// 5xx as a refresh failure. RefreshTokenWithRetry returns immediately on a
 	// 401/403 rejection, so a revoked refresh token is still parked after a

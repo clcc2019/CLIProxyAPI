@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"strconv"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 var sseDataPrefix = []byte("data:")
@@ -15,6 +18,58 @@ func ClaudeInputTokensJSON(count int64) []byte {
 	out = strconv.AppendInt(out, count, 10)
 	out = append(out, '}')
 	return out
+}
+
+// NewRawArrayItems creates a raw item slice sized for the expected input.
+func NewRawArrayItems(capacity int64) [][]byte {
+	if capacity <= 0 {
+		return nil
+	}
+	return make([][]byte, 0, int(capacity))
+}
+
+// JoinRawArray joins validated raw JSON items without re-encoding them.
+func JoinRawArray(items [][]byte) []byte {
+	if len(items) == 0 {
+		return []byte("[]")
+	}
+	size := len(items) + 1
+	for _, item := range items {
+		size += len(item)
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	for i, item := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item...)
+	}
+	return append(out, ']')
+}
+
+// SetRawArrayItems replaces an empty JSON array at path with raw items. The
+// single-item fast path avoids an intermediate joined array allocation.
+func SetRawArrayItems(data []byte, path string, items [][]byte) []byte {
+	if len(items) == 0 {
+		return data
+	}
+	if len(items) == 1 {
+		array := gjson.GetBytes(data, path)
+		if array.Raw == "[]" && array.Index >= 0 && array.Index+len(array.Raw) <= len(data) {
+			out := make([]byte, 0, len(data)+len(items[0]))
+			out = append(out, data[:array.Index]...)
+			out = append(out, '[')
+			out = append(out, items[0]...)
+			out = append(out, ']')
+			return append(out, data[array.Index+len(array.Raw):]...)
+		}
+	}
+	updated, err := sjson.SetRawBytes(data, path, JoinRawArray(items))
+	if err != nil {
+		return data
+	}
+	return updated
 }
 
 func PassthroughStreamPayload(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {

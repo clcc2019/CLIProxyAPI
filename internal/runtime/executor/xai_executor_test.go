@@ -15,7 +15,51 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tiktoken-go/tokenizer"
 )
+
+func TestCountXAIInputTokensExcludesRequestStructure(t *testing.T) {
+	enc, err := tokenizer.Get(tokenizer.O200kBase)
+	if err != nil {
+		t.Fatalf("tokenizer.Get() error = %v", err)
+	}
+
+	semantic := []byte(`{
+		"instructions":"Follow the repository instructions.",
+		"input":[
+			{"type":"message","content":[{"type":"input_text","text":"Review this implementation."}]},
+			{"type":"function_call","name":"read_file","arguments":"{\"path\":\"main.go\"}"},
+			{"type":"function_call_output","output":"package main"},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"I will inspect the file."}]}
+		],
+		"tools":[{"type":"function","name":"read_file","description":"Reads a file.","parameters":{"type":"object"}}],
+		"text":{"format":{"name":"result","schema":{"type":"object"}}}
+	}`)
+	withStructure := []byte(`{
+		"model":"grok-test","stream":false,"metadata":{"ignored":"large"},"max_output_tokens":4096,
+		"instructions":"Follow the repository instructions.",
+		"input":[
+			{"type":"message","content":[{"type":"input_text","text":"Review this implementation."}]},
+			{"type":"function_call","name":"read_file","arguments":"{\"path\":\"main.go\"}"},
+			{"type":"function_call_output","output":"package main"},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"I will inspect the file."}]}
+		],
+		"tools":[{"type":"function","name":"read_file","description":"Reads a file.","parameters":{"type":"object"}}],
+		"text":{"format":{"name":"result","schema":{"type":"object"}}}
+	}`)
+
+	semanticCount, err := countXAIInputTokens(enc, semantic)
+	if err != nil {
+		t.Fatalf("countXAIInputTokens(semantic) error = %v", err)
+	}
+	structureCount, err := countXAIInputTokens(enc, withStructure)
+	if err != nil {
+		t.Fatalf("countXAIInputTokens(structure) error = %v", err)
+	}
+	if structureCount != semanticCount {
+		t.Fatalf("structure count = %d, want semantic count %d", structureCount, semanticCount)
+	}
+}
 
 func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	var gotPath string

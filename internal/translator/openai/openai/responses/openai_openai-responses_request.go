@@ -3,6 +3,7 @@ package responses
 import (
 	"strings"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -32,6 +33,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	out := []byte(`{"model":"","messages":[],"stream":false}`)
 
 	root := gjson.ParseBytes(rawJSON)
+	messageItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int() + 1)
+	appendMessage := func(message []byte) {
+		messageItems = append(messageItems, message)
+	}
 
 	// Set model name
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -44,15 +49,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
 
-	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {
-		out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
-	}
-
 	// Convert instructions to system message
 	if instructions := root.Get("instructions"); instructions.Exists() {
 		systemMessage := []byte(`{"role":"system","content":""}`)
 		systemMessage, _ = sjson.SetBytes(systemMessage, "content", instructions.String())
-		out, _ = sjson.SetRawBytes(out, "messages.-1", systemMessage)
+		appendMessage(systemMessage)
 	}
 
 	// Convert input array to messages
@@ -81,7 +82,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
-			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+			appendMessage(assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
 					continue
@@ -93,7 +94,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 		flushDeferredMessages := func() {
 			for _, message := range deferredMessages {
-				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+				appendMessage(message)
 			}
 			deferredMessages = deferredMessages[:0]
 		}
@@ -112,7 +113,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				deferredMessages = append(deferredMessages, message)
 				return
 			}
-			out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+			appendMessage(message)
 		}
 
 		for _, item := range inputItems {
@@ -135,8 +136,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				message, _ = sjson.SetBytes(message, "role", role)
 
 				if content := item.Get("content"); content.Exists() && content.IsArray() {
-					var messageContent string
-					var toolCalls []interface{}
+					contentItems := translatorcommon.NewRawArrayItems(content.Get("#").Int())
 
 					content.ForEach(func(_, contentItem gjson.Result) bool {
 						contentType := contentItem.Get("type").String()
@@ -149,23 +149,16 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							text := contentItem.Get("text").String()
 							contentPart := []byte(`{"type":"text","text":""}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "text", text)
-							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+							contentItems = append(contentItems, contentPart)
 						case "input_image":
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
-							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+							contentItems = append(contentItems, contentPart)
 						}
 						return true
 					})
-
-					if messageContent != "" {
-						message, _ = sjson.SetBytes(message, "content", messageContent)
-					}
-
-					if len(toolCalls) > 0 {
-						message, _ = sjson.SetBytes(message, "tool_calls", toolCalls)
-					}
+					message = translatorcommon.SetRawArrayItems(message, "content", contentItems)
 				} else if content.Type == gjson.String {
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
@@ -206,7 +199,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
 				}
 
-				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				appendMessage(toolMessage)
 				if callID != "" {
 					delete(awaitingToolOutputs, callID)
 				}
@@ -222,12 +215,15 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
 		msg, _ = sjson.SetBytes(msg, "content", input.String())
-		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+		appendMessage(msg)
+	}
+	if len(messageItems) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	}
 
 	// Convert tools from responses format to chat completions format
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var chatCompletionsTools []interface{}
+		var chatCompletionsTools [][]byte
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
@@ -257,13 +253,19 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 
 			chatTool, _ = sjson.SetRawBytes(chatTool, "function", function)
-			chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
+			chatCompletionsTools = append(chatCompletionsTools, chatTool)
 
 			return true
 		})
 
 		if len(chatCompletionsTools) > 0 {
-			out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
+			out = translatorcommon.SetRawArrayItems(out, "tools", chatCompletionsTools)
+			if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {
+				out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
+			}
+			if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+			}
 		}
 	}
 
@@ -272,11 +274,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		if effort != "" {
 			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 		}
-	}
-
-	// Convert tool_choice if present
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.String())
 	}
 
 	return out

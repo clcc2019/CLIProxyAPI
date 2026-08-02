@@ -42,7 +42,8 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(name, alias) {
+			reasoningEffort := cloneOAuthModelAliasReasoningEffort(entry.ReasoningEffort)
+			if strings.EqualFold(name, alias) && (channel != "codex" || len(reasoningEffort) == 0) {
 				continue
 			}
 			aliasKey := strings.ToLower(alias)
@@ -51,7 +52,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			}
 			rev[aliasKey] = oauthModelAliasRule{
 				upstreamModel:   name,
-				reasoningEffort: cloneOAuthModelAliasReasoningEffort(entry.ReasoningEffort),
+				reasoningEffort: reasoningEffort,
 			}
 		}
 		if len(rev) > 0 {
@@ -249,29 +250,25 @@ func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) s
 	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
 }
 
-func (m *Manager) lookupOAuthModelAliasRule(auth *Auth, requestedModel, channel string) (oauthModelAliasRule, thinking.SuffixResult, string, bool) {
+func (m *Manager) lookupOAuthModelAliasRule(auth *Auth, requestedModel, channel string) (oauthModelAliasRule, thinking.SuffixResult, bool) {
 	if m == nil || auth == nil {
-		return oauthModelAliasRule{}, thinking.SuffixResult{}, "", false
+		return oauthModelAliasRule{}, thinking.SuffixResult{}, false
 	}
 	channel = strings.ToLower(strings.TrimSpace(channel))
 	if channel == "" {
-		return oauthModelAliasRule{}, thinking.SuffixResult{}, "", false
+		return oauthModelAliasRule{}, thinking.SuffixResult{}, false
 	}
 
 	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
-	baseModel := requestResult.ModelName
-	if baseModel == "" {
-		baseModel = strings.TrimSpace(requestedModel)
-	}
 
 	raw := m.oauthModelAlias.Load()
 	table, _ := raw.(*oauthModelAliasTable)
 	if table == nil || table.reverse == nil {
-		return oauthModelAliasRule{}, requestResult, baseModel, false
+		return oauthModelAliasRule{}, requestResult, false
 	}
 	rev := table.reverse[channel]
 	if rev == nil {
-		return oauthModelAliasRule{}, requestResult, baseModel, false
+		return oauthModelAliasRule{}, requestResult, false
 	}
 
 	for _, candidate := range candidates {
@@ -283,22 +280,19 @@ func (m *Manager) lookupOAuthModelAliasRule(auth *Auth, requestedModel, channel 
 		if !exists || strings.TrimSpace(rule.upstreamModel) == "" {
 			continue
 		}
-		return rule, requestResult, baseModel, true
+		return rule, requestResult, true
 	}
 
-	return oauthModelAliasRule{}, requestResult, baseModel, false
+	return oauthModelAliasRule{}, requestResult, false
 }
 
 func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) string {
-	rule, requestResult, baseModel, ok := m.lookupOAuthModelAliasRule(auth, requestedModel, channel)
+	rule, requestResult, ok := m.lookupOAuthModelAliasRule(auth, requestedModel, channel)
 	if !ok {
 		return ""
 	}
 
 	original := strings.TrimSpace(rule.upstreamModel)
-	if strings.EqualFold(original, baseModel) {
-		return ""
-	}
 
 	// If config already has suffix, it takes priority.
 	if thinking.ParseSuffix(original).HasSuffix {
@@ -323,7 +317,7 @@ func (m *Manager) oauthModelAliasReasoningEffort(auth *Auth, requestedModel, sou
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return ""
 	}
-	rule, _, _, ok := m.lookupOAuthModelAliasRule(auth, requestedModel, modelAliasChannel(auth))
+	rule, _, ok := m.lookupOAuthModelAliasRule(auth, requestedModel, modelAliasChannel(auth))
 	if !ok {
 		return ""
 	}

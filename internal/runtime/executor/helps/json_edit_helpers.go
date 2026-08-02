@@ -82,6 +82,48 @@ func SetRawJSONBytes(body []byte, path string, rawValue []byte) ([]byte, error) 
 	return sjson.SetRawBytesOptions(body, path, rawValue, optimisticJSONOptions)
 }
 
+// SetStringIfDifferent updates a JSON string field only when its canonical
+// value differs. This keeps large request bodies reusable when the requested
+// value is already present.
+func SetStringIfDifferent(body []byte, path, value string) []byte {
+	current := gjson.GetBytes(body, path)
+	if current.Type == gjson.String && current.String() == value {
+		return body
+	}
+	updated, err := SetJSONBytes(body, path, value)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+// SetBoolIfDifferent updates a JSON boolean field only when its canonical
+// value differs.
+func SetBoolIfDifferent(body []byte, path string, value bool) []byte {
+	current := gjson.GetBytes(body, path)
+	if (value && current.Type == gjson.True) || (!value && current.Type == gjson.False) {
+		return body
+	}
+	updated, err := SetJSONBytes(body, path, value)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+// SetRawIfDifferent updates a JSON field only when its raw JSON differs.
+func SetRawIfDifferent(body []byte, path string, rawValue []byte) []byte {
+	current := gjson.GetBytes(body, path)
+	if current.Exists() && len(current.Indexes) == 0 && current.Raw == string(rawValue) {
+		return body
+	}
+	updated, err := SetRawJSONBytes(body, path, rawValue)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
 // DeleteJSONBytes removes a JSON field when present, skipping no-op deletes.
 func DeleteJSONBytes(body []byte, path string) ([]byte, error) {
 	if len(body) == 0 || path == "" {

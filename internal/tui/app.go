@@ -130,6 +130,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.logs.SetSize(contentW, contentH)
 		return a, nil
 
+	case authFilesMsg:
+		// Auth-file fetches can complete while another tab (especially OAuth)
+		// is active. Apply the result to the auth tab directly instead of routing
+		// it only to whichever tab currently has focus.
+		var cmd tea.Cmd
+		a.auth, cmd = a.auth.Update(msg)
+		return a, cmd
+
 	case authConnectMsg:
 		a.authConnecting = false
 		if msg.err != nil {
@@ -258,6 +266,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.oauth, cmd = a.oauth.Update(msg)
 	case tabLogs:
 		a.logs, cmd = a.logs.Update(msg)
+	}
+
+	// OAuth completion persists a new credential asynchronously. Refresh the
+	// auth-file tab as soon as the flow reports success so the user does not
+	// need to leave the tab and press its manual refresh key.
+	if poll, ok := msg.(oauthPollMsg); ok && poll.done && poll.err == nil {
+		refreshAuthCmd := a.auth.fetchFiles
+		if cmd == nil {
+			cmd = refreshAuthCmd
+		} else {
+			cmd = tea.Batch(cmd, refreshAuthCmd)
+		}
 	}
 
 	// Keep logs polling alive even when logs tab is not active.

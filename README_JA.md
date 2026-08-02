@@ -44,7 +44,7 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 ## 概要
 
 - CLIモデル向けのOpenAI/Gemini/Claude/Grok互換APIエンドポイント
-- OAuthログインによるOpenAI Codexサポート（GPTモデル）
+- OpenAI Codex（GPTモデル）のOAuthサポート（デバイスコードログインがデフォルト、ブラウザーコールバックも利用可能）
 - OAuthログインによるClaude Codeサポート
 - OAuthログインによるGrok Buildサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート

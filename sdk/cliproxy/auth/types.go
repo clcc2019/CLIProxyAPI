@@ -97,6 +97,10 @@ type Auth struct {
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+	// codexInstallationIDExplicit distinguishes a caller-selected client
+	// identity from the random default generated for a fresh login. It is a
+	// persistence hint only and is never serialized into an auth file.
+	codexInstallationIDExplicit bool
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -637,24 +641,25 @@ func (a *Auth) CloneForManagementSummary() *Auth {
 
 func (a *Auth) cloneSnapshotBase() Auth {
 	return Auth{
-		ID:               a.ID,
-		Index:            a.Index,
-		Provider:         a.Provider,
-		Prefix:           a.Prefix,
-		FileName:         a.FileName,
-		Label:            a.Label,
-		Status:           a.Status,
-		Disabled:         a.Disabled,
-		Unavailable:      a.Unavailable,
-		ProxyURL:         a.ProxyURL,
-		Quota:            a.Quota,
-		RateLimits:       cloneRateLimitSnapshots(a.RateLimits),
-		CreatedAt:        a.CreatedAt,
-		UpdatedAt:        a.UpdatedAt,
-		LastRefreshedAt:  a.LastRefreshedAt,
-		NextRefreshAfter: a.NextRefreshAfter,
-		NextRetryAfter:   a.NextRetryAfter,
-		indexAssigned:    a.indexAssigned,
+		ID:                          a.ID,
+		Index:                       a.Index,
+		Provider:                    a.Provider,
+		Prefix:                      a.Prefix,
+		FileName:                    a.FileName,
+		Label:                       a.Label,
+		Status:                      a.Status,
+		Disabled:                    a.Disabled,
+		Unavailable:                 a.Unavailable,
+		ProxyURL:                    a.ProxyURL,
+		Quota:                       a.Quota,
+		RateLimits:                  cloneRateLimitSnapshots(a.RateLimits),
+		CreatedAt:                   a.CreatedAt,
+		UpdatedAt:                   a.UpdatedAt,
+		LastRefreshedAt:             a.LastRefreshedAt,
+		NextRefreshAfter:            a.NextRefreshAfter,
+		NextRetryAfter:              a.NextRetryAfter,
+		indexAssigned:               a.indexAssigned,
+		codexInstallationIDExplicit: a.codexInstallationIDExplicit,
 	}
 }
 

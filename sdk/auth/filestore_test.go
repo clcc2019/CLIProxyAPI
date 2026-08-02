@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -61,6 +63,157 @@ func TestFileTokenStoreSaveDisabledPersistsFlagForTokenStorage(t *testing.T) {
 	if disabled, _ := meta["disabled"].(bool); !disabled {
 		t.Fatalf("disabled=%v, want true (raw=%s)", meta["disabled"], string(raw))
 	}
+}
+
+func TestFileTokenStoreSaveStabilizesCodexInstallationID(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("reauth preserves existing ID", func(t *testing.T) {
+		baseDir := t.TempDir()
+		path := filepath.Join(baseDir, "codex.json")
+		if err := os.WriteFile(path, []byte(`{"type":"codex","installation_id":"installation-existing"}`), 0o600); err != nil {
+			t.Fatalf("seed auth file: %v", err)
+		}
+
+		store := NewFileTokenStore()
+		store.SetBaseDir(baseDir)
+		auth := &cliproxyauth.Auth{
+			ID:       "codex.json",
+			Provider: "codex",
+			FileName: "codex.json",
+			Metadata: map[string]any{
+				"type":            "codex",
+				"installation_id": "installation-generated",
+			},
+		}
+
+		if _, err := store.Save(ctx, auth); err != nil {
+			t.Fatalf("Save() error: %v", err)
+		}
+		if got := cliproxyauth.CodexInstallationID(auth); got != "installation-existing" {
+			t.Fatalf("record installation ID = %q, want existing value", got)
+		}
+		if got := readInstallationID(t, path); got != "installation-existing" {
+			t.Fatalf("persisted installation ID = %q, want existing value", got)
+		}
+	})
+
+	t.Run("explicit override rotates ID", func(t *testing.T) {
+		baseDir := t.TempDir()
+		path := filepath.Join(baseDir, "codex.json")
+		if err := os.WriteFile(path, []byte(`{"type":"codex","installation_id":"installation-existing"}`), 0o600); err != nil {
+			t.Fatalf("seed auth file: %v", err)
+		}
+
+		store := NewFileTokenStore()
+		store.SetBaseDir(baseDir)
+		auth := &cliproxyauth.Auth{
+			ID:       "codex.json",
+			Provider: "codex",
+			FileName: "codex.json",
+			Metadata: map[string]any{
+				"type":            "codex",
+				"installation_id": "installation-explicit",
+			},
+		}
+		cliproxyauth.MarkCodexInstallationIDExplicit(auth, true)
+
+		if _, err := store.Save(ctx, auth); err != nil {
+			t.Fatalf("Save() error: %v", err)
+		}
+		if got := readInstallationID(t, path); got != "installation-explicit" {
+			t.Fatalf("persisted installation ID = %q, want explicit value", got)
+		}
+	})
+
+	t.Run("legacy credential is backfilled", func(t *testing.T) {
+		baseDir := t.TempDir()
+		path := filepath.Join(baseDir, "codex.json")
+		if err := os.WriteFile(path, []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); err != nil {
+			t.Fatalf("seed auth file: %v", err)
+		}
+
+		store := NewFileTokenStore()
+		store.SetBaseDir(baseDir)
+		auth := &cliproxyauth.Auth{
+			ID:       "codex.json",
+			Provider: "codex",
+			FileName: "codex.json",
+			Metadata: map[string]any{"type": "codex", "email": "user@example.com"},
+		}
+
+		if _, err := store.Save(ctx, auth); err != nil {
+			t.Fatalf("Save() error: %v", err)
+		}
+		installationID := readInstallationID(t, path)
+		if _, err := uuid.Parse(installationID); err != nil {
+			t.Fatalf("persisted installation ID = %q, want UUID: %v", installationID, err)
+		}
+	})
+}
+
+func TestFileTokenStoreConcurrentFirstCodexSaveConvergesInstallationID(t *testing.T) {
+	baseDir := t.TempDir()
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths := []*cliproxyauth.Auth{
+		{
+			ID:       "codex.json",
+			Provider: "codex",
+			FileName: "codex.json",
+			Metadata: map[string]any{"type": "codex", "installation_id": "installation-a"},
+		},
+		{
+			ID:       "codex.json",
+			Provider: "codex",
+			FileName: "codex.json",
+			Metadata: map[string]any{"type": "codex", "installation_id": "installation-b"},
+		},
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan error, len(auths))
+	var wg sync.WaitGroup
+	for _, auth := range auths {
+		wg.Add(1)
+		go func(record *cliproxyauth.Auth) {
+			defer wg.Done()
+			<-start
+			_, err := store.Save(context.Background(), record)
+			errCh <- err
+		}(auth)
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("Save() error: %v", err)
+		}
+	}
+
+	first := cliproxyauth.CodexInstallationID(auths[0])
+	second := cliproxyauth.CodexInstallationID(auths[1])
+	if first == "" || second != first {
+		t.Fatalf("concurrent installation IDs = %q and %q, want one stable value", first, second)
+	}
+	if got := readInstallationID(t, filepath.Join(baseDir, "codex.json")); got != first {
+		t.Fatalf("persisted installation ID = %q, want %q", got, first)
+	}
+}
+
+func readInstallationID(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("decode auth file: %v", err)
+	}
+	value, _ := metadata[cliproxyauth.AuthFileCodexInstallationIDKey].(string)
+	return value
 }
 
 func TestFileTokenStoreListReadsJSONFilesInWalkOrder(t *testing.T) {

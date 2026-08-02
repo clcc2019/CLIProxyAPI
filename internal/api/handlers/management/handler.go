@@ -58,18 +58,20 @@ type Handler struct {
 	postAuthHook        coreauth.PostAuthHook
 	// codexUsageCache memoises Codex /wham/usage responses with a short TTL
 	// and keeps a brief stale copy for transient ChatGPT backend 5xx spikes.
-	// Lazily allocated under h.mu by codexUsageHandlerCache.
-	codexUsageCache *codexUsageCache
+	// Its zero value is ready for use, so cache hits do not contend on the
+	// Handler-wide configuration mutex.
+	codexUsageCache codexUsageCache
 	// aggregatedUsageCache memoises the serialized aggregate dashboard response
 	// for a very short period. It is keyed by the statistics instance and its
 	// aggregate revision, so writes invalidate it immediately.
-	// Lazily allocated under h.mu by aggregatedUsageHandlerCache.
-	aggregatedUsageCache *aggregatedUsageCache
+	// Its zero value is ready for use.
+	aggregatedUsageCache aggregatedUsageCache
 	// codexUpstreamSlots bounds aggregate management traffic to ChatGPT's
 	// usage and account endpoints. The web UI may refresh many credentials at
 	// once, so leaving this unbounded amplifies one click into a proxy burst.
-	// Lazily allocated under h.mu by acquireCodexUpstreamSlot.
-	codexUpstreamSlots chan struct{}
+	// It is lazily allocated once by acquireCodexUpstreamSlot.
+	codexUpstreamSlots     chan struct{}
+	codexUpstreamSlotsOnce sync.Once
 
 	// Codex quota maintenance periodically refreshes /wham/usage and primes a
 	// pristine 5-hour window with one minimal client-shaped request.
@@ -450,8 +452,10 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
@@ -462,8 +466,10 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
@@ -474,6 +480,8 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	set(*body.Value)
-	h.persist(c)
+	h.persistLocked(c)
 }

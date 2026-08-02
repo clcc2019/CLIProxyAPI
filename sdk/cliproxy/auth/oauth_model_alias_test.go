@@ -270,6 +270,59 @@ func TestWithOAuthModelAliasReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestOAuthModelAlias_EffortOnlyRule(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{
+			Name:            "gpt-5.6-sol",
+			Alias:           "gpt-5.6-sol",
+			ReasoningEffort: map[string]string{"max": "xhigh"},
+		}},
+	})
+	auth := createAuthForChannel("codex")
+
+	const requestedModel = "gpt-5.6-sol(max)"
+	if got := mgr.applyOAuthModelAlias(auth, requestedModel); got != "gpt-5.6-sol" {
+		t.Fatalf("applyOAuthModelAlias() = %q, want clean upstream model gpt-5.6-sol", got)
+	}
+
+	req := cliproxyexecutor.Request{
+		Model:   requestedModel,
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}
+	got := mgr.withOAuthModelAliasReasoningEffort(
+		req,
+		auth,
+		requestedModel,
+		cliproxyexecutor.Options{},
+	)
+	if actual, _ := got.Metadata[cliproxyexecutor.UpstreamReasoningEffortOverrideMetadataKey].(string); actual != "xhigh" {
+		t.Fatalf("upstream override = %q, want xhigh; metadata=%#v", actual, got.Metadata)
+	}
+}
+
+func TestOAuthModelAlias_EffortOnlyRuleSuppressesBuiltinRename(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{
+			Name:            "gpt-5.6",
+			Alias:           "gpt-5.6",
+			ReasoningEffort: map[string]string{"max": "xhigh"},
+		}},
+	})
+	auth := createAuthForChannel("codex")
+
+	if got := mgr.applyOAuthModelAlias(auth, "gpt-5.6(max)"); got != "gpt-5.6" {
+		t.Fatalf("applyOAuthModelAlias() = %q, want effort-only rule to suppress built-in rename", got)
+	}
+}
+
 func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	t.Parallel()
 

@@ -62,10 +62,17 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 }
 
 func (s *oauthSessionStore) Register(state, provider string) {
+	s.RegisterWithTTL(state, provider, s.ttl)
+}
+
+func (s *oauthSessionStore) RegisterWithTTL(state, provider string, ttl time.Duration) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" || provider == "" {
 		return
+	}
+	if ttl <= 0 {
+		ttl = s.ttl
 	}
 	now := time.Now()
 
@@ -77,7 +84,7 @@ func (s *oauthSessionStore) Register(state, provider string) {
 		Provider:  provider,
 		Status:    "",
 		CreatedAt: now,
-		ExpiresAt: now.Add(s.ttl),
+		ExpiresAt: now.Add(ttl),
 	}
 }
 
@@ -187,6 +194,10 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
+
+func RegisterOAuthSessionWithTTL(state, provider string, ttl time.Duration) {
+	oauthSessions.RegisterWithTTL(state, provider, ttl)
+}
 
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 

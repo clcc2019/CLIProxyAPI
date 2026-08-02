@@ -32,6 +32,35 @@ func TestForEachSSEDataLine(t *testing.T) {
 	}
 }
 
+func TestJoinRawArray(t *testing.T) {
+	tests := []struct {
+		name  string
+		items [][]byte
+		want  string
+	}{
+		{name: "empty", want: "[]"},
+		{name: "items", items: [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)}, want: `[{"a":1},{"b":2}]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(JoinRawArray(tt.items)); got != tt.want {
+				t.Fatalf("JoinRawArray() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetRawArrayItems(t *testing.T) {
+	input := []byte(`{"messages":[],"tail":true}`)
+	got := SetRawArrayItems(input, "messages", [][]byte{[]byte(`{"role":"user"}`)})
+	if string(got) != `{"messages":[{"role":"user"}],"tail":true}` {
+		t.Fatalf("SetRawArrayItems() = %s", got)
+	}
+	if string(input) != `{"messages":[],"tail":true}` {
+		t.Fatalf("SetRawArrayItems modified input: %s", input)
+	}
+}
+
 func TestForEachSSEDataLineStopsWhenCallbackReturnsFalse(t *testing.T) {
 	raw := []byte("data: one\ndata: two\n")
 	count := 0

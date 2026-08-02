@@ -1417,7 +1417,7 @@ func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T
 	}
 }
 
-func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
+func TestClaudeExecutor_CountTokensUpstream_AppliesCacheControlGuards(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -1448,7 +1448,7 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 		]
 	}`)
 
-	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+	_, err := executor.countTokensUpstream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-3-5-haiku-20241022",
 		Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
@@ -1595,9 +1595,9 @@ func TestClaudeExecutor_ExecuteStream_InvalidGzipErrorBodyReturnsDecodeMessage(t
 	})
 }
 
-func TestClaudeExecutor_CountTokens_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+func TestClaudeExecutor_CountTokensUpstream_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
 	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
-		_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		_, err := executor.countTokensUpstream(context.Background(), auth, cliproxyexecutor.Request{
 			Model:   "claude-3-5-sonnet-20241022",
 			Payload: payload,
 		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})

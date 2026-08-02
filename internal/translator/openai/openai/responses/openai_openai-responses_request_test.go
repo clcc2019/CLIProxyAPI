@@ -131,6 +131,39 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NormalizesReasonin
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_SkipsToolControlsWithoutFunctionTools(t *testing.T) {
+	raw := []byte(`{
+		"tools":[{"type":"web_search"}],
+		"parallel_tool_calls":true,
+		"tool_choice":{"type":"function","name":"lookup"}
+	}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-test", raw, false)
+	for _, path := range []string{"tools", "parallel_tool_calls", "tool_choice"} {
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("%s should be omitted when no function tools are convertible: %s", path, out)
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesObjectToolChoice(t *testing.T) {
+	raw := []byte(`{
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+		"parallel_tool_calls":false,
+		"tool_choice":{"type":"function","name":"lookup"}
+	}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-test", raw, false)
+	if got := len(gjson.GetBytes(out, "tools").Array()); got != 1 {
+		t.Fatalf("tools count = %d, want 1: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "parallel_tool_calls"); !got.Exists() || got.Bool() {
+		t.Fatalf("parallel_tool_calls = %s, want false", got.Raw)
+	}
+	choice := gjson.GetBytes(out, "tool_choice")
+	if !choice.IsObject() || choice.Get("type").String() != "function" || choice.Get("name").String() != "lookup" {
+		t.Fatalf("tool_choice = %s, want original object", choice.Raw)
+	}
+}
+
 func TestNormalizeReasoningEffort(t *testing.T) {
 	tests := []struct {
 		name  string

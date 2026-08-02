@@ -80,7 +80,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		}
 	}()
 
-	authSvc := codex.NewCodexAuth(cfg)
+	authSvc := codex.NewCodexAuthWithProxyURL(cfg, util.OAuthProxyURL(cfg))
 
 	clientFeatures := NewCodexClientFeatures(opts.Metadata)
 	authURL, err := authSvc.GenerateAuthURLWithOptions(

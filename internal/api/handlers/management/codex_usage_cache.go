@@ -118,12 +118,7 @@ func (h *Handler) codexUsageHandlerCache() *codexUsageCache {
 	if h == nil {
 		return nil
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.codexUsageCache == nil {
-		h.codexUsageCache = &codexUsageCache{}
-	}
-	return h.codexUsageCache
+	return &h.codexUsageCache
 }
 
 func parseCodexUsageRequestOptions(c *gin.Context) codexUsageRequestOptions {

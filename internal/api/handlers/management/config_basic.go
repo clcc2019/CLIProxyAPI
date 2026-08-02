@@ -246,21 +246,12 @@ func (h *Handler) GetLogsMaxTotalSizeMB(c *gin.Context) {
 	c.JSON(200, gin.H{"logs-max-total-size-mb": value})
 }
 func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
-	var body struct {
-		Value *int `json:"value"`
-	}
-	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	value := *body.Value
-	if value < 0 {
-		value = 0
-	}
-	h.mu.Lock()
-	h.cfg.LogsMaxTotalSizeMB = value
-	h.persistLocked(c)
-	h.mu.Unlock()
+	h.updateIntField(c, func(value int) {
+		if value < 0 {
+			value = 0
+		}
+		h.cfg.LogsMaxTotalSizeMB = value
+	})
 }
 
 // ErrorLogsMaxFiles
@@ -269,21 +260,12 @@ func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"error-logs-max-files": value})
 }
 func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
-	var body struct {
-		Value *int `json:"value"`
-	}
-	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	value := *body.Value
-	if value < 0 {
-		value = 10
-	}
-	h.mu.Lock()
-	h.cfg.ErrorLogsMaxFiles = value
-	h.persistLocked(c)
-	h.mu.Unlock()
+	h.updateIntField(c, func(value int) {
+		if value < 0 {
+			value = 10
+		}
+		h.cfg.ErrorLogsMaxFiles = value
+	})
 }
 
 // Request log

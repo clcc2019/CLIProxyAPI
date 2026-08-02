@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // countingTransport returns a fixed status and records how many round trips
@@ -15,6 +17,12 @@ import (
 type countingTransport struct {
 	status int
 	calls  atomic.Int32
+}
+
+type kimiRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f kimiRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -73,7 +81,7 @@ func TestRefreshErrorClassification(t *testing.T) {
 // only burns quota.
 func TestRefreshTokenWithRetryStopsOnPermanentRejection(t *testing.T) {
 	rt := &countingTransport{status: http.StatusForbidden}
-	client := &DeviceFlowClient{httpClient: &http.Client{Transport: rt}}
+	client := &TokenRefreshClient{httpClient: &http.Client{Transport: rt}}
 
 	_, err := client.RefreshTokenWithRetry(context.Background(), "revoked", 3)
 	if err == nil {
@@ -92,7 +100,7 @@ func TestRefreshTokenWithRetryStopsOnPermanentRejection(t *testing.T) {
 // remaining schedule.
 func TestRefreshTokenWithRetryHonorsContextCancellation(t *testing.T) {
 	rt := &countingTransport{status: http.StatusInternalServerError}
-	client := &DeviceFlowClient{httpClient: &http.Client{Transport: rt}}
+	client := &TokenRefreshClient{httpClient: &http.Client{Transport: rt}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -101,5 +109,76 @@ func TestRefreshTokenWithRetryHonorsContextCancellation(t *testing.T) {
 	}
 	if calls := rt.calls.Load(); calls > 1 {
 		t.Errorf("upstream calls = %d; cancelled context should stop after the first attempt", calls)
+	}
+}
+
+func TestRefreshTokenDeduplicatesConcurrentRefreshAcrossClients(t *testing.T) {
+	var calls int32
+	started := make(chan struct{})
+	secondUpstream := make(chan struct{})
+	release := make(chan struct{})
+	var firstOnce sync.Once
+	var secondOnce sync.Once
+
+	transport := kimiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		callNumber := atomic.AddInt32(&calls, 1)
+		if callNumber == 1 {
+			firstOnce.Do(func() { close(started) })
+		} else {
+			secondOnce.Do(func() { close(secondUpstream) })
+		}
+		<-release
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"coding"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	clientA := &TokenRefreshClient{httpClient: &http.Client{Transport: transport}, deviceID: "device-a"}
+	clientB := &TokenRefreshClient{httpClient: &http.Client{Transport: transport}, deviceID: "device-b"}
+	refreshToken := "kimi-singleflight-refresh-token"
+
+	type refreshResult struct {
+		token *KimiTokenData
+		err   error
+	}
+	results := make(chan refreshResult, 2)
+	refresh := func(client *TokenRefreshClient) {
+		token, err := client.RefreshToken(context.Background(), refreshToken)
+		results <- refreshResult{token: token, err: err}
+	}
+
+	go refresh(clientA)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first refresh request")
+	}
+
+	secondLaunched := make(chan struct{})
+	go func() {
+		close(secondLaunched)
+		refresh(clientB)
+	}()
+	<-secondLaunched
+	select {
+	case <-secondUpstream:
+		t.Fatal("second concurrent refresh reached the upstream")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("refresh %d failed: %v", i, result.err)
+		}
+		if result.token == nil || result.token.AccessToken != "new-access" || result.token.RefreshToken != "new-refresh" {
+			t.Fatalf("unexpected refresh %d result: %+v", i, result.token)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
 	}
 }

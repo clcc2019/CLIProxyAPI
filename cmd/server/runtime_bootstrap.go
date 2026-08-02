@@ -128,14 +128,14 @@ func detectConfigReady(cloudDeploy bool, configFilePath string, cfg *config.Conf
 
 func dispatchCommand(flags runtimeFlags, state startupState) error {
 	switch {
+	case flags.codexBrowserLogin:
+		cmd.DoCodexBrowserLogin(state.cfg, state.loginOptions)
 	case flags.codexLogin:
 		cmd.DoCodexLogin(state.cfg, state.loginOptions)
 	case flags.codexDeviceLogin:
 		cmd.DoCodexDeviceLogin(state.cfg, state.loginOptions)
 	case flags.claudeLogin:
 		cmd.DoClaudeLogin(state.cfg, state.loginOptions)
-	case flags.kimiLogin:
-		cmd.DoKimiLogin(state.cfg, state.loginOptions)
 	case flags.xaiLogin:
 		cmd.DoXAILogin(state.cfg, state.loginOptions)
 	default:

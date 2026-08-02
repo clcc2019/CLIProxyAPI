@@ -418,11 +418,11 @@ func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, 
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	enc, err := tokenizer.Get(tokenizer.Cl100kBase)
+	enc, err := tokenizer.Get(tokenizer.O200kBase)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("xai executor: tokenizer init failed: %w", err)
 	}
-	count, err := enc.Count(string(prepared.body))
+	count, err := countXAIInputTokens(enc, prepared.body)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("xai executor: token counting failed: %w", err)
 	}

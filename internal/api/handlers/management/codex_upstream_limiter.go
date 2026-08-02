@@ -15,12 +15,10 @@ func (h *Handler) acquireCodexUpstreamSlot(ctx context.Context) (func(), error) 
 		ctx = context.Background()
 	}
 
-	h.mu.Lock()
-	if h.codexUpstreamSlots == nil {
+	h.codexUpstreamSlotsOnce.Do(func() {
 		h.codexUpstreamSlots = make(chan struct{}, codexManagementUpstreamConcurrency)
-	}
+	})
 	slots := h.codexUpstreamSlots
-	h.mu.Unlock()
 
 	select {
 	case slots <- struct{}{}:

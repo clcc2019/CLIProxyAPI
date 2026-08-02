@@ -67,6 +67,9 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 			dirSetter.SetBaseDir(cfg.AuthDir)
 		}
 	}
+	if err = coreauth.ReuseCodexInstallationID(ctx, m.store, record); err != nil {
+		return record, "", err
+	}
 
 	savedPath, err := m.store.Save(ctx, record)
 	if err != nil {

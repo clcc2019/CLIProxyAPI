@@ -6,6 +6,7 @@ func PrepareAuthFileMetadataForSave(auth *Auth) map[string]any {
 	if auth == nil {
 		return nil
 	}
+	PrepareCodexInstallationIDForSave(auth, nil)
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}

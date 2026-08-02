@@ -16,13 +16,23 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+type codexDeviceLoginService interface {
+	StartDeviceFlow(context.Context, *config.Config) (*sdkAuth.CodexDeviceAuthorization, error)
+	CompleteDeviceFlow(context.Context, *config.Config, *sdkAuth.CodexDeviceAuthorization, *sdkAuth.LoginOptions) (*coreauth.Auth, error)
+}
+
+var newCodexDeviceLoginService = func() codexDeviceLoginService {
+	return sdkAuth.NewCodexAuthenticator()
+}
 
 func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 	if h == nil {
@@ -50,16 +60,87 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	store := h.tokenStoreWithBaseDir()
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
+	}
+	if err := coreauth.ReuseCodexInstallationID(ctx, store, record); err != nil {
+		return "", err
 	}
 	if hook := h.postAuthHookSnapshot(); hook != nil {
 		if err := hook(ctx, record); err != nil {
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
-	return store.Save(ctx, record)
+	savedPath, err := store.Save(ctx, record)
+	if err != nil {
+		return "", err
+	}
+
+	// The management list is backed by the core manager, while the OAuth flow
+	// persists through the token store. Normally the file watcher bridges those
+	// two components, but it is asynchronous and is not present for every
+	// embedded/server setup. Publish the saved record immediately so a successful
+	// OAuth flow is visible to management callers without waiting for a watcher
+	// round trip. Skip the second persistence pass; the token store write above
+	// is already complete and the watcher can later replace this snapshot with
+	// its file-projected version.
+	if manager := h.authManagerSnapshot(); manager != nil {
+		if strings.TrimSpace(savedPath) != "" {
+			if record.Attributes == nil {
+				record.Attributes = make(map[string]string)
+			}
+			if strings.TrimSpace(record.Attributes["path"]) == "" {
+				record.Attributes["path"] = savedPath
+			}
+		}
+		publishedRecord := h.projectSavedTokenRecord(record, savedPath)
+		publishCtx := coreauth.WithSkipPersist(ctx)
+		var publishErr error
+		if _, exists := manager.GetByID(publishedRecord.ID); exists {
+			_, publishErr = manager.Update(publishCtx, publishedRecord)
+		} else {
+			_, publishErr = manager.Register(publishCtx, publishedRecord)
+		}
+		if publishErr != nil {
+			return savedPath, fmt.Errorf("register saved authentication: %w", publishErr)
+		}
+	}
+
+	return savedPath, nil
+}
+
+// projectSavedTokenRecord reads the just-persisted JSON back into the same
+// shape used by the file watcher. OAuth storage implementations may keep the
+// actual token fields on Auth.Storage rather than Auth.Metadata, so publishing
+// the pre-save record directly would make a newly authenticated account visible
+// but temporarily unusable until the watcher projected the file.
+func (h *Handler) projectSavedTokenRecord(record *coreauth.Auth, savedPath string) *coreauth.Auth {
+	if h == nil || record == nil || strings.TrimSpace(savedPath) == "" {
+		return record
+	}
+	authDir := h.authDirSnapshot()
+	data, errRead := readManagedAuthPathFile(savedPath, authDir)
+	if errRead != nil || len(data) == 0 {
+		return record
+	}
+
+	projected, errProject := coreauth.NewAuthFromAuthFileData(data, coreauth.AuthFileProjectionOptions{
+		ID:                     record.ID,
+		Path:                   savedPath,
+		BaseDir:                authDir,
+		FileName:               record.FileName,
+		UseBaseNameAsFileName:  strings.TrimSpace(record.FileName) == "",
+		IncludeSourceAttribute: true,
+		Now:                    time.Now(),
+	})
+	if errProject != nil || projected == nil {
+		return record
+	}
+	return projected
 }
 
 func (h *Handler) waitForOAuthCallbackFile(provider, state, fileName string, timeout time.Duration) (map[string]string, error) {
@@ -124,7 +205,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	}
 
 	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(h.cfg, util.OAuthProxyURL(h.cfg))
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -227,6 +308,126 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
+	mode, errMode := codexLoginModeFromRequest(c)
+	if errMode != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMode.Error()})
+		return
+	}
+	if mode == sdkAuth.CodexLoginModeBrowser {
+		h.requestCodexBrowserToken(c)
+		return
+	}
+	h.requestCodexDeviceToken(c)
+}
+
+func codexLoginModeFromRequest(c *gin.Context) (string, error) {
+	mode := ""
+	if c != nil {
+		mode = strings.TrimSpace(c.Query("mode"))
+		if mode == "" {
+			mode = strings.TrimSpace(c.Query("login_mode"))
+		}
+	}
+	switch {
+	case mode == "", strings.EqualFold(mode, sdkAuth.CodexLoginModeDevice):
+		return sdkAuth.CodexLoginModeDevice, nil
+	case strings.EqualFold(mode, sdkAuth.CodexLoginModeBrowser):
+		return sdkAuth.CodexLoginModeBrowser, nil
+	default:
+		return "", fmt.Errorf("unsupported Codex login mode %q", mode)
+	}
+}
+
+func (h *Handler) requestCodexDeviceToken(c *gin.Context) {
+	ctx := PopulateAuthContext(context.Background(), c)
+	state, errState := misc.GenerateRandomState()
+	if errState != nil {
+		log.Errorf("Failed to generate state parameter: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	h.mu.RLock()
+	cfg := h.cfg
+	h.mu.RUnlock()
+	service := newCodexDeviceLoginService()
+	if service == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "codex device login service unavailable"})
+		return
+	}
+	authorization, errStart := service.StartDeviceFlow(ctx, cfg)
+	if errStart != nil {
+		log.Errorf("Failed to start Codex device authentication: %v", errStart)
+		c.JSON(http.StatusBadGateway, gin.H{"error": oauthSessionErrorWithCause("failed to start Codex device authentication", errStart)})
+		return
+	}
+	if authorization == nil || strings.TrimSpace(authorization.UserCode) == "" || strings.TrimSpace(authorization.VerificationURL) == "" {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Codex device authentication returned incomplete instructions"})
+		return
+	}
+
+	expiresAt := authorization.ExpiresAt
+	if expiresAt.IsZero() || !expiresAt.After(time.Now()) {
+		expiresAt = time.Now().Add(15 * time.Minute)
+		authorization.ExpiresAt = expiresAt
+	}
+	sessionTTL := time.Until(expiresAt)
+	RegisterOAuthSessionWithTTL(state, "codex", sessionTTL)
+
+	metadata := map[string]string{sdkAuth.CodexLoginModeMetadataKey: sdkAuth.CodexLoginModeDevice}
+	if userAgent := codexLoginRequestUserAgent(c); userAgent != "" {
+		metadata["user_agent"] = userAgent
+	}
+	loginOptions := &sdkAuth.LoginOptions{
+		NoBrowser: true,
+		Metadata:  metadata,
+	}
+
+	go func() {
+		deviceCtx, cancel := context.WithDeadline(ctx, expiresAt)
+		defer cancel()
+		record, errComplete := service.CompleteDeviceFlow(deviceCtx, cfg, authorization, loginOptions)
+		if errComplete != nil {
+			log.Errorf("Codex device authentication failed: %v", errComplete)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Codex device authentication failed", errComplete))
+			return
+		}
+		if record == nil {
+			SetOAuthSessionError(state, "Codex device authentication returned no credential")
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Codex device authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+		fmt.Printf("Codex device authentication successful! Token saved to %s\n", savedPath)
+		CompleteOAuthSession(state)
+	}()
+
+	expiresIn := int(time.Until(expiresAt) / time.Second)
+	if expiresIn < 1 {
+		expiresIn = 1
+	}
+	intervalSeconds := int(authorization.PollInterval / time.Second)
+	if intervalSeconds < 1 {
+		intervalSeconds = 1
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{
+		"status":           "ok",
+		"mode":             sdkAuth.CodexLoginModeDevice,
+		"url":              authorization.VerificationURL,
+		"verification_url": authorization.VerificationURL,
+		"user_code":        authorization.UserCode,
+		"state":            state,
+		"expires_in":       expiresIn,
+		"interval":         intervalSeconds,
+	})
+}
+
+func (h *Handler) requestCodexBrowserToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
@@ -249,7 +450,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	}
 
 	// Initialize Codex auth service
-	openaiAuth := codex.NewCodexAuth(h.cfg)
+	openaiAuth := codex.NewCodexAuthWithProxyURL(h.cfg, util.OAuthProxyURL(h.cfg))
 	clientFeatures := sdkAuth.NewCodexClientFeatures(nil)
 
 	// Generate authorization URL
@@ -371,7 +572,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		CompleteOAuthSession(state)
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	c.JSON(200, gin.H{"status": "ok", "mode": sdkAuth.CodexLoginModeBrowser, "url": authURL, "state": state})
 }
 
 func (h *Handler) RequestXAIToken(c *gin.Context) {
@@ -401,7 +602,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		return
 	}
 
-	authSvc := xaiauth.NewXAIAuth(h.cfg)
+	authSvc := xaiauth.NewXAIAuthWithProxyURL(h.cfg, util.OAuthProxyURL(h.cfg))
 	discovery, errDiscover := authSvc.Discover(ctx)
 	if errDiscover != nil {
 		log.Errorf("Failed to discover xAI OAuth endpoints: %v", errDiscover)
@@ -537,82 +738,6 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		CompleteOAuthSession(state)
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use xAI services through this CLI")
-	}()
-
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
-}
-
-func (h *Handler) RequestKimiToken(c *gin.Context) {
-	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
-
-	fmt.Println("Initializing Kimi authentication...")
-
-	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
-	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuth(h.cfg)
-
-	// Generate authorization URL
-	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
-	if errStartDeviceFlow != nil {
-		log.Errorf("Failed to generate authorization URL: %v", errStartDeviceFlow)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return
-	}
-	authURL := deviceFlow.VerificationURIComplete
-	if authURL == "" {
-		authURL = deviceFlow.VerificationURI
-	}
-
-	RegisterOAuthSession(state, "kimi")
-
-	go func() {
-		fmt.Println("Waiting for authentication...")
-		authBundle, errWaitForAuthorization := kimiAuth.WaitForAuthorization(ctx, deviceFlow)
-		if errWaitForAuthorization != nil {
-			SetOAuthSessionError(state, "Authentication failed")
-			fmt.Printf("Authentication failed: %v\n", errWaitForAuthorization)
-			return
-		}
-
-		// Create token storage
-		tokenStorage := kimiAuth.CreateTokenStorage(authBundle)
-
-		metadata := map[string]any{
-			"type":          "kimi",
-			"access_token":  authBundle.TokenData.AccessToken,
-			"refresh_token": authBundle.TokenData.RefreshToken,
-			"token_type":    authBundle.TokenData.TokenType,
-			"scope":         authBundle.TokenData.Scope,
-			"timestamp":     time.Now().UnixMilli(),
-		}
-		if authBundle.TokenData.ExpiresAt > 0 {
-			expired := time.Unix(authBundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
-			metadata["expired"] = expired
-		}
-		if strings.TrimSpace(authBundle.DeviceID) != "" {
-			metadata["device_id"] = strings.TrimSpace(authBundle.DeviceID)
-		}
-
-		fileName := fmt.Sprintf("kimi-%d.json", time.Now().UnixMilli())
-		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "kimi",
-			FileName: fileName,
-			Label:    "Kimi User",
-			Storage:  tokenStorage,
-			Metadata: metadata,
-		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
-		if errSave != nil {
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
-			return
-		}
-
-		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		fmt.Println("You can now use Kimi services through this CLI")
-		CompleteOAuthSession(state)
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})

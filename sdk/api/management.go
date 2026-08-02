@@ -21,7 +21,6 @@ type ManagementTokenRequester interface {
 	RequestAnthropicToken(*gin.Context)
 	RequestCodexToken(*gin.Context)
 	RequestXAIToken(*gin.Context)
-	RequestKimiToken(*gin.Context)
 	GetAuthStatus(c *gin.Context)
 	PostOAuthCallback(c *gin.Context)
 }

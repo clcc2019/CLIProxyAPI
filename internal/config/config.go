@@ -263,9 +263,10 @@ type RedisConfig struct {
 	MaxRetries int `yaml:"max-retries,omitempty" json:"max-retries,omitempty"`
 }
 
-// ProxyPoolConfig controls automatic stable proxy leases for auth-file credentials.
-// Codex Free-plan credentials are excluded so limited proxies remain available
-// to paid plans.
+// ProxyPoolConfig controls automatic stable proxy leases for auth-file credentials
+// and supplies round-robin proxies for new OAuth login flows. Codex Free-plan
+// credentials are excluded from persistent leases so limited proxies remain
+// available to paid plans.
 type ProxyPoolConfig struct {
 	Enabled               bool     `yaml:"enabled" json:"enabled"`
 	StateStore            string   `yaml:"state-store,omitempty" json:"state-store,omitempty"`
@@ -316,7 +317,9 @@ type RoutingConfig struct {
 // OAuthModelAlias defines a model ID alias for a specific channel.
 // It maps the upstream model name (Name) to the client-visible alias (Alias).
 // When Fork is true, the alias is added as an additional model in listings while
-// keeping the original model ID available.
+// keeping the original model ID available. For Codex, Name and Alias may be the
+// same when ReasoningEffort is non-empty; that form keeps the model ID unchanged
+// and only rewrites the requested reasoning effort.
 type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`

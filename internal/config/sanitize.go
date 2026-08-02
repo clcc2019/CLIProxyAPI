@@ -129,6 +129,8 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
 // allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
+// A Codex entry may use the same upstream and client-visible name when it has a
+// reasoning-effort map; this represents an effort-only rewrite rather than a rename.
 func (cfg *Config) SanitizeOAuthModelAlias() {
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return
@@ -147,7 +149,9 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(name, alias) {
+			reasoningEffort := sanitizeOAuthModelAliasReasoningEffort(entry.ReasoningEffort)
+			effortOnly := strings.EqualFold(name, alias)
+			if effortOnly && (channel != "codex" || len(reasoningEffort) == 0) {
 				continue
 			}
 			aliasKey := strings.ToLower(alias)
@@ -158,8 +162,8 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			clean = append(clean, OAuthModelAlias{
 				Name:            name,
 				Alias:           alias,
-				Fork:            entry.Fork,
-				ReasoningEffort: sanitizeOAuthModelAliasReasoningEffort(entry.ReasoningEffort),
+				Fork:            entry.Fork && !effortOnly,
+				ReasoningEffort: reasoningEffort,
 			})
 		}
 		if len(clean) > 0 {

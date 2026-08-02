@@ -1,6 +1,5 @@
-// Package kimi provides authentication and token management functionality
-// for Kimi (Moonshot AI) services. It handles OAuth2 device flow token storage,
-// serialization, and retrieval for maintaining authenticated sessions with the Kimi API.
+// Package kimi provides token storage and refresh support for existing Kimi
+// credentials.
 package kimi
 
 import (
@@ -48,30 +47,6 @@ type KimiTokenData struct {
 	ExpiresAt int64 `json:"expires_at"`
 	// Scope is the OAuth2 scope granted to the token.
 	Scope string `json:"scope"`
-}
-
-// KimiAuthBundle bundles authentication data for storage.
-type KimiAuthBundle struct {
-	// TokenData contains the OAuth token information.
-	TokenData *KimiTokenData
-	// DeviceID is the device identifier used during OAuth device flow.
-	DeviceID string
-}
-
-// DeviceCodeResponse represents Kimi's device code response.
-type DeviceCodeResponse struct {
-	// DeviceCode is the device verification code.
-	DeviceCode string `json:"device_code"`
-	// UserCode is the code the user must enter at the verification URI.
-	UserCode string `json:"user_code"`
-	// VerificationURI is the URL where the user should enter the code.
-	VerificationURI string `json:"verification_uri,omitempty"`
-	// VerificationURIComplete is the URL with the code pre-filled.
-	VerificationURIComplete string `json:"verification_uri_complete"`
-	// ExpiresIn is the number of seconds until the device code expires.
-	ExpiresIn int `json:"expires_in"`
-	// Interval is the minimum number of seconds to wait between polling requests.
-	Interval int `json:"interval"`
 }
 
 // SaveTokenToFile serializes the Kimi token storage to a JSON file.

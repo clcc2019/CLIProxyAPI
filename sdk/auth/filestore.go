@@ -81,6 +81,8 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	if err = scopedPath.validateExistingTarget(); err != nil {
 		return "", fmt.Errorf("auth filestore: validate target failed: %w", err)
 	}
+	existingAuthFile, _ := scopedPath.readFile()
+	cliproxyauth.PrepareCodexInstallationIDForSave(auth, existingAuthFile)
 
 	// metadataSetter is a private interface for TokenStorage implementations that support metadata injection.
 	type metadataSetter interface {

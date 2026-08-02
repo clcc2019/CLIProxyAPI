@@ -92,3 +92,51 @@ func TestSanitizeOAuthModelAlias_NormalizesReasoningEffort(t *testing.T) {
 		t.Fatalf("reasoning-effort = %#v, want %#v", alias.ReasoningEffort, wantEfforts)
 	}
 }
+
+func TestSanitizeOAuthModelAlias_AllowsCodexEffortOnlyRule(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			" CoDeX ": {
+				{
+					Name:  " gpt-5.6-sol ",
+					Alias: " GPT-5.6-SOL ",
+					Fork:  true,
+					ReasoningEffort: map[string]string{
+						" MAX ": " XHIGH ",
+					},
+				},
+				{Name: "gpt-5.6-terra", Alias: "gpt-5.6-terra"},
+			},
+			"claude": {
+				{
+					Name:            "claude-sonnet-4-5",
+					Alias:           "claude-sonnet-4-5",
+					ReasoningEffort: map[string]string{"high": "max"},
+				},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	aliases := cfg.OAuthModelAlias["codex"]
+	if len(aliases) != 1 {
+		t.Fatalf("expected only the actionable Codex effort-only rule, got %#v", aliases)
+	}
+	alias := aliases[0]
+	if alias.Name != "gpt-5.6-sol" || alias.Alias != "GPT-5.6-SOL" {
+		t.Fatalf("unexpected effort-only alias: %#v", alias)
+	}
+	if alias.Fork {
+		t.Fatal("effort-only rule must not retain the meaningless fork flag")
+	}
+	wantEfforts := map[string]string{"max": "xhigh"}
+	if !reflect.DeepEqual(alias.ReasoningEffort, wantEfforts) {
+		t.Fatalf("reasoning-effort = %#v, want %#v", alias.ReasoningEffort, wantEfforts)
+	}
+	if _, exists := cfg.OAuthModelAlias["claude"]; exists {
+		t.Fatalf("same-name effort rules must remain Codex-only: %#v", cfg.OAuthModelAlias)
+	}
+}

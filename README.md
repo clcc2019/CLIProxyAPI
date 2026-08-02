@@ -46,7 +46,7 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 ## Overview
 
 - OpenAI/Gemini/Claude/Grok compatible API endpoints for CLI models
-- OpenAI Codex support (GPT models) via OAuth login
+- OpenAI Codex support (GPT models) via OAuth, using device-code login by default with a browser-callback fallback
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
 - Amp CLI and IDE extensions support with provider routing

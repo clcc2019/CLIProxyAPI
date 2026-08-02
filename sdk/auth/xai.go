@@ -66,7 +66,7 @@ func (a XAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 		return nil, fmt.Errorf("xai nonce generation failed: %w", err)
 	}
 
-	authSvc := xaiauth.NewXAIAuth(cfg)
+	authSvc := xaiauth.NewXAIAuthWithProxyURL(cfg, util.OAuthProxyURL(cfg))
 	discovery, err := authSvc.Discover(ctx)
 	if err != nil {
 		return nil, err

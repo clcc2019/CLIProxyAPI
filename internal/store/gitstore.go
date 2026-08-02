@@ -287,6 +287,8 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
 	}
+	existingAuthFile, _ := os.ReadFile(path)
+	cliproxyauth.PrepareCodexInstallationIDForSave(auth, existingAuthFile)
 
 	switch {
 	case auth.Storage != nil:

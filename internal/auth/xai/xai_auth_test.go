@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -174,6 +175,74 @@ func TestRefreshTokensPostsClientIDAndRefreshToken(t *testing.T) {
 	}
 	if gotForm.Get("refresh_token") != "old-refresh" {
 		t.Fatalf("refresh_token = %q, want old-refresh", gotForm.Get("refresh_token"))
+	}
+}
+
+func TestRefreshTokensDeduplicatesConcurrentRefreshAcrossInstances(t *testing.T) {
+	var calls int32
+	started := make(chan struct{})
+	secondUpstream := make(chan struct{})
+	release := make(chan struct{})
+	var firstOnce sync.Once
+	var secondOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callNumber := atomic.AddInt32(&calls, 1)
+		if callNumber == 1 {
+			firstOnce.Do(func() { close(started) })
+		} else {
+			secondOnce.Do(func() { close(secondUpstream) })
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	authA := &XAIAuth{httpClient: server.Client()}
+	authB := &XAIAuth{httpClient: server.Client()}
+	refreshToken := "xai-singleflight-refresh-token"
+
+	type refreshResult struct {
+		token *TokenData
+		err   error
+	}
+	results := make(chan refreshResult, 2)
+	refresh := func(auth *XAIAuth) {
+		token, err := auth.RefreshTokens(context.Background(), refreshToken, server.URL)
+		results <- refreshResult{token: token, err: err}
+	}
+
+	go refresh(authA)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first refresh request")
+	}
+
+	secondLaunched := make(chan struct{})
+	go func() {
+		close(secondLaunched)
+		refresh(authB)
+	}()
+	<-secondLaunched
+	select {
+	case <-secondUpstream:
+		t.Fatal("second concurrent refresh reached the upstream")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("refresh %d failed: %v", i, result.err)
+		}
+		if result.token == nil || result.token.AccessToken != "new-access" || result.token.RefreshToken != "new-refresh" {
+			t.Fatalf("unexpected refresh %d result: %+v", i, result.token)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
 	}
 }
 

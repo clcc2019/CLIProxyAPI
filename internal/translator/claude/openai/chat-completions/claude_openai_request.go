@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -164,7 +165,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
-		messageIndex := 0
+		systemBlocks := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
+		messageBlocks := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
+		previousRole := ""
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
@@ -174,13 +177,13 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					textPart := []byte(`{"type":"text","text":""}`)
 					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
-					out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
+					systemBlocks = append(systemBlocks, textPart)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						if part.Get("type").String() == "text" {
 							textPart := []byte(`{"type":"text","text":""}`)
 							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-							out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
+							systemBlocks = append(systemBlocks, textPart)
 						}
 						return true
 					})
@@ -188,17 +191,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			case "user", "assistant":
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
+				contentBlocks := translatorcommon.NewRawArrayItems(contentResult.Get("#").Int() + message.Get("tool_calls.#").Int())
 
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					part := []byte(`{"type":"text","text":""}`)
 					part, _ = sjson.SetBytes(part, "text", contentResult.String())
-					msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
+					contentBlocks = append(contentBlocks, part)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						claudePart := convertOpenAIContentPartToClaudePart(part)
 						if claudePart != "" {
-							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(claudePart))
+							contentBlocks = append(contentBlocks, []byte(claudePart))
 						}
 						return true
 					})
@@ -235,14 +239,14 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 								toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte("{}"))
 							}
 
-							msg, _ = sjson.SetRawBytes(msg, "content.-1", toolUse)
+							contentBlocks = append(contentBlocks, toolUse)
 						}
 						return true
 					})
 				}
 
-				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-				messageIndex++
+				msg = translatorcommon.SetRawArrayItems(msg, "content", contentBlocks)
+				messageBlocks = append(messageBlocks, msg)
 
 			case "tool":
 				// Handle tool result messages conversion
@@ -257,26 +261,35 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				} else {
 					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 				}
-				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-				messageIndex++
+				if previousRole == "tool" && len(messageBlocks) > 0 {
+					toolResult := gjson.GetBytes(msg, "content.0")
+					lastIdx := len(messageBlocks) - 1
+					messageBlocks[lastIdx], _ = sjson.SetRawBytes(messageBlocks[lastIdx], "content.-1", []byte(toolResult.Raw))
+				} else {
+					messageBlocks = append(messageBlocks, msg)
+				}
 			}
+			previousRole = role
 			return true
 		})
 
 		// Preserve a minimal conversational turn for system-only inputs.
 		// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
-		if messageIndex == 0 {
-			system := gjson.GetBytes(out, "system")
-			if system.Exists() && system.IsArray() && len(system.Array()) > 0 {
-				fallbackMsg := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", fallbackMsg)
-			}
+		if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
+			fallbackMsg := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+			messageBlocks = append(messageBlocks, fallbackMsg)
+		}
+		if len(systemBlocks) > 0 {
+			out, _ = sjson.SetRawBytes(out, "system", translatorcommon.JoinRawArray(systemBlocks))
+		}
+		if len(messageBlocks) > 0 {
+			out = translatorcommon.SetRawArrayItems(out, "messages", messageBlocks)
 		}
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
-		hasAnthropicTools := false
+		anthropicTools := translatorcommon.NewRawArrayItems(tools.Get("#").Int())
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
@@ -291,14 +304,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
 				}
 
-				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
-				hasAnthropicTools = true
+				anthropicTools = append(anthropicTools, anthropicTool)
 			}
 			return true
 		})
 
-		if !hasAnthropicTools {
+		if len(anthropicTools) == 0 {
 			out, _ = sjson.DeleteBytes(out, "tools")
+		} else {
+			out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(anthropicTools))
 		}
 	}
 

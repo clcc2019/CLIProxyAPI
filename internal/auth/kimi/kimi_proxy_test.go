@@ -7,9 +7,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
-func TestNewDeviceFlowClientWithDeviceIDAndProxyURL_OverrideDirectDisablesProxy(t *testing.T) {
+func TestNewTokenRefreshClient_OverrideDirectDisablesProxy(t *testing.T) {
 	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://proxy.example.com:8080"}}
-	client := NewDeviceFlowClientWithDeviceIDAndProxyURL(cfg, "device-1", "direct")
+	client := NewTokenRefreshClient(cfg, "device-1", "direct")
 
 	transport, ok := client.httpClient.Transport.(*http.Transport)
 	if !ok || transport == nil {
@@ -20,9 +20,9 @@ func TestNewDeviceFlowClientWithDeviceIDAndProxyURL_OverrideDirectDisablesProxy(
 	}
 }
 
-func TestNewDeviceFlowClientWithDeviceIDAndProxyURL_OverrideProxyTakesPrecedence(t *testing.T) {
+func TestNewTokenRefreshClient_OverrideProxyTakesPrecedence(t *testing.T) {
 	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global.example.com:8080"}}
-	client := NewDeviceFlowClientWithDeviceIDAndProxyURL(cfg, "device-1", "http://override.example.com:8081")
+	client := NewTokenRefreshClient(cfg, "device-1", "http://override.example.com:8081")
 
 	transport, ok := client.httpClient.Transport.(*http.Transport)
 	if !ok || transport == nil {

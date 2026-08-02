@@ -9,9 +9,9 @@ import (
 type runtimeFlags struct {
 	codexLogin        bool
 	codexDeviceLogin  bool
+	codexBrowserLogin bool
 	claudeLogin       bool
 	noBrowser         bool
-	kimiLogin         bool
 	xaiLogin          bool
 	tuiMode           bool
 	standalone        bool
@@ -24,12 +24,12 @@ type runtimeFlags struct {
 func parseRuntimeFlags() runtimeFlags {
 	flags := runtimeFlags{}
 
-	flag.BoolVar(&flags.codexLogin, "codex-login", false, "Login to Codex using OAuth")
-	flag.BoolVar(&flags.codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
+	flag.BoolVar(&flags.codexLogin, "codex-login", false, "Login to Codex using device code flow (default)")
+	flag.BoolVar(&flags.codexDeviceLogin, "codex-device-login", false, "Alias for -codex-login")
+	flag.BoolVar(&flags.codexBrowserLogin, "codex-browser-login", false, "Login to Codex using the localhost browser callback flow")
 	flag.BoolVar(&flags.claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&flags.noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.IntVar(&flags.oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
-	flag.BoolVar(&flags.kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&flags.xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&flags.configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&flags.password, "password", "", "")

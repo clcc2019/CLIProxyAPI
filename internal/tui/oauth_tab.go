@@ -15,16 +15,17 @@ import (
 
 // oauthProvider represents an OAuth provider option.
 type oauthProvider struct {
-	name    string
-	apiPath string // management API path
-	emoji   string
+	name      string
+	apiPath   string // management API path
+	loginMode string // optional provider-specific login mode
+	emoji     string
 }
 
 var oauthProviders = []oauthProvider{
-	{"Claude (Anthropic)", "anthropic-auth-url", "🟧"},
-	{"Codex (OpenAI)", "codex-auth-url", "🟩"},
-	{"Kimi", "kimi-auth-url", "🟫"},
-	{"xAI", "xai-auth-url", "⬛"},
+	{name: "Claude (Anthropic)", apiPath: "anthropic-auth-url", emoji: "🟧"},
+	{name: "Codex (OpenAI)", apiPath: "codex-auth-url", emoji: "🟩"},
+	{name: "Codex (OpenAI, browser fallback)", apiPath: "codex-auth-url", loginMode: "browser", emoji: "🟩"},
+	{name: "xAI", apiPath: "xai-auth-url", emoji: "⬛"},
 }
 
 // oauthTabModel handles OAuth login flows.
@@ -43,6 +44,7 @@ type oauthTabModel struct {
 	authURL       string // auth URL to display
 	authState     string // OAuth state parameter
 	providerName  string // current provider name
+	deviceCode    string // one-time code for device authentication
 	callbackInput textinput.Model
 	inputActive   bool // true when user is typing callback URL
 }
@@ -53,6 +55,7 @@ const (
 	oauthIdle oauthState = iota
 	oauthPending
 	oauthRemote // remote browser mode: waiting for manual callback
+	oauthDevice // device-code mode: waiting for server-side polling
 	oauthSuccess
 	oauthError
 )
@@ -62,10 +65,13 @@ type oauthStartMsg struct {
 	url          string
 	state        string
 	providerName string
+	deviceCode   string
+	timeout      time.Duration
 	err          error
 }
 
 type oauthPollMsg struct {
+	state   string
 	done    bool
 	message string
 	err     error
@@ -106,6 +112,16 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 		m.authURL = msg.url
 		m.authState = msg.state
 		m.providerName = msg.providerName
+		m.deviceCode = msg.deviceCode
+		if msg.deviceCode != "" {
+			m.state = oauthDevice
+			m.callbackInput.SetValue("")
+			m.callbackInput.Blur()
+			m.inputActive = false
+			m.message = ""
+			m.viewport.SetContent(m.renderContent())
+			return m, m.pollOAuthStatus(msg.state, msg.timeout)
+		}
 		m.state = oauthRemote
 		m.callbackInput.SetValue("")
 		m.callbackInput.Focus()
@@ -113,9 +129,12 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 		m.message = ""
 		m.viewport.SetContent(m.renderContent())
 		// Also start polling in the background
-		return m, tea.Batch(textinput.Blink, m.pollOAuthStatus(msg.state))
+		return m, tea.Batch(textinput.Blink, m.pollOAuthStatus(msg.state, msg.timeout))
 
 	case oauthPollMsg:
+		if msg.state != "" && msg.state != m.authState {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.state = oauthError
 			m.err = msg.err
@@ -191,6 +210,18 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 			return m, cmd
 		}
 
+		if m.state == oauthDevice {
+			if msg.String() == "esc" {
+				m.state = oauthIdle
+				m.message = ""
+				m.authURL = ""
+				m.authState = ""
+				m.deviceCode = ""
+				m.viewport.SetContent(m.renderContent())
+			}
+			return m, nil
+		}
+
 		// ---- Pending (auto polling) ----
 		if m.state == oauthPending {
 			if msg.String() == "esc" {
@@ -245,7 +276,11 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 func (m oauthTabModel) startOAuth(provider oauthProvider) tea.Cmd {
 	return func() tea.Msg {
 		// Call the auth URL endpoint with is_webui=true
-		data, err := m.client.getJSON("/v0/management/" + provider.apiPath + "?is_webui=true")
+		path := "/v0/management/" + provider.apiPath + "?is_webui=true"
+		if provider.loginMode != "" {
+			path += "&mode=" + provider.loginMode
+		}
+		data, err := m.client.getJSON(path)
 		if err != nil {
 			return oauthStartMsg{err: fmt.Errorf("failed to start %s login: %w", provider.name, err)}
 		}
@@ -255,11 +290,29 @@ func (m oauthTabModel) startOAuth(provider oauthProvider) tea.Cmd {
 		if authURL == "" {
 			return oauthStartMsg{err: fmt.Errorf("no auth URL returned for %s", provider.name)}
 		}
+		if state == "" {
+			return oauthStartMsg{err: fmt.Errorf("no auth state returned for %s", provider.name)}
+		}
+		mode := getString(data, "mode")
+		deviceCode := getString(data, "user_code")
+		if strings.EqualFold(mode, "device") && deviceCode == "" {
+			return oauthStartMsg{err: fmt.Errorf("no device code returned for %s", provider.name)}
+		}
+		timeout := 5 * time.Minute
+		if expiresIn := getFloat(data, "expires_in"); expiresIn > 0 {
+			timeout = time.Duration(expiresIn)*time.Second + 5*time.Second
+		}
 
 		// Try to open browser (best effort)
 		_ = openBrowser(authURL)
 
-		return oauthStartMsg{url: authURL, state: state, providerName: provider.name}
+		return oauthStartMsg{
+			url:          authURL,
+			state:        state,
+			providerName: provider.name,
+			deviceCode:   deviceCode,
+			timeout:      timeout,
+		}
 	}
 }
 
@@ -275,8 +328,6 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "anthropic"
 				case "codex-auth-url":
 					providerKey = "codex"
-				case "kimi-auth-url":
-					providerKey = "kimi"
 				case "xai-auth-url":
 					providerKey = "xai"
 				}
@@ -297,13 +348,15 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 	}
 }
 
-func (m oauthTabModel) pollOAuthStatus(state string) tea.Cmd {
+func (m oauthTabModel) pollOAuthStatus(state string, timeout time.Duration) tea.Cmd {
 	return func() tea.Msg {
-		// Poll session status for up to 5 minutes
-		deadline := time.Now().Add(5 * time.Minute)
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		deadline := time.Now().Add(timeout)
 		for {
 			if time.Now().After(deadline) {
-				return oauthPollMsg{done: false, err: fmt.Errorf("%s", T("oauth_timeout"))}
+				return oauthPollMsg{state: state, done: false, err: fmt.Errorf("%s", T("oauth_timeout"))}
 			}
 
 			time.Sleep(2 * time.Second)
@@ -316,18 +369,21 @@ func (m oauthTabModel) pollOAuthStatus(state string) tea.Cmd {
 			switch status {
 			case "ok":
 				return oauthPollMsg{
+					state:   state,
 					done:    true,
 					message: T("oauth_success"),
 				}
 			case "error":
 				return oauthPollMsg{
-					done: false,
-					err:  fmt.Errorf("%s: %s", T("oauth_failed"), errMsg),
+					state: state,
+					done:  false,
+					err:   fmt.Errorf("%s: %s", T("oauth_failed"), errMsg),
 				}
 			case "wait":
 				continue
 			default:
 				return oauthPollMsg{
+					state:   state,
 					done:    true,
 					message: T("oauth_completed"),
 				}
@@ -371,6 +427,10 @@ func (m oauthTabModel) renderContent() string {
 	// ---- Remote browser mode ----
 	if m.state == oauthRemote {
 		sb.WriteString(m.renderRemoteMode())
+		return sb.String()
+	}
+	if m.state == oauthDevice {
+		sb.WriteString(m.renderDeviceMode())
 		return sb.String()
 	}
 
@@ -445,6 +505,39 @@ func (m oauthTabModel) renderRemoteMode() string {
 
 	sb.WriteString("\n\n")
 	sb.WriteString(warningStyle.Render(T("oauth_waiting")))
+
+	return sb.String()
+}
+
+func (m oauthTabModel) renderDeviceMode() string {
+	var sb strings.Builder
+
+	providerStyle := lipgloss.NewStyle().Bold(true).Foreground(colorHighlight)
+	sb.WriteString(providerStyle.Render(fmt.Sprintf("  ✦ %s OAuth", m.providerName)))
+	sb.WriteString("\n\n")
+
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_auth_url")))
+	sb.WriteString("\n")
+	urlStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	maxURLWidth := m.width - 6
+	if maxURLWidth < 40 {
+		maxURLWidth = 40
+	}
+	for _, line := range wrapText(m.authURL, maxURLWidth) {
+		sb.WriteString("  " + urlStyle.Render(line) + "\n")
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_device_code")))
+	sb.WriteString("\n")
+	codeStyle := lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).PaddingLeft(2)
+	sb.WriteString(codeStyle.Render(m.deviceCode))
+	sb.WriteString("\n\n")
+	sb.WriteString(helpStyle.Render(T("oauth_device_hint")))
+	sb.WriteString("\n\n")
+	sb.WriteString(warningStyle.Render(T("oauth_waiting")))
+	sb.WriteString("\n")
+	sb.WriteString(helpStyle.Render(T("oauth_press_esc")))
 
 	return sb.String()
 }

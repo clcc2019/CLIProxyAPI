@@ -183,6 +183,8 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("object store: create auth directory: %w", err)
 	}
+	existingAuthFile, _ := os.ReadFile(path)
+	cliproxyauth.PrepareCodexInstallationIDForSave(auth, existingAuthFile)
 
 	switch {
 	case auth.Storage != nil:
