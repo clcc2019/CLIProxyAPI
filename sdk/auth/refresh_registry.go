@@ -9,7 +9,15 @@ import (
 func init() {
 	registerRefreshLead("codex", func() Authenticator { return NewCodexAuthenticator() })
 	registerRefreshLead("claude", func() Authenticator { return NewClaudeAuthenticator() })
+	registerRefreshLeadDuration("kimi", 5*time.Minute)
 	registerRefreshLead("xai", func() Authenticator { return NewXAIAuthenticator() })
+}
+
+func registerRefreshLeadDuration(provider string, lead time.Duration) {
+	cliproxyauth.RegisterRefreshLeadProvider(provider, func() *time.Duration {
+		value := lead
+		return &value
+	})
 }
 
 func registerRefreshLead(provider string, factory func() Authenticator) {

@@ -351,6 +351,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
+	claudeInputTokens := helps.NewClaudeInputTokenState(prepared.from, prepared.to, prepared.from, prepared.originalPayload)
 	out := make(chan cliproxyexecutor.StreamChunk, cliproxyexecutor.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
@@ -387,7 +388,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					translatedLine = append([]byte("data: "), eventData...)
 				}
 			}
-			chunks := sdktranslator.TranslateStream(ctx, prepared.to, prepared.from, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param)
+			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.from, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param, claudeInputTokens)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:

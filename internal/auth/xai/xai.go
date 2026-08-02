@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
+	internalauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sync/singleflight"
 )
 
 // XAIAuth performs xAI OAuth discovery, token exchange, and refresh.
@@ -26,7 +26,7 @@ type XAIAuth struct {
 // xaiRefreshGroup prevents concurrent callers from replaying a rotating xAI
 // refresh token. The group is package-wide so separately constructed auth
 // helpers still share the same in-flight exchange.
-var xaiRefreshGroup singleflight.Group
+var xaiRefreshGroup internalauth.RefreshGroup[*TokenData]
 
 // NewXAIAuth creates an xAI OAuth helper using config proxy settings.
 func NewXAIAuth(cfg *config.Config) *XAIAuth {
@@ -44,7 +44,7 @@ func NewXAIAuthWithProxyURL(cfg *config.Config, proxyURL string) *XAIAuth {
 		}
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
-	return &XAIAuth{httpClient: util.SetProxy(&sdkCfg, &http.Client{})}
+	return &XAIAuth{httpClient: util.SetProxy(&sdkCfg, &http.Client{Timeout: 30 * time.Second})}
 }
 
 // ValidateOAuthEndpoint validates an endpoint returned by xAI discovery.
@@ -200,14 +200,13 @@ func (a *XAIAuth) RefreshTokens(ctx context.Context, refreshToken, tokenEndpoint
 	}
 	tokenEndpoint = strings.TrimSpace(tokenEndpoint)
 
-	result, err, _ := xaiRefreshGroup.Do(refreshToken, func() (any, error) {
-		return a.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken, tokenEndpoint)
+	tokenData, err := xaiRefreshGroup.Do(ctx, refreshToken, func(refreshCtx context.Context) (*TokenData, error) {
+		return a.refreshTokensSingleFlight(refreshCtx, refreshToken, tokenEndpoint)
 	})
 	if err != nil {
 		return nil, err
 	}
-	tokenData, ok := result.(*TokenData)
-	if !ok || tokenData == nil {
+	if tokenData == nil {
 		return nil, fmt.Errorf("xai token refresh failed: invalid single-flight result")
 	}
 	cloned := *tokenData

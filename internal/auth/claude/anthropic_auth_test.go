@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -125,6 +126,42 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	tokenResults[0].AccessToken = "caller-mutation"
 	if got := tokenResults[1].AccessToken; got != "new-access" {
 		t.Fatalf("second caller observed shared token mutation: %q", got)
+	}
+}
+
+func TestRefreshTokens_HonorsInFlightCancellation(t *testing.T) {
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+
+	started := make(chan struct{})
+	requestCancelled := make(chan struct{})
+	auth := &ClaudeAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+		close(requestCancelled)
+		return nil, req.Context().Err()
+	})}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := auth.RefreshTokens(ctx, "claude-cancel-in-flight")
+		result <- err
+	}()
+	<-started
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RefreshTokens() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RefreshTokens() did not return after cancellation")
+	}
+	select {
+	case <-requestCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("refresh HTTP request did not observe cancellation")
 	}
 }
 

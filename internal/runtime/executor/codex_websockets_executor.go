@@ -1092,6 +1092,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return nil, errSend
 		}
 	}
+	claudeInputTokens := helps.NewClaudeInputTokenState(from, to, from, originalPayload)
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func() {
 		terminateReason := "completed"
@@ -1328,7 +1329,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if len(line) == 0 || !codexSameByteView(payload, messagePayload) {
 					line = encodeCodexWebsocketAsSSE(payload)
 				}
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, from, req.Model, originalPayload, body, line, &param, claudeInputTokens)
 				for i := range chunks {
 					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 						terminateReason = "context_done"

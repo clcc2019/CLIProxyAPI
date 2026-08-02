@@ -253,5 +253,6 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 func NewAnthropicHttpClient(cfg *config.SDKConfig) *http.Client {
 	return &http.Client{
 		Transport: newUtlsRoundTripper(cfg),
+		Timeout:   30 * time.Second,
 	}
 }

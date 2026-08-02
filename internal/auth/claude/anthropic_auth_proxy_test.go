@@ -2,6 +2,7 @@ package claude
 
 import (
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"golang.org/x/net/proxy"
@@ -17,6 +18,9 @@ func TestNewClaudeAuthWithProxyURL_OverrideDirectTakesPrecedence(t *testing.T) {
 	}
 	if transport.dialer != proxy.Direct {
 		t.Fatalf("expected proxy.Direct, got %T", transport.dialer)
+	}
+	if got := auth.httpClient.Timeout; got != 30*time.Second {
+		t.Fatalf("HTTP timeout = %s, want 30s", got)
 	}
 }
 

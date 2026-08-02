@@ -303,19 +303,26 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		req:        req,
 		opts:       opts,
 		translated: translated,
+		claudeInputTokens: helps.NewClaudeInputTokenState(
+			from,
+			to,
+			from,
+			originalPayload,
+		),
 	})
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
 type openAICompatStreamState struct {
-	ctx        context.Context
-	resp       *http.Response
-	reporter   *helps.UsageReporter
-	from       sdktranslator.Format
-	to         sdktranslator.Format
-	req        cliproxyexecutor.Request
-	opts       cliproxyexecutor.Options
-	translated []byte
+	ctx               context.Context
+	resp              *http.Response
+	reporter          *helps.UsageReporter
+	from              sdktranslator.Format
+	to                sdktranslator.Format
+	req               cliproxyexecutor.Request
+	opts              cliproxyexecutor.Options
+	translated        []byte
+	claudeInputTokens *helps.ClaudeInputTokenState
 }
 
 func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStreamState) <-chan cliproxyexecutor.StreamChunk {
@@ -355,7 +362,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.
-			chunks := sdktranslator.TranslateStream(state.ctx, state.to, state.from, state.req.Model, state.opts.OriginalRequest, state.translated, line, &param)
+			chunks := helps.TranslateStreamWithClaudeInputTokens(state.ctx, state.to, state.from, state.req.Model, state.opts.OriginalRequest, state.translated, line, &param, state.claudeInputTokens)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
@@ -370,7 +377,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 			// In case the upstream close the stream without a terminal [DONE] marker.
 			// Feed a synthetic done marker through the translator so pending
 			// response.completed events are still emitted exactly once.
-			chunks := sdktranslator.TranslateStream(state.ctx, state.to, state.from, state.req.Model, state.opts.OriginalRequest, state.translated, []byte("data: [DONE]"), &param)
+			chunks := helps.TranslateStreamWithClaudeInputTokens(state.ctx, state.to, state.from, state.req.Model, state.opts.OriginalRequest, state.translated, []byte("data: [DONE]"), &param, state.claudeInputTokens)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}

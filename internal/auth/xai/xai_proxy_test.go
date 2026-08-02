@@ -3,6 +3,7 @@ package xai
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
@@ -17,6 +18,9 @@ func TestNewXAIAuthWithProxyURL_OverrideDirectDisablesProxy(t *testing.T) {
 	}
 	if transport.Proxy != nil {
 		t.Fatal("expected direct transport to disable proxy function")
+	}
+	if got := auth.httpClient.Timeout; got != 30*time.Second {
+		t.Fatalf("HTTP timeout = %s, want 30s", got)
 	}
 }
 

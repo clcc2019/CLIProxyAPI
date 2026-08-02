@@ -101,3 +101,59 @@ func TestOpenAICompatExecutorStreamPassthroughOpenAIChunks(t *testing.T) {
 		t.Fatalf("payload = %q, want %q", got, want)
 	}
 }
+
+func TestOpenAICompatExecutorClaudeStreamPopulatesInputTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-claude\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-claude\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	originalRequest := []byte(`{"model":"claude-test","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"Count this request."}]}`)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-test",
+		Payload: bytes.Clone(originalRequest),
+	}, cliproxyexecutor.Options{
+		OriginalRequest: originalRequest,
+		SourceFormat:    sdktranslator.FromString("claude"),
+		Stream:          true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	messageStartFound := false
+	var inputTokens int64
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		for _, line := range bytes.Split(chunk.Payload, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
+			}
+			payload := bytes.TrimSpace(line[len("data:"):])
+			if gjson.GetBytes(payload, "type").String() != "message_start" {
+				continue
+			}
+			messageStartFound = true
+			inputTokens = gjson.GetBytes(payload, "message.usage.input_tokens").Int()
+		}
+	}
+
+	if !messageStartFound {
+		t.Fatal("translated Claude stream did not emit message_start")
+	}
+	if inputTokens <= 0 {
+		t.Fatalf("message_start input_tokens = %d, want positive estimate", inputTokens)
+	}
+}

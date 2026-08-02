@@ -182,3 +182,36 @@ func TestRefreshTokenDeduplicatesConcurrentRefreshAcrossClients(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want 1", got)
 	}
 }
+
+func TestRefreshTokenHonorsInFlightCancellation(t *testing.T) {
+	started := make(chan struct{})
+	requestCancelled := make(chan struct{})
+	client := &TokenRefreshClient{httpClient: &http.Client{Transport: kimiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+		close(requestCancelled)
+		return nil, req.Context().Err()
+	})}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.RefreshToken(ctx, "kimi-cancel-in-flight")
+		result <- err
+	}()
+	<-started
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RefreshToken() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RefreshToken() did not return after cancellation")
+	}
+	select {
+	case <-requestCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("refresh HTTP request did not observe cancellation")
+	}
+}

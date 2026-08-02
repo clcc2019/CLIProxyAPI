@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	internalauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -43,7 +43,7 @@ type TokenRefreshClient struct {
 // kimiRefreshGroup prevents concurrent callers from exchanging the same Kimi
 // refresh token more than once, including callers using separate refresh
 // clients with different device metadata.
-var kimiRefreshGroup singleflight.Group
+var kimiRefreshGroup internalauth.RefreshGroup[*KimiTokenData]
 
 // NewTokenRefreshClient creates a refresh client with a device ID and proxy override.
 // proxyURL takes precedence over cfg.ProxyURL when non-empty.
@@ -208,14 +208,17 @@ func (c *TokenRefreshClient) RefreshToken(ctx context.Context, refreshToken stri
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	result, err, _ := kimiRefreshGroup.Do(refreshToken, func() (any, error) {
-		return c.refreshTokenSingleFlight(context.WithoutCancel(ctx), refreshToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil, fmt.Errorf("kimi: refresh token is required")
+	}
+	tokenData, err := kimiRefreshGroup.Do(ctx, refreshToken, func(refreshCtx context.Context) (*KimiTokenData, error) {
+		return c.refreshTokenSingleFlight(refreshCtx, refreshToken)
 	})
 	if err != nil {
 		return nil, err
 	}
-	tokenData, ok := result.(*KimiTokenData)
-	if !ok || tokenData == nil {
+	if tokenData == nil {
 		return nil, fmt.Errorf("kimi: refresh returned invalid single-flight result")
 	}
 	cloned := *tokenData

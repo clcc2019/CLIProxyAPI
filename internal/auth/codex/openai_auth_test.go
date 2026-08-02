@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -127,6 +128,39 @@ func TestRefreshTokensDeduplicatesConcurrentRefreshAcrossInstances(t *testing.T)
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+}
+
+func TestRefreshTokensHonorsInFlightCancellation(t *testing.T) {
+	started := make(chan struct{})
+	requestCancelled := make(chan struct{})
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+		close(requestCancelled)
+		return nil, req.Context().Err()
+	})}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := auth.RefreshTokens(ctx, "codex-cancel-in-flight")
+		result <- err
+	}()
+	<-started
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RefreshTokens() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RefreshTokens() did not return after cancellation")
+	}
+	select {
+	case <-requestCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("refresh HTTP request did not observe cancellation")
 	}
 }
 
@@ -312,6 +346,9 @@ func TestNewCodexAuthWithProxyURL_OverrideDirectDisablesProxy(t *testing.T) {
 	}
 	if transport.Proxy != nil {
 		t.Fatal("expected direct transport to disable proxy function")
+	}
+	if got := auth.httpClient.Timeout; got != 30*time.Second {
+		t.Fatalf("HTTP timeout = %s, want 30s", got)
 	}
 }
 

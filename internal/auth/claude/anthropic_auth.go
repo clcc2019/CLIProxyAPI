@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
+	internalauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sync/singleflight"
 )
 
 // OAuth configuration constants for Claude/Anthropic
@@ -33,7 +33,7 @@ const (
 )
 
 var (
-	claudeRefreshGroup singleflight.Group
+	claudeRefreshGroup internalauth.RefreshGroup[*ClaudeTokenData]
 	claudeRefreshMu    sync.Mutex
 	claudeRefreshBlock = make(map[string]time.Time)
 )
@@ -56,7 +56,6 @@ func resetClaudeRefreshState() {
 	claudeRefreshMu.Lock()
 	defer claudeRefreshMu.Unlock()
 	claudeRefreshBlock = make(map[string]time.Time)
-	claudeRefreshGroup = singleflight.Group{}
 }
 
 func claudeRefreshBlockedUntil(refreshToken string) time.Time {
@@ -340,14 +339,13 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		}
 	}
 
-	result, err, _ := claudeRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+	tokenData, err := claudeRefreshGroup.Do(ctx, refreshToken, func(refreshCtx context.Context) (*ClaudeTokenData, error) {
+		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 	})
 	if err != nil {
 		return nil, err
 	}
-	tokenData, ok := result.(*ClaudeTokenData)
-	if !ok || tokenData == nil {
+	if tokenData == nil {
 		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
 	}
 	// singleflight returns the same pointer to every waiter. Return a value copy
@@ -463,6 +461,12 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 //   - *ClaudeTokenData: The refreshed token data
 //   - error: An error if all retry attempts fail
 func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*ClaudeTokenData, error) {
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {

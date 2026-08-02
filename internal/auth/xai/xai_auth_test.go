@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+type xaiRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f xaiRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestBuildAuthorizeURLIncludesXAIRequiredParameters(t *testing.T) {
 	authURL, err := BuildAuthorizeURL(AuthorizeURLParams{
 		AuthorizationEndpoint: "https://auth.x.ai/oauth/authorize",
@@ -243,6 +249,39 @@ func TestRefreshTokensDeduplicatesConcurrentRefreshAcrossInstances(t *testing.T)
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+}
+
+func TestRefreshTokensHonorsInFlightCancellation(t *testing.T) {
+	started := make(chan struct{})
+	requestCancelled := make(chan struct{})
+	auth := &XAIAuth{httpClient: &http.Client{Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+		close(requestCancelled)
+		return nil, req.Context().Err()
+	})}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := auth.RefreshTokens(ctx, "xai-cancel-in-flight", "https://auth.x.ai/oauth/token")
+		result <- err
+	}()
+	<-started
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RefreshTokens() error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RefreshTokens() did not return after cancellation")
+	}
+	select {
+	case <-requestCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("refresh HTTP request did not observe cancellation")
 	}
 }
 

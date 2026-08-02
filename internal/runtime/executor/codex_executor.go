@@ -510,6 +510,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		codexResponseHeaderPresent(httpResp.Header, codexHeaderReasoningIncluded),
 	)
 	reasoningReplayApplied = recovery.reasoningReplayApplied
+	claudeInputTokens := helps.NewClaudeInputTokenState(from, to, from, originalPayload)
 	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	releaseUpstreamCtxOnReturn = false
 	go func() {
@@ -631,7 +632,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if downstreamClosed {
 						return
 					}
-					chunks := sdktranslator.TranslateStream(upstreamCtx, to, from, req.Model, originalPayload, body, line, &param)
+					chunks := helps.TranslateStreamWithClaudeInputTokens(upstreamCtx, to, from, req.Model, originalPayload, body, line, &param, claudeInputTokens)
 					for i := range chunks {
 						if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 							break
