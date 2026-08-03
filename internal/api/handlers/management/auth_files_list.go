@@ -28,7 +28,11 @@ type authFilesListQuery struct {
 }
 
 type authFileEntryBuildOptions struct {
-	Summary                  bool
+	Summary bool
+	// SkipRecentRequests omits the fixed-size request-history buckets while an
+	// entry is only being used for filtering, sorting, or pagination. The final
+	// page can populate them after the expensive candidate reduction.
+	SkipRecentRequests       bool
 	AuthDir                  string
 	AuthRoot                 *os.Root
 	StatCache                map[string]authFileStatResult
@@ -81,6 +85,12 @@ func parsePositiveQueryInt(raw string) int {
 
 func (q authFilesListQuery) active() bool {
 	return q.Paginated || q.Type != "" || q.Search != "" || q.Sort != "default" || q.Summary || q.ProblemOnly || q.DisabledOnly || q.PremiumOnly
+}
+
+// hasManagerPreFilter reports whether a lightweight management snapshot can
+// eliminate auths before their full token-bearing clone is requested.
+func (q authFilesListQuery) hasManagerPreFilter() bool {
+	return q.Type != "" || q.Search != "" || q.ProblemOnly || q.DisabledOnly
 }
 
 func (q authFilesListQuery) offset() int {
@@ -190,6 +200,15 @@ func authFileListAuthKeys(auth *coreauth.Auth) []string {
 func authFileEntryLookupKey(entry gin.H) string {
 	for _, key := range []string{"id", "name", "file_name", "fileName"} {
 		if value := authFileListKey(valueAsString(entry[key])); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func authFileEntryManagerID(entry gin.H) string {
+	for _, key := range []string{"id", "name", "file_name", "fileName"} {
+		if value := strings.TrimSpace(valueAsString(entry[key])); value != "" {
 			return value
 		}
 	}

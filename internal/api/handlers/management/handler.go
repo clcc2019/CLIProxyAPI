@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -66,6 +67,13 @@ type Handler struct {
 	// aggregate revision, so writes invalidate it immediately.
 	// Its zero value is ready for use.
 	aggregatedUsageCache aggregatedUsageCache
+	// authListCooldownMaintenanceAt throttles the O(n) expired-quota scan that
+	// accompanies management auth-list requests. The list endpoint is polled by
+	// the UI, while cooldown expiry only needs sub-second freshness.
+	authListCooldownMaintenanceAt atomic.Int64
+	// logReadCache keeps the last per-file log cursor so incremental /logs polls
+	// do not rescan unchanged rotated files.
+	logReadCache logReadCache
 	// codexUpstreamSlots bounds aggregate management traffic to ChatGPT's
 	// usage and account endpoints. The web UI may refresh many credentials at
 	// once, so leaving this unbounded amplifies one click into a proxy burst.
@@ -189,6 +197,7 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	h.mu.Lock()
 	h.authManager = manager
 	h.mu.Unlock()
+	h.authListCooldownMaintenanceAt.Store(0)
 	if manager != nil {
 		h.StartCodexQuotaMaintenance()
 	}
@@ -258,8 +267,12 @@ func (h *Handler) SetLogDirectory(dir string) {
 		}
 	}
 	h.mu.Lock()
+	changed := h.logDir != dir
 	h.logDir = dir
 	h.mu.Unlock()
+	if changed {
+		h.resetLogReadCache()
+	}
 }
 
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.

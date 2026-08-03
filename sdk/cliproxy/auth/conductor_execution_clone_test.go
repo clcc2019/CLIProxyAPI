@@ -242,6 +242,9 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 			"subscription":          map[string]any{"current_period_end": "2026-06-19T11:44:26Z", "large_blob": "drop-me"},
 			runtimeStateMetadataKey: map[string]any{"updated_at": "2026-05-20T00:00:00Z"},
 		},
+		RateLimits: map[string]RateLimitSnapshot{
+			"codex": {PlanType: "plus"},
+		},
 	}
 	now := time.Now()
 	auth.recordRecentRequest(now, true)
@@ -290,6 +293,9 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 	if cloned.Metadata["refresh_token"] != "refresh-token" || cloned.Metadata["plan_type"] != "plus" {
 		t.Fatalf("management summary metadata = %#v", cloned.Metadata)
 	}
+	if cloned.RateLimits != nil {
+		t.Fatalf("management summary copied runtime rate limits: %#v", cloned.RateLimits)
+	}
 	for _, key := range []string{"originator", "beta_features", "installation_id", "include_timing_metrics", "codex_client_profile_pinned"} {
 		if _, ok := cloned.Metadata[key]; !ok {
 			t.Fatalf("management summary dropped %s metadata: %#v", key, cloned.Metadata)
@@ -320,6 +326,23 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 	originalHeaders := auth.Metadata["headers"].(map[string]any)
 	if originalHeaders["X-Codex-Installation-Id"] != "install-1" {
 		t.Fatal("CloneForManagementSummary should copy profile headers")
+	}
+}
+
+func TestAuthCloneForManagementSummaryWithoutRecentRequestsOmitsRequestRing(t *testing.T) {
+	auth := &Auth{ID: "summary-page-auth", Provider: "codex"}
+	now := time.Now()
+	auth.recordRecentRequest(now, true)
+
+	cloned := auth.CloneForManagementSummaryWithoutRecentRequests()
+	if cloned == nil {
+		t.Fatal("CloneForManagementSummaryWithoutRecentRequests returned nil")
+	}
+	if cloned.recentRequests != nil {
+		t.Fatal("page summary unexpectedly copied recent request ring")
+	}
+	if auth.recentRequests == nil {
+		t.Fatal("test auth did not record recent request")
 	}
 }
 

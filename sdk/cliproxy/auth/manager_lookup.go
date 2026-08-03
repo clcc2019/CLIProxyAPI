@@ -46,11 +46,76 @@ func (m *Manager) ListByProvider(provider string) []*Auth {
 // views. It intentionally avoids copying full token-bearing metadata for every
 // credential while preserving the fields needed for filtering, sorting, and cards.
 func (m *Manager) ListManagementSummary() []*Auth {
+	if m == nil {
+		return nil
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	list := make([]*Auth, 0, len(m.auths))
 	for _, auth := range m.auths {
 		list = append(list, auth.CloneForManagementSummary())
+	}
+	return list
+}
+
+// ListManagementSummaryWithoutRecentRequests returns the same lightweight
+// management snapshots without copying each auth's fixed-size request ring.
+// Paginated callers can clone only the candidates that land on the requested
+// page when they need to expose recent request buckets.
+func (m *Manager) ListManagementSummaryWithoutRecentRequests() []*Auth {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	list := make([]*Auth, 0, len(m.auths))
+	for _, auth := range m.auths {
+		list = append(list, auth.cloneForManagementSummary(false))
+	}
+	return list
+}
+
+// ListManagementSummaryByIDs returns lightweight management snapshots with
+// recent request rings for only the requested auth IDs.
+func (m *Manager) ListManagementSummaryByIDs(ids []string) []*Auth {
+	if m == nil || len(ids) == 0 {
+		return []*Auth{}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	list := make([]*Auth, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if auth := m.auths[id]; auth != nil {
+			list = append(list, auth.CloneForManagementSummary())
+		}
+	}
+	return list
+}
+
+// ListByIDs returns defensive full clones for the requested auth IDs. It is
+// used by management filters after a lightweight summary pass so unrelated
+// credentials do not have their token-bearing metadata copied.
+func (m *Manager) ListByIDs(ids []string) []*Auth {
+	if m == nil || len(ids) == 0 {
+		return []*Auth{}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	list := make([]*Auth, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if auth := m.auths[id]; auth != nil {
+			list = append(list, auth.Clone())
+		}
 	}
 	return list
 }

@@ -3,6 +3,7 @@ package management
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,6 +23,48 @@ const (
 	logScannerInitialBuffer = 64 * 1024
 	logScannerMaxBuffer     = 8 * 1024 * 1024
 )
+
+// logReadCache stores only per-file counters and the byte cursor for the
+// incomplete tail. It deliberately does not retain log bodies in memory: the
+// common polling path can skip immutable files while keeping memory bounded.
+type logReadCache struct {
+	mu    sync.Mutex
+	dir   string
+	files map[string]logFileCacheEntry
+}
+
+type logFileCacheEntry struct {
+	size    int64
+	modTime int64
+
+	// completeSize is the byte offset immediately after the last complete
+	// newline that was consumed. tailBytes starts at this offset.
+	completeSize          int64
+	completeTotal         int
+	completeLatest        int64
+	completeLastTimestamp int64
+
+	total         int
+	latest        int64
+	lastTimestamp int64
+	tailBytes     int64
+}
+
+func (c *logReadCache) reset() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.dir = ""
+	c.files = nil
+	c.mu.Unlock()
+}
+
+func (h *Handler) resetLogReadCache() {
+	if h != nil {
+		h.logReadCache.reset()
+	}
+}
 
 // GetLogs returns log lines with optional incremental loading.
 func (h *Handler) GetLogs(c *gin.Context) {
@@ -65,15 +109,11 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	}
 
 	cutoff := parseCutoff(c.Query("after"))
-	acc := newLogAccumulator(cutoff, limit)
-	for i := range files {
-		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
-			return
-		}
+	lines, total, latest, errRead := h.readLogsIncrementally(logDir, files, cutoff, limit)
+	if errRead != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRead.Error()})
+		return
 	}
-
-	lines, total, latest := acc.result()
 	if latest == 0 || latest < cutoff {
 		latest = cutoff
 	}
@@ -137,6 +177,7 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 			removed++
 		}
 	}
+	h.resetLogReadCache()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -399,6 +440,193 @@ func (h *Handler) collectLogFiles(dir string) ([]string, error) {
 	return paths, nil
 }
 
+// readLogsIncrementally serves the usual after>0 polling request from a
+// per-file cursor. When a cursor is unavailable, a file is rewritten, or a
+// caller asks for an older cutoff than the cache can reconstruct, it falls
+// back to the original full scan and refreshes the cache.
+func (h *Handler) readLogsIncrementally(dir string, files []string, cutoff int64, limit int) ([]string, int, int64, error) {
+	if h == nil {
+		return nil, 0, 0, fmt.Errorf("handler unavailable")
+	}
+
+	h.logReadCache.mu.Lock()
+	defer h.logReadCache.mu.Unlock()
+
+	if cutoff <= 0 || h.logReadCache.dir != dir || h.logReadCache.files == nil {
+		return h.rebuildLogReadCacheLocked(dir, files, cutoff, limit)
+	}
+
+	acc := newLogAccumulator(cutoff, limit)
+	updated := make(map[string]logFileCacheEntry, len(files))
+	for _, path := range files {
+		info, errStat := os.Stat(path)
+		if errStat != nil {
+			if os.IsNotExist(errStat) {
+				return h.rebuildLogReadCacheLocked(dir, files, cutoff, limit)
+			}
+			return nil, 0, 0, fmt.Errorf("failed to stat log file %s: %w", path, errStat)
+		}
+
+		cached, ok := h.logReadCache.files[path]
+		if !ok {
+			return h.rebuildLogReadCacheLocked(dir, files, cutoff, limit)
+		}
+		if cached.latest > cutoff {
+			// The cache stores counters rather than line bodies, so an older
+			// cutoff cannot be reconstructed without scanning the file.
+			return h.rebuildLogReadCacheLocked(dir, files, cutoff, limit)
+		}
+
+		if info.Size() == cached.size && info.ModTime().UnixNano() == cached.modTime {
+			acc.addCachedLogSummary(cached, cutoff)
+			updated[path] = cached
+			continue
+		}
+
+		// main.log is append-only between rotations. Re-read only the old
+		// incomplete tail and bytes appended after the cached cursor.
+		if filepath.Base(path) != defaultLogFileName || info.Size() < cached.size {
+			return h.rebuildLogReadCacheLocked(dir, files, cutoff, limit)
+		}
+		complete := logFileCacheEntry{
+			completeTotal:         cached.completeTotal,
+			completeLatest:        cached.completeLatest,
+			completeLastTimestamp: cached.completeLastTimestamp,
+			total:                 cached.completeTotal,
+			latest:                cached.completeLatest,
+			lastTimestamp:         cached.completeLastTimestamp,
+		}
+		acc.addCachedLogSummary(complete, cutoff)
+		refreshed, errScan := scanLogFile(path, cached.completeSize, acc, complete)
+		if errScan != nil {
+			return nil, 0, 0, fmt.Errorf("failed to read log file %s: %w", path, errScan)
+		}
+		refreshed.modTime = info.ModTime().UnixNano()
+		updated[path] = refreshed
+	}
+
+	h.logReadCache.dir = dir
+	h.logReadCache.files = updated
+	lines, total, latest := acc.result()
+	return lines, total, latest, nil
+}
+
+func (h *Handler) rebuildLogReadCacheLocked(dir string, files []string, cutoff int64, limit int) ([]string, int, int64, error) {
+	acc := newLogAccumulator(cutoff, limit)
+	updated := make(map[string]logFileCacheEntry, len(files))
+	for _, path := range files {
+		info, errStat := os.Stat(path)
+		if errStat != nil {
+			if os.IsNotExist(errStat) {
+				continue
+			}
+			return nil, 0, 0, fmt.Errorf("failed to stat log file %s: %w", path, errStat)
+		}
+		entry, errScan := scanLogFile(path, 0, acc, logFileCacheEntry{})
+		if errScan != nil {
+			return nil, 0, 0, fmt.Errorf("failed to read log file %s: %w", path, errScan)
+		}
+		entry.size = entry.completeSize + entry.tailBytes
+		entry.modTime = info.ModTime().UnixNano()
+		updated[path] = entry
+	}
+	h.logReadCache.dir = dir
+	h.logReadCache.files = updated
+	lines, total, latest := acc.result()
+	return lines, total, latest, nil
+}
+
+func (acc *logAccumulator) addCachedLogSummary(file logFileCacheEntry, cutoff int64) {
+	acc.total += file.total
+	if file.latest > acc.latest {
+		acc.latest = file.latest
+	}
+	if file.lastTimestamp > 0 {
+		acc.include = cutoff == 0 || file.lastTimestamp > cutoff
+	}
+}
+
+// scanLogFile consumes complete lines and, when present, the final partial
+// line. Starting at completeSize lets an append-only main.log reuse its old
+// summary while still handling a line that was incomplete during the last poll.
+func scanLogFile(path string, completeSize int64, acc *logAccumulator, base logFileCacheEntry) (logFileCacheEntry, error) {
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		if os.IsNotExist(errOpen) {
+			return logFileCacheEntry{}, nil
+		}
+		return logFileCacheEntry{}, errOpen
+	}
+	defer func() { _ = file.Close() }()
+
+	if completeSize > 0 {
+		if _, errSeek := file.Seek(completeSize, io.SeekStart); errSeek != nil {
+			return logFileCacheEntry{}, errSeek
+		}
+	}
+
+	entry := logFileCacheEntry{
+		completeSize:          completeSize,
+		completeTotal:         base.completeTotal,
+		completeLatest:        base.completeLatest,
+		completeLastTimestamp: base.completeLastTimestamp,
+		latest:                base.completeLatest,
+		lastTimestamp:         base.completeLastTimestamp,
+	}
+	reader := bufio.NewReaderSize(file, logScannerInitialBuffer)
+	for {
+		raw, errRead := reader.ReadString('\n')
+		if len(raw) == 0 && errRead == io.EOF {
+			break
+		}
+		if len(raw) > logScannerMaxBuffer+1 {
+			return logFileCacheEntry{}, fmt.Errorf("bufio.Scanner: token too long")
+		}
+		if errRead != nil && errRead != io.EOF {
+			return logFileCacheEntry{}, errRead
+		}
+
+		complete := errRead == nil
+		rawLen := len(raw)
+		if complete {
+			raw = strings.TrimSuffix(raw, "\n")
+		}
+		line := strings.TrimRight(raw, "\r")
+		ts := parseTimestamp(line)
+		acc.addLineWithTimestamp(line, ts)
+		if ts > entry.latest {
+			entry.latest = ts
+		}
+		if ts > 0 {
+			entry.lastTimestamp = ts
+		}
+
+		if complete {
+			entry.completeSize += int64(rawLen)
+			entry.completeTotal++
+			if ts > entry.completeLatest {
+				entry.completeLatest = ts
+			}
+			if ts > 0 {
+				entry.completeLastTimestamp = ts
+			}
+			entry.tailBytes = 0
+		} else {
+			entry.tailBytes = int64(rawLen)
+			break
+		}
+		if errRead == io.EOF {
+			break
+		}
+	}
+	entry.total = entry.completeTotal
+	if entry.tailBytes > 0 {
+		entry.total++
+	}
+	entry.size = entry.completeSize + entry.tailBytes
+	return entry, nil
+}
+
 type logAccumulator struct {
 	cutoff  int64
 	limit   int
@@ -446,9 +674,12 @@ func (acc *logAccumulator) consumeFile(path string) error {
 }
 
 func (acc *logAccumulator) addLine(raw string) {
+	acc.addLineWithTimestamp(raw, parseTimestamp(raw))
+}
+
+func (acc *logAccumulator) addLineWithTimestamp(raw string, ts int64) {
 	line := strings.TrimRight(raw, "\r")
 	acc.total++
-	ts := parseTimestamp(line)
 	if ts > acc.latest {
 		acc.latest = ts
 	}
@@ -510,9 +741,33 @@ func parseTimestamp(line string) int64 {
 	if len(line) < 19 {
 		return 0
 	}
-	candidate := line[:19]
-	t, err := time.ParseInLocation("2006-01-02 15:04:05", candidate, time.Local)
-	if err != nil {
+	if line[4] != '-' || line[7] != '-' || line[10] != ' ' || line[13] != ':' || line[16] != ':' {
+		return 0
+	}
+	values := [6]int{}
+	positions := [...]int{0, 5, 8, 11, 14, 17}
+	limits := [...]int{9999, 12, 31, 23, 59, 59}
+	for i, pos := range positions {
+		if line[pos] < '0' || line[pos] > '9' || line[pos+1] < '0' || line[pos+1] > '9' {
+			return 0
+		}
+		value := int(line[pos]-'0')*10 + int(line[pos+1]-'0')
+		if i == 0 {
+			if line[pos+2] < '0' || line[pos+2] > '9' || line[pos+3] < '0' || line[pos+3] > '9' {
+				return 0
+			}
+			value = value*100 + int(line[pos+2]-'0')*10 + int(line[pos+3]-'0')
+		}
+		if (i < 3 && value <= 0) || value > limits[i] {
+			return 0
+		}
+		values[i] = value
+	}
+	if values[1] < 1 || values[2] < 1 {
+		return 0
+	}
+	t := time.Date(values[0], time.Month(values[1]), values[2], values[3], values[4], values[5], 0, time.Local)
+	if t.Year() != values[0] || int(t.Month()) != values[1] || t.Day() != values[2] || t.Hour() != values[3] || t.Minute() != values[4] || t.Second() != values[5] {
 		return 0
 	}
 	return t.Unix()

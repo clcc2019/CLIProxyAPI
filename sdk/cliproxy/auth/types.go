@@ -620,6 +620,17 @@ func (a *Auth) CloneShallow() *Auth {
 // summaries. Full auth metadata can contain large tokens, so summary endpoints
 // avoid cloning it for every row while still returning independent maps.
 func (a *Auth) CloneForManagementSummary() *Auth {
+	return a.cloneForManagementSummary(true)
+}
+
+// CloneForManagementSummaryWithoutRecentRequests is the cheaper snapshot used
+// while a paginated management request is locating its page. The fixed-size
+// request ring is copied only for the final page, where it is actually exposed.
+func (a *Auth) CloneForManagementSummaryWithoutRecentRequests() *Auth {
+	return a.cloneForManagementSummary(false)
+}
+
+func (a *Auth) cloneForManagementSummary(includeRecentRequests bool) *Auth {
 	if a == nil {
 		return nil
 	}
@@ -627,11 +638,13 @@ func (a *Auth) CloneForManagementSummary() *Auth {
 	mu.Lock()
 	defer mu.Unlock()
 
-	copyAuth := a.cloneSnapshotBase()
+	copyAuth := a.cloneSnapshotBaseWithoutRateLimits()
 	copyAuth.StatusMessage = a.StatusMessage
 	copyAuth.Success = a.Success
 	copyAuth.Failed = a.Failed
-	copyAuth.recentRequests = cloneRecentRequestRing(a.recentRequests)
+	if includeRecentRequests {
+		copyAuth.recentRequests = cloneRecentRequestRing(a.recentRequests)
+	}
 	copyAuth.Attributes = cloneAuthAttributesForManagementSummary(a.Attributes)
 	copyAuth.Metadata = cloneAuthMetadataForManagementSummary(a.Metadata)
 	copyAuth.managementSummaryHasAccessToken = CodexAccessTokenAvailable(a)
@@ -640,7 +653,17 @@ func (a *Auth) CloneForManagementSummary() *Auth {
 }
 
 func (a *Auth) cloneSnapshotBase() Auth {
-	return Auth{
+	return a.cloneSnapshotBaseWithRateLimits(true)
+}
+
+// cloneSnapshotBaseWithoutRateLimits omits runtime quota details that are not
+// consumed by management list filtering or entry construction.
+func (a *Auth) cloneSnapshotBaseWithoutRateLimits() Auth {
+	return a.cloneSnapshotBaseWithRateLimits(false)
+}
+
+func (a *Auth) cloneSnapshotBaseWithRateLimits(includeRateLimits bool) Auth {
+	copyAuth := Auth{
 		ID:                          a.ID,
 		Index:                       a.Index,
 		Provider:                    a.Provider,
@@ -652,7 +675,6 @@ func (a *Auth) cloneSnapshotBase() Auth {
 		Unavailable:                 a.Unavailable,
 		ProxyURL:                    a.ProxyURL,
 		Quota:                       a.Quota,
-		RateLimits:                  cloneRateLimitSnapshots(a.RateLimits),
 		CreatedAt:                   a.CreatedAt,
 		UpdatedAt:                   a.UpdatedAt,
 		LastRefreshedAt:             a.LastRefreshedAt,
@@ -661,6 +683,10 @@ func (a *Auth) cloneSnapshotBase() Auth {
 		indexAssigned:               a.indexAssigned,
 		codexInstallationIDExplicit: a.codexInstallationIDExplicit,
 	}
+	if includeRateLimits {
+		copyAuth.RateLimits = cloneRateLimitSnapshots(a.RateLimits)
+	}
+	return copyAuth
 }
 
 func (a *Auth) cloneForExecution() *Auth {

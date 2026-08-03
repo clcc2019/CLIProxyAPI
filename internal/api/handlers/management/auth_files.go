@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -34,7 +35,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		h.listAuthFilesFromManager(c, codexSubscriptionMode, listQuery)
 		return
 	}
-	manager.ClearExpiredQuotaCooldowns(c.Request.Context())
+	h.maybeClearExpiredQuotaCooldowns(manager, c.Request.Context())
 	auths := manager.List()
 	files := make([]gin.H, 0, len(auths))
 	entryOpts := authFileEntryBuildOptions{RecentRequestSnapshotter: coreauth.NewRecentRequestSnapshotter(time.Now())}
@@ -48,25 +49,46 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files, "total": len(files)})
 }
 
-func (h *Handler) listAuthsForManagement(c *gin.Context, summary bool) []*coreauth.Auth {
+func (h *Handler) listAuthsForManagement(c *gin.Context, q authFilesListQuery) ([]*coreauth.Auth, []*coreauth.Auth) {
 	if h == nil {
-		return nil
+		return nil, nil
 	}
 	manager := h.authManagerSnapshot()
 	if manager == nil {
-		return nil
+		return nil, nil
 	}
 	if c != nil && c.Request != nil {
-		manager.ClearExpiredQuotaCooldowns(c.Request.Context())
+		h.maybeClearExpiredQuotaCooldowns(manager, c.Request.Context())
 	}
-	if summary {
-		return manager.ListManagementSummary()
+	if q.Summary {
+		return manager.ListManagementSummary(), nil
 	}
-	return manager.List()
+	if !q.hasManagerPreFilter() {
+		return manager.List(), nil
+	}
+
+	// A filtered management page used to clone every credential, including
+	// token-bearing metadata, before applying the cheap provider/name filters.
+	// Lightweight summaries retain exactly the fields needed for those filters;
+	// only matching IDs need the full defensive clone used to build a response.
+	summaries := manager.ListManagementSummaryWithoutRecentRequests()
+	ids := make([]string, 0, len(summaries))
+	for _, auth := range summaries {
+		if authFileMatchesListPreQuery(auth, q) {
+			ids = append(ids, auth.ID)
+		}
+	}
+	return manager.ListByIDs(ids), summaries
 }
 
 func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode, q authFilesListQuery) {
-	auths := h.listAuthsForManagement(c, q.Summary)
+	if q.Paginated && q.PageSize > 0 {
+		if h.listAuthFilesFromManagerPage(c, codexSubscriptionMode, q) {
+			return
+		}
+	}
+
+	auths, summaries := h.listAuthsForManagement(c, q)
 	entrySubscriptionMode := codexSubscriptionMode
 	deferRefreshToPage := q.Paginated && codexSubscriptionMode == codexSubscriptionListRefresh
 	if deferRefreshToPage {
@@ -88,14 +110,20 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 	if !q.Summary {
 		entryOpts.StatCache = make(map[string]authFileStatResult, len(auths))
 	}
-	countEntries := make([]gin.H, 0, len(auths))
+	countSource := auths
+	if summaries != nil {
+		countSource = summaries
+	}
+	countEntries := make([]gin.H, 0, len(countSource))
 	displayEntries := make([]gin.H, 0, len(auths))
-	for _, auth := range auths {
+	for _, auth := range countSource {
 		if authFileMatchesListDisplayQuery(auth, q) {
 			if entry := authFileTypeCountEntry(auth); entry != nil {
 				countEntries = append(countEntries, entry)
 			}
 		}
+	}
+	for _, auth := range auths {
 		if !authFileMatchesListPreQuery(auth, q) {
 			continue
 		}
@@ -124,6 +152,233 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 		})
 	}
 	c.JSON(200, authFilesListPayload(pageFiles, total, q, typeCounts))
+}
+
+// listAuthFilesFromManagerPage uses lightweight management snapshots to find
+// the requested page before cloning full credentials. The old path built every
+// response entry first, which made page_size reduce the JSON payload but not
+// the expensive work behind it.
+func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscriptionMode codexSubscriptionListMode, q authFilesListQuery) bool {
+	if h == nil || c == nil || c.Request == nil {
+		return false
+	}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
+		return false
+	}
+	h.maybeClearExpiredQuotaCooldowns(manager, c.Request.Context())
+
+	summaries := manager.ListManagementSummaryWithoutRecentRequests()
+	entrySubscriptionMode := codexSubscriptionMode
+	deferRefreshToPage := codexSubscriptionMode == codexSubscriptionListRefresh
+	if deferRefreshToPage {
+		entrySubscriptionMode = codexSubscriptionListCache
+	}
+	recentSnapshotter := coreauth.NewRecentRequestSnapshotter(time.Now())
+	summaryOpts := authFileEntryBuildOptions{
+		Summary:                  true,
+		SkipRecentRequests:       true,
+		RecentRequestSnapshotter: recentSnapshotter,
+	}
+
+	countEntries := make([]gin.H, 0, len(summaries))
+	displayEntries := make([]gin.H, 0, len(summaries))
+	var summaryAuthIDsByName map[string][]string
+	if q.Summary {
+		summaryAuthIDsByName = make(map[string][]string, len(summaries))
+	}
+	for _, auth := range summaries {
+		if authFileMatchesListDisplayQuery(auth, q) {
+			if entry := authFileTypeCountEntry(auth); entry != nil {
+				countEntries = append(countEntries, entry)
+			}
+		}
+		if !authFileMatchesListPreQuery(auth, q) {
+			continue
+		}
+		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth, entrySubscriptionMode)
+		if entry := h.buildAuthFileEntryWithOptions(auth, summaryOpts); entry != nil {
+			displayEntries = append(displayEntries, entry)
+			if q.Summary {
+				name := authFileListKey(valueAsString(entry["name"]))
+				id := strings.TrimSpace(auth.ID)
+				if name != "" && id != "" {
+					summaryAuthIDsByName[name] = append(summaryAuthIDsByName[name], id)
+				}
+			}
+		}
+	}
+
+	displayEntries = dedupeAuthFileEntries(displayEntries)
+	typeCounts := authFileEntryTypeCounts(dedupeAuthFileEntries(countEntries), authFilesListQuery{})
+	filtered := make([]gin.H, 0, len(displayEntries))
+	for _, entry := range displayEntries {
+		if authFileEntryMatchesListQuery(entry, q) {
+			filtered = append(filtered, entry)
+		}
+	}
+
+	entryOpts := authFileEntryBuildOptions{RecentRequestSnapshotter: recentSnapshotter}
+	if !q.Summary {
+		entryOpts.AuthDir = h.authDirSnapshot()
+		if entryOpts.AuthDir != "" {
+			if root, err := os.OpenRoot(entryOpts.AuthDir); err == nil {
+				entryOpts.AuthRoot = root
+				defer func() { _ = root.Close() }()
+			}
+		}
+		entryOpts.StatCache = make(map[string]authFileStatResult, len(filtered))
+		available := filtered[:0]
+		for _, entry := range filtered {
+			if h.authFileListEntryAvailable(entry, entryOpts) {
+				available = append(available, entry)
+			}
+		}
+		filtered = available
+	}
+
+	sortAuthFileEntriesForList(filtered, q.Sort)
+	total := len(filtered)
+	q = clampAuthFilesListPage(q, total)
+	pageEntries := authFileEntryPageSlice(filtered, q)
+	if q.Summary {
+		pageRecentIDs := make([]string, 0, len(pageEntries))
+		for _, entry := range pageEntries {
+			name := authFileListKey(valueAsString(entry["name"]))
+			pageRecentIDs = append(pageRecentIDs, summaryAuthIDsByName[name]...)
+		}
+		pageRecentAuths := manager.ListManagementSummaryByIDs(pageRecentIDs)
+		recentAuthsByName := make(map[string][]*coreauth.Auth, len(pageRecentAuths))
+		for _, auth := range pageRecentAuths {
+			name := strings.TrimSpace(auth.FileName)
+			if name == "" {
+				name = auth.ID
+			}
+			name = authFileListKey(name)
+			if name != "" {
+				recentAuthsByName[name] = append(recentAuthsByName[name], auth)
+			}
+		}
+		populateSummaryPageRecentRequests(pageEntries, recentAuthsByName, recentSnapshotter)
+		if deferRefreshToPage {
+			pageEntries = h.refreshAuthFileEntryPageFromManager(c.Request.Context(), pageEntries, pageRecentAuths, authFileEntryBuildOptions{
+				Summary:                  true,
+				RecentRequestSnapshotter: recentSnapshotter,
+			})
+			populateSummaryPageRecentRequests(pageEntries, recentAuthsByName, recentSnapshotter)
+		}
+		c.JSON(http.StatusOK, authFilesListPayload(pageEntries, total, q, typeCounts))
+		return true
+	}
+
+	pageIDs := make([]string, 0, len(pageEntries))
+	for _, entry := range pageEntries {
+		if id := authFileEntryManagerID(entry); id != "" {
+			pageIDs = append(pageIDs, id)
+		}
+	}
+	pageAuths := manager.ListByIDs(pageIDs)
+	authsByKey := make(map[string]*coreauth.Auth, len(pageAuths)*2)
+	for _, auth := range pageAuths {
+		for _, key := range authFileListAuthKeys(auth) {
+			if _, exists := authsByKey[key]; !exists {
+				authsByKey[key] = auth
+			}
+		}
+	}
+
+	fullEntries := make([]gin.H, 0, len(pageEntries))
+	for _, summaryEntry := range pageEntries {
+		auth := authsByKey[authFileEntryLookupKey(summaryEntry)]
+		if auth == nil {
+			continue
+		}
+		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth, entrySubscriptionMode)
+		if entry := h.buildAuthFileEntryWithOptions(auth, entryOpts); entry != nil && authFileEntryMatchesListQuery(entry, q) {
+			fullEntries = append(fullEntries, entry)
+		}
+	}
+	if deferRefreshToPage {
+		fullEntries = h.refreshAuthFileEntryPageFromManager(c.Request.Context(), fullEntries, pageAuths, authFileEntryBuildOptions{
+			RecentRequestSnapshotter: recentSnapshotter,
+		})
+	}
+	c.JSON(http.StatusOK, authFilesListPayload(fullEntries, total, q, typeCounts))
+	return true
+}
+
+// populateSummaryPageRecentRequests delays the fixed-size request-history
+// allocation until after pagination. Duplicate memory/file entries are kept
+// compatible with mergeAuthFileEntryGroup by retaining the candidate with the
+// highest recent-request total, while preferring the entry selected as the
+// merged representative when totals tie.
+func populateSummaryPageRecentRequests(entries []gin.H, authsByName map[string][]*coreauth.Auth, snapshotter *coreauth.RecentRequestSnapshotter) {
+	if len(entries) == 0 || len(authsByName) == 0 || snapshotter == nil {
+		return
+	}
+	for _, entry := range entries {
+		name := authFileListKey(valueAsString(entry["name"]))
+		candidates := authsByName[name]
+		if len(candidates) == 0 {
+			continue
+		}
+		preferredKey := authFileEntryLookupKey(entry)
+		var (
+			best          []coreauth.RecentRequestBucket
+			bestTotal     int64 = -1
+			bestPreferred bool
+		)
+		for _, auth := range candidates {
+			recent := snapshotter.Snapshot(auth)
+			total := authFileRecentRequestsTotal(recent)
+			preferred := authFileListKey(auth.ID) == preferredKey
+			if total > bestTotal || (total == bestTotal && preferred && !bestPreferred) {
+				best = recent
+				bestTotal = total
+				bestPreferred = preferred
+			}
+		}
+		if best != nil {
+			entry["recent_requests"] = best
+		}
+	}
+}
+
+func (h *Handler) authFileListEntryAvailable(entry gin.H, opts authFileEntryBuildOptions) bool {
+	if h == nil || opts.Summary {
+		return true
+	}
+	path := strings.TrimSpace(valueAsString(entry["path"]))
+	if path == "" {
+		return true
+	}
+	if _, errStat := statAuthFileEntryPath(path, opts); errStat == nil {
+		return true
+	} else if !os.IsNotExist(errStat) {
+		return true
+	}
+	if authFileEntryRuntimeOnly(entry) {
+		return true
+	}
+	removedByManagement := authFileEntryDisabled(entry) || strings.EqualFold(strings.TrimSpace(authFileEntryString(entry, "status_message", "statusMessage")), "removed via management api")
+	return !h.isManagedAuthFilePath(path) && !removedByManagement
+}
+
+const authListQuotaMaintenanceInterval = time.Second
+
+func (h *Handler) maybeClearExpiredQuotaCooldowns(manager *coreauth.Manager, ctx context.Context) {
+	if h == nil || manager == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := h.authListCooldownMaintenanceAt.Load()
+	if last != 0 && now-last < authListQuotaMaintenanceInterval.Nanoseconds() {
+		return
+	}
+	if !h.authListCooldownMaintenanceAt.CompareAndSwap(last, now) {
+		return
+	}
+	manager.ClearExpiredQuotaCooldowns(ctx)
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file

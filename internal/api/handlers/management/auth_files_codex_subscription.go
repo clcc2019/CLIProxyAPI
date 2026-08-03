@@ -497,7 +497,30 @@ func ensureCodexSubscriptionSnapshotMetadata(auth *coreauth.Auth, value any) (*c
 	if normalizedString == "" {
 		return auth, false
 	}
-	changed := false
+	needsUpdate := false
+	for _, key := range []string{"subscription_expires_at", "chatgpt_subscription_active_until"} {
+		existing, ok := normalizeCodexSubscriptionUntilValue(auth.Metadata[key])
+		if !ok || strings.TrimSpace(valueAsString(existing)) != normalizedString {
+			needsUpdate = true
+			break
+		}
+	}
+	if start, ok := codexSubscriptionActiveStartValue(auth.Metadata); ok {
+		startString := strings.TrimSpace(valueAsString(start))
+		if startString != "" {
+			for _, key := range []string{"chatgpt_subscription_active_start", "subscription_active_start"} {
+				existing, ok := normalizeCodexSubscriptionUntilValue(auth.Metadata[key])
+				if !ok || strings.TrimSpace(valueAsString(existing)) != startString {
+					needsUpdate = true
+					break
+				}
+			}
+		}
+	}
+	if !needsUpdate {
+		return auth, false
+	}
+
 	updated := auth.Clone()
 	if updated.Metadata == nil {
 		updated.Metadata = make(map[string]any)
@@ -505,7 +528,6 @@ func ensureCodexSubscriptionSnapshotMetadata(auth *coreauth.Auth, value any) (*c
 	for _, key := range []string{"subscription_expires_at", "chatgpt_subscription_active_until"} {
 		if existing, ok := normalizeCodexSubscriptionUntilValue(updated.Metadata[key]); !ok || strings.TrimSpace(valueAsString(existing)) != normalizedString {
 			updated.Metadata[key] = normalizedString
-			changed = true
 		}
 	}
 	if start, ok := codexSubscriptionActiveStartValue(auth.Metadata); ok {
@@ -514,12 +536,11 @@ func ensureCodexSubscriptionSnapshotMetadata(auth *coreauth.Auth, value any) (*c
 			for _, key := range []string{"chatgpt_subscription_active_start", "subscription_active_start"} {
 				if existing, ok := normalizeCodexSubscriptionUntilValue(updated.Metadata[key]); !ok || strings.TrimSpace(valueAsString(existing)) != startString {
 					updated.Metadata[key] = startString
-					changed = true
 				}
 			}
 		}
 	}
-	return updated, changed
+	return updated, true
 }
 
 func codexSubscriptionBackfillShouldPersist(original, updated *coreauth.Auth) bool {
