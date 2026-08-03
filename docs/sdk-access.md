@@ -74,9 +74,11 @@ api-keys:
       monthly-requests: 30000
       daily-tokens: 100000
       monthly-tokens: 3000000
+      daily-cost: 10
+      monthly-cost: 200
 ```
 
-`quota` supports `daily`, `monthly`, and `total` windows for `requests` and `tokens`. Windows are evaluated in UTC. Token quotas are checked against completed usage records, so in-flight token usage is not pre-reserved.
+`quota` supports `daily`, `monthly`, and `total` windows for `requests`, `tokens`, and `cost`. Request/token limits use the `daily-requests`, `monthly-requests`, `total-requests`, `daily-tokens`, `monthly-tokens`, and `total-tokens` fields. Cost limits use `daily-cost`, `monthly-cost`, and `total-cost`, and are measured in USD. Windows are evaluated in UTC. Quotas are checked against completed usage records, so in-flight usage is not pre-reserved.
 
 ## Loading Providers from External Go Modules
 

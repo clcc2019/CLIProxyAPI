@@ -22,12 +22,20 @@ type ClientAPIKeyEntry struct {
 	Quota          ClientAPIKeyQuota `yaml:"quota,omitempty" json:"quota,omitempty"`
 }
 
-// ClientAPIKeyQuota limits how much one client-facing API key can consume.
-// Zero values mean unlimited. Daily and monthly windows are evaluated in UTC.
+// ClientAPIKeyQuota limits request count, token usage, and spend for one
+// client-facing API key. Zero values mean unlimited. Daily and monthly windows
+// are evaluated in UTC; cost limits are measured in USD.
 type ClientAPIKeyQuota struct {
 	DailyCost   float64 `yaml:"daily-cost,omitempty" json:"daily-cost,omitempty"`
 	MonthlyCost float64 `yaml:"monthly-cost,omitempty" json:"monthly-cost,omitempty"`
 	TotalCost   float64 `yaml:"total-cost,omitempty" json:"total-cost,omitempty"`
+
+	DailyTokens     int64 `yaml:"daily-tokens,omitempty" json:"daily-tokens,omitempty"`
+	MonthlyTokens   int64 `yaml:"monthly-tokens,omitempty" json:"monthly-tokens,omitempty"`
+	TotalTokens     int64 `yaml:"total-tokens,omitempty" json:"total-tokens,omitempty"`
+	DailyRequests   int64 `yaml:"daily-requests,omitempty" json:"daily-requests,omitempty"`
+	MonthlyRequests int64 `yaml:"monthly-requests,omitempty" json:"monthly-requests,omitempty"`
+	TotalRequests   int64 `yaml:"total-requests,omitempty" json:"total-requests,omitempty"`
 }
 
 // ClientAPIKeys keeps backward compatibility with the historical
@@ -35,9 +43,15 @@ type ClientAPIKeyQuota struct {
 type ClientAPIKeys []ClientAPIKeyEntry
 
 const (
-	clientAPIKeyQuotaDailyCostMetadataKey   = "quota_daily_cost"
-	clientAPIKeyQuotaMonthlyCostMetadataKey = "quota_monthly_cost"
-	clientAPIKeyQuotaTotalCostMetadataKey   = "quota_total_cost"
+	clientAPIKeyQuotaDailyCostMetadataKey       = "quota_daily_cost"
+	clientAPIKeyQuotaMonthlyCostMetadataKey     = "quota_monthly_cost"
+	clientAPIKeyQuotaTotalCostMetadataKey       = "quota_total_cost"
+	clientAPIKeyQuotaDailyTokensMetadataKey     = "quota_daily_tokens"
+	clientAPIKeyQuotaMonthlyTokensMetadataKey   = "quota_monthly_tokens"
+	clientAPIKeyQuotaTotalTokensMetadataKey     = "quota_total_tokens"
+	clientAPIKeyQuotaDailyRequestsMetadataKey   = "quota_daily_requests"
+	clientAPIKeyQuotaMonthlyRequestsMetadataKey = "quota_monthly_requests"
+	clientAPIKeyQuotaTotalRequestsMetadataKey   = "quota_total_requests"
 )
 
 // HasLimits reports whether any quota field is configured.
@@ -45,7 +59,13 @@ func (quota ClientAPIKeyQuota) HasLimits() bool {
 	quota = NormalizeClientAPIKeyQuota(quota)
 	return quota.DailyCost > 0 ||
 		quota.MonthlyCost > 0 ||
-		quota.TotalCost > 0
+		quota.TotalCost > 0 ||
+		quota.DailyTokens > 0 ||
+		quota.MonthlyTokens > 0 ||
+		quota.TotalTokens > 0 ||
+		quota.DailyRequests > 0 ||
+		quota.MonthlyRequests > 0 ||
+		quota.TotalRequests > 0
 }
 
 // IsZero lets encoders that honor IsZero omit empty quotas on direct entry marshaling.
@@ -58,6 +78,12 @@ func NormalizeClientAPIKeyQuota(quota ClientAPIKeyQuota) ClientAPIKeyQuota {
 	quota.DailyCost = normalizeClientAPIKeyQuotaLimit(quota.DailyCost)
 	quota.MonthlyCost = normalizeClientAPIKeyQuotaLimit(quota.MonthlyCost)
 	quota.TotalCost = normalizeClientAPIKeyQuotaLimit(quota.TotalCost)
+	quota.DailyTokens = normalizeClientAPIKeyQuotaCount(quota.DailyTokens)
+	quota.MonthlyTokens = normalizeClientAPIKeyQuotaCount(quota.MonthlyTokens)
+	quota.TotalTokens = normalizeClientAPIKeyQuotaCount(quota.TotalTokens)
+	quota.DailyRequests = normalizeClientAPIKeyQuotaCount(quota.DailyRequests)
+	quota.MonthlyRequests = normalizeClientAPIKeyQuotaCount(quota.MonthlyRequests)
+	quota.TotalRequests = normalizeClientAPIKeyQuotaCount(quota.TotalRequests)
 	return quota
 }
 
@@ -76,6 +102,24 @@ func AddClientAPIKeyQuotaMetadata(metadata map[string]string, quota ClientAPIKey
 	if quota.TotalCost > 0 {
 		metadata[clientAPIKeyQuotaTotalCostMetadataKey] = strconv.FormatFloat(quota.TotalCost, 'f', -1, 64)
 	}
+	if quota.DailyTokens > 0 {
+		metadata[clientAPIKeyQuotaDailyTokensMetadataKey] = strconv.FormatInt(quota.DailyTokens, 10)
+	}
+	if quota.MonthlyTokens > 0 {
+		metadata[clientAPIKeyQuotaMonthlyTokensMetadataKey] = strconv.FormatInt(quota.MonthlyTokens, 10)
+	}
+	if quota.TotalTokens > 0 {
+		metadata[clientAPIKeyQuotaTotalTokensMetadataKey] = strconv.FormatInt(quota.TotalTokens, 10)
+	}
+	if quota.DailyRequests > 0 {
+		metadata[clientAPIKeyQuotaDailyRequestsMetadataKey] = strconv.FormatInt(quota.DailyRequests, 10)
+	}
+	if quota.MonthlyRequests > 0 {
+		metadata[clientAPIKeyQuotaMonthlyRequestsMetadataKey] = strconv.FormatInt(quota.MonthlyRequests, 10)
+	}
+	if quota.TotalRequests > 0 {
+		metadata[clientAPIKeyQuotaTotalRequestsMetadataKey] = strconv.FormatInt(quota.TotalRequests, 10)
+	}
 }
 
 // ClientAPIKeyQuotaFromMetadata parses quota limits emitted by the config API key provider.
@@ -84,9 +128,15 @@ func ClientAPIKeyQuotaFromMetadata(metadata map[string]string) ClientAPIKeyQuota
 		return ClientAPIKeyQuota{}
 	}
 	return NormalizeClientAPIKeyQuota(ClientAPIKeyQuota{
-		DailyCost:   parseClientAPIKeyQuotaMetadataValue(metadata[clientAPIKeyQuotaDailyCostMetadataKey]),
-		MonthlyCost: parseClientAPIKeyQuotaMetadataValue(metadata[clientAPIKeyQuotaMonthlyCostMetadataKey]),
-		TotalCost:   parseClientAPIKeyQuotaMetadataValue(metadata[clientAPIKeyQuotaTotalCostMetadataKey]),
+		DailyCost:       parseClientAPIKeyQuotaMetadataValue(metadata[clientAPIKeyQuotaDailyCostMetadataKey]),
+		MonthlyCost:     parseClientAPIKeyQuotaMetadataValue(metadata[clientAPIKeyQuotaMonthlyCostMetadataKey]),
+		TotalCost:       parseClientAPIKeyQuotaMetadataValue(metadata[clientAPIKeyQuotaTotalCostMetadataKey]),
+		DailyTokens:     parseClientAPIKeyQuotaMetadataCount(metadata[clientAPIKeyQuotaDailyTokensMetadataKey]),
+		MonthlyTokens:   parseClientAPIKeyQuotaMetadataCount(metadata[clientAPIKeyQuotaMonthlyTokensMetadataKey]),
+		TotalTokens:     parseClientAPIKeyQuotaMetadataCount(metadata[clientAPIKeyQuotaTotalTokensMetadataKey]),
+		DailyRequests:   parseClientAPIKeyQuotaMetadataCount(metadata[clientAPIKeyQuotaDailyRequestsMetadataKey]),
+		MonthlyRequests: parseClientAPIKeyQuotaMetadataCount(metadata[clientAPIKeyQuotaMonthlyRequestsMetadataKey]),
+		TotalRequests:   parseClientAPIKeyQuotaMetadataCount(metadata[clientAPIKeyQuotaTotalRequestsMetadataKey]),
 	})
 }
 
@@ -96,6 +146,14 @@ func parseClientAPIKeyQuotaMetadataValue(value string) float64 {
 		return 0
 	}
 	return normalizeClientAPIKeyQuotaLimit(parsed)
+}
+
+func parseClientAPIKeyQuotaMetadataCount(value string) int64 {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
 }
 
 // SanitizeClientAPIKeys normalizes the configured client-facing API keys.
@@ -389,6 +447,48 @@ func parseClientAPIKeyQuota(raw any) ClientAPIKeyQuota {
 			"total-spend",
 			"totalSpend",
 		),
+		DailyTokens: extractClientAPIKeyQuotaCount(
+			record,
+			"daily-tokens",
+			"dailyTokens",
+			"daily-token-limit",
+			"dailyTokenLimit",
+		),
+		MonthlyTokens: extractClientAPIKeyQuotaCount(
+			record,
+			"monthly-tokens",
+			"monthlyTokens",
+			"monthly-token-limit",
+			"monthlyTokenLimit",
+		),
+		TotalTokens: extractClientAPIKeyQuotaCount(
+			record,
+			"total-tokens",
+			"totalTokens",
+			"total-token-limit",
+			"totalTokenLimit",
+		),
+		DailyRequests: extractClientAPIKeyQuotaCount(
+			record,
+			"daily-requests",
+			"dailyRequests",
+			"daily-request-limit",
+			"dailyRequestLimit",
+		),
+		MonthlyRequests: extractClientAPIKeyQuotaCount(
+			record,
+			"monthly-requests",
+			"monthlyRequests",
+			"monthly-request-limit",
+			"monthlyRequestLimit",
+		),
+		TotalRequests: extractClientAPIKeyQuotaCount(
+			record,
+			"total-requests",
+			"totalRequests",
+			"total-request-limit",
+			"totalRequestLimit",
+		),
 	})
 }
 
@@ -399,6 +499,17 @@ func extractClientAPIKeyQuotaLimit(record map[string]any, names ...string) float
 			continue
 		}
 		return parseClientAPIKeyQuotaLimit(raw)
+	}
+	return 0
+}
+
+func extractClientAPIKeyQuotaCount(record map[string]any, names ...string) int64 {
+	for _, name := range names {
+		raw, ok := record[name]
+		if !ok {
+			continue
+		}
+		return parseClientAPIKeyQuotaCount(raw)
 	}
 	return 0
 }
@@ -446,8 +557,73 @@ func parseClientAPIKeyQuotaLimit(raw any) float64 {
 	}
 }
 
+func parseClientAPIKeyQuotaCount(raw any) int64 {
+	var parsed int64
+	switch typed := raw.(type) {
+	case int:
+		parsed = int64(typed)
+	case int8:
+		parsed = int64(typed)
+	case int16:
+		parsed = int64(typed)
+	case int32:
+		parsed = int64(typed)
+	case int64:
+		parsed = typed
+	case uint:
+		if uint64(typed) > uint64(math.MaxInt64) {
+			return 0
+		}
+		parsed = int64(typed)
+	case uint8:
+		parsed = int64(typed)
+	case uint16:
+		parsed = int64(typed)
+	case uint32:
+		parsed = int64(typed)
+	case uint64:
+		if typed > uint64(math.MaxInt64) {
+			return 0
+		}
+		parsed = int64(typed)
+	case float32:
+		return parseClientAPIKeyQuotaFloatCount(float64(typed))
+	case float64:
+		return parseClientAPIKeyQuotaFloatCount(typed)
+	case json.Number:
+		value, err := typed.Int64()
+		if err != nil {
+			return 0
+		}
+		parsed = value
+	case string:
+		value, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil {
+			return 0
+		}
+		parsed = value
+	default:
+		return 0
+	}
+	return normalizeClientAPIKeyQuotaCount(parsed)
+}
+
+func parseClientAPIKeyQuotaFloatCount(value float64) int64 {
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value >= float64(math.MaxInt64) {
+		return 0
+	}
+	return int64(value)
+}
+
 func normalizeClientAPIKeyQuotaLimit(limit float64) float64 {
 	if limit <= 0 || math.IsNaN(limit) || math.IsInf(limit, 0) {
+		return 0
+	}
+	return limit
+}
+
+func normalizeClientAPIKeyQuotaCount(limit int64) int64 {
+	if limit <= 0 {
 		return 0
 	}
 	return limit
@@ -518,9 +694,15 @@ func mergeClientAPIKeyQuota(base, extra ClientAPIKeyQuota) ClientAPIKeyQuota {
 	base = NormalizeClientAPIKeyQuota(base)
 	extra = NormalizeClientAPIKeyQuota(extra)
 	return ClientAPIKeyQuota{
-		DailyCost:   mergeClientAPIKeyQuotaLimit(base.DailyCost, extra.DailyCost),
-		MonthlyCost: mergeClientAPIKeyQuotaLimit(base.MonthlyCost, extra.MonthlyCost),
-		TotalCost:   mergeClientAPIKeyQuotaLimit(base.TotalCost, extra.TotalCost),
+		DailyCost:       mergeClientAPIKeyQuotaLimit(base.DailyCost, extra.DailyCost),
+		MonthlyCost:     mergeClientAPIKeyQuotaLimit(base.MonthlyCost, extra.MonthlyCost),
+		TotalCost:       mergeClientAPIKeyQuotaLimit(base.TotalCost, extra.TotalCost),
+		DailyTokens:     mergeClientAPIKeyQuotaCount(base.DailyTokens, extra.DailyTokens),
+		MonthlyTokens:   mergeClientAPIKeyQuotaCount(base.MonthlyTokens, extra.MonthlyTokens),
+		TotalTokens:     mergeClientAPIKeyQuotaCount(base.TotalTokens, extra.TotalTokens),
+		DailyRequests:   mergeClientAPIKeyQuotaCount(base.DailyRequests, extra.DailyRequests),
+		MonthlyRequests: mergeClientAPIKeyQuotaCount(base.MonthlyRequests, extra.MonthlyRequests),
+		TotalRequests:   mergeClientAPIKeyQuotaCount(base.TotalRequests, extra.TotalRequests),
 	}
 }
 
@@ -537,4 +719,16 @@ func mergeClientAPIKeyQuotaLimit(base, extra float64) float64 {
 		return extra
 	}
 	return base
+}
+
+func mergeClientAPIKeyQuotaCount(base, extra int64) int64 {
+	base = normalizeClientAPIKeyQuotaCount(base)
+	extra = normalizeClientAPIKeyQuotaCount(extra)
+	if base == 0 {
+		return extra
+	}
+	if extra == 0 || extra >= base {
+		return base
+	}
+	return extra
 }

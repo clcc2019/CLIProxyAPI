@@ -108,6 +108,39 @@ func TestRedisOptions_MaxRetriesNegativeOneDisables(t *testing.T) {
 	}
 }
 
+func TestClientAPIKeyQuotaCounterKeySeparatesResources(t *testing.T) {
+	store := &Store{keyPrefix: "team"}
+	if got := store.clientAPIKeyQuotaCounterKey("hash", "daily", "2026-05-07", "requests"); got != "team:quota:client-api-key:hash:daily:requests:2026-05-07" {
+		t.Fatalf("request counter key = %q", got)
+	}
+	if got := store.clientAPIKeyQuotaCounterKey("hash", "total", "", "tokens"); got != "team:quota:client-api-key:hash:total:tokens" {
+		t.Fatalf("token counter key = %q", got)
+	}
+}
+
+func TestRedisQuotaCountParsesOnlyIntegers(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  int64
+		ok    bool
+	}{
+		{name: "integer string", value: "42", want: 42, ok: true},
+		{name: "integer bytes", value: []byte("7"), want: 7, ok: true},
+		{name: "fractional", value: "4.2"},
+		{name: "zero", value: "0"},
+		{name: "negative", value: "-1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := redisQuotaCount(tt.value)
+			if ok != tt.ok || (tt.ok && got != tt.want) {
+				t.Fatalf("redisQuotaCount(%#v) = %d, %t; want %d, %t", tt.value, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestReconcileProxyLeaseArgsTrimsAndCounts(t *testing.T) {
 	args := reconcileProxyLeaseArgs(
 		[]string{" auth-a ", "", "\tauth-b\n"},

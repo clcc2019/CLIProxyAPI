@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -20,6 +21,16 @@ type fakeClientAPIKeyQuotaAdd struct {
 	apiKey    string
 	timestamp time.Time
 	cost      float64
+}
+
+type fakeClientAPIKeyQuotaCounterStore struct {
+	*fakeClientAPIKeyQuotaStore
+	counterAdds []ClientAPIKeyQuotaUsage
+}
+
+func (s *fakeClientAPIKeyQuotaCounterStore) AddClientAPIKeyQuotaUsageCounters(_ context.Context, _ string, _ time.Time, usage ClientAPIKeyQuotaUsage) error {
+	s.counterAdds = append(s.counterAdds, usage)
+	return nil
 }
 
 func (s *fakeClientAPIKeyQuotaStore) LoadClientAPIKeyQuotaUsage(context.Context, string, time.Time) (ClientAPIKeyQuotaUsage, bool, error) {
@@ -93,6 +104,93 @@ func TestClientAPIKeyQuotaTrackerUsesUTCWindows(t *testing.T) {
 	}
 	if exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{MonthlyCost: 1}, now); exceeded == nil {
 		t.Fatal("same UTC month should count toward monthly quota")
+	}
+}
+
+func TestClientAPIKeyQuotaTrackerChecksRequestAndTokenUsage(t *testing.T) {
+	tracker := newClientAPIKeyQuotaTracker()
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	tracker.record(coreusage.Record{
+		APIKey:      "client-key",
+		RequestedAt: now,
+		Model:       "unknown-model",
+		Detail:      coreusage.Detail{TotalTokens: 75},
+	})
+
+	if exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{DailyRequests: 1}, now); exceeded == nil || exceeded.Resource != "requests" || exceeded.Used != 1 {
+		t.Fatalf("daily request quota = %#v, want one request exceeded", exceeded)
+	}
+	if exceeded := tracker.check("client-key", config.ClientAPIKeyQuota{DailyTokens: 75}, now); exceeded == nil || exceeded.Resource != "tokens" || exceeded.Used != 75 {
+		t.Fatalf("daily token quota = %#v, want 75 tokens exceeded", exceeded)
+	}
+}
+
+func TestClientAPIKeyQuotaDoesNotDoubleCountAdditionalModelUsage(t *testing.T) {
+	tracker := newClientAPIKeyQuotaTracker()
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	tracker.record(coreusage.Record{
+		APIKey:      "client-key",
+		RequestedAt: now,
+		Detail:      coreusage.Detail{TotalTokens: 75},
+	})
+	tracker.record(coreusage.Record{
+		APIKey:               "client-key",
+		RequestedAt:          now,
+		AdditionalModelUsage: true,
+		Detail:               coreusage.Detail{TotalTokens: 25},
+	})
+
+	usage := tracker.usage("client-key", now)
+	if usage.DailyRequests != 1 || usage.TotalRequests != 1 {
+		t.Fatalf("request usage = %#v, want one request", usage)
+	}
+	if usage.DailyTokens != 100 || usage.TotalTokens != 100 {
+		t.Fatalf("token usage = %#v, want 100 tokens", usage)
+	}
+}
+
+func TestClientAPIKeyQuotaCountersSaturateAtMaxInt64(t *testing.T) {
+	tracker := newClientAPIKeyQuotaTracker()
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	tracker.record(coreusage.Record{
+		APIKey:      "client-key",
+		RequestedAt: now,
+		Detail:      coreusage.Detail{TotalTokens: math.MaxInt64},
+	})
+	tracker.record(coreusage.Record{
+		APIKey:      "client-key",
+		RequestedAt: now,
+		Detail:      coreusage.Detail{TotalTokens: 1},
+	})
+
+	usage := tracker.usage("client-key", now)
+	if usage.TotalTokens != math.MaxInt64 {
+		t.Fatalf("total tokens = %d, want saturation at %d", usage.TotalTokens, math.MaxInt64)
+	}
+}
+
+func TestClientAPIKeyQuotaPluginWritesRequestAndTokenCountersToExtendedStore(t *testing.T) {
+	resetClientAPIKeyQuotaGlobals(t)
+	store := &fakeClientAPIKeyQuotaCounterStore{fakeClientAPIKeyQuotaStore: &fakeClientAPIKeyQuotaStore{}}
+	SetClientAPIKeyQuotaStore(store)
+
+	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	clientAPIKeyQuotaPlugin{}.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:      "client-key",
+		RequestedAt: now,
+		Model:       "unknown-model",
+		Detail:      coreusage.Detail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	})
+
+	if len(store.counterAdds) != 1 {
+		t.Fatalf("counter store adds = %d, want 1", len(store.counterAdds))
+	}
+	got := store.counterAdds[0]
+	if got.DailyRequests != 1 || got.MonthlyRequests != 1 || got.TotalRequests != 1 {
+		t.Fatalf("request counters = %#v, want all 1", got)
+	}
+	if got.DailyTokens != 15 || got.MonthlyTokens != 15 || got.TotalTokens != 15 {
+		t.Fatalf("token counters = %#v, want all 15", got)
 	}
 }
 

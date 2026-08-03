@@ -83,6 +83,30 @@ func newManagementTestServer(t *testing.T) *Server {
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
 
+func TestNewServer_NilConfigUsesDefaults(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := NewServer(
+		nil,
+		nil,
+		nil,
+		filepath.Join(t.TempDir(), "config.yaml"),
+		WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger {
+			return nil
+		}),
+	)
+
+	if server == nil {
+		t.Fatal("expected server to be initialized")
+	}
+	if server.cfg == nil {
+		t.Fatal("expected nil config to be normalized")
+	}
+	if server.server == nil {
+		t.Fatal("expected underlying http server to be initialized")
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	server := newTestServer(t)
 

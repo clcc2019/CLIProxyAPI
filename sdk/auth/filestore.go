@@ -287,14 +287,13 @@ func (s *FileTokenStore) readAuthFileCandidates(ctx context.Context, dir, absDir
 		}()
 	}
 
+sendJobs:
 	for _, candidate := range candidates {
 		select {
 		case <-ctxRead.Done():
-			break
+			break sendJobs
 		case jobs <- candidate:
-			continue
 		}
-		break
 	}
 	close(jobs)
 	wg.Wait()

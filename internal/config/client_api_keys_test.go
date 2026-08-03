@@ -214,7 +214,9 @@ func TestClientAPIKeysQuotaJSONAliases(t *testing.T) {
 			"quota": {
 				"dailyCost": 1.25,
 				"monthly-cost": "20",
-				"totalSpend": 100
+				"totalSpend": 100,
+				"dailyRequests": 3,
+				"monthly-tokens": "400"
 			}
 		}
 	]`)
@@ -227,13 +229,54 @@ func TestClientAPIKeysQuotaJSONAliases(t *testing.T) {
 	want := ClientAPIKeys{{
 		APIKey: "quota-key",
 		Quota: ClientAPIKeyQuota{
-			DailyCost:   1.25,
-			MonthlyCost: 20,
-			TotalCost:   100,
+			DailyCost:     1.25,
+			MonthlyCost:   20,
+			TotalCost:     100,
+			DailyRequests: 3,
+			MonthlyTokens: 400,
 		},
 	}}
 	if !reflect.DeepEqual(parsed, want) {
 		t.Fatalf("unexpected api keys: %#v", parsed)
+	}
+}
+
+func TestClientAPIKeysQuotaSupportsRequestAndTokenLimits(t *testing.T) {
+	type payload struct {
+		APIKeys ClientAPIKeys `yaml:"api-keys"`
+	}
+
+	input := `
+api-keys:
+  - api-key: "quota-key"
+    quota:
+      daily-requests: 2
+      monthly-requests: 20
+      total-tokens: 1000
+      daily-tokens: 100
+`
+
+	var parsed payload
+	if err := yaml.Unmarshal([]byte(input), &parsed); err != nil {
+		t.Fatalf("yaml unmarshal failed: %v", err)
+	}
+	want := ClientAPIKeys{{
+		APIKey: "quota-key",
+		Quota: ClientAPIKeyQuota{
+			DailyRequests:   2,
+			MonthlyRequests: 20,
+			DailyTokens:     100,
+			TotalTokens:     1000,
+		},
+	}}
+	if !reflect.DeepEqual(parsed.APIKeys, want) {
+		t.Fatalf("unexpected api keys: %#v", parsed.APIKeys)
+	}
+
+	metadata := map[string]string{}
+	AddClientAPIKeyQuotaMetadata(metadata, want[0].Quota)
+	if got := ClientAPIKeyQuotaFromMetadata(metadata); !reflect.DeepEqual(got, want[0].Quota) {
+		t.Fatalf("quota metadata = %#v, want %#v", got, want[0].Quota)
 	}
 }
 

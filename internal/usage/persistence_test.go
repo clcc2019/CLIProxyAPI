@@ -193,6 +193,12 @@ func TestPersistedStateRestoresClientAPIKeyQuotaCounters(t *testing.T) {
 	if usage.DailyCost != 1 || usage.MonthlyCost != 1 || usage.TotalCost != 1 {
 		t.Fatalf("restored quota usage = %+v, want all costs 1", usage)
 	}
+	if usage.DailyRequests != 1 || usage.MonthlyRequests != 1 || usage.TotalRequests != 1 {
+		t.Fatalf("restored quota requests = %+v, want all requests 1", usage)
+	}
+	if usage.DailyTokens != 1_000_000 || usage.MonthlyTokens != 1_000_000 || usage.TotalTokens != 1_000_000 {
+		t.Fatalf("restored quota tokens = %+v, want all tokens 1000000", usage)
+	}
 }
 
 func TestPersistedStateRestoresCompactedAggregateBucket(t *testing.T) {

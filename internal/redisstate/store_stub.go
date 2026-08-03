@@ -49,6 +49,9 @@ func (s *Store) LoadClientAPIKeyQuotaUsage(_ context.Context, _ string, _ time.T
 func (s *Store) AddClientAPIKeyQuotaUsage(_ context.Context, _ string, _ time.Time, _ float64) error {
 	return nil
 }
+func (s *Store) AddClientAPIKeyQuotaUsageCounters(_ context.Context, _ string, _ time.Time, _ internalusage.ClientAPIKeyQuotaUsage) error {
+	return nil
+}
 func (s *Store) SeedClientAPIKeyQuotaState(_ context.Context, _ internalusage.ClientAPIKeyQuotaState) error {
 	return nil
 }

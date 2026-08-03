@@ -50,7 +50,8 @@ auth-dir: "~/.cli-proxy-api"
 
 # API keys for client authentication. Add your own high-entropy keys.
 # String entries keep the legacy unlimited format. Object entries can restrict
-# visible models and USD spend quota. Quota windows are UTC and use completed usage records.
+# visible models and request, token, and USD spend quotas. Quota windows are UTC
+# and use completed usage records.
 # Example:
 # api-keys:
 #   - "sk-client-unlimited"
@@ -59,6 +60,10 @@ auth-dir: "~/.cli-proxy-api"
 #     allowed-models: ["gpt-*", "claude-*"]
 #     excluded-models: ["gpt-image-*"]
 #     quota:
+#       daily-requests: 1000
+#       monthly-requests: 30000
+#       daily-tokens: 100000
+#       monthly-tokens: 3000000
 #       daily-cost: 1.5
 #       monthly-cost: 30
 #       total-cost: 100

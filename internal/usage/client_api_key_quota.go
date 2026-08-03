@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,8 @@ func (clientAPIKeyQuotaPlugin) HandleUsageBatch(items []coreusage.Item) {
 			add.timestamp = addResult.timestamp
 		}
 		add.cost += addResult.cost
+		add.requests += addResult.requests
+		add.tokens += addResult.tokens
 		pending[key] = add
 	}
 	if len(pending) == 0 || store == nil {
@@ -53,8 +56,25 @@ func (clientAPIKeyQuotaPlugin) HandleUsageBatch(items []coreusage.Item) {
 	ctx := clientAPIKeyQuotaBatchContext(items)
 	storeCtx, cancel := clientAPIKeyQuotaStoreContext(ctx)
 	defer cancel()
+	counterStore, supportsCounters := store.(clientAPIKeyQuotaCounterStore)
 	for key, add := range pending {
-		if err := store.AddClientAPIKeyQuotaUsage(storeCtx, key.apiKey, add.timestamp, add.cost); err != nil {
+		var err error
+		if supportsCounters {
+			err = counterStore.AddClientAPIKeyQuotaUsageCounters(storeCtx, key.apiKey, add.timestamp, ClientAPIKeyQuotaUsage{
+				DailyCost:       add.cost,
+				MonthlyCost:     add.cost,
+				TotalCost:       add.cost,
+				DailyTokens:     add.tokens,
+				MonthlyTokens:   add.tokens,
+				TotalTokens:     add.tokens,
+				DailyRequests:   add.requests,
+				MonthlyRequests: add.requests,
+				TotalRequests:   add.requests,
+			})
+		} else if add.cost > 0 {
+			err = store.AddClientAPIKeyQuotaUsage(storeCtx, key.apiKey, add.timestamp, add.cost)
+		}
+		if err != nil {
 			log.WithError(err).Debug("client api key quota redis update failed")
 		}
 	}
@@ -69,6 +89,8 @@ type clientAPIKeyQuotaStoreAddKey struct {
 type clientAPIKeyQuotaStoreAdd struct {
 	timestamp time.Time
 	cost      float64
+	requests  int64
+	tokens    int64
 }
 
 type clientAPIKeyQuotaRecordAdd struct {
@@ -77,6 +99,8 @@ type clientAPIKeyQuotaRecordAdd struct {
 	day       string
 	month     string
 	cost      float64
+	requests  int64
+	tokens    int64
 }
 
 func clientAPIKeyQuotaBatchContext(items []coreusage.Item) context.Context {
@@ -90,9 +114,15 @@ func clientAPIKeyQuotaBatchContext(items []coreusage.Item) context.Context {
 
 // ClientAPIKeyQuotaUsage is the quota-relevant usage already recorded for one API key.
 type ClientAPIKeyQuotaUsage struct {
-	DailyCost   float64
-	MonthlyCost float64
-	TotalCost   float64
+	DailyCost       float64
+	MonthlyCost     float64
+	TotalCost       float64
+	DailyTokens     int64
+	MonthlyTokens   int64
+	TotalTokens     int64
+	DailyRequests   int64
+	MonthlyRequests int64
+	TotalRequests   int64
 }
 
 // ClientAPIKeyQuotaExceeded describes the first configured quota limit that has been reached.
@@ -120,7 +150,9 @@ func (e *ClientAPIKeyQuotaExceeded) RetryAfter(now time.Time) time.Duration {
 }
 
 type clientAPIKeyQuotaCounters struct {
-	cost float64
+	cost     float64
+	requests int64
+	tokens   int64
 }
 
 // ClientAPIKeyQuotaState is the portable persisted state used to seed external
@@ -129,10 +161,19 @@ type ClientAPIKeyQuotaState struct {
 	Total   map[string]float64            `json:"total,omitempty"`
 	Daily   map[string]map[string]float64 `json:"daily,omitempty"`
 	Monthly map[string]map[string]float64 `json:"monthly,omitempty"`
+
+	TotalTokens     map[string]int64            `json:"total_tokens,omitempty"`
+	DailyTokens     map[string]map[string]int64 `json:"daily_tokens,omitempty"`
+	MonthlyTokens   map[string]map[string]int64 `json:"monthly_tokens,omitempty"`
+	TotalRequests   map[string]int64            `json:"total_requests,omitempty"`
+	DailyRequests   map[string]map[string]int64 `json:"daily_requests,omitempty"`
+	MonthlyRequests map[string]map[string]int64 `json:"monthly_requests,omitempty"`
 }
 
 func (state ClientAPIKeyQuotaState) isZero() bool {
-	return len(state.Total) == 0 && len(state.Daily) == 0 && len(state.Monthly) == 0
+	return len(state.Total) == 0 && len(state.Daily) == 0 && len(state.Monthly) == 0 &&
+		len(state.TotalTokens) == 0 && len(state.DailyTokens) == 0 && len(state.MonthlyTokens) == 0 &&
+		len(state.TotalRequests) == 0 && len(state.DailyRequests) == 0 && len(state.MonthlyRequests) == 0
 }
 
 // IsZero reports whether the state contains any quota counters.
@@ -147,6 +188,13 @@ type ClientAPIKeyQuotaStore interface {
 	LoadClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, now time.Time) (ClientAPIKeyQuotaUsage, bool, error)
 	AddClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, timestamp time.Time, cost float64) error
 	SeedClientAPIKeyQuotaState(ctx context.Context, state ClientAPIKeyQuotaState) error
+}
+
+// clientAPIKeyQuotaCounterStore is an optional extension implemented by shared
+// stores that can persist request/token counters as well as spend counters.
+// The base interface remains cost-only for compatibility with existing stores.
+type clientAPIKeyQuotaCounterStore interface {
+	AddClientAPIKeyQuotaUsageCounters(ctx context.Context, apiKey string, timestamp time.Time, usage ClientAPIKeyQuotaUsage) error
 }
 
 type clientAPIKeyQuotaTracker struct {
@@ -176,9 +224,10 @@ const clientAPIKeyQuotaStoreTimeout = 2 * time.Second
 
 func newClientAPIKeyQuotaTracker() *clientAPIKeyQuotaTracker {
 	return &clientAPIKeyQuotaTracker{
-		total:   make(map[string]clientAPIKeyQuotaCounters),
-		daily:   make(map[string]map[string]clientAPIKeyQuotaCounters),
-		monthly: make(map[string]map[string]clientAPIKeyQuotaCounters),
+		modelPrices: config.EffectiveModelPrices(nil),
+		total:       make(map[string]clientAPIKeyQuotaCounters),
+		daily:       make(map[string]map[string]clientAPIKeyQuotaCounters),
+		monthly:     make(map[string]map[string]clientAPIKeyQuotaCounters),
 	}
 }
 
@@ -198,6 +247,11 @@ func CheckClientAPIKeyQuota(apiKey string, quota config.ClientAPIKeyQuota, now t
 		usage, ok, err := store.LoadClientAPIKeyQuotaUsage(ctx, apiKey, now)
 		cancel()
 		if err == nil && ok {
+			// Older shared stores only know about spend counters. Keep local
+			// request/token counters available while letting the shared store
+			// remain authoritative for cost.
+			localUsage := defaultClientAPIKeyQuotaTracker.usage(apiKey, now)
+			usage = fillMissingClientAPIKeyQuotaCounters(usage, localUsage)
 			return evaluateNormalizedClientAPIKeyQuota(quota, usage, now)
 		}
 		if err != nil {
@@ -208,7 +262,31 @@ func CheckClientAPIKeyQuota(apiKey string, quota config.ClientAPIKeyQuota, now t
 }
 
 func normalizedClientAPIKeyQuotaHasLimits(quota config.ClientAPIKeyQuota) bool {
-	return quota.DailyCost > 0 || quota.MonthlyCost > 0 || quota.TotalCost > 0
+	return quota.DailyCost > 0 || quota.MonthlyCost > 0 || quota.TotalCost > 0 ||
+		quota.DailyTokens > 0 || quota.MonthlyTokens > 0 || quota.TotalTokens > 0 ||
+		quota.DailyRequests > 0 || quota.MonthlyRequests > 0 || quota.TotalRequests > 0
+}
+
+func fillMissingClientAPIKeyQuotaCounters(usage, fallback ClientAPIKeyQuotaUsage) ClientAPIKeyQuotaUsage {
+	if usage.DailyTokens == 0 {
+		usage.DailyTokens = fallback.DailyTokens
+	}
+	if usage.MonthlyTokens == 0 {
+		usage.MonthlyTokens = fallback.MonthlyTokens
+	}
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = fallback.TotalTokens
+	}
+	if usage.DailyRequests == 0 {
+		usage.DailyRequests = fallback.DailyRequests
+	}
+	if usage.MonthlyRequests == 0 {
+		usage.MonthlyRequests = fallback.MonthlyRequests
+	}
+	if usage.TotalRequests == 0 {
+		usage.TotalRequests = fallback.TotalRequests
+	}
+	return usage
 }
 
 // SetClientAPIKeyQuotaStore swaps the optional shared quota counter backend.
@@ -248,9 +326,15 @@ func (t *clientAPIKeyQuotaTracker) persistedState() persistedClientAPIKeyQuotaSt
 	defer t.mu.RUnlock()
 
 	return persistedClientAPIKeyQuotaState{
-		Total:   persistedClientAPIKeyQuotaCounters(t.total),
-		Daily:   persistedClientAPIKeyQuotaBuckets(t.daily),
-		Monthly: persistedClientAPIKeyQuotaBuckets(t.monthly),
+		Total:           persistedClientAPIKeyQuotaCounters(t.total),
+		Daily:           persistedClientAPIKeyQuotaBuckets(t.daily),
+		Monthly:         persistedClientAPIKeyQuotaBuckets(t.monthly),
+		TotalTokens:     persistedClientAPIKeyQuotaCountCounters(t.total, func(c clientAPIKeyQuotaCounters) int64 { return c.tokens }),
+		DailyTokens:     persistedClientAPIKeyQuotaCountBuckets(t.daily, func(c clientAPIKeyQuotaCounters) int64 { return c.tokens }),
+		MonthlyTokens:   persistedClientAPIKeyQuotaCountBuckets(t.monthly, func(c clientAPIKeyQuotaCounters) int64 { return c.tokens }),
+		TotalRequests:   persistedClientAPIKeyQuotaCountCounters(t.total, func(c clientAPIKeyQuotaCounters) int64 { return c.requests }),
+		DailyRequests:   persistedClientAPIKeyQuotaCountBuckets(t.daily, func(c clientAPIKeyQuotaCounters) int64 { return c.requests }),
+		MonthlyRequests: persistedClientAPIKeyQuotaCountBuckets(t.monthly, func(c clientAPIKeyQuotaCounters) int64 { return c.requests }),
 	}
 }
 
@@ -268,6 +352,9 @@ func (t *clientAPIKeyQuotaTracker) restorePersistedState(state persistedClientAP
 	t.total = restoredClientAPIKeyQuotaCounters(state.Total)
 	t.daily = restoredClientAPIKeyQuotaBuckets(state.Daily)
 	t.monthly = restoredClientAPIKeyQuotaBuckets(state.Monthly)
+	mergeRestoredClientAPIKeyQuotaCounters(t.total, state.TotalTokens, state.TotalRequests)
+	mergeRestoredClientAPIKeyQuotaBuckets(t.daily, state.DailyTokens, state.DailyRequests)
+	mergeRestoredClientAPIKeyQuotaBuckets(t.monthly, state.MonthlyTokens, state.MonthlyRequests)
 	t.pruneLocked(now)
 }
 
@@ -288,14 +375,15 @@ func (t *clientAPIKeyQuotaTracker) record(record coreusage.Record) float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	cost := t.costForRecordLocked(record)
-	if cost <= 0 {
-		return 0
+	tokens := normaliseDetail(record.Provider, record.Detail).TotalTokens
+	if tokens < 0 {
+		tokens = 0
 	}
-
-	t.addCountersLocked(t.total, apiKey, "", cost)
-	t.addCountersLocked(t.daily, apiKey, timestamp.Format("2006-01-02"), cost)
-	t.addCountersLocked(t.monthly, apiKey, timestamp.Format("2006-01"), cost)
+	requests := clientAPIKeyQuotaRequestCount(record)
+	cost := t.costForRecordLocked(record)
+	t.addCountersLocked(t.total, apiKey, "", cost, requests, tokens)
+	t.addCountersLocked(t.daily, apiKey, timestamp.Format("2006-01-02"), cost, requests, tokens)
+	t.addCountersLocked(t.monthly, apiKey, timestamp.Format("2006-01"), cost, requests, tokens)
 	t.pruneLocked(timestamp)
 	return cost
 }
@@ -307,9 +395,6 @@ func (t *clientAPIKeyQuotaTracker) recordBatch(items []coreusage.Item, collectAd
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.modelPrices) == 0 {
-		return nil
-	}
 
 	var adds []clientAPIKeyQuotaRecordAdd
 	if collectAdds {
@@ -334,10 +419,12 @@ func (t *clientAPIKeyQuotaTracker) recordBatch(items []coreusage.Item, collectAd
 			timestamp = time.Now().UTC()
 		}
 
-		cost := t.costForRecordLocked(record)
-		if cost <= 0 {
-			continue
+		tokens := normaliseDetail(record.Provider, record.Detail).TotalTokens
+		if tokens < 0 {
+			tokens = 0
 		}
+		requests := clientAPIKeyQuotaRequestCount(record)
+		cost := t.costForRecordLocked(record)
 
 		year, monthValue, _ := timestamp.Date()
 		yearDay := timestamp.YearDay()
@@ -351,9 +438,9 @@ func (t *clientAPIKeyQuotaTracker) recordBatch(items []coreusage.Item, collectAd
 			lastMonth = monthValue
 			lastMonthValue = timestamp.Format("2006-01")
 		}
-		t.addCountersLocked(t.total, apiKey, "", cost)
-		t.addCountersLocked(t.daily, apiKey, lastDay, cost)
-		t.addCountersLocked(t.monthly, apiKey, lastMonthValue, cost)
+		t.addCountersLocked(t.total, apiKey, "", cost, requests, tokens)
+		t.addCountersLocked(t.daily, apiKey, lastDay, cost, requests, tokens)
+		t.addCountersLocked(t.monthly, apiKey, lastMonthValue, cost, requests, tokens)
 		if pruneReference.IsZero() || timestamp.After(pruneReference) {
 			pruneReference = timestamp
 		}
@@ -364,6 +451,8 @@ func (t *clientAPIKeyQuotaTracker) recordBatch(items []coreusage.Item, collectAd
 				day:       lastDay,
 				month:     lastMonthValue,
 				cost:      cost,
+				requests:  requests,
+				tokens:    tokens,
 			})
 		}
 	}
@@ -414,11 +503,29 @@ func evaluateNormalizedClientAPIKeyQuota(quota config.ClientAPIKeyQuota, usage C
 	if quota.TotalCost > 0 && usage.TotalCost >= quota.TotalCost {
 		return &ClientAPIKeyQuotaExceeded{Scope: "total", Resource: "cost", Limit: quota.TotalCost, Used: usage.TotalCost}
 	}
+	if quota.TotalRequests > 0 && usage.TotalRequests >= quota.TotalRequests {
+		return &ClientAPIKeyQuotaExceeded{Scope: "total", Resource: "requests", Limit: float64(quota.TotalRequests), Used: float64(usage.TotalRequests)}
+	}
+	if quota.TotalTokens > 0 && usage.TotalTokens >= quota.TotalTokens {
+		return &ClientAPIKeyQuotaExceeded{Scope: "total", Resource: "tokens", Limit: float64(quota.TotalTokens), Used: float64(usage.TotalTokens)}
+	}
 	if quota.MonthlyCost > 0 && usage.MonthlyCost >= quota.MonthlyCost {
 		return &ClientAPIKeyQuotaExceeded{Scope: "monthly", Resource: "cost", Limit: quota.MonthlyCost, Used: usage.MonthlyCost, ResetAt: nextMonthlyResetUTC(now)}
 	}
+	if quota.MonthlyRequests > 0 && usage.MonthlyRequests >= quota.MonthlyRequests {
+		return &ClientAPIKeyQuotaExceeded{Scope: "monthly", Resource: "requests", Limit: float64(quota.MonthlyRequests), Used: float64(usage.MonthlyRequests), ResetAt: nextMonthlyResetUTC(now)}
+	}
+	if quota.MonthlyTokens > 0 && usage.MonthlyTokens >= quota.MonthlyTokens {
+		return &ClientAPIKeyQuotaExceeded{Scope: "monthly", Resource: "tokens", Limit: float64(quota.MonthlyTokens), Used: float64(usage.MonthlyTokens), ResetAt: nextMonthlyResetUTC(now)}
+	}
 	if quota.DailyCost > 0 && usage.DailyCost >= quota.DailyCost {
 		return &ClientAPIKeyQuotaExceeded{Scope: "daily", Resource: "cost", Limit: quota.DailyCost, Used: usage.DailyCost, ResetAt: nextDailyResetUTC(now)}
+	}
+	if quota.DailyRequests > 0 && usage.DailyRequests >= quota.DailyRequests {
+		return &ClientAPIKeyQuotaExceeded{Scope: "daily", Resource: "requests", Limit: float64(quota.DailyRequests), Used: float64(usage.DailyRequests), ResetAt: nextDailyResetUTC(now)}
+	}
+	if quota.DailyTokens > 0 && usage.DailyTokens >= quota.DailyTokens {
+		return &ClientAPIKeyQuotaExceeded{Scope: "daily", Resource: "tokens", Limit: float64(quota.DailyTokens), Used: float64(usage.DailyTokens), ResetAt: nextDailyResetUTC(now)}
 	}
 	return nil
 }
@@ -464,9 +571,15 @@ func (t *clientAPIKeyQuotaTracker) usage(apiKey string, now time.Time) ClientAPI
 	daily := lookupClientAPIKeyQuotaCounters(t.daily, apiKey, now.Format("2006-01-02"))
 	monthly := lookupClientAPIKeyQuotaCounters(t.monthly, apiKey, now.Format("2006-01"))
 	return ClientAPIKeyQuotaUsage{
-		DailyCost:   daily.cost,
-		MonthlyCost: monthly.cost,
-		TotalCost:   total.cost,
+		DailyCost:       daily.cost,
+		MonthlyCost:     monthly.cost,
+		TotalCost:       total.cost,
+		DailyTokens:     daily.tokens,
+		MonthlyTokens:   monthly.tokens,
+		TotalTokens:     total.tokens,
+		DailyRequests:   daily.requests,
+		MonthlyRequests: monthly.requests,
+		TotalRequests:   total.requests,
 	}
 }
 
@@ -481,11 +594,13 @@ func lookupClientAPIKeyQuotaCounters(source map[string]map[string]clientAPIKeyQu
 	return buckets[bucket]
 }
 
-func (t *clientAPIKeyQuotaTracker) addCountersLocked(source any, apiKey, bucket string, cost float64) {
+func (t *clientAPIKeyQuotaTracker) addCountersLocked(source any, apiKey, bucket string, cost float64, requests, tokens int64) {
 	switch typed := source.(type) {
 	case map[string]clientAPIKeyQuotaCounters:
 		current := typed[apiKey]
 		current.cost += cost
+		current.requests = saturatingAddClientAPIKeyQuotaCount(current.requests, requests)
+		current.tokens = saturatingAddClientAPIKeyQuotaCount(current.tokens, tokens)
 		typed[apiKey] = current
 	case map[string]map[string]clientAPIKeyQuotaCounters:
 		buckets := typed[apiKey]
@@ -495,8 +610,17 @@ func (t *clientAPIKeyQuotaTracker) addCountersLocked(source any, apiKey, bucket 
 		}
 		current := buckets[bucket]
 		current.cost += cost
+		current.requests = saturatingAddClientAPIKeyQuotaCount(current.requests, requests)
+		current.tokens = saturatingAddClientAPIKeyQuotaCount(current.tokens, tokens)
 		buckets[bucket] = current
 	}
+}
+
+func clientAPIKeyQuotaRequestCount(record coreusage.Record) int64 {
+	if record.AdditionalModelUsage {
+		return 0
+	}
+	return 1
 }
 
 func (t *clientAPIKeyQuotaTracker) costForRecordLocked(record coreusage.Record) float64 {
@@ -558,6 +682,19 @@ func maxInt64(value, minimum int64) int64 {
 		return minimum
 	}
 	return value
+}
+
+func saturatingAddClientAPIKeyQuotaCount(current, increment int64) int64 {
+	if current < 0 {
+		current = 0
+	}
+	if increment <= 0 {
+		return current
+	}
+	if current > math.MaxInt64-increment {
+		return math.MaxInt64
+	}
+	return current + increment
 }
 
 func (t *clientAPIKeyQuotaTracker) pruneLocked(reference time.Time) {
@@ -633,6 +770,54 @@ func persistedClientAPIKeyQuotaBuckets(source map[string]map[string]clientAPIKey
 	return out
 }
 
+func persistedClientAPIKeyQuotaCountCounters(source map[string]clientAPIKeyQuotaCounters, value func(clientAPIKeyQuotaCounters) int64) map[string]int64 {
+	if len(source) == 0 || value == nil {
+		return nil
+	}
+	out := make(map[string]int64, len(source))
+	for apiKey, counters := range source {
+		apiKey = strings.TrimSpace(apiKey)
+		count := value(counters)
+		if apiKey == "" || count <= 0 {
+			continue
+		}
+		out[apiKey] = count
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func persistedClientAPIKeyQuotaCountBuckets(source map[string]map[string]clientAPIKeyQuotaCounters, value func(clientAPIKeyQuotaCounters) int64) map[string]map[string]int64 {
+	if len(source) == 0 || value == nil {
+		return nil
+	}
+	out := make(map[string]map[string]int64, len(source))
+	for apiKey, buckets := range source {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" || len(buckets) == 0 {
+			continue
+		}
+		persistedBuckets := make(map[string]int64, len(buckets))
+		for bucket, counters := range buckets {
+			bucket = strings.TrimSpace(bucket)
+			count := value(counters)
+			if bucket == "" || count <= 0 {
+				continue
+			}
+			persistedBuckets[bucket] = count
+		}
+		if len(persistedBuckets) > 0 {
+			out[apiKey] = persistedBuckets
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func restoredClientAPIKeyQuotaCounters(source map[string]float64) map[string]clientAPIKeyQuotaCounters {
 	out := make(map[string]clientAPIKeyQuotaCounters, len(source))
 	for apiKey, cost := range source {
@@ -665,6 +850,60 @@ func restoredClientAPIKeyQuotaBuckets(source map[string]map[string]float64) map[
 		}
 	}
 	return out
+}
+
+func mergeRestoredClientAPIKeyQuotaCounters(target map[string]clientAPIKeyQuotaCounters, tokens, requests map[string]int64) {
+	if target == nil {
+		return
+	}
+	for apiKey, count := range tokens {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" || count <= 0 {
+			continue
+		}
+		current := target[apiKey]
+		current.tokens = count
+		target[apiKey] = current
+	}
+	for apiKey, count := range requests {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" || count <= 0 {
+			continue
+		}
+		current := target[apiKey]
+		current.requests = count
+		target[apiKey] = current
+	}
+}
+
+func mergeRestoredClientAPIKeyQuotaBuckets(target map[string]map[string]clientAPIKeyQuotaCounters, tokens, requests map[string]map[string]int64) {
+	if target == nil {
+		return
+	}
+	merge := func(source map[string]map[string]int64, set func(*clientAPIKeyQuotaCounters, int64)) {
+		for apiKey, buckets := range source {
+			apiKey = strings.TrimSpace(apiKey)
+			if apiKey == "" || len(buckets) == 0 {
+				continue
+			}
+			targetBuckets := target[apiKey]
+			if targetBuckets == nil {
+				targetBuckets = make(map[string]clientAPIKeyQuotaCounters)
+				target[apiKey] = targetBuckets
+			}
+			for bucket, count := range buckets {
+				bucket = strings.TrimSpace(bucket)
+				if bucket == "" || count <= 0 {
+					continue
+				}
+				current := targetBuckets[bucket]
+				set(&current, count)
+				targetBuckets[bucket] = current
+			}
+		}
+	}
+	merge(tokens, func(counters *clientAPIKeyQuotaCounters, count int64) { counters.tokens = count })
+	merge(requests, func(counters *clientAPIKeyQuotaCounters, count int64) { counters.requests = count })
 }
 
 func nextDailyResetUTC(now time.Time) time.Time {

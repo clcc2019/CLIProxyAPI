@@ -6,9 +6,9 @@ import (
 	"os"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cc "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
 	rr "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 )
 
 func genClaudeReq(r *rand.Rand) map[string]any {
@@ -121,12 +121,12 @@ func TestDumpNew(t *testing.T) {
 		rrq, _ := json.Marshal(genResponsesReq(r))
 		si, _ := json.Marshal(genSanitizeInput(r))
 		out = append(out, map[string]string{
-			"claude_in":   string(cr),
-			"claude_out":  string(cc.ConvertClaudeRequestToCodex("m", cr, true)),
-			"resp_in":     string(rrq),
-			"resp_out":    string(rr.ConvertOpenAIResponsesRequestToCodex("m", rrq, true)),
-			"san_in":      string(si),
-			"san_out":     string(helps.SanitizeCodexInputItemIDs(si)),
+			"claude_in":  string(cr),
+			"claude_out": string(cc.ConvertClaudeRequestToCodex("m", cr, true)),
+			"resp_in":    string(rrq),
+			"resp_out":   string(rr.ConvertOpenAIResponsesRequestToCodex("m", rrq, true)),
+			"san_in":     string(si),
+			"san_out":    string(helps.SanitizeCodexInputItemIDs(si)),
 		})
 	}
 	b, _ := json.Marshal(out)

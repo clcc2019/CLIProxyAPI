@@ -457,7 +457,7 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 	filter := newAuthFilter("", tried)
 	filter.positiveOnly = s.strategy == schedulerStrategyWeightedRoundRobin
 	var smallCandidates [4]mixedProviderCandidate
-	candidates := smallCandidates[:0]
+	var candidates []mixedProviderCandidate
 	if len(normalized) <= len(smallCandidates) {
 		candidates = smallCandidates[:len(normalized)]
 	} else {

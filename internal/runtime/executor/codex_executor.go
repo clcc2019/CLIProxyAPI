@@ -354,7 +354,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 
 	auth = attempt.auth
 	body = attempt.body
-	reasoningReplayApplied = recovery.reasoningReplayApplied
 	result := attempt.result
 	usageOwner := attempt.usageOwner
 	call := attempt.call
@@ -501,7 +500,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	auth = attempt.auth
-	apiKey = attempt.apiKey
 	call := attempt.call
 	body = attempt.body
 	httpResp := attempt.response

@@ -703,8 +703,12 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{}); ok {
 		t.Fatalf("expected all-zero token usage to be skipped")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
+	record, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{InputTokens: 2})
+	if !ok {
 		t.Fatalf("expected non-zero input token usage to be recorded")
+	}
+	if !record.AdditionalModelUsage {
+		t.Fatal("expected additional model usage to be marked as supplemental")
 	}
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")

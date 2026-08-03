@@ -74,9 +74,11 @@ api-keys:
       monthly-requests: 30000
       daily-tokens: 100000
       monthly-tokens: 3000000
+      daily-cost: 10
+      monthly-cost: 200
 ```
 
-`quota` 支持 `daily/monthly/total` 三类窗口，资源类型为 `requests` 和 `tokens`。窗口按 UTC 计算；token 额度基于已完成并写入 usage 的请求判断，因此不会预扣正在并发执行的 token。
+`quota` 支持 `daily/monthly/total` 三类窗口，资源类型为 `requests`、`tokens` 和 `cost`。请求数/token 使用 `daily-requests`、`monthly-requests`、`total-requests`、`daily-tokens`、`monthly-tokens`、`total-tokens` 字段；费用使用 `daily-cost`、`monthly-cost`、`total-cost` 字段，单位为 USD。窗口按 UTC 计算；额度基于已完成并写入 usage 的请求判断，因此不会预扣正在并发执行的用量。
 
 ## 引入外部 Go 模块提供者
 

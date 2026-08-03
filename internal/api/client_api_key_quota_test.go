@@ -104,3 +104,51 @@ func TestAuthMiddlewareRejectsClientAPIKeyQuotaExceeded(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthMiddlewareRejectsClientAPIKeyRequestQuotaExceeded(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	apiKey := "request-quota-middleware-key"
+	now := time.Now().UTC()
+	coreusage.PublishRecord(context.Background(), coreusage.Record{
+		APIKey:      apiKey,
+		RequestedAt: now,
+		Model:       "unknown-model",
+		Detail:      coreusage.Detail{TotalTokens: 1},
+	})
+	flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := coreusage.FlushDefault(flushCtx); err != nil {
+		t.Fatalf("flush usage failed: %v", err)
+	}
+
+	metadata := map[string]string{}
+	config.AddClientAPIKeyQuotaMetadata(metadata, config.ClientAPIKeyQuota{DailyRequests: 1})
+	manager := sdkaccess.NewManager()
+	manager.SetProviders([]sdkaccess.Provider{staticAccessProvider{result: &sdkaccess.Result{
+		Provider:  "static",
+		Principal: apiKey,
+		Metadata:  metadata,
+	}}})
+
+	router := gin.New()
+	router.Use(AuthMiddleware(manager))
+	router.GET("/v1/models", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusTooManyRequests, resp.Body.String())
+	}
+	body := resp.Body.String()
+	for _, expected := range []string{`"error":"api key quota exceeded"`, `"scope":"daily"`, `"resource":"requests"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("body %q missing %s", body, expected)
+		}
+	}
+	if strings.Contains(body, `"currency"`) {
+		t.Fatalf("request quota response should not contain currency: %s", body)
+	}
+}

@@ -1,3 +1,5 @@
+//go:build !no_redis
+
 package redisstate
 
 import "testing"

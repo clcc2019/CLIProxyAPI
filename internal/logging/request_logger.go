@@ -852,9 +852,7 @@ func (l *FileRequestLogger) generateFilename(url string, requestID ...string) st
 	}
 
 	// Remove leading slash
-	if strings.HasPrefix(path, "/") {
-		path = path[1:]
-	}
+	path = strings.TrimPrefix(path, "/")
 
 	// Sanitize path for filename
 	sanitized := l.sanitizeForFilename(path)

@@ -538,6 +538,12 @@ func (s *Store) LoadClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, n
 		s.clientAPIKeyQuotaKey(apiKeyHash, "total", ""),
 		s.clientAPIKeyQuotaKey(apiKeyHash, "daily", now.Format("2006-01-02")),
 		s.clientAPIKeyQuotaKey(apiKeyHash, "monthly", now.Format("2006-01")),
+		s.clientAPIKeyQuotaCounterKey(apiKeyHash, "total", "", "requests"),
+		s.clientAPIKeyQuotaCounterKey(apiKeyHash, "daily", now.Format("2006-01-02"), "requests"),
+		s.clientAPIKeyQuotaCounterKey(apiKeyHash, "monthly", now.Format("2006-01"), "requests"),
+		s.clientAPIKeyQuotaCounterKey(apiKeyHash, "total", "", "tokens"),
+		s.clientAPIKeyQuotaCounterKey(apiKeyHash, "daily", now.Format("2006-01-02"), "tokens"),
+		s.clientAPIKeyQuotaCounterKey(apiKeyHash, "monthly", now.Format("2006-01"), "tokens"),
 	}
 	values, err := s.client.MGet(ctx, keys[:]...).Result()
 	if err != nil {
@@ -557,11 +563,45 @@ func (s *Store) LoadClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, n
 		usage.MonthlyCost = cost
 		found = true
 	}
+	if count, ok := redisQuotaCount(values[3]); ok {
+		usage.TotalRequests = count
+		found = true
+	}
+	if count, ok := redisQuotaCount(values[4]); ok {
+		usage.DailyRequests = count
+		found = true
+	}
+	if count, ok := redisQuotaCount(values[5]); ok {
+		usage.MonthlyRequests = count
+		found = true
+	}
+	if count, ok := redisQuotaCount(values[6]); ok {
+		usage.TotalTokens = count
+		found = true
+	}
+	if count, ok := redisQuotaCount(values[7]); ok {
+		usage.DailyTokens = count
+		found = true
+	}
+	if count, ok := redisQuotaCount(values[8]); ok {
+		usage.MonthlyTokens = count
+		found = true
+	}
 	return usage, found, nil
 }
 
 func (s *Store) AddClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, timestamp time.Time, cost float64) error {
-	if s == nil || s.client == nil || cost <= 0 {
+	return s.AddClientAPIKeyQuotaUsageCounters(ctx, apiKey, timestamp, internalusage.ClientAPIKeyQuotaUsage{
+		DailyCost:   cost,
+		MonthlyCost: cost,
+		TotalCost:   cost,
+	})
+}
+
+// AddClientAPIKeyQuotaUsageCounters atomically adds spend, request, and token
+// counters for one completed request batch to the shared quota store.
+func (s *Store) AddClientAPIKeyQuotaUsageCounters(ctx context.Context, apiKey string, timestamp time.Time, usage internalusage.ClientAPIKeyQuotaUsage) error {
+	if s == nil || s.client == nil {
 		return nil
 	}
 	apiKeyHash := clientAPIKeyQuotaHash(apiKey)
@@ -578,13 +618,44 @@ func (s *Store) AddClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, ti
 	monthlyExpireAt := clientAPIKeyQuotaMonthlyExpireAt(timestamp)
 
 	pipe := s.client.Pipeline()
-	pipe.IncrByFloat(ctx, s.clientAPIKeyQuotaKey(apiKeyHash, "total", ""), cost)
-	daily := s.clientAPIKeyQuotaKey(apiKeyHash, "daily", day)
-	monthly := s.clientAPIKeyQuotaKey(apiKeyHash, "monthly", month)
-	pipe.IncrByFloat(ctx, daily, cost)
-	pipe.ExpireAt(ctx, daily, dailyExpireAt)
-	pipe.IncrByFloat(ctx, monthly, cost)
-	pipe.ExpireAt(ctx, monthly, monthlyExpireAt)
+	commands := 0
+	addCost := func(scope, bucket string, value float64, expireAt time.Time) {
+		if value <= 0 {
+			return
+		}
+		key := s.clientAPIKeyQuotaKey(apiKeyHash, scope, bucket)
+		pipe.IncrByFloat(ctx, key, value)
+		commands++
+		if !expireAt.IsZero() {
+			pipe.ExpireAt(ctx, key, expireAt)
+			commands++
+		}
+	}
+	addCount := func(scope, bucket, resource string, value int64, expireAt time.Time) {
+		if value <= 0 {
+			return
+		}
+		key := s.clientAPIKeyQuotaCounterKey(apiKeyHash, scope, bucket, resource)
+		pipe.IncrBy(ctx, key, value)
+		commands++
+		if !expireAt.IsZero() {
+			pipe.ExpireAt(ctx, key, expireAt)
+			commands++
+		}
+	}
+
+	addCost("total", "", usage.TotalCost, time.Time{})
+	addCost("daily", day, usage.DailyCost, dailyExpireAt)
+	addCost("monthly", month, usage.MonthlyCost, monthlyExpireAt)
+	addCount("total", "", "requests", usage.TotalRequests, time.Time{})
+	addCount("daily", day, "requests", usage.DailyRequests, dailyExpireAt)
+	addCount("monthly", month, "requests", usage.MonthlyRequests, monthlyExpireAt)
+	addCount("total", "", "tokens", usage.TotalTokens, time.Time{})
+	addCount("daily", day, "tokens", usage.DailyTokens, dailyExpireAt)
+	addCount("monthly", month, "tokens", usage.MonthlyTokens, monthlyExpireAt)
+	if commands == 0 {
+		return nil
+	}
 	_, err := pipe.Exec(ctx)
 	return err
 }
@@ -603,6 +674,20 @@ func (s *Store) SeedClientAPIKeyQuotaState(ctx context.Context, state internalus
 			expireUnix = expireAt.UTC().Unix()
 		}
 		if err := seedClientAPIKeyQuotaScript.Run(ctx, s.client, []string{key}, strconv.FormatFloat(cost, 'f', -1, 64), expireUnix).Err(); err != nil {
+			return err
+		}
+		ops++
+		return nil
+	}
+	seedCount := func(key string, count int64, expireAt time.Time) error {
+		if key == "" || count <= 0 {
+			return nil
+		}
+		expireUnix := int64(0)
+		if !expireAt.IsZero() {
+			expireUnix = expireAt.UTC().Unix()
+		}
+		if err := seedClientAPIKeyQuotaScript.Run(ctx, s.client, []string{key}, strconv.FormatInt(count, 10), expireUnix).Err(); err != nil {
 			return err
 		}
 		ops++
@@ -629,6 +714,58 @@ func (s *Store) SeedClientAPIKeyQuotaState(ctx context.Context, state internalus
 		for bucket, cost := range buckets {
 			if expireAt, ok := clientAPIKeyQuotaMonthlyBucketExpireAt(bucket); ok {
 				if err := seed(s.clientAPIKeyQuotaKey(apiKeyHash, "monthly", bucket), cost, expireAt); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for apiKey, count := range state.TotalRequests {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		if err := seedCount(s.clientAPIKeyQuotaCounterKey(apiKeyHash, "total", "", "requests"), count, time.Time{}); err != nil {
+			return err
+		}
+	}
+	for apiKey, buckets := range state.DailyRequests {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		for bucket, count := range buckets {
+			if expireAt, ok := clientAPIKeyQuotaDailyBucketExpireAt(bucket); ok {
+				if err := seedCount(s.clientAPIKeyQuotaCounterKey(apiKeyHash, "daily", bucket, "requests"), count, expireAt); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for apiKey, buckets := range state.MonthlyRequests {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		for bucket, count := range buckets {
+			if expireAt, ok := clientAPIKeyQuotaMonthlyBucketExpireAt(bucket); ok {
+				if err := seedCount(s.clientAPIKeyQuotaCounterKey(apiKeyHash, "monthly", bucket, "requests"), count, expireAt); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for apiKey, count := range state.TotalTokens {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		if err := seedCount(s.clientAPIKeyQuotaCounterKey(apiKeyHash, "total", "", "tokens"), count, time.Time{}); err != nil {
+			return err
+		}
+	}
+	for apiKey, buckets := range state.DailyTokens {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		for bucket, count := range buckets {
+			if expireAt, ok := clientAPIKeyQuotaDailyBucketExpireAt(bucket); ok {
+				if err := seedCount(s.clientAPIKeyQuotaCounterKey(apiKeyHash, "daily", bucket, "tokens"), count, expireAt); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for apiKey, buckets := range state.MonthlyTokens {
+		apiKeyHash := clientAPIKeyQuotaHash(apiKey)
+		for bucket, count := range buckets {
+			if expireAt, ok := clientAPIKeyQuotaMonthlyBucketExpireAt(bucket); ok {
+				if err := seedCount(s.clientAPIKeyQuotaCounterKey(apiKeyHash, "monthly", bucket, "tokens"), count, expireAt); err != nil {
 					return err
 				}
 			}
@@ -928,6 +1065,20 @@ func (s *Store) clientAPIKeyQuotaKey(apiKeyHash, scope, bucket string) string {
 	return s.key("quota", "client-api-key", apiKeyHash, scope, bucket)
 }
 
+func (s *Store) clientAPIKeyQuotaCounterKey(apiKeyHash, scope, bucket, resource string) string {
+	apiKeyHash = strings.TrimSpace(apiKeyHash)
+	scope = strings.TrimSpace(scope)
+	bucket = strings.TrimSpace(bucket)
+	resource = strings.TrimSpace(resource)
+	if apiKeyHash == "" || scope == "" || resource == "" {
+		return ""
+	}
+	if bucket == "" {
+		return s.key("quota", "client-api-key", apiKeyHash, scope, resource)
+	}
+	return s.key("quota", "client-api-key", apiKeyHash, scope, resource, bucket)
+}
+
 func (s *Store) key(parts ...string) string {
 	prefix := strings.Trim(strings.TrimSpace(s.keyPrefix), ":")
 	if prefix == "" {
@@ -966,6 +1117,31 @@ func redisInt64(value any) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func redisQuotaCount(value any) (int64, bool) {
+	var (
+		count int64
+		ok    bool
+	)
+	switch typed := value.(type) {
+	case int:
+		count, ok = int64(typed), true
+	case int64:
+		count, ok = typed, true
+	case string:
+		var err error
+		count, err = strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		ok = err == nil
+	case []byte:
+		var err error
+		count, err = strconv.ParseInt(strings.TrimSpace(string(typed)), 10, 64)
+		ok = err == nil
+	}
+	if !ok || count <= 0 {
+		return 0, false
+	}
+	return count, true
 }
 
 func redisFloat(value any) (float64, bool) {

@@ -53,6 +53,9 @@ type Record struct {
 	Detail              Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
+	// AdditionalModelUsage marks a secondary billable model record emitted for
+	// the same client request. It contributes usage but not another request.
+	AdditionalModelUsage bool
 }
 
 // Failure holds HTTP failure metadata for an upstream request attempt.

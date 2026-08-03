@@ -243,6 +243,12 @@ func (s *Server) Ready() bool {
 // Returns:
 //   - *Server: A new server instance
 func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdkaccess.Manager, configFilePath string, opts ...ServerOption) *Server {
+	if cfg == nil {
+		// NewServer is also used directly by embedded SDK consumers, which do
+		// not necessarily pass through the CLI runtime bootstrap.
+		cfg = &config.Config{}
+	}
+	usage.SetClientAPIKeyQuotaModelPrices(cfg.ModelPrices)
 	optionState := &serverOptionConfig{
 		requestLoggerFactory: defaultRequestLoggerFactory,
 	}
@@ -261,7 +267,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	requestAccessLogEnabled := &atomic.Bool{}
-	requestAccessLogEnabled.Store(cfg != nil && cfg.RequestLog)
+	requestAccessLogEnabled.Store(cfg.RequestLog)
 
 	// Add middleware
 	engine.Use(logging.GinLogrusLoggerWithOptions(logging.GinLogrusLoggerOptions{
@@ -362,7 +368,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// or when a local management password is provided (e.g. TUI mode).
 	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
 	s.managementRoutesEnabled.Store(hasManagementSecret)
-	redisqueue.SetEnabled(hasManagementSecret || (cfg != nil && cfg.Home.Enabled))
+	redisqueue.SetEnabled(hasManagementSecret || cfg.Home.Enabled)
 	if hasManagementSecret {
 		s.registerManagementRoutes()
 	}
@@ -1313,7 +1319,9 @@ func enforceClientAPIKeyQuota(c *gin.Context, result *sdkaccess.Result) bool {
 		"resource": exceeded.Resource,
 		"limit":    exceeded.Limit,
 		"used":     exceeded.Used,
-		"currency": "USD",
+	}
+	if exceeded.Resource == "cost" {
+		payload["currency"] = "USD"
 	}
 	if !exceeded.ResetAt.IsZero() {
 		payload["reset_at"] = exceeded.ResetAt.Format(time.RFC3339)
