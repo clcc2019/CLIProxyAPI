@@ -14,17 +14,25 @@ import (
 )
 
 type authFilesListQuery struct {
-	Paginated    bool
-	Page         int
-	PageSize     int
-	Type         string
-	Search       string
-	SearchParts  []string
-	Sort         string
-	Summary      bool
-	ProblemOnly  bool
-	DisabledOnly bool
-	PremiumOnly  bool
+	Paginated   bool
+	Page        int
+	PageSize    int
+	Type        string
+	Search      string
+	SearchParts []string
+	Sort        string
+	Summary     bool
+	// IncludeRecentRequests controls the fixed-size status-bar buckets. The
+	// default stays enabled for existing clients; the web UI can defer them
+	// until its lightweight card list has painted.
+	IncludeRecentRequests bool
+	// TypeCountsOnly returns provider counts without constructing full list entries.
+	// It is a compatibility-friendly split path for filter controls that do not
+	// need any card payload.
+	TypeCountsOnly bool
+	ProblemOnly    bool
+	DisabledOnly   bool
+	PremiumOnly    bool
 }
 
 type authFileEntryBuildOptions struct {
@@ -59,6 +67,11 @@ func authFilesListQueryFromRequest(c *gin.Context) authFilesListQuery {
 		q.SearchParts = strings.Split(q.Search, "*")
 	}
 	q.Summary = isTruthyQueryValue(firstNonEmptyQueryValue(c, "summary", "lite", "compact", "summary_only", "summaryOnly"))
+	q.IncludeRecentRequests = true
+	q.TypeCountsOnly = isTruthyQueryValue(firstNonEmptyQueryValue(c, "type_counts_only", "typeCountsOnly"))
+	if rawRecentRequests := firstNonEmptyQueryValue(c, "recent_requests", "include_recent_requests", "includeRecentRequests"); rawRecentRequests != "" {
+		q.IncludeRecentRequests = !isSkipQueryValue(rawRecentRequests)
+	}
 	if page := parsePositiveQueryInt(firstNonEmptyQueryValue(c, "page")); page > 0 {
 		q.Page = page
 	}
@@ -84,7 +97,7 @@ func parsePositiveQueryInt(raw string) int {
 }
 
 func (q authFilesListQuery) active() bool {
-	return q.Paginated || q.Type != "" || q.Search != "" || q.Sort != "default" || q.Summary || q.ProblemOnly || q.DisabledOnly || q.PremiumOnly
+	return q.Paginated || q.Type != "" || q.Search != "" || q.Sort != "default" || q.Summary || !q.IncludeRecentRequests || q.TypeCountsOnly || q.ProblemOnly || q.DisabledOnly || q.PremiumOnly
 }
 
 // hasManagerPreFilter reports whether a lightweight management snapshot can
@@ -222,7 +235,7 @@ func authFileListKey(value string) string {
 func authFileEntryTypeCounts(files []gin.H, q authFilesListQuery) map[string]int {
 	counts := map[string]int{"all": 0}
 	for _, file := range files {
-		if !authFileEntryMatchesDisplayQuery(file, q) {
+		if !authFileEntryMatchesTypeCountQuery(file, q) {
 			continue
 		}
 		counts["all"]++
@@ -232,6 +245,21 @@ func authFileEntryTypeCounts(files []gin.H, q authFilesListQuery) map[string]int
 		}
 	}
 	return counts
+}
+
+// authFileEntryMatchesTypeCountQuery scopes provider counts by the current
+// search and display filters while deliberately ignoring q.Type. The active
+// provider chip needs the other provider totals to remain visible.
+func authFileEntryMatchesTypeCountQuery(file gin.H, q authFilesListQuery) bool {
+	if !authFileEntryMatchesDisplayQuery(file, q) {
+		return false
+	}
+	return authFileMatchesNormalizedSearch(
+		q.Search,
+		q.SearchParts,
+		authFileEntryString(file, "name"),
+		authFileEntryString(file, "type", "provider"),
+	)
 }
 
 func authFileTypeCountEntry(auth *coreauth.Auth) gin.H {
@@ -264,6 +292,20 @@ func authFileTypeCountEntry(auth *coreauth.Auth) gin.H {
 	if !auth.UpdatedAt.IsZero() {
 		entry["modtime"] = auth.UpdatedAt
 		entry["updated_at"] = auth.UpdatedAt
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		applyCodexSubscriptionSnapshotSummary(entry, auth)
+	}
+	return entry
+}
+
+func authFileTypeCountEntryForQuery(auth *coreauth.Auth, q authFilesListQuery) gin.H {
+	if auth == nil || !authFileMatchesListDisplayQuery(auth, q) {
+		return nil
+	}
+	entry := authFileTypeCountEntry(auth)
+	if entry == nil || !authFileEntryMatchesTypeCountQuery(entry, q) {
+		return nil
 	}
 	return entry
 }
