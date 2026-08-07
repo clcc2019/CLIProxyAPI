@@ -638,15 +638,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// NOTE: Startup legacy key migration is intentionally disabled.
-	// Reason: avoid mutating config.yaml during server startup.
-	// Re-enable the block below if automatic startup migration is needed again.
-	// var legacy legacyConfigData
-	// if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
-	// 	if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
-	// 		cfg.legacyMigrationPending = true
-	// 	}
-	// }
+	// Accept legacy inline keys in memory without rewriting config.yaml during startup.
+	var legacy legacyConfigData
+	if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
+		cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat)
+	}
 
 	if err := cfg.normalizeLoadedConfig(configFile); err != nil {
 		return nil, err
@@ -1402,6 +1398,7 @@ type legacyConfigData struct {
 type legacyOpenAICompatibility struct {
 	Name    string   `yaml:"name"`
 	BaseURL string   `yaml:"base-url"`
+	APIKey  string   `yaml:"api-key"`
 	APIKeys []string `yaml:"api-keys"`
 }
 
@@ -1411,14 +1408,18 @@ func (cfg *Config) migrateLegacyOpenAICompatibilityKeys(legacy []legacyOpenAICom
 	}
 	changed := false
 	for _, legacyEntry := range legacy {
-		if len(legacyEntry.APIKeys) == 0 {
+		keys := append([]string(nil), legacyEntry.APIKeys...)
+		if key := strings.TrimSpace(legacyEntry.APIKey); key != "" {
+			keys = append(keys, key)
+		}
+		if len(keys) == 0 {
 			continue
 		}
 		target := findOpenAICompatTarget(cfg.OpenAICompatibility, legacyEntry.Name, legacyEntry.BaseURL)
 		if target == nil {
 			continue
 		}
-		if mergeLegacyOpenAICompatAPIKeys(target, legacyEntry.APIKeys) {
+		if mergeLegacyOpenAICompatAPIKeys(target, keys) {
 			changed = true
 		}
 	}

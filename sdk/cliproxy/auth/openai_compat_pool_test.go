@@ -421,6 +421,67 @@ func TestOpenAICompatRuntimeSnapshotIsImmutableAndRefreshes(t *testing.T) {
 	assertPool([]string{"upstream-v2"}, 0)
 }
 
+func TestOpenAICompatRuntimeSnapshotResolvesEmptyNameByBaseURL(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			BaseURL:  "https://anonymous.example/v1",
+			PoolMode: true,
+			Models: []internalconfig.OpenAICompatibilityModel{{
+				Name:  "upstream-model",
+				Alias: "public-model",
+			}},
+		}},
+	})
+	auth := &Auth{
+		ID:       "anonymous-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"auth_kind":    "api_key",
+			"base_url":     "https://anonymous.example/v1/",
+			"provider_key": "openai-compatibility",
+		},
+	}
+
+	if got := m.resolveOpenAICompatUpstreamModelPool(auth, "public-model"); !reflect.DeepEqual(got, []string{"upstream-model"}) {
+		t.Fatalf("resolved model pool = %v, want upstream-model", got)
+	}
+	if got := m.apiKeyPoolModeRetries(auth); got != apiKeyPoolModeRetryCount {
+		t.Fatalf("pool-mode retries = %d, want %d", got, apiKeyPoolModeRetryCount)
+	}
+}
+
+func TestOpenAICompatRuntimeSnapshotUsesBaseURLForDuplicateNames(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name:    "provider",
+				BaseURL: "https://first.example/v1",
+				Models:  []internalconfig.OpenAICompatibilityModel{{Name: "first", Alias: "public"}},
+			},
+			{
+				Name:    "provider",
+				BaseURL: "https://second.example/v1",
+				Models:  []internalconfig.OpenAICompatibilityModel{{Name: "second", Alias: "public"}},
+			},
+		},
+	})
+	auth := &Auth{
+		Provider: "provider",
+		Attributes: map[string]string{
+			"auth_kind":    "api_key",
+			"base_url":     "https://second.example/v1",
+			"compat_name":  "provider",
+			"provider_key": "provider",
+		},
+	}
+
+	if got := m.resolveOpenAICompatUpstreamModelPool(auth, "public"); !reflect.DeepEqual(got, []string{"second"}) {
+		t.Fatalf("resolved model pool = %v, want second", got)
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}

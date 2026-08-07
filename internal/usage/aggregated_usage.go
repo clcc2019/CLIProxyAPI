@@ -137,6 +137,11 @@ type AggregatedUsageCredentialStats struct {
 	TotalTokens   int64  `json:"total_tokens"`
 }
 
+type AggregatedUsageCredentialsSnapshot struct {
+	GeneratedAt time.Time
+	Credentials []AggregatedUsageCredentialStats
+}
+
 type aggregatedUsageWindowConfig struct {
 	key             string
 	duration        time.Duration
@@ -273,6 +278,55 @@ func (s *RequestStatistics) AggregatedUsageRevision() uint64 {
 		return 0
 	}
 	return s.aggregateRevision.Load()
+}
+
+// AggregatedUsageCredentialsSnapshotWithRevision returns the all-time
+// credential totals without allocating model, chart, cost, or API series.
+func (s *RequestStatistics) AggregatedUsageCredentialsSnapshotWithRevision(now time.Time) (AggregatedUsageCredentialsSnapshot, uint64) {
+	now = now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result := AggregatedUsageCredentialsSnapshot{GeneratedAt: now}
+	if s == nil {
+		return result, 0
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	acc := &aggregatedUsageWindowAccumulator{
+		credentials: make(map[string]*aggregatedUsageCredentialAccumulator),
+	}
+	for _, record := range s.aggregateRecords {
+		detail := record.Detail
+		detail.Timestamp = detail.Timestamp.UTC()
+		if detail.Timestamp.IsZero() || detail.Timestamp.After(now) {
+			continue
+		}
+		requests := record.Requests
+		if requests <= 0 {
+			requests = 1
+		}
+		acc.addCredentialAggregate(detail, requests, normaliseTokenStats(detail.Tokens))
+	}
+	result.Credentials = acc.buildCredentialStats()
+
+	merge := func(snapshot *AggregatedUsageSnapshot) {
+		if snapshot == nil {
+			return
+		}
+		if window, ok := snapshot.Windows["all"]; ok {
+			result.Credentials = mergeAggregatedUsageCredentialStatsList(result.Credentials, window.Credentials)
+		}
+	}
+	merge(s.rolledUpAggregated)
+	merge(s.importedAggregated)
+	for _, snapshot := range s.importedAggregateSource {
+		merge(&snapshot)
+	}
+
+	return result, s.aggregateRevision.Load()
 }
 
 func (s *RequestStatistics) aggregatedUsageSnapshotLocked(now time.Time, result AggregatedUsageSnapshot) AggregatedUsageSnapshot {

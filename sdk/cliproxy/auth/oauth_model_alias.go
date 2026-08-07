@@ -321,6 +321,11 @@ func (m *Manager) oauthModelAliasReasoningEffort(auth *Auth, requestedModel, sou
 	if !ok {
 		return ""
 	}
+	// A suffix configured on the upstream model is the most specific alias
+	// setting and must not be replaced by the rule's effort map.
+	if thinking.ParseSuffix(rule.upstreamModel).HasSuffix {
+		return ""
+	}
 	return rule.targetReasoningEffort(sourceEffort)
 }
 

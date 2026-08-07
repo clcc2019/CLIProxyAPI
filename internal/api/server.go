@@ -224,6 +224,14 @@ func (s *Server) SetReady(ready bool) {
 	s.ready.Store(ready)
 }
 
+// SetManagementConfigSavedHandler applies persisted management changes to runtime state.
+func (s *Server) SetManagementConfigSavedHandler(handler func(*config.Config)) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetConfigSavedHook(handler)
+}
+
 // Ready reports the current readiness state.
 func (s *Server) Ready() bool {
 	if s == nil {

@@ -601,6 +601,25 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	s.rebindExecutors()
 }
 
+// applyPersistedConfigUpdate makes config-dependent routing and model state
+// visible before a successful management save response is returned. The file
+// watcher still performs the full server configuration update afterwards.
+func (s *Service) applyPersistedConfigUpdate(newCfg *config.Config) {
+	if s == nil || newCfg == nil {
+		return
+	}
+	s.cfgMu.Lock()
+	s.cfg = newCfg
+	s.cfgMu.Unlock()
+	if s.coreManager == nil {
+		return
+	}
+	s.coreManager.SetConfig(newCfg)
+	s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+	s.refreshModelRegistrationsForConfig()
+	s.rebindExecutors()
+}
+
 // refreshModelRegistrationsForConfig reapplies the current config-dependent
 // model view to every auth after a hot reload. Runtime alias tables are updated
 // by Manager.SetConfig, but the global registry and scheduler supported-model
@@ -871,6 +890,7 @@ func (s *Service) Run(ctx context.Context) error {
 		serverOptions = append(serverOptions, api.WithManagementCacheStore(s.redisState))
 	}
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, serverOptions...)
+	s.server.SetManagementConfigSavedHandler(s.applyPersistedConfigUpdate)
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
@@ -956,22 +976,8 @@ func (s *Service) Run(ctx context.Context) error {
 	time.Sleep(100 * time.Millisecond)
 	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
 
-	// Bootstrap is complete: auth manager loaded, executors rebound, server
-	// goroutine launched. Mark the proxy ready so /readyz starts returning 200.
-	// /healthz has been answering 200 since the listener bound, so liveness
-	// probes were never blocked by the auth load.
-	s.server.SetReady(true)
-
-	s.applyPprofConfig(s.cfg)
-
-	if s.hooks.OnAfterStart != nil {
-		s.hooks.OnAfterStart(s)
-	}
-
 	if !homeEnabled {
-		var watcherWrapper *WatcherWrapper
 		reloadCallback := func(newCfg *config.Config) { s.applyConfigUpdate(newCfg) }
-
 		watcherWrapper, errCreate := s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
 		if errCreate != nil {
 			return fmt.Errorf("cliproxy: failed to create watcher: %w", errCreate)
@@ -988,6 +994,23 @@ func (s *Service) Run(ctx context.Context) error {
 		if errStart := watcherWrapper.Start(watcherCtx); errStart != nil {
 			return fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
 		}
+
+		loadCtx := coreauth.WithSkipPersist(ctx)
+		for _, auth := range watcherWrapper.CurrentAuths() {
+			s.applyCoreAuthAddOrUpdate(loadCtx, auth)
+		}
+	}
+
+	// Bootstrap is complete: auth manager loaded, executors rebound, server
+	// goroutine launched, and watcher auths registered. Mark the proxy ready so /readyz starts returning 200.
+	// /healthz has been answering 200 since the listener bound, so liveness
+	// probes were never blocked by the auth load.
+	s.server.SetReady(true)
+
+	s.applyPprofConfig(s.cfg)
+
+	if s.hooks.OnAfterStart != nil {
+		s.hooks.OnAfterStart(s)
 	}
 
 	// Prefer core auth manager auto refresh if available.
@@ -1214,66 +1237,37 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
 	default:
-		// Handle OpenAI-compatibility providers by name using config
+		// Resolve compatibility providers by explicit name first, then base URL for
+		// legacy empty-name entries.
 		if s.cfg != nil {
-			providerKey := provider
-			compatName := strings.TrimSpace(a.Provider)
-			isCompatAuth := false
-			if compatDetected {
-				if compatProviderKey != "" {
-					providerKey = compatProviderKey
-				}
-				if compatDisplayName != "" {
-					compatName = compatDisplayName
-				}
-				isCompatAuth = true
+			baseURL := ""
+			if a.Attributes != nil {
+				baseURL = strings.TrimSpace(a.Attributes["base_url"])
 			}
-			if strings.EqualFold(providerKey, "openai-compatibility") {
-				isCompatAuth = true
-				if a.Attributes != nil {
-					if v := strings.TrimSpace(a.Attributes["compat_name"]); v != "" {
-						compatName = v
-					}
-					if v := strings.TrimSpace(a.Attributes["provider_key"]); v != "" {
-						providerKey = strings.ToLower(v)
-						isCompatAuth = true
-					}
+			compat := internalconfig.ResolveOpenAICompatibility(
+				s.cfg.OpenAICompatibility,
+				compatProviderKey,
+				compatDisplayName,
+				a.Provider,
+				baseURL,
+			)
+			if compat != nil {
+				providerKey := strings.ToLower(strings.TrimSpace(compat.Name))
+				if providerKey == "" {
+					providerKey = strings.ToLower(strings.TrimSpace(compatProviderKey))
 				}
-				if providerKey == "openai-compatibility" && compatName != "" {
-					providerKey = strings.ToLower(compatName)
+				if providerKey == "" {
+					providerKey = "openai-compatibility"
 				}
-			} else if a.Attributes != nil {
-				if v := strings.TrimSpace(a.Attributes["compat_name"]); v != "" {
-					compatName = v
-					isCompatAuth = true
-				}
-				if v := strings.TrimSpace(a.Attributes["provider_key"]); v != "" {
-					providerKey = strings.ToLower(v)
-					isCompatAuth = true
-				}
-			}
-			for i := range s.cfg.OpenAICompatibility {
-				compat := &s.cfg.OpenAICompatibility[i]
-				if compat.Disabled {
-					continue
-				}
-				if strings.EqualFold(compat.Name, compatName) {
-					isCompatAuth = true
-					ms := buildOpenAICompatibilityConfigModels(compat)
-					// Register and return
-					if len(ms) > 0 {
-						if providerKey == "" {
-							providerKey = "openai-compatibility"
-						}
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
-					} else {
-						// Ensure stale registrations are cleared when model list becomes empty.
-						GlobalModelRegistry().UnregisterClient(a.ID)
-					}
+				models := buildOpenAICompatibilityConfigModels(compat)
+				if len(models) == 0 {
+					GlobalModelRegistry().UnregisterClient(a.ID)
 					return
 				}
+				s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg.ForceModelPrefix))
+				return
 			}
-			if isCompatAuth {
+			if compatDetected {
 				// No matching provider found or models removed entirely; drop any prior registration.
 				GlobalModelRegistry().UnregisterClient(a.ID)
 				return
@@ -1523,6 +1517,10 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		return nil
 	}
 	now := time.Now().Unix()
+	ownedBy := strings.TrimSpace(compat.Name)
+	if ownedBy == "" {
+		ownedBy = "openai-compatibility"
+	}
 	models := make([]*ModelInfo, 0, len(compat.Models))
 	for i := range compat.Models {
 		model := compat.Models[i]
@@ -1546,7 +1544,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 			Name:        strings.TrimSpace(model.Name),
 			Object:      "model",
 			Created:     now,
-			OwnedBy:     compat.Name,
+			OwnedBy:     ownedBy,
 			Type:        modelType,
 			DisplayName: modelID,
 			UserDefined: false,

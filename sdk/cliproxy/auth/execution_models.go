@@ -145,13 +145,15 @@ func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedMode
 	}
 	providerKey := ""
 	compatName := ""
+	baseURL := ""
 	if auth.Attributes != nil {
 		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
 	rawSnapshot := m.openAICompatRuntime.Load()
 	snapshot, _ := rawSnapshot.(*openAICompatRuntimeSnapshot)
-	entry := snapshot.resolve(providerKey, compatName, auth.Provider)
+	entry := snapshot.resolve(providerKey, compatName, auth.Provider, baseURL)
 	if entry == nil {
 		return nil
 	}
@@ -165,13 +167,15 @@ func (m *Manager) apiKeyPoolModeRetries(auth *Auth) int {
 	if isOpenAICompatAPIKeyAuth(auth) {
 		providerKey := ""
 		compatName := ""
+		baseURL := ""
 		if auth.Attributes != nil {
 			providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 			compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		}
 		rawSnapshot := m.openAICompatRuntime.Load()
 		snapshot, _ := rawSnapshot.(*openAICompatRuntimeSnapshot)
-		entry := snapshot.resolve(providerKey, compatName, auth.Provider)
+		entry := snapshot.resolve(providerKey, compatName, auth.Provider, baseURL)
 		if entry != nil && entry.poolMode {
 			return apiKeyPoolModeRetryCount
 		}

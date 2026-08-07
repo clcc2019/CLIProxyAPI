@@ -62,12 +62,14 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			// OpenAI-compat uses config selection from auth.Attributes.
 			providerKey := ""
 			compatName := ""
+			baseURL := ""
 			if auth.Attributes != nil {
 				providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 				compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+				baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 			}
 			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
-				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
+				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider, baseURL); entry != nil {
 					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 				}
 			}

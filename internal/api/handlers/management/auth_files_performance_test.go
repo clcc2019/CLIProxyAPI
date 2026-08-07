@@ -64,6 +64,39 @@ func BenchmarkListAuthFilesFilteredManager(b *testing.B) {
 	}
 }
 
+func TestAuthFilesListPayloadAcknowledgesPremiumFilter(t *testing.T) {
+	payload := authFilesListPayload(nil, 0, authFilesListQuery{PremiumOnly: true}, nil)
+	if applied, ok := payload["premium_only_applied"].(bool); !ok || !applied {
+		t.Fatalf("premium_only_applied = %#v, want true", payload["premium_only_applied"])
+	}
+}
+
+func TestAuthFileEntryHasPremiumPlan(t *testing.T) {
+	tests := []struct {
+		name string
+		file gin.H
+		want bool
+	}{
+		{name: "free with expiry", file: gin.H{"plan_type": "free", "subscription_expires_at": "2999-01-01T00:00:00Z"}},
+		{name: "missing plan with expiry", file: gin.H{"subscription_expires_at": "2999-01-01T00:00:00Z"}},
+		{name: "unsupported plan", file: gin.H{"plan_type": "team"}},
+		{name: "plus", file: gin.H{"plan_type": "plus"}, want: true},
+		{name: "k12", file: gin.H{"plan_type": "K12"}, want: true},
+		{name: "pro", file: gin.H{"plan_type": "pro"}, want: true},
+		{name: "pro lite alias", file: gin.H{"plan_type": "pro_lite"}, want: true},
+		{name: "active premium", file: gin.H{"plan_type": "plus", "subscription_expires_at": "2999-01-01T00:00:00Z"}, want: true},
+		{name: "expired premium", file: gin.H{"plan_type": "plus", "subscription_expires_at": "2000-01-01T00:00:00Z"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := authFileEntryHasPremiumPlan(tt.file); got != tt.want {
+				t.Fatalf("authFileEntryHasPremiumPlan() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEnsureCodexSubscriptionSnapshotMetadataReusesCanonicalAuth(t *testing.T) {
 	auth := &coreauth.Auth{
 		Provider: "codex",

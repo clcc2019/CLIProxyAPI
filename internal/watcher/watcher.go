@@ -157,3 +157,19 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RUnlock()
 	return snapshotCoreAuths(cfg, w.authDir)
 }
+
+// CurrentAuths returns the auth snapshot produced by the latest completed load.
+func (w *Watcher) CurrentAuths() []*coreauth.Auth {
+	if w == nil {
+		return nil
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	auths := make([]*coreauth.Auth, 0, len(w.currentAuths))
+	for _, auth := range w.currentAuths {
+		if auth != nil {
+			auths = append(auths, auth.Clone())
+		}
+	}
+	return auths
+}
