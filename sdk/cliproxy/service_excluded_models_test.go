@@ -266,6 +266,87 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 }
 
+func TestRegisterModelsForAuth_OpenAICompatibilityEmptyNameUsesBaseURL(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				BaseURL: "https://anonymous.example/v1",
+				Models: []config.OpenAICompatibilityModel{{
+					Name:  "upstream-model",
+					Alias: "public-model",
+				}},
+			}},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-openai-compat-empty-name",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":    "api_key",
+			"base_url":     "https://anonymous.example/v1/",
+			"compat_name":  "",
+			"provider_key": "openai-compatibility",
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	service.registerModelsForAuth(auth)
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) != 1 || models[0].ID != "public-model" || models[0].Name != "upstream-model" {
+		t.Fatalf("registered models = %#v, want public-model", models)
+	}
+}
+
+func TestApplyPersistedConfigUpdateRefreshesOpenAICompatibilityModels(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{
+		cfg: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "provider",
+				BaseURL: "https://provider.example/v1",
+				Models:  []config.OpenAICompatibilityModel{{Name: "upstream-v1", Alias: "public-v1"}},
+			}},
+		},
+		coreManager: manager,
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-openai-compat-persisted-update",
+		Provider: "provider",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":    "api_key",
+			"base_url":     "https://provider.example/v1",
+			"compat_name":  "provider",
+			"provider_key": "provider",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+	service.registerModelsForAuth(auth)
+
+	service.applyPersistedConfigUpdate(&config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "provider",
+			BaseURL: "https://provider.example/v1",
+			Models:  []config.OpenAICompatibilityModel{{Name: "upstream-v2", Alias: "public-v2"}},
+		}},
+	})
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) != 1 || models[0].ID != "public-v2" || models[0].Name != "upstream-v2" {
+		t.Fatalf("registered models = %#v, want public-v2", models)
+	}
+}
+
 func BenchmarkMatchWildcard(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if !matchWildcard("claude*sonnet*4-5", "claude-3-5-sonnet-4-5") {

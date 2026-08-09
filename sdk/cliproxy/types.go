@@ -81,6 +81,7 @@ type WatcherWrapper struct {
 
 	setConfig             func(cfg *config.Config)
 	snapshotAuths         func() []*coreauth.Auth
+	currentAuths          func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 }
@@ -125,6 +126,14 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 		return nil
 	}
 	return w.snapshotAuths()
+}
+
+// CurrentAuths returns the latest auth snapshot already loaded by the watcher.
+func (w *WatcherWrapper) CurrentAuths() []*coreauth.Auth {
+	if w == nil || w.currentAuths == nil {
+		return nil
+	}
+	return w.currentAuths()
 }
 
 // SetAuthUpdateQueue registers the channel used to propagate auth updates.

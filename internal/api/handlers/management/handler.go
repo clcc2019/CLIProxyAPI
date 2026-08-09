@@ -57,6 +57,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	configSavedHook     func(*config.Config)
 	// codexUsageCache memoises Codex /wham/usage responses with a short TTL
 	// and keeps a brief stale copy for transient ChatGPT backend 5xx spikes.
 	// Its zero value is ready for use, so cache hits do not contend on the
@@ -285,6 +286,16 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.mu.Unlock()
 }
 
+// SetConfigSavedHook registers a synchronous runtime update after persistence.
+func (h *Handler) SetConfigSavedHook(hook func(*config.Config)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.configSavedHook = hook
+	h.mu.Unlock()
+}
+
 func (h *Handler) postAuthHookSnapshot() coreauth.PostAuthHook {
 	if h == nil {
 		return nil
@@ -451,6 +462,9 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 	}
 	if h.authManager != nil {
 		h.authManager.SetConfig(h.cfg)
+	}
+	if h.configSavedHook != nil {
+		h.configSavedHook(h.cfg)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true

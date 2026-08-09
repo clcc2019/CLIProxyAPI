@@ -164,14 +164,16 @@ func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, 
 func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	providerKey := ""
 	compatName := ""
+	baseURL := ""
 	if auth != nil && len(auth.Attributes) > 0 {
 		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
 	if compatName == "" && !strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 		return ""
 	}
-	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
+	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider, baseURL)
 	if entry == nil {
 		return ""
 	}
@@ -180,32 +182,17 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 
 type apiKeyModelAliasTable map[string]map[string]string
 
-func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatName, authProvider string) *internalconfig.OpenAICompatibility {
+func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatName, authProvider, baseURL string) *internalconfig.OpenAICompatibility {
 	if cfg == nil {
 		return nil
 	}
-	candidates := make([]string, 0, 3)
-	if v := strings.TrimSpace(compatName); v != "" {
-		candidates = append(candidates, v)
-	}
-	if v := strings.TrimSpace(providerKey); v != "" {
-		candidates = append(candidates, v)
-	}
-	if v := strings.TrimSpace(authProvider); v != "" {
-		candidates = append(candidates, v)
-	}
-	for i := range cfg.OpenAICompatibility {
-		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled {
-			continue
-		}
-		for _, candidate := range candidates {
-			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
-				return compat
-			}
-		}
-	}
-	return nil
+	return internalconfig.ResolveOpenAICompatibility(
+		cfg.OpenAICompatibility,
+		providerKey,
+		compatName,
+		authProvider,
+		baseURL,
+	)
 }
 
 func asModelAliasEntries[T interface {

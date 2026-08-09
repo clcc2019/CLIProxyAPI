@@ -99,17 +99,39 @@ func (h *Handler) GetDetailedUsageStatistics(c *gin.Context) {
 
 // GetAggregatedUsageStatistics returns pre-aggregated usage windows for the management usage page.
 func (h *Handler) GetAggregatedUsageStatistics(c *gin.Context) {
+	window := strings.ToLower(strings.TrimSpace(c.Query("window")))
+	if window != "" && !isAggregatedUsageWindow(window) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid aggregate usage window"})
+		return
+	}
+	fields := strings.ToLower(strings.TrimSpace(c.Query("fields")))
+	if fields != "" && fields != "credentials" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid aggregate usage fields"})
+		return
+	}
 	if err := flushUsageStatistics(c.Request.Context()); err != nil {
 		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "usage statistics are still being processed"})
 		return
 	}
 
-	payload, err := h.aggregatedUsageResponse(time.Now().UTC())
+	payload, err := h.aggregatedUsageResponse(time.Now().UTC(), aggregatedUsageResponseOptions{
+		Window: window,
+		Fields: fields,
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode aggregate usage statistics"})
 		return
 	}
 	c.Data(http.StatusOK, "application/json; charset=utf-8", payload)
+}
+
+func isAggregatedUsageWindow(window string) bool {
+	switch window {
+	case "1h", "3h", "6h", "12h", "24h", "7d", "all":
+		return true
+	default:
+		return false
+	}
 }
 
 // ExportUsageStatistics returns an aggregated usage export plus a summary snapshot for import compatibility.

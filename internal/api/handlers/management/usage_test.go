@@ -437,6 +437,8 @@ func TestGetAggregatedUsageStatisticsReturnsWindowedPayload(t *testing.T) {
 	now := time.Now().UTC()
 	stats.Record(context.Background(), coreusage.Record{
 		APIKey:      "aggregate-test",
+		Source:      "auth-file.json",
+		AuthIndex:   "auth-1",
 		Model:       "gpt-5.4",
 		RequestedAt: now.Add(-20 * time.Minute),
 		Latency:     800 * time.Millisecond,
@@ -492,6 +494,96 @@ func TestGetAggregatedUsageStatisticsReturnsWindowedPayload(t *testing.T) {
 	}
 	if got := len(payload.Usage.Windows["1h"].Sparklines.Timestamps); got != 60 {
 		t.Fatalf("1h sparkline timestamps len = %d, want 60", got)
+	}
+
+	selectedRec := httptest.NewRecorder()
+	selectedCtx, _ := gin.CreateTestContext(selectedRec)
+	selectedCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/aggregated?window=1h", nil)
+	handler.GetAggregatedUsageStatistics(selectedCtx)
+
+	if selectedRec.Code != http.StatusOK {
+		t.Fatalf("selected window status = %d, want %d, body=%s", selectedRec.Code, http.StatusOK, selectedRec.Body.String())
+	}
+	var selectedPayload struct {
+		Usage usage.AggregatedUsageSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(selectedRec.Body.Bytes(), &selectedPayload); err != nil {
+		t.Fatalf("unmarshal selected window response: %v", err)
+	}
+	if len(selectedPayload.Usage.Windows) != 1 {
+		t.Fatalf("selected response windows = %d, want 1", len(selectedPayload.Usage.Windows))
+	}
+	if got := selectedPayload.Usage.Windows["1h"].TotalRequests; got != 1 {
+		t.Fatalf("selected 1h total_requests = %d, want 1", got)
+	}
+	if selectedRec.Body.Len() >= rec.Body.Len() {
+		t.Fatalf("selected response size = %d, want less than full response size %d", selectedRec.Body.Len(), rec.Body.Len())
+	}
+
+	credentialsRec := httptest.NewRecorder()
+	credentialsCtx, _ := gin.CreateTestContext(credentialsRec)
+	credentialsCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/aggregated?window=all&fields=credentials", nil)
+	handler.GetAggregatedUsageStatistics(credentialsCtx)
+
+	if credentialsRec.Code != http.StatusOK {
+		t.Fatalf("credentials status = %d, want %d, body=%s", credentialsRec.Code, http.StatusOK, credentialsRec.Body.String())
+	}
+	var credentialsPayload struct {
+		Usage struct {
+			Windows map[string]map[string]json.RawMessage `json:"windows"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(credentialsRec.Body.Bytes(), &credentialsPayload); err != nil {
+		t.Fatalf("unmarshal credentials response: %v", err)
+	}
+	allFields := credentialsPayload.Usage.Windows["all"]
+	if len(credentialsPayload.Usage.Windows) != 1 || len(allFields) != 1 {
+		t.Fatalf("credentials response contains unrelated fields: %#v", credentialsPayload.Usage.Windows)
+	}
+	var credentials []usage.AggregatedUsageCredentialStats
+	if err := json.Unmarshal(allFields["credentials"], &credentials); err != nil {
+		t.Fatalf("unmarshal credential stats: %v", err)
+	}
+	found := false
+	for _, credential := range credentials {
+		if credential.Source == "auth-file.json" && credential.AuthIndex == "auth-1" {
+			found = true
+			if credential.SuccessCount != 1 || credential.TotalTokens != 37 {
+				t.Fatalf("credential totals = %#v, want success=1 tokens=37", credential)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("credentials = %#v, want auth-file.json", credentials)
+	}
+	if credentialsRec.Body.Len() >= selectedRec.Body.Len() {
+		t.Fatalf("credentials response size = %d, want less than window response size %d", credentialsRec.Body.Len(), selectedRec.Body.Len())
+	}
+}
+
+func TestGetAggregatedUsageStatisticsRejectsInvalidWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/aggregated?window=year", nil)
+
+	(&Handler{usageStats: usage.NewRequestStatistics()}).GetAggregatedUsageStatistics(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestGetAggregatedUsageStatisticsRejectsInvalidFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/aggregated?fields=models", nil)
+
+	(&Handler{usageStats: usage.NewRequestStatistics()}).GetAggregatedUsageStatistics(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 

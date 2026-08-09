@@ -11,7 +11,8 @@ import (
 // request-time API-key routing. Keeping this separate from Config avoids
 // scanning and adapting the complete config on every request.
 type openAICompatRuntimeSnapshot struct {
-	entries map[string]*openAICompatRuntimeEntry
+	entries  map[string]*openAICompatRuntimeEntry
+	baseURLs map[string]*openAICompatRuntimeEntry
 }
 
 type openAICompatRuntimeEntry struct {
@@ -28,15 +29,13 @@ func buildOpenAICompatRuntimeSnapshot(cfg *internalconfig.Config) *openAICompatR
 	}
 
 	snapshot.entries = make(map[string]*openAICompatRuntimeEntry, len(cfg.OpenAICompatibility))
+	snapshot.baseURLs = make(map[string]*openAICompatRuntimeEntry, len(cfg.OpenAICompatibility))
 	for index := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[index]
 		if compat.Disabled {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(compat.Name))
-		if name == "" {
-			continue
-		}
 
 		aliasPools := make(map[string][]string)
 		nameModels := make(map[string]string)
@@ -66,21 +65,35 @@ func buildOpenAICompatRuntimeSnapshot(cfg *internalconfig.Config) *openAICompatR
 			}
 		}
 
-		// The config resolver gives the first matching provider entry priority.
-		if _, exists := snapshot.entries[name]; exists {
-			continue
-		}
-		snapshot.entries[name] = &openAICompatRuntimeEntry{
+		entry := &openAICompatRuntimeEntry{
 			order:      index,
 			poolMode:   compat.PoolMode,
 			aliasPools: nilIfEmptyStringSliceMap(aliasPools),
 			nameModels: nilIfEmptyStringMap(nameModels),
 		}
+		if name != "" {
+			if _, exists := snapshot.entries[name]; !exists {
+				snapshot.entries[name] = entry
+			}
+		}
+		baseURL := normalizeOpenAICompatRuntimeBaseURL(compat.BaseURL)
+		if baseURL != "" {
+			if _, exists := snapshot.baseURLs[baseURL]; !exists {
+				snapshot.baseURLs[baseURL] = entry
+			}
+		}
 	}
 	if len(snapshot.entries) == 0 {
 		snapshot.entries = nil
 	}
+	if len(snapshot.baseURLs) == 0 {
+		snapshot.baseURLs = nil
+	}
 	return snapshot
+}
+
+func normalizeOpenAICompatRuntimeBaseURL(value string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(value), "/"))
 }
 
 func containsFolded(values []string, target string) bool {
@@ -106,13 +119,19 @@ func nilIfEmptyStringMap(values map[string]string) map[string]string {
 	return values
 }
 
-func (s *openAICompatRuntimeSnapshot) resolve(providerKey, compatName, authProvider string) *openAICompatRuntimeEntry {
-	if s == nil || len(s.entries) == 0 {
+func (s *openAICompatRuntimeSnapshot) resolve(providerKey, compatName, authProvider, baseURL string) *openAICompatRuntimeEntry {
+	if s == nil {
 		return nil
 	}
 
 	var selected *openAICompatRuntimeEntry
-	for _, candidate := range []string{compatName, providerKey, authProvider} {
+	candidates := []string{compatName}
+	for _, candidate := range []string{providerKey, authProvider} {
+		if !strings.EqualFold(strings.TrimSpace(candidate), "openai-compatibility") {
+			candidates = append(candidates, candidate)
+		}
+	}
+	for _, candidate := range candidates {
 		key := strings.ToLower(strings.TrimSpace(candidate))
 		if key == "" {
 			continue
@@ -122,6 +141,9 @@ func (s *openAICompatRuntimeSnapshot) resolve(providerKey, compatName, authProvi
 			continue
 		}
 		selected = entry
+	}
+	if entry := s.baseURLs[normalizeOpenAICompatRuntimeBaseURL(baseURL)]; entry != nil {
+		return entry
 	}
 	return selected
 }

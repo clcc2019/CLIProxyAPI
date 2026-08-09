@@ -270,6 +270,41 @@ func TestWithOAuthModelAliasReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestWithOAuthModelAliasReasoningEffort_ConfiguredUpstreamSuffixTakesPriority(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{
+			Name:            "gpt-5.6-terra(low)",
+			Alias:           "gpt-5.5",
+			ReasoningEffort: map[string]string{"default": "high"},
+		}},
+	})
+	auth := createAuthForChannel("codex")
+
+	const requestedModel = "gpt-5.5"
+	resolvedModel := mgr.applyOAuthModelAlias(auth, requestedModel)
+	if resolvedModel != "gpt-5.6-terra(low)" {
+		t.Fatalf("applyOAuthModelAlias() = %q, want configured upstream suffix", resolvedModel)
+	}
+
+	req := cliproxyexecutor.Request{
+		Model:   resolvedModel,
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}
+	got := mgr.withOAuthModelAliasReasoningEffort(
+		req,
+		auth,
+		requestedModel,
+		cliproxyexecutor.Options{},
+	)
+	if _, exists := got.Metadata[cliproxyexecutor.UpstreamReasoningEffortOverrideMetadataKey]; exists {
+		t.Fatalf("configured upstream suffix must not be overridden by alias effort map: %#v", got.Metadata)
+	}
+}
+
 func TestOAuthModelAlias_EffortOnlyRule(t *testing.T) {
 	t.Parallel()
 

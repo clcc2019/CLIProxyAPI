@@ -115,6 +115,9 @@ func (q authFilesListQuery) offset() int {
 
 func authFilesListPayload(files []gin.H, total int, q authFilesListQuery, typeCounts map[string]int) gin.H {
 	payload := gin.H{"files": files, "total": total}
+	if q.PremiumOnly {
+		payload["premium_only_applied"] = true
+	}
 	if q.Paginated {
 		payload["page"] = q.Page
 		payload["page_size"] = q.PageSize
@@ -561,11 +564,13 @@ func authFileEntryMatchesDisplayQuery(file gin.H, q authFilesListQuery) bool {
 }
 
 func authFileEntryHasPremiumPlan(file gin.H) bool {
-	planType := authFileEntryPlanType(file)
-	if planType != "" && planType != "free" {
-		return true
+	switch authFileEntryPlanType(file) {
+	case "plus", "k12", "pro", "prolite", "pro-lite", "pro_lite":
+		expiresAt := authFileEntrySubscriptionExpiryMs(file)
+		return expiresAt == 0 || expiresAt > time.Now().UnixMilli()
+	default:
+		return false
 	}
-	return authFileEntrySubscriptionExpiryMs(file) > 0
 }
 
 func authFileMatchesNormalizedSearch(search string, wildcardParts []string, values ...string) bool {
