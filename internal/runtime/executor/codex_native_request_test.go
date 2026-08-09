@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"strings"
@@ -9,6 +10,35 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func TestCodexBorrowedNativeTranslationCopiesBeforeCacheMissNormalization(t *testing.T) {
+	format := sdktranslator.FromString("openai-response")
+	body := []byte(`{"model":"gpt-5.4-borrowed-copy-test","input":[],"stream":false}`)
+	original := bytes.Clone(body)
+
+	translated, _, native := codexTranslateRequestWithOriginalBorrowed(
+		nil,
+		context.Background(),
+		format,
+		sdktranslator.FromString("codex"),
+		"gpt-5.4-borrowed-copy-test",
+		body,
+		body,
+		true,
+		http.Header{"Originator": []string{"codex_cli_rs"}},
+	)
+	if !native || len(translated) == 0 || &translated[0] != &body[0] {
+		t.Fatal("native hot path did not borrow the request payload")
+	}
+
+	_ = normalizeCodexFinalUpstreamBodyBorrowed(translated, "gpt-5.4-borrowed-copy-test", nil, codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	})
+	if !bytes.Equal(body, original) {
+		t.Fatalf("cache-miss normalization mutated borrowed request\n want: %s\n got:  %s", original, body)
+	}
+}
 
 func BenchmarkCodexTranslateNativeRequestWithOriginal(b *testing.B) {
 	format := sdktranslator.FromString("openai-response")
@@ -19,6 +49,31 @@ func BenchmarkCodexTranslateNativeRequestWithOriginal(b *testing.B) {
 	b.SetBytes(int64(len(body)))
 	for i := 0; i < b.N; i++ {
 		translated, original, native := codexTranslateRequestWithOriginal(
+			nil,
+			context.Background(),
+			format,
+			sdktranslator.FromString("codex"),
+			"gpt-5.4",
+			body,
+			body,
+			true,
+			headers,
+		)
+		if !native || len(translated) != len(body) || len(original) != len(body) {
+			b.Fatal("unexpected native translation result")
+		}
+	}
+}
+
+func BenchmarkCodexTranslateNativeRequestWithOriginalBorrowed(b *testing.B) {
+	format := sdktranslator.FromString("openai-response")
+	body := []byte(`{"model":"gpt-5.4","input":[]}`)
+	headers := http.Header{"Originator": []string{"codex_cli_rs"}}
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for i := 0; i < b.N; i++ {
+		translated, original, native := codexTranslateRequestWithOriginalBorrowed(
 			nil,
 			context.Background(),
 			format,

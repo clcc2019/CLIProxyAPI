@@ -81,3 +81,14 @@ func TestOpenAIChatRequestBodyDetailsUsesResponsesFormat(t *testing.T) {
 		})
 	}
 }
+
+func TestParseOpenAIChatRequestBodyDetailsOwnsModel(t *testing.T) {
+	rawJSON := []byte(`{"model":"gpt-5-codex","stream":true,"messages":[]}`)
+	details := ParseOpenAIChatRequestBodyDetails(rawJSON)
+	for i := range rawJSON {
+		rawJSON[i] = 'x'
+	}
+	if details.Model != "gpt-5-codex" {
+		t.Fatalf("model = %q after source reuse, want gpt-5-codex", details.Model)
+	}
+}

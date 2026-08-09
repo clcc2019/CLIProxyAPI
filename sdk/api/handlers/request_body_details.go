@@ -1,6 +1,18 @@
 package handlers
 
-import "github.com/tidwall/gjson"
+import (
+	"strings"
+	"unsafe"
+
+	"github.com/tidwall/gjson"
+)
+
+func immutableRequestBodyString(rawJSON []byte) string {
+	if len(rawJSON) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(rawJSON), len(rawJSON))
+}
 
 // RequestBodyDetails captures hot-path request fields without full unmarshalling.
 type RequestBodyDetails struct {
@@ -11,15 +23,13 @@ type RequestBodyDetails struct {
 
 // ParseRequestBodyDetails extracts commonly used request fields in one pass.
 func ParseRequestBodyDetails(rawJSON []byte) RequestBodyDetails {
-	results := gjson.GetManyBytes(rawJSON, "model", "stream")
+	jsonText := immutableRequestBodyString(rawJSON)
+	model := gjson.Get(jsonText, "model")
+	stream := gjson.Get(jsonText, "stream")
 	details := RequestBodyDetails{}
-	if len(results) > 0 {
-		details.Model = results[0].String()
-	}
-	if len(results) > 1 {
-		details.HasStream = results[1].Exists()
-		details.Stream = results[1].Type == gjson.True
-	}
+	details.Model = strings.Clone(model.String())
+	details.HasStream = stream.Exists()
+	details.Stream = stream.Type == gjson.True
 	return details
 }
 
@@ -33,24 +43,16 @@ type OpenAIChatRequestBodyDetails struct {
 
 // ParseOpenAIChatRequestBodyDetails extracts OpenAI chat request routing fields in one pass.
 func ParseOpenAIChatRequestBodyDetails(rawJSON []byte) OpenAIChatRequestBodyDetails {
-	results := gjson.GetManyBytes(rawJSON, "model", "stream", "messages", "input", "instructions")
+	jsonText := immutableRequestBodyString(rawJSON)
+	model := gjson.Get(jsonText, "model")
+	stream := gjson.Get(jsonText, "stream")
 	details := OpenAIChatRequestBodyDetails{}
-	if len(results) > 0 {
-		details.Model = results[0].String()
-	}
-	if len(results) > 1 {
-		details.HasStream = results[1].Exists()
-		details.Stream = results[1].Type == gjson.True
-	}
-	if len(results) > 2 {
-		details.HasMessages = results[2].Exists()
-	}
-	if len(results) > 3 {
-		details.HasInput = results[3].Exists()
-	}
-	if len(results) > 4 {
-		details.HasInstructions = results[4].Exists()
-	}
+	details.Model = strings.Clone(model.String())
+	details.HasStream = stream.Exists()
+	details.Stream = stream.Type == gjson.True
+	details.HasMessages = gjson.Get(jsonText, "messages").Exists()
+	details.HasInput = gjson.Get(jsonText, "input").Exists()
+	details.HasInstructions = gjson.Get(jsonText, "instructions").Exists()
 	return details
 }
 

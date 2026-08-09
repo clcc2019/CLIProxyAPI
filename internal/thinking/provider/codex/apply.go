@@ -7,11 +7,21 @@
 package codex
 
 import (
+	"unsafe"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func codexReasoningEffortEquals(body []byte, effort string) bool {
+	if len(body) == 0 {
+		return false
+	}
+	current := gjson.Get(unsafe.String(unsafe.SliceData(body), len(body)), "reasoning.effort")
+	return current.Type == gjson.String && current.String() == effort
+}
 
 // Applier implements thinking.ProviderApplier for Codex models.
 //
@@ -59,7 +69,11 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 
 	if config.Mode == thinking.ModeLevel {
-		result, _ := sjson.SetBytes(body, "reasoning.effort", string(config.Level))
+		effort := string(config.Level)
+		if codexReasoningEffortEquals(body, effort) {
+			return body, nil
+		}
+		result, _ := sjson.SetBytes(body, "reasoning.effort", effort)
 		return result, nil
 	}
 
@@ -79,7 +93,9 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	if effort == "" {
 		return body, nil
 	}
-
+	if codexReasoningEffortEquals(body, effort) {
+		return body, nil
+	}
 	result, _ := sjson.SetBytes(body, "reasoning.effort", effort)
 	return result, nil
 }
@@ -115,6 +131,9 @@ func applyCompatibleCodex(body []byte, config thinking.ThinkingConfig) ([]byte, 
 		return body, nil
 	}
 
+	if codexReasoningEffortEquals(body, effort) {
+		return body, nil
+	}
 	result, _ := sjson.SetBytes(body, "reasoning.effort", effort)
 	return result, nil
 }

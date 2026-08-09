@@ -2196,38 +2196,58 @@ func TestIsRequestInvalidError_BadRequestDoesNotBlockCredentialFailover(t *testi
 }
 
 func TestIsRequestInvalidError_MissingResponsesRequestAnchorStopsRetry(t *testing.T) {
-	message := `{"error":{"message":"One of \"input\" or \"previous_response_id\" or 'prompt' or 'conversation_id' must be provided.","type":"invalid_request_error"}}`
-	tests := []struct {
+	messages := []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "conversation_id",
+			message: `{"error":{"message":"One of \"input\" or \"previous_response_id\" or 'prompt' or 'conversation_id' must be provided.","type":"invalid_request_error"}}`,
+		},
+		{
+			name:    "conversation",
+			message: `HTTP 400: One of "input" or "previous_response_id" or 'prompt' or 'conversation' must be provided.`,
+		},
+	}
+	errorKinds := []struct {
 		name string
-		err  error
+		err  func(string) error
 	}{
 		{
 			name: "manager error",
-			err: &Error{
-				HTTPStatus: http.StatusBadRequest,
-				Message:    message,
+			err: func(message string) error {
+				return &Error{
+					HTTPStatus: http.StatusBadRequest,
+					Message:    message,
+				}
 			},
 		},
 		{
 			name: "executor status error",
-			err: &retryAfterStatusError{
-				status:  http.StatusBadRequest,
-				message: message,
+			err: func(message string) error {
+				return &retryAfterStatusError{
+					status:  http.StatusBadRequest,
+					message: message,
+				}
 			},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if !isRequestInvalidError(tt.err) {
-				t.Fatal("missing Responses request anchor should stop retries")
+	for _, message := range messages {
+		t.Run(message.name, func(t *testing.T) {
+			for _, errorKind := range errorKinds {
+				t.Run(errorKind.name, func(t *testing.T) {
+					if !isRequestInvalidError(errorKind.err(message.message)) {
+						t.Fatal("missing Responses request anchor should stop retries")
+					}
+				})
 			}
 		})
 	}
 }
 
 func TestManager_MissingResponsesRequestAnchorDoesNotRetryCredentials(t *testing.T) {
-	const message = `{"error":{"message":"One of \"input\" or \"previous_response_id\" or 'prompt' or 'conversation_id' must be provided.","type":"invalid_request_error"}}`
+	const message = `HTTP 400: One of "input" or "previous_response_id" or 'prompt' or 'conversation' must be provided.`
 
 	tests := []struct {
 		name     string
@@ -2291,6 +2311,16 @@ func TestManager_MissingResponsesRequestAnchorDoesNotRetryCredentials(t *testing
 			if got := tt.calls(executor); len(got) != 1 || got[0] != badAuthID {
 				t.Fatalf("credential calls = %v, want only %q", got, badAuthID)
 			}
+			updatedBad, ok := m.GetByID(badAuthID)
+			if !ok || updatedBad == nil {
+				t.Fatal("first auth should remain registered")
+			}
+			if updatedBad.Unavailable || updatedBad.Status == StatusError {
+				t.Fatalf("client request error changed auth availability: status=%q unavailable=%t", updatedBad.Status, updatedBad.Unavailable)
+			}
+			if updatedBad.LastError != nil {
+				t.Fatalf("client request error persisted as auth LastError: %#v", updatedBad.LastError)
+			}
 		})
 	}
 }
@@ -2312,6 +2342,10 @@ func TestManagerMarkResult_SessionContextBadRequestDoesNotSuspendAuth(t *testing
 		{
 			name:    "custom tool call missing",
 			message: `{"type":"error","status":400,"error":{"message":"No tool call found for custom tool call output with call_id call_jzaeS5GDDushxTKTsXR9CTWL.","param":"input","type":"invalid_request_error"}}`,
+		},
+		{
+			name:    "responses request anchor missing",
+			message: `HTTP 400: One of "input" or "previous_response_id" or 'prompt' or 'conversation' must be provided.`,
 		},
 		{
 			name:    "context too large code",

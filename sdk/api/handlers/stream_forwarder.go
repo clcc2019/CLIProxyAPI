@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 var defaultSSEKeepAlive = []byte(": keep-alive\n\n")
@@ -22,6 +23,10 @@ type FirstStreamChunk struct {
 	Chunk []byte
 	Data  <-chan []byte
 	Errs  <-chan *interfaces.ErrorMessage
+}
+
+type FirstStreamResultChunk struct {
+	Chunk []byte
 }
 
 type StreamForwardOptions struct {
@@ -44,6 +49,68 @@ type StreamForwardOptions struct {
 	// WriteKeepAlive optionally writes a keep-alive heartbeat. It should not flush.
 	// When nil, a standard SSE comment heartbeat is used.
 	WriteKeepAlive func()
+
+	// ValidateChunk validates a provider chunk before it is written. A failure is
+	// surfaced as a terminal upstream error.
+	ValidateChunk func([]byte) error
+}
+
+// AwaitStreamResultFirstChunk waits for the first non-empty payload from the
+// direct StreamResult API. Authentication bootstrap has already completed by
+// the time this function is called, but the checks keep custom executors safe.
+func AwaitStreamResultFirstChunk(ctx context.Context, result *coreexecutor.StreamResult) (FirstStreamResultChunk, *interfaces.ErrorMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if result == nil || result.Chunks == nil {
+		return FirstStreamResultChunk{}, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: ErrStreamClosedBeforePayload}, nil
+	}
+	for {
+		if len(result.Buffered) > 0 {
+			chunk := result.Buffered[0]
+			result.Buffered = result.Buffered[1:]
+			if result.Observe != nil {
+				result.Observe(chunk)
+			}
+			if chunk.Err != nil {
+				FinalizeStreamResult(result, false)
+				return FirstStreamResultChunk{}, errorMessageFromError(chunk.Err, http.StatusInternalServerError), nil
+			}
+			if len(chunk.Payload) > 0 {
+				return FirstStreamResultChunk{Chunk: chunk.Payload}, nil, nil
+			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			FinalizeStreamResult(result, false)
+			return FirstStreamResultChunk{}, nil, ctx.Err()
+		case chunk, ok := <-result.Chunks:
+			if !ok {
+				FinalizeStreamResult(result, true)
+				return FirstStreamResultChunk{}, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: ErrStreamClosedBeforePayload}, nil
+			}
+			if result.Observe != nil {
+				result.Observe(chunk)
+			}
+			if chunk.Err != nil {
+				FinalizeStreamResult(result, false)
+				return FirstStreamResultChunk{}, errorMessageFromError(chunk.Err, http.StatusInternalServerError), nil
+			}
+			if len(chunk.Payload) == 0 {
+				continue
+			}
+			return FirstStreamResultChunk{Chunk: chunk.Payload}, nil, nil
+		}
+	}
+}
+
+// FinalizeStreamResult completes a direct stream lifecycle. It is safe to call
+// more than once when the producer supplied an idempotent callback.
+func FinalizeStreamResult(result *coreexecutor.StreamResult, completed bool) {
+	if result != nil && result.Finalize != nil {
+		result.Finalize(completed)
+	}
 }
 
 func PendingStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
@@ -220,6 +287,129 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			}
 			cancel(ErrorMessageCause(errMsg))
 			return
+		case <-keepAliveC:
+			writeKeepAlive()
+			flushNow()
+		}
+	}
+}
+
+// ForwardStreamResult forwards a direct executor stream without introducing a
+// relay goroutine or split data/error channels.
+func (h *BaseAPIHandler) ForwardStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), result *coreexecutor.StreamResult, opts StreamForwardOptions) {
+	writeKeepAlive := opts.WriteKeepAlive
+	if writeKeepAlive == nil {
+		writeKeepAlive = func() {
+			_, _ = c.Writer.Write(defaultSSEKeepAlive)
+		}
+	}
+	keepAliveInterval := StreamingKeepAliveInterval(h.Cfg)
+	if opts.KeepAliveInterval != nil {
+		keepAliveInterval = *opts.KeepAliveInterval
+	}
+	var keepAlive *time.Ticker
+	var keepAliveC <-chan time.Time
+	if keepAliveInterval > 0 {
+		keepAlive = time.NewTicker(keepAliveInterval)
+		defer keepAlive.Stop()
+		keepAliveC = keepAlive.C
+	}
+	flushNow := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	cancelWith := func(err error) {
+		if cancel != nil {
+			cancel(err)
+		}
+	}
+	writeError := func(errMsg *interfaces.ErrorMessage) {
+		if opts.WriteTerminalError != nil {
+			opts.WriteTerminalError(errMsg)
+			flushNow()
+		}
+		cancelWith(ErrorMessageCause(errMsg))
+	}
+	if result == nil || result.Chunks == nil {
+		FinalizeStreamResult(result, false)
+		writeError(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errNilStreamChannels})
+		return
+	}
+	requestCtx := c.Request.Context()
+	for {
+		if len(result.Buffered) > 0 {
+			chunk := result.Buffered[0]
+			result.Buffered = result.Buffered[1:]
+			if result.Observe != nil {
+				result.Observe(chunk)
+			}
+			if chunk.Err != nil {
+				FinalizeStreamResult(result, false)
+				writeError(errorMessageFromError(chunk.Err, http.StatusInternalServerError))
+				return
+			}
+			if len(chunk.Payload) == 0 {
+				continue
+			}
+			if opts.ValidateChunk != nil {
+				if err := opts.ValidateChunk(chunk.Payload); err != nil {
+					FinalizeStreamResult(result, false)
+					writeError(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+					return
+				}
+			}
+			if opts.WriteChunk == nil {
+				FinalizeStreamResult(result, false)
+				writeError(&interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: errNilStreamChunkWriter})
+				return
+			}
+			if opts.WriteChunk(chunk.Payload) {
+				flushNow()
+			}
+			continue
+		}
+		select {
+		case <-requestCtx.Done():
+			FinalizeStreamResult(result, false)
+			cancelWith(requestCtx.Err())
+			return
+		case chunk, ok := <-result.Chunks:
+			if !ok {
+				FinalizeStreamResult(result, true)
+				if opts.WriteDone != nil {
+					opts.WriteDone()
+				}
+				flushNow()
+				cancelWith(nil)
+				return
+			}
+			if result.Observe != nil {
+				result.Observe(chunk)
+			}
+			if chunk.Err != nil {
+				FinalizeStreamResult(result, false)
+				writeError(errorMessageFromError(chunk.Err, http.StatusInternalServerError))
+				return
+			}
+			if len(chunk.Payload) == 0 {
+				continue
+			}
+			if opts.ValidateChunk != nil {
+				if err := opts.ValidateChunk(chunk.Payload); err != nil {
+					FinalizeStreamResult(result, false)
+					writeError(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+					return
+				}
+			}
+			if opts.WriteChunk == nil {
+				FinalizeStreamResult(result, false)
+				writeError(&interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: errNilStreamChunkWriter})
+				return
+			}
+			if opts.WriteChunk(chunk.Payload) {
+				flushNow()
+			}
 		case <-keepAliveC:
 			writeKeepAlive()
 			flushNow()

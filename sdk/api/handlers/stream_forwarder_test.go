@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -52,6 +53,70 @@ func TestForwardStreamFlushesEveryChunkByDefault(t *testing.T) {
 
 	if flusher.count != 3 {
 		t.Fatalf("flush count = %d, want 3", flusher.count)
+	}
+}
+
+func TestForwardStreamResultDrainsBootstrapAndFinalizes(t *testing.T) {
+	ctx, cancelRequest := newStreamForwardTestContext(t)
+	defer cancelRequest()
+
+	remaining := make(chan coreexecutor.StreamChunk, 1)
+	remaining <- coreexecutor.StreamChunk{Payload: []byte("b")}
+	close(remaining)
+	observed := 0
+	finalized := false
+	completed := false
+	result := &coreexecutor.StreamResult{
+		Buffered: []coreexecutor.StreamChunk{{Payload: []byte("a")}},
+		Chunks:   remaining,
+		Observe:  func(coreexecutor.StreamChunk) { observed++ },
+		Finalize: func(done bool) {
+			finalized = true
+			completed = done
+		},
+	}
+	first, errMsg, err := AwaitStreamResultFirstChunk(ctx.Request.Context(), result)
+	if err != nil || errMsg != nil || string(first.Chunk) != "a" {
+		t.Fatalf("first = %q, errMsg=%v, err=%v", first.Chunk, errMsg, err)
+	}
+
+	flusher := &countingFlusher{}
+	var chunks []string
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	handler.ForwardStreamResult(ctx, flusher, func(error) {}, result, StreamForwardOptions{
+		WriteChunk: func(chunk []byte) bool {
+			chunks = append(chunks, string(chunk))
+			return true
+		},
+	})
+	if len(chunks) != 1 || chunks[0] != "b" || observed != 2 {
+		t.Fatalf("chunks=%v observed=%d", chunks, observed)
+	}
+	if !finalized || !completed {
+		t.Fatalf("finalized=%v completed=%v", finalized, completed)
+	}
+}
+
+func TestForwardStreamResultErrorFinalizesIncomplete(t *testing.T) {
+	ctx, cancelRequest := newStreamForwardTestContext(t)
+	defer cancelRequest()
+
+	wantErr := errors.New("stream failed")
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Err: wantErr}
+	close(chunks)
+	completed := true
+	result := &coreexecutor.StreamResult{Chunks: chunks, Finalize: func(done bool) { completed = done }}
+	var gotErr *interfaces.ErrorMessage
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	handler.ForwardStreamResult(ctx, &countingFlusher{}, func(error) {}, result, StreamForwardOptions{
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) { gotErr = errMsg },
+	})
+	if gotErr == nil || !errors.Is(gotErr.Error, wantErr) {
+		t.Fatalf("terminal error = %#v", gotErr)
+	}
+	if completed {
+		t.Fatal("errored stream finalized as completed")
 	}
 }
 

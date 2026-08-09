@@ -28,6 +28,12 @@ var codexPinnedClientProfileHeaders = []string{
 	codexWireHeaderResponsesAPIIncludeTimingMetrics,
 }
 
+var codexAllClientProfileHeaderNames = func() []string {
+	headers := make([]string, 0, len(codexPinnedClientProfileHeaders)+2)
+	headers = append(headers, "User-Agent", "Originator")
+	return append(headers, codexPinnedClientProfileHeaders...)
+}()
+
 type codexClientProfile struct {
 	headers http.Header
 }
@@ -236,13 +242,13 @@ func codexUserAgentProductVersion(userAgent string) (string, string, bool) {
 }
 
 func codexClientProfilePinned(auth *cliproxyauth.Auth) bool {
-	_, ok := codexPinnedClientProfileForAuth(auth)
+	_, ok := codexPinnedClientProfileViewForAuth(auth)
 	return ok
 }
 
 func codexClientProfileSourceHeaders(auth *cliproxyauth.Auth, source http.Header) http.Header {
-	if profile, ok := codexPinnedClientProfileForAuth(auth); ok {
-		return profile.headers.Clone()
+	if profile, ok := codexPinnedClientProfileViewForAuth(auth); ok {
+		return profile.headers
 	}
 	return source
 }
@@ -251,7 +257,7 @@ func codexPreparePinnedClientProfileHeaders(headers http.Header, auth *cliproxya
 	if headers == nil {
 		return
 	}
-	profile, ok := codexPinnedClientProfileForAuth(auth)
+	profile, ok := codexPinnedClientProfileViewForAuth(auth)
 	if !ok {
 		return
 	}
@@ -275,6 +281,17 @@ func codexPreparePinnedClientProfileHeaders(headers http.Header, auth *cliproxya
 }
 
 func codexPinnedClientProfileForAuth(auth *cliproxyauth.Auth) (codexClientProfile, bool) {
+	profile, ok := codexPinnedClientProfileViewForAuth(auth)
+	if !ok {
+		return codexClientProfile{}, false
+	}
+	return codexCloneClientProfile(profile), true
+}
+
+// codexPinnedClientProfileViewForAuth returns the immutable cache entry used by
+// request preparation. Cache updates replace the complete profile and never
+// mutate a published header map, so concurrent readers do not need a clone.
+func codexPinnedClientProfileViewForAuth(auth *cliproxyauth.Auth) (codexClientProfile, bool) {
 	key, ok := codexClientProfileKeyForAuth(auth)
 	if !ok {
 		return codexClientProfile{}, false
@@ -284,7 +301,7 @@ func codexPinnedClientProfileForAuth(auth *cliproxyauth.Auth) (codexClientProfil
 	profile, exists := codexClientProfiles[key]
 	codexClientProfilesMu.RUnlock()
 	if exists && len(profile.headers) > 0 {
-		return codexCloneClientProfile(profile), true
+		return profile, true
 	}
 
 	legacyProfile, exists := codexLegacyClientProfileFromAuth(auth)
@@ -296,12 +313,12 @@ func codexPinnedClientProfileForAuth(auth *cliproxyauth.Auth) (codexClientProfil
 	defer codexClientProfilesMu.Unlock()
 	if profile, exists = codexClientProfiles[key]; exists {
 		if len(profile.headers) > 0 {
-			return codexCloneClientProfile(profile), true
+			return profile, true
 		}
 		delete(codexClientProfiles, key)
 	}
 	codexClientProfiles[key] = legacyProfile
-	return codexCloneClientProfile(legacyProfile), true
+	return legacyProfile, true
 }
 
 func codexLegacyClientProfileFromAuth(auth *cliproxyauth.Auth) (codexClientProfile, bool) {
@@ -350,10 +367,7 @@ func codexClientProfileKeyForAuth(auth *cliproxyauth.Auth) (codexClientProfileKe
 }
 
 func codexAllClientProfileHeaders() []string {
-	headers := make([]string, 0, len(codexPinnedClientProfileHeaders)+2)
-	headers = append(headers, "User-Agent", "Originator")
-	headers = append(headers, codexPinnedClientProfileHeaders...)
-	return headers
+	return codexAllClientProfileHeaderNames
 }
 
 func codexPinnedClientProfileHeaderName(name string) bool {
@@ -394,22 +408,36 @@ func codexClientProfileAuthHeaderFixed(auth *cliproxyauth.Auth, name string) boo
 	return codexAuthHeaderFixed(auth, name)
 }
 
-func codexClientProfileCustomHeaderAttrs(auth *cliproxyauth.Auth) map[string]string {
-	if auth == nil || len(auth.Attributes) == 0 {
-		return nil
+func codexApplyCustomHeadersFromAuth(req *http.Request, auth *cliproxyauth.Auth) bool {
+	if req == nil || auth == nil || len(auth.Attributes) == 0 {
+		return false
 	}
-	if !codexClientProfilePinned(auth) {
-		return auth.Attributes
+	if req.Header == nil {
+		req.Header = make(http.Header)
 	}
-	filtered := make(map[string]string, len(auth.Attributes))
-	for key, value := range auth.Attributes {
-		headerName, ok := strings.CutPrefix(key, "header:")
-		if ok && codexPinnedClientProfileHeaderName(headerName) && !codexClientProfileAuthHeaderFixed(auth, headerName) {
+	pinned := codexClientProfilePinned(auth)
+	applied := false
+	for rawKey, rawValue := range auth.Attributes {
+		headerName, ok := strings.CutPrefix(rawKey, "header:")
+		if !ok {
 			continue
 		}
-		filtered[key] = value
+		headerName = strings.TrimSpace(headerName)
+		value := strings.TrimSpace(rawValue)
+		if headerName == "" || value == "" {
+			continue
+		}
+		if pinned && codexPinnedClientProfileHeaderName(headerName) && !codexClientProfileAuthHeaderFixed(auth, headerName) {
+			continue
+		}
+		headerName = http.CanonicalHeaderKey(headerName)
+		if headerName == "Host" {
+			req.Host = value
+		}
+		codexSetSingleHeaderValue(req.Header, headerName, value)
+		applied = true
 	}
-	return filtered
+	return applied
 }
 
 func codexResetClientProfilesForTest() {

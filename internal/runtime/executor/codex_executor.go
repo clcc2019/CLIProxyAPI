@@ -101,6 +101,13 @@ func NewCodexExecutorWithResponseObserver(cfg *config.Config, observer CodexResp
 
 func (e *CodexExecutor) Identifier() string { return "codex" }
 
+func codexRequestReasoningEffort(opts cliproxyexecutor.Options) string {
+	if !opts.RequestMetadata.Parsed {
+		return ""
+	}
+	return opts.RequestMetadata.ReasoningEffort
+}
+
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	ctx = contextWithCodexForcedUpstreamSessionFromOptions(ctx, opts)
 	if isCodexOpenAIImageRequest(opts) {
@@ -118,7 +125,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
+	reporter.CaptureModelReasoningEffortWithHint(codexRequestReasoningEffort(opts), opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -128,12 +135,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body, originalTranslated, nativeRequest := codexTranslateRequestWithOriginal(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, false, opts.Headers)
+	body, originalTranslated, nativeRequest := codexTranslateRequestWithOriginalBorrowed(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, false, opts.Headers)
 	if nativeRequest {
 		ctx = contextWithCodexNativeClientRequest(ctx)
 	}
 
-	body, err = applyCodexThinking(body, req, from.String(), to.String(), e.Identifier())
+	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -254,7 +261,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
+	reporter.CaptureModelReasoningEffortWithHint(codexRequestReasoningEffort(opts), opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -264,12 +271,12 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body, originalTranslated, nativeRequest := codexTranslateRequestWithOriginal(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, false, opts.Headers)
+	body, originalTranslated, nativeRequest := codexTranslateRequestWithOriginalBorrowed(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, false, opts.Headers)
 	if nativeRequest {
 		ctx = contextWithCodexNativeClientRequest(ctx)
 	}
 
-	body, err = applyCodexThinking(body, req, from.String(), to.String(), e.Identifier())
+	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -411,7 +418,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	reporter := helps.NewExecutorUsageReporter(upstreamCtx, e, baseModel, auth)
-	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
+	reporter.CaptureModelReasoningEffortWithHint(codexRequestReasoningEffort(opts), opts.OriginalRequest, req.Payload)
 	defer func() {
 		if !codexRequestContextDone(ctx, err) {
 			reporter.TrackFailure(upstreamCtx, &err)
@@ -425,12 +432,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body, originalTranslated, nativeRequest := codexTranslateRequestWithOriginal(e.cfg, upstreamCtx, from, to, baseModel, req.Payload, originalPayload, true, opts.Headers)
+	body, originalTranslated, nativeRequest := codexTranslateRequestWithOriginalBorrowed(e.cfg, upstreamCtx, from, to, baseModel, req.Payload, originalPayload, true, opts.Headers)
 	if nativeRequest {
 		upstreamCtx = contextWithCodexNativeClientRequest(upstreamCtx)
 	}
 
-	body, err = applyCodexThinking(body, req, from.String(), to.String(), e.Identifier())
+	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +628,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			// partial payload chunks. Without this the client would treat a
 			// partially-delivered response as a successful completion.
 			var pendingTerminalErr error
-			errRead := helps.ReadStreamLines(streamBody, func(line []byte) error {
+			errRead := helps.ReadStreamLinesBorrowed(streamBody, func(line []byte) error {
 				if err := upstreamCtx.Err(); err != nil {
 					return err
 				}
@@ -1017,10 +1024,16 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func normalizeCodexInstructions(body []byte) []byte {
-	instructions := gjson.GetBytes(body, "instructions")
-	if !instructions.Exists() || instructions.Type == gjson.Null {
-		body, _ = sjson.SetBytes(body, "instructions", "")
+	instructions := codexGJSONGetImmutableBytes(body, "instructions")
+	if instructions.Exists() && instructions.Type != gjson.Null {
+		return body
 	}
+	if !instructions.Exists() {
+		if updated, ok := codexAppendTopLevelStringField(body, "instructions", ""); ok {
+			return updated
+		}
+	}
+	body, _ = sjson.SetBytes(body, "instructions", "")
 	return body
 }
 
@@ -1046,7 +1059,7 @@ func isCodexResponsesLiteRequest(body []byte, baseModel string, auth *cliproxyau
 			return true
 		}
 	}
-	value := gjson.GetBytes(body, "client_metadata."+codexWSClientMetadataResponsesLite)
+	value := codexGJSONGetImmutableBytes(body, "client_metadata."+codexWSClientMetadataResponsesLite)
 	if !value.Exists() {
 		return false
 	}
@@ -1095,7 +1108,7 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 		return body
 	}
 
-	tools := gjson.GetBytes(body, "tools")
+	tools := codexGJSONGetImmutableBytes(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
 		body, _ = sjson.SetRawBytes(body, "tools", imageGenToolArrayJSON)
 		return body

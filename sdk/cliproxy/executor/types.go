@@ -72,13 +72,32 @@ type Request struct {
 	Metadata map[string]any
 }
 
+// RequestMetadata contains request facts that the HTTP handler has already
+// parsed. Executors may use it to avoid rescanning OriginalRequest on the hot
+// path. The value is immutable for the lifetime of an execution; nil means the
+// caller did not provide pre-parsed metadata and executors must use their
+// existing fallback parsing.
+type RequestMetadata struct {
+	Parsed             bool
+	RequestedModel     string
+	NormalizedModel    string
+	ReasoningEffort    string
+	ServiceTier        string
+	RequestPath        string
+	ContentType        string
+	IdempotencyKey     string
+	ExecutionSessionID string
+	Stream             bool
+}
+
 // Options controls execution behavior for both streaming and non-streaming calls.
 type Options struct {
 	// Stream toggles streaming mode.
 	Stream bool
 	// Alt carries optional alternate format hint (e.g. SSE JSON key).
 	Alt string
-	// Headers are forwarded to the provider request builder.
+	// Headers are a read-only view forwarded to the provider request builder.
+	// Executors must copy values into their own request before mutation.
 	Headers http.Header
 	// Query contains optional query string parameters.
 	Query url.Values
@@ -88,6 +107,13 @@ type Options struct {
 	SourceFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
+	// RequestMetadata carries immutable request facts parsed once by the handler.
+	// Its Parsed field is false for existing SDK users and custom executors.
+	RequestMetadata RequestMetadata
+	// DirectStream asks the auth manager to preserve the executor channel and
+	// attach lifecycle callbacks instead of allocating a relay channel. It is
+	// intended for built-in consumers that understand StreamResult.Buffered.
+	DirectStream bool
 }
 
 // Response wraps either a full provider response or metadata for streaming flows.
@@ -115,6 +141,15 @@ type StreamResult struct {
 	Headers http.Header
 	// Chunks is the channel of streaming payload units.
 	Chunks <-chan StreamChunk
+	// Buffered contains chunks consumed while validating stream bootstrap. Direct
+	// consumers must drain these before Chunks. Legacy auth-manager paths replay
+	// them through Chunks and leave this field empty.
+	Buffered []StreamChunk
+	// Observe is called exactly once for each consumed chunk on the direct path.
+	Observe func(StreamChunk)
+	// Finalize releases stream resources. completed is true only after Chunks
+	// closes normally. Implementations must make this callback idempotent.
+	Finalize func(completed bool)
 }
 
 // StatusError represents an error that carries an HTTP-like status code.

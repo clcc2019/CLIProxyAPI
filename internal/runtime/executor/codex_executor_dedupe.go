@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -51,6 +52,7 @@ type codexPreparedRequest struct {
 	body               []byte
 	promptCacheID      string
 	executionSessionID string
+	firstRequestUsed   *atomic.Bool
 }
 
 type codexPrepareRequestBodyOptions struct {
@@ -139,6 +141,7 @@ func (e *CodexExecutor) prepareCodexRequestWithKindBodyOptions(ctx context.Conte
 		body:               body,
 		promptCacheID:      cache.ID,
 		executionSessionID: strings.TrimSpace(executionSessionID),
+		firstRequestUsed:   new(atomic.Bool),
 	}, nil
 }
 

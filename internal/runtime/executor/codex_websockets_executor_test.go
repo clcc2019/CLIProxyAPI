@@ -312,7 +312,7 @@ func BenchmarkRememberCodexWebsocketTurn(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(previousBody) + len(completedResponse)))
 	for i := 0; i < b.N; i++ {
-		sess.rememberLogicalRequest(previousBody)
+		sess.rememberLogicalRequestOwned(bytes.Clone(previousBody))
 		sess.rememberCompletedResponse(completedResponse)
 	}
 }
@@ -383,6 +383,20 @@ func TestCodexWebsocketSessionRememberedTurnOwnsState(t *testing.T) {
 	}
 	if got := gjson.GetBytes(sess.lastResponseItems[0], "content.0.text").String(); got != "reply" {
 		t.Fatalf("remembered response text = %q, want reply", got)
+	}
+}
+
+func TestCodexWebsocketSessionRememberLogicalRequestOwnedTransfersBuffer(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	sess := &codexWebsocketSession{}
+
+	sess.rememberLogicalRequestOwned(request)
+
+	if len(sess.lastRequest) == 0 || &sess.lastRequest[0] != &request[0] {
+		t.Fatal("owned request was copied instead of transferred to the session")
+	}
+	if got := gjson.GetBytes(sess.lastRequestInput[0], "content.0.text").String(); got != "hello" {
+		t.Fatalf("remembered request text = %q, want hello", got)
 	}
 }
 

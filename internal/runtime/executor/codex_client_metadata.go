@@ -145,7 +145,10 @@ func codexApplyWebsocketClientMetadataWithOptions(ctx context.Context, body []by
 	}
 
 	source := codexGinHeadersFromContext(ctx)
-	var entries [11]codexClientMetadataEntry
+	// WebSocket metadata has eight shared fields plus four transport-specific
+	// fields. Keep all twelve on the stack so the final append does not grow the
+	// caller-provided slice.
+	var entries [12]codexClientMetadataEntry
 	metadataEntries := codexCompactClientMetadataEntries(codexResponsesClientMetadataEntries(entries[:0], headers, source, auth, cfg, true, streamStartMS))
 	if appendResponseCreateType {
 		body = codexSetClientMetadataAndResponseCreateTypeNormalized(body, metadataEntries)

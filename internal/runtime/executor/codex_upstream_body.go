@@ -340,7 +340,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	// Resolve all four inspected fields in a single payload traversal so
 	// downstream branches can reuse the decoded Result values rather than
 	// re-parsing the body once per field.
-	scanned := gjson.GetManyBytes(body, codexFinalUpstreamScanFields...)
+	scanned := codexGJSONGetManyImmutableBytes(body, codexFinalUpstreamScanFields...)
 	model := scanned[0]
 	store := scanned[1]
 	instructions := scanned[2]

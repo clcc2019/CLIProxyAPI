@@ -102,6 +102,20 @@ func (r *UsageReporter) CaptureModelReasoningEffort(payloads ...[]byte) {
 	}
 }
 
+// CaptureModelReasoningEffortWithHint uses handler-parsed metadata when it is
+// available and falls back to payload inspection for non-HTTP and legacy SDK
+// callers. This avoids repeatedly scanning the same request JSON.
+func (r *UsageReporter) CaptureModelReasoningEffortWithHint(hint string, payloads ...[]byte) {
+	if r == nil {
+		return
+	}
+	if hint = normalizeReasoningEffortValue(hint); hint != "" {
+		r.modelReasoningEffort = hint
+		return
+	}
+	r.CaptureModelReasoningEffort(payloads...)
+}
+
 // SetCodexResponseMetadata records the server-selected model and the
 // X-Reasoning-Included header for the usage record. A server model is billed
 // and aggregated as the actual model while alias/requested-model fields retain

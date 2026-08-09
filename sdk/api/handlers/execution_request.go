@@ -50,6 +50,18 @@ func (h *BaseAPIHandler) prepareExecutionRequest(ctx context.Context, handlerTyp
 		metadata[coreexecutor.NeedResponseHeadersMetadataKey] = true
 	}
 	setServiceTierMetadata(metadata, rawJSON)
+	requestMetadata := coreexecutor.RequestMetadata{
+		Parsed:          true,
+		RequestedModel:  modelName,
+		NormalizedModel: normalizedModel,
+		ReasoningEffort: metadataString(metadata, coreexecutor.ReasoningEffortMetadataKey),
+		ServiceTier:     metadataString(metadata, coreexecutor.ServiceTierMetadataKey),
+		RequestPath:     metadataString(metadata, coreexecutor.RequestPathMetadataKey),
+		ContentType:     metadataString(metadata, coreexecutor.RequestContentTypeMetadataKey),
+		IdempotencyKey:  metadataString(metadata, idempotencyKeyMetadataKey),
+		Stream:          mode.stream,
+	}
+	requestMetadata.ExecutionSessionID = metadataString(metadata, coreexecutor.ExecutionSessionMetadataKey)
 
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -66,11 +78,26 @@ func (h *BaseAPIHandler) prepareExecutionRequest(ctx context.Context, handlerTyp
 		options: coreexecutor.Options{
 			Stream:          mode.stream,
 			Alt:             alt,
-			Headers:         requestHeadersFromContext(ctx),
+			Headers:         requestHeadersViewFromContext(ctx),
 			OriginalRequest: rawJSON,
 			SourceFormat:    sdktranslator.FromString(handlerType),
 			Metadata:        metadata,
+			RequestMetadata: requestMetadata,
 		},
 		passthroughHeaders: passthroughHeaders,
 	}, nil
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	switch value := metadata[key].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
 }

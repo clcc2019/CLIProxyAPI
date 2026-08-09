@@ -66,6 +66,35 @@ func codexTranslateRequestWithOriginal(
 	stream bool,
 	headers http.Header,
 ) (translated []byte, originalTranslated []byte, native bool) {
+	return codexTranslateRequestWithOriginalMode(cfg, ctx, from, to, model, payload, original, stream, headers, false)
+}
+
+func codexTranslateRequestWithOriginalBorrowed(
+	cfg *config.Config,
+	ctx context.Context,
+	from sdktranslator.Format,
+	to sdktranslator.Format,
+	model string,
+	payload []byte,
+	original []byte,
+	stream bool,
+	headers http.Header,
+) (translated []byte, originalTranslated []byte, native bool) {
+	return codexTranslateRequestWithOriginalMode(cfg, ctx, from, to, model, payload, original, stream, headers, true)
+}
+
+func codexTranslateRequestWithOriginalMode(
+	cfg *config.Config,
+	ctx context.Context,
+	from sdktranslator.Format,
+	to sdktranslator.Format,
+	model string,
+	payload []byte,
+	original []byte,
+	stream bool,
+	headers http.Header,
+	borrowNative bool,
+) (translated []byte, originalTranslated []byte, native bool) {
 	native = codexNativeClientRequest(from, headers, payload) ||
 		codexNativeClientRequest(from, codexGinHeadersFromContext(ctx), payload)
 	if !native {
@@ -73,15 +102,34 @@ func codexTranslateRequestWithOriginal(
 		return translated, originalTranslated, false
 	}
 
-	translated = bytes.Clone(payload)
+	if borrowNative && codexNativeTranslationMayBorrow(cfg) {
+		translated = payload
+	} else {
+		translated = bytes.Clone(payload)
+	}
 	if len(original) > 0 {
 		// Payload rules and response translators only inspect the original request;
-		// they never mutate it. Keep the owned clone for the body that continues
-		// through normalization, but borrow the caller's immutable original bytes
-		// instead of copying the same native payload a second time.
+		// they never mutate it. Borrow the caller's immutable original bytes instead
+		// of copying the same native payload a second time. The borrowed hot path
+		// defers its working copy until a final-body cache miss.
 		originalTranslated = original
 	}
 	return translated, originalTranslated, true
+}
+
+func codexNativeTranslationMayBorrow(cfg *config.Config) bool {
+	if cfg == nil {
+		return true
+	}
+	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
+		return false
+	}
+	rules := cfg.Payload
+	return len(rules.Default) == 0 &&
+		len(rules.DefaultRaw) == 0 &&
+		len(rules.Override) == 0 &&
+		len(rules.OverrideRaw) == 0 &&
+		len(rules.Filter) == 0
 }
 
 func codexFirstPartyOriginator(originator string) bool {

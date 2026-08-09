@@ -191,3 +191,25 @@ func TestNormalizeCodexFinalUpstreamBodyReturnsDistinctBuffers(t *testing.T) {
 		t.Error("two cache hits for the same key returned different content")
 	}
 }
+
+func TestNormalizeCodexFinalUpstreamBodyBorrowedRemainsImmutable(t *testing.T) {
+	opts := codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	}
+	body := []byte(`{"model":"gpt-5","instructions":"x","stream":true,"store":false,` +
+		`"prompt_cache_key":"11111111-1111-1111-1111-111111111111","input":[]}`)
+
+	_ = normalizeCodexFinalUpstreamBody(body, "gpt-5", nil, opts)
+	borrowed := normalizeCodexFinalUpstreamBodyBorrowed(body, "gpt-5", nil, opts)
+	expected := bytes.Clone(borrowed)
+	updated := codexSetPromptCacheKey(borrowed, "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")
+	if bytes.Equal(updated, borrowed) {
+		t.Fatal("prompt cache update did not produce a changed body")
+	}
+
+	again := normalizeCodexFinalUpstreamBodyBorrowed(body, "gpt-5", nil, opts)
+	if !bytes.Equal(again, expected) {
+		t.Fatalf("copy-on-write request preparation mutated memo entry\n want: %s\n got:  %s", expected, again)
+	}
+}

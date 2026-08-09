@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/sjson"
 )
 
@@ -198,7 +199,12 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, mode
 	if executionSessionID := responsesExplicitExecutionSessionID(c.Request, rawJSON); executionSessionID != "" {
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, executionSessionID)
 	}
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	streamResult, errMsg := h.ExecuteStreamResultWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(handlers.ErrorMessageCause(errMsg))
+		return
+	}
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -208,7 +214,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, mode
 	}
 	framer := &responsesSSEFramer{noticeFilter: newResponsesNoticeFilter(), trustedData: true}
 
-	first, errMsg, err := handlers.AwaitStreamFirstChunk(c.Request.Context(), dataChan, errChan)
+	first, errMsg, err := handlers.AwaitStreamResultFirstChunk(c.Request.Context(), streamResult)
 	if err != nil {
 		cliCancel(err)
 		return
@@ -218,12 +224,17 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, mode
 		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
-	dataChan = first.Data
-	errChan = first.Errs
+	if err := handlers.ValidateSSEDataJSON(first.Chunk); err != nil {
+		handlers.FinalizeStreamResult(streamResult, false)
+		errMsg = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(err)
+		return
+	}
 
 	// Success! Set headers.
 	setSSEHeaders()
-	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), streamResult.Headers)
 
 	// Write first chunk logic (matching forwardResponsesStream)
 	if framer.WriteChunk(c.Writer, first.Chunk) {
@@ -231,7 +242,39 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, mode
 	}
 
 	// Continue
-	h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+	h.forwardResponsesStreamResult(c, flusher, func(err error) { cliCancel(err) }, streamResult, framer)
+}
+
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), result *coreexecutor.StreamResult, framer *responsesSSEFramer) {
+	if framer == nil {
+		framer = &responsesSSEFramer{}
+	}
+	h.ForwardStreamResult(c, flusher, cancel, result, handlers.StreamForwardOptions{
+		ValidateChunk: handlers.ValidateSSEDataJSON,
+		WriteChunk: func(chunk []byte) bool {
+			return framer.WriteChunk(c.Writer, chunk)
+		},
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			_ = framer.Flush(c.Writer)
+			if errMsg == nil {
+				return
+			}
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
+			}
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
+			}
+			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+			handlers.WriteSSEEventDataFrameWithLeadingNewline(c.Writer, "error", chunk)
+		},
+		WriteDone: func() {
+			_ = framer.Flush(c.Writer)
+			_, _ = c.Writer.Write([]byte("\n"))
+		},
+	})
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {

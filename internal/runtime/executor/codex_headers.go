@@ -5,6 +5,8 @@ import "net/http"
 const (
 	codexRequestHeaderInitialCapacity     = 24
 	codexHTTPRequestHeaderInitialCapacity = 14
+	codexWebsocketHeaderValueCapacity     = 12
+	codexHeaderValueArenaKey              = "\x00codex-header-values"
 
 	codexHeaderSessionID                        = "Session_id"
 	codexHeaderThreadID                         = "Thread_id"
@@ -33,10 +35,31 @@ const (
 	codexWireHeaderOAIAttestation                   = "X-Oai-Attestation"
 )
 
+// codexNewRequestHeader reserves one request-owned backing array for the
+// common single-value headers. Each value handed out below has cap=1, so an
+// http.Header.Add cannot overwrite the next header's slot. The private arena
+// entry must be removed with codexFinalizeRequestHeaders before transport.
+func codexNewRequestHeader(headerCapacity int, valueCapacity int) http.Header {
+	headers := make(http.Header, headerCapacity)
+	headers[codexHeaderValueArenaKey] = make([]string, valueCapacity)
+	return headers
+}
+
+func codexFinalizeRequestHeaders(headers http.Header) {
+	delete(headers, codexHeaderValueArenaKey)
+}
+
 func codexSetSingleHeaderValue(headers http.Header, key string, value string) {
 	if values := headers[key]; len(values) > 0 {
 		values[0] = value
 		headers[key] = values[:1]
+		return
+	}
+	if arena := headers[codexHeaderValueArenaKey]; len(arena) > 0 {
+		values := arena[:1:1]
+		values[0] = value
+		headers[key] = values
+		headers[codexHeaderValueArenaKey] = arena[1:]
 		return
 	}
 	headers[key] = []string{value}

@@ -11,6 +11,25 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func TestCodexRequestHeaderArenaKeepsValuesIndependent(t *testing.T) {
+	headers := codexNewRequestHeader(3, 3)
+	codexSetSingleHeaderValue(headers, "First", "one")
+	codexSetSingleHeaderValue(headers, "Second", "two")
+
+	headers.Add("First", "three")
+	if got := headers.Values("First"); len(got) != 2 || got[0] != "one" || got[1] != "three" {
+		t.Fatalf("First values = %v, want [one three]", got)
+	}
+	if got := headers.Get("Second"); got != "two" {
+		t.Fatalf("Second = %q, want two", got)
+	}
+
+	codexFinalizeRequestHeaders(headers)
+	if _, exists := headers[codexHeaderValueArenaKey]; exists {
+		t.Fatal("private header arena escaped request preparation")
+	}
+}
+
 func TestApplyCodexHeadersOmitsEmptyAuthorizationToken(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {

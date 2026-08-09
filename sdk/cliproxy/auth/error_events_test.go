@@ -163,6 +163,16 @@ func TestManagerMarkResultSkipsSessionContextErrorEvent(t *testing.T) {
 			HTTPStatus: http.StatusBadRequest,
 		},
 	})
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "codex",
+		Model:    "gpt-5-codex",
+		Success:  false,
+		Error: &Error{
+			Message:    `HTTP 400: One of "input" or "previous_response_id" or 'prompt' or 'conversation' must be provided.`,
+			HTTPStatus: http.StatusBadRequest,
+		},
+	})
 
 	select {
 	case got := <-subscriber:

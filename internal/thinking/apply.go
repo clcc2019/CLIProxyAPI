@@ -108,7 +108,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	suffixResult := ParseSuffix(model)
 	baseModel := suffixResult.ModelName
 	// Use provider-specific lookup to handle capability differences across providers.
-	modelInfo := registry.LookupModelInfo(baseModel, providerKey)
+	modelInfo := registry.LookupModelInfoReadOnly(baseModel, providerKey)
 
 	// 3. Model capability check
 	// Unknown models are treated as user-defined so thinking config can still be applied.

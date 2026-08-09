@@ -2,6 +2,7 @@
 cli-proxy-api
 CLIProxyAPI
 CLIProxyAPI-*
+!cliproxyapi-api.skill
 *.exe
 
 # Configuration
@@ -49,6 +50,11 @@ GEMINI.md
 .serena/*
 .agent/*
 .agents/*
+!.agents/
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/cliproxyapi-api/
+!.agents/skills/cliproxyapi-api/**
 .opencode/*
 .idea/*
 .beads/*

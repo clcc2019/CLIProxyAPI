@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -98,8 +97,7 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 		codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, accountID)
 	}
 	codexEnsureFedramp(headers, profileHeaders, auth, apiKeyAuth)
-	attrs := codexClientProfileCustomHeaderAttrs(auth)
-	if util.ApplyCustomHeadersFromAttrs(r, attrs) {
+	if codexApplyCustomHeadersFromAuth(r, auth) {
 		codexEnsureVersionHeader(headers, nil)
 		if cfgUserAgent != "" {
 			codexSetSingleHeaderValue(headers, "User-Agent", cfgUserAgent)
@@ -174,10 +172,13 @@ func codexSetHeaderCasePreserved(headers http.Header, key string, value string) 
 	}
 	for existingKey := range headers {
 		if strings.EqualFold(existingKey, key) {
+			if existingKey == key {
+				continue
+			}
 			delete(headers, existingKey)
 		}
 	}
-	headers[key] = []string{value}
+	codexSetSingleHeaderValue(headers, key, value)
 }
 
 func codexEnsureFedramp(target http.Header, source http.Header, auth *cliproxyauth.Auth, apiKeyAuth bool) {

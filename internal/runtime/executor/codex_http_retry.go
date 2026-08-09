@@ -225,6 +225,9 @@ func codexHTTPRequestForAttempt(prepared codexPreparedRequest, encoding string, 
 		return nil, errors.New("codex executor: request is nil")
 	}
 	if attempt <= 0 {
+		if prepared.firstRequestUsed != nil && prepared.firstRequestUsed.CompareAndSwap(false, true) {
+			return prepared.httpReq, nil
+		}
 		return codexClonePreparedHTTPRequestForFirstAttempt(prepared)
 	}
 	req := codexClonePreparedHTTPRequestForRetry(prepared)

@@ -54,6 +54,24 @@ func TestGetModelInfoReturnsClone(t *testing.T) {
 	}
 }
 
+func TestLookupModelInfoReadOnlyMatchesDefensiveLookup(t *testing.T) {
+	modelID := staticModelWithThinkingLevels(t)
+	readOnly := LookupModelInfoReadOnly(modelID, "codex")
+	defensive := LookupModelInfo(modelID, "codex")
+	if readOnly == nil || defensive == nil {
+		t.Fatalf("model lookups returned nil: readOnly=%v defensive=%v", readOnly, defensive)
+	}
+	if readOnly.ID != defensive.ID || readOnly.UserDefined != defensive.UserDefined {
+		t.Fatalf("read-only lookup mismatch: readOnly=%+v defensive=%+v", readOnly, defensive)
+	}
+	if (readOnly.Thinking == nil) != (defensive.Thinking == nil) {
+		t.Fatalf("thinking capability mismatch: readOnly=%+v defensive=%+v", readOnly.Thinking, defensive.Thinking)
+	}
+	if readOnly == defensive {
+		t.Fatal("defensive lookup unexpectedly returned the registry-owned pointer")
+	}
+}
+
 func TestClientSupportsModelMatchesProviderName(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-name", "openai-compatibility", []*ModelInfo{{

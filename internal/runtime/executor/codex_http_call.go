@@ -162,7 +162,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	requestKind := finalOpts.requestKind
 	ginHeaders := codexGinHeadersFromContext(ctx)
 	finalOpts.preserveNativeFields = codexNativeClientRequestFromContext(ctx) || codexNativeClientRequest(from, ginHeaders, body)
-	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, finalOpts)
+	body = normalizeCodexFinalUpstreamBodyBorrowed(body, baseModel, auth, finalOpts)
 	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = helps.SanitizeCodexInputItemIDs(body)

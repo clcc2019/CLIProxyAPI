@@ -1102,6 +1102,9 @@ func isSessionContextErrorMessage(message string) bool {
 	if lower == "" {
 		return false
 	}
+	if isMissingResponsesRequestAnchorErrorMessage(lower) {
+		return true
+	}
 	if isContextLengthErrorText(lower) {
 		return true
 	}
@@ -1206,7 +1209,11 @@ func isMissingResponsesRequestAnchorErrorMessage(message string) bool {
 	if lower == "" || !strings.Contains(lower, "one of") || !strings.Contains(lower, "must be provided") {
 		return false
 	}
-	for _, field := range [...]string{"input", "previous_response_id", "prompt", "conversation_id"} {
+	// Upstream deployments use both `conversation` and `conversation_id` for
+	// the final request anchor. Matching the shared field name accepts both
+	// spellings while the other required fragments keep this classification
+	// specific to this Responses validation error.
+	for _, field := range [...]string{"input", "previous_response_id", "prompt", "conversation"} {
 		if !strings.Contains(lower, field) {
 			return false
 		}

@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -418,7 +419,12 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, modelName str
 	if executionSessionID != "" {
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, executionSessionID)
 	}
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
+	streamResult, errMsg := h.ExecuteStreamResultWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(handlers.ErrorMessageCause(errMsg))
+		return
+	}
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -427,7 +433,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, modelName str
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
-	first, errMsg, err := handlers.AwaitStreamFirstChunk(c.Request.Context(), dataChan, errChan)
+	first, errMsg, err := handlers.AwaitStreamResultFirstChunk(c.Request.Context(), streamResult)
 	if err != nil {
 		cliCancel(err)
 		return
@@ -437,18 +443,15 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, modelName str
 		cliCancel(handlers.ErrorMessageCause(errMsg))
 		return
 	}
-	dataChan = first.Data
-	errChan = first.Errs
-
 	// Success! Commit to streaming headers.
 	setSSEHeaders()
-	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), streamResult.Headers)
 
 	handlers.WriteSSEDataFrame(c.Writer, first.Chunk)
 	flusher.Flush()
 
 	// Continue streaming the rest
-	h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+	h.handleStreamResultDirect(c, flusher, func(err error) { cliCancel(err) }, streamResult)
 }
 
 // handleCompletionsNonStreamingResponse handles non-streaming completions responses.
@@ -555,6 +558,42 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 		transform = transforms[0]
 	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		WriteChunk: func(chunk []byte) bool {
+			if transform != nil {
+				chunk = transform(chunk)
+				if len(chunk) == 0 {
+					return false
+				}
+			}
+			return handlers.WriteSSEDataFrame(c.Writer, chunk)
+		},
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			if errMsg == nil {
+				return
+			}
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
+			}
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
+			}
+			body := handlers.BuildErrorResponseBody(status, errText)
+			handlers.WriteSSEDataFrame(c.Writer, body)
+		},
+		WriteDone: func() {
+			handlers.WriteSSEDataFrame(c.Writer, []byte("[DONE]"))
+		},
+	})
+}
+
+func (h *OpenAIAPIHandler) handleStreamResultDirect(c *gin.Context, flusher http.Flusher, cancel func(error), result *coreexecutor.StreamResult, transforms ...func([]byte) []byte) {
+	var transform func([]byte) []byte
+	if len(transforms) > 0 {
+		transform = transforms[0]
+	}
+	h.ForwardStreamResult(c, flusher, cancel, result, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) bool {
 			if transform != nil {
 				chunk = transform(chunk)

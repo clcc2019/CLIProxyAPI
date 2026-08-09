@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"net"
 	"net/http"
@@ -26,7 +27,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -143,7 +143,8 @@ type codexWebsocketSession struct {
 	turnState          atomic.Value
 	turnStateScope     atomic.Value
 	lastRequest        []byte
-	lastRequestCmp     []byte
+	lastRequestCmp     [2]uint64
+	lastRequestCmpOK   bool
 	lastRequestInput   [][]byte
 	lastResponseID     string
 	lastResponseOutput []byte
@@ -350,16 +351,28 @@ func codexWebsocketTurnStateFromEvent(payload []byte) string {
 }
 
 func (s *codexWebsocketSession) rememberLogicalRequest(body []byte) {
+	s.rememberLogicalRequestBuffer(bytes.Clone(bytes.TrimSpace(body)))
+}
+
+// rememberLogicalRequestOwned records a request buffer whose ownership is
+// transferred to the session. The executor calls this only after the terminal
+// response has arrived, when the request body will no longer be read or
+// mutated by the completed execution. Tests and other callers that retain
+// their input continue to use rememberLogicalRequest, which takes a copy.
+func (s *codexWebsocketSession) rememberLogicalRequestOwned(body []byte) {
+	s.rememberLogicalRequestBuffer(bytes.TrimSpace(body))
+}
+
+func (s *codexWebsocketSession) rememberLogicalRequestBuffer(request []byte) {
 	if s == nil {
 		return
 	}
-	request := bytes.Clone(bytes.TrimSpace(body))
 	s.lastRequest = request
 	s.lastResponseID = ""
 	s.lastResponseOutput = nil
 	s.lastResponseItems = nil
 	inputResult := codexGJSONGetImmutableBytes(request, "input")
-	s.lastRequestCmp, _ = codexComparableRequestWithoutInputWithInputResult(request, inputResult)
+	s.lastRequestCmp, s.lastRequestCmpOK = codexComparableRequestDigestWithoutInputWithInputResult(request, inputResult)
 	if inputItems, ok := codexRawArrayItemViews(request, inputResult, 0, 16); ok {
 		s.lastRequestInput = inputItems
 	} else {
@@ -390,7 +403,8 @@ func (s *codexWebsocketSession) clearIncrementalState() {
 		return
 	}
 	s.lastRequest = nil
-	s.lastRequestCmp = nil
+	s.lastRequestCmp = [2]uint64{}
+	s.lastRequestCmpOK = false
 	s.lastRequestInput = nil
 	s.lastResponseID = ""
 	s.lastResponseOutput = nil
@@ -703,7 +717,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
+	reporter.CaptureModelReasoningEffortWithHint(codexRequestReasoningEffort(opts), opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -713,9 +727,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body, originalTranslated, _ := codexTranslateRequestWithOriginal(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, false, opts.Headers)
+	body, originalTranslated, _ := codexTranslateRequestWithOriginalBorrowed(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, false, opts.Headers)
 
-	body, err = applyCodexThinking(body, req, from.String(), to.String(), e.Identifier())
+	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -961,7 +975,7 @@ readLoop:
 					reporter.Publish(ctx, detail)
 				}
 				if sess != nil {
-					sess.rememberLogicalRequest(body)
+					sess.rememberLogicalRequestOwned(body)
 					sess.rememberCompletedResponse(payload)
 				}
 				var param any
@@ -997,7 +1011,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
+	reporter.CaptureModelReasoningEffortWithHint(codexRequestReasoningEffort(opts), opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -1007,9 +1021,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body, originalTranslated, _ := codexTranslateRequestWithOriginal(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, true, opts.Headers)
+	body, originalTranslated, _ := codexTranslateRequestWithOriginalBorrowed(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, true, opts.Headers)
 
-	body, err = applyCodexThinking(body, req, from.String(), to.String(), e.Identifier())
+	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -1342,7 +1356,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				if eventType == codexEventCompleted || eventType == "response.done" {
 					if sess != nil {
-						sess.rememberLogicalRequest(body)
+						sess.rememberLogicalRequestOwned(body)
 						sess.rememberCompletedResponse(payload)
 					}
 					return
@@ -1376,7 +1390,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	ginHeaders := codexGinHeadersFromContext(ctx)
-	body = normalizeCodexFinalUpstreamBody(body, baseModel, auth, codexFinalUpstreamBodyOptions{
+	body = normalizeCodexFinalUpstreamBodyBorrowed(body, baseModel, auth, codexFinalUpstreamBodyOptions{
 		requestKind:                codexFinalUpstreamResponses,
 		streamMode:                 codexStreamFieldTrue,
 		preservePreviousResponseID: true,
@@ -1471,6 +1485,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 			prepared.wsReqBody = buildCodexWebsocketRequestBodyWithCurrentTurnMetadata(body)
 		}
 	}
+	codexFinalizeRequestHeaders(wsHeaders)
 	prepared.wsReqLog = helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -1810,7 +1825,7 @@ func codexWebsocketRequestBodyReady(body []byte) bool {
 }
 
 func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body []byte, turnMetadataHeader string) ([]byte, bool) {
-	if sess == nil || len(sess.lastRequestCmp) == 0 {
+	if sess == nil || !sess.lastRequestCmpOK {
 		return nil, false
 	}
 	previousResponseID := strings.TrimSpace(sess.lastResponseID)
@@ -1819,8 +1834,11 @@ func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body
 	}
 
 	inputResult := codexGJSONGetImmutableBytes(body, "input")
-	currentComparable, ok := codexComparableRequestWithoutInputWithInputResult(body, inputResult)
-	if !ok || !codexJSONRawEqual(sess.lastRequestCmp, currentComparable) {
+	currentComparable, ok := codexComparableRequestDigestWithoutInputWithInputResult(body, inputResult)
+	if !ok {
+		return nil, false
+	}
+	if sess.lastRequestCmp != currentComparable && !codexComparableRequestsSemanticallyEqual(sess.lastRequest, body, inputResult) {
 		return nil, false
 	}
 
@@ -1852,6 +1870,16 @@ func buildCodexIncrementalWebsocketRequestBody(sess *codexWebsocketSession, body
 		return nil, false
 	}
 	return buildCodexWebsocketRequestBody(updated, turnMetadataHeader), true
+}
+
+func codexComparableRequestsSemanticallyEqual(previous []byte, current []byte, currentInputResult gjson.Result) bool {
+	previousInputResult := codexGJSONGetImmutableBytes(previous, "input")
+	previousComparable, previousOK := codexComparableRequestWithoutInputWithInputResult(previous, previousInputResult)
+	if !previousOK {
+		return false
+	}
+	currentComparable, currentOK := codexComparableRequestWithoutInputWithInputResult(current, currentInputResult)
+	return currentOK && codexJSONRawEqual(previousComparable, currentComparable)
 }
 
 func codexIncrementalInputDeltaViews(source []byte, inputResult gjson.Result, previousInput [][]byte, responseOutput [][]byte) ([][]byte, bool) {
@@ -2162,6 +2190,276 @@ func stampCodexWebsocketStreamRequestStartMS(body []byte, now time.Time) []byte 
 	return codexSetClientMetadataString(body, codexClientMetadataWSStreamRequestStartMS, strconv.FormatInt(now.UnixMilli(), 10), true)
 }
 
+var (
+	codexComparableRequestSeedA = maphash.MakeSeed()
+	codexComparableRequestSeedB = maphash.MakeSeed()
+)
+
+type codexComparableRequestDigestWriter struct {
+	first  maphash.Hash
+	second maphash.Hash
+}
+
+func newCodexComparableRequestDigestWriter() codexComparableRequestDigestWriter {
+	var writer codexComparableRequestDigestWriter
+	writer.first.SetSeed(codexComparableRequestSeedA)
+	writer.second.SetSeed(codexComparableRequestSeedB)
+	return writer
+}
+
+func (w *codexComparableRequestDigestWriter) write(data []byte) {
+	_, _ = w.first.Write(data)
+	_, _ = w.second.Write(data)
+}
+
+func (w *codexComparableRequestDigestWriter) writeString(value string) {
+	_, _ = w.first.WriteString(value)
+	_, _ = w.second.WriteString(value)
+}
+
+func (w *codexComparableRequestDigestWriter) sum() [2]uint64 {
+	return [2]uint64{w.first.Sum64(), w.second.Sum64()}
+}
+
+func codexComparableRequestDigestWithoutInputWithInputResult(body []byte, inputResult gjson.Result) ([2]uint64, bool) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return [2]uint64{}, false
+	}
+	if digest, ok := codexComparableRequestDigestWithoutInputFast(body, inputResult); ok {
+		return digest, true
+	}
+
+	// Escaped keys and other uncommon JSON layouts retain the compatibility
+	// fallback. The result is still reduced to a digest before it is retained by
+	// the session, so only the exceptional request pays for the temporary body.
+	comparable, ok := codexComparableRequestWithoutInputWithInputResult(body, inputResult)
+	if !ok {
+		return [2]uint64{}, false
+	}
+	writer := newCodexComparableRequestDigestWriter()
+	writer.write(comparable)
+	return writer.sum(), true
+}
+
+func codexComparableRequestDigestWithoutInputFast(data []byte, inputResult gjson.Result) ([2]uint64, bool) {
+	i := codexSkipJSONSpaces(data, 0)
+	if i >= len(data) || data[i] != '{' {
+		return [2]uint64{}, false
+	}
+	i++
+	inputStart, inputEnd, hasInputRange := codexJSONResultRawRange(data, inputResult)
+
+	writer := newCodexComparableRequestDigestWriter()
+	writer.writeString("{")
+	wrote := false
+	appendFieldPrefix := func(keyRaw []byte) {
+		if wrote {
+			writer.writeString(",")
+		}
+		writer.write(keyRaw)
+		writer.writeString(":")
+		wrote = true
+	}
+
+	for {
+		i = codexSkipJSONSpaces(data, i)
+		if i >= len(data) {
+			return [2]uint64{}, false
+		}
+		if data[i] == '}' {
+			writer.writeString("}")
+			i = codexSkipJSONSpaces(data, i+1)
+			if i != len(data) {
+				return [2]uint64{}, false
+			}
+			return writer.sum(), true
+		}
+
+		keyRawStart := i
+		keyStart, keyEnd, keyEscaped, next, ok := codexParseJSONStringRaw(data, i)
+		if !ok || keyEscaped {
+			return [2]uint64{}, false
+		}
+		keyRaw := data[keyRawStart:next]
+		key := data[keyStart:keyEnd]
+		i = codexSkipJSONSpaces(data, next)
+		if i >= len(data) || data[i] != ':' {
+			return [2]uint64{}, false
+		}
+		valueStart := codexSkipJSONSpaces(data, i+1)
+		if valueStart >= len(data) {
+			return [2]uint64{}, false
+		}
+		inputKey := bytes.Equal(key, codexJSONKeyInput)
+		valueNext := 0
+		if inputKey && hasInputRange && inputStart == valueStart {
+			valueNext = inputEnd
+		} else {
+			valueNext, ok = codexSkipJSONValue(data, valueStart)
+			if !ok {
+				return [2]uint64{}, false
+			}
+		}
+		valueRaw := data[valueStart:valueNext]
+
+		switch {
+		case inputKey, bytes.Equal(key, codexJSONKeyGenerate):
+		case bytes.Equal(key, codexJSONKeyMetadata):
+			keep, valid := codexComparableClientMetadataHasKeptField(valueRaw)
+			if !valid {
+				return [2]uint64{}, false
+			}
+			if keep {
+				appendFieldPrefix(keyRaw)
+				if !codexWriteComparableClientMetadataDigest(valueRaw, &writer) {
+					return [2]uint64{}, false
+				}
+			}
+		default:
+			appendFieldPrefix(keyRaw)
+			writer.write(bytes.TrimSpace(valueRaw))
+		}
+
+		i = codexSkipJSONSpaces(data, valueNext)
+		if i >= len(data) {
+			return [2]uint64{}, false
+		}
+		switch data[i] {
+		case ',':
+			i++
+		case '}':
+			writer.writeString("}")
+			i = codexSkipJSONSpaces(data, i+1)
+			if i != len(data) {
+				return [2]uint64{}, false
+			}
+			return writer.sum(), true
+		default:
+			return [2]uint64{}, false
+		}
+	}
+}
+
+func codexComparableClientMetadataHasKeptField(raw []byte) (bool, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return false, false
+	}
+	if raw[0] != '{' {
+		return true, true
+	}
+	i := codexSkipJSONSpaces(raw, 1)
+	keep := false
+	for {
+		if i >= len(raw) {
+			return false, false
+		}
+		if raw[i] == '}' {
+			i = codexSkipJSONSpaces(raw, i+1)
+			return keep, i == len(raw)
+		}
+		keyStart, keyEnd, keyEscaped, next, ok := codexParseJSONStringRaw(raw, i)
+		if !ok || keyEscaped {
+			return false, false
+		}
+		key := raw[keyStart:keyEnd]
+		i = codexSkipJSONSpaces(raw, next)
+		if i >= len(raw) || raw[i] != ':' {
+			return false, false
+		}
+		valueStart := codexSkipJSONSpaces(raw, i+1)
+		valueNext, ok := codexSkipJSONValue(raw, valueStart)
+		if !ok {
+			return false, false
+		}
+		if !codexComparableSkipClientMetadataKey(key) {
+			keep = true
+		}
+		i = codexSkipJSONSpaces(raw, valueNext)
+		if i >= len(raw) {
+			return false, false
+		}
+		switch raw[i] {
+		case ',':
+			i = codexSkipJSONSpaces(raw, i+1)
+		case '}':
+			i = codexSkipJSONSpaces(raw, i+1)
+			return keep, i == len(raw)
+		default:
+			return false, false
+		}
+	}
+}
+
+func codexWriteComparableClientMetadataDigest(raw []byte, writer *codexComparableRequestDigestWriter) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || writer == nil {
+		return false
+	}
+	if raw[0] != '{' {
+		writer.write(raw)
+		return true
+	}
+	i := codexSkipJSONSpaces(raw, 1)
+	writer.writeString("{")
+	wrote := false
+	for {
+		if i >= len(raw) {
+			return false
+		}
+		if raw[i] == '}' {
+			i = codexSkipJSONSpaces(raw, i+1)
+			if i != len(raw) {
+				return false
+			}
+			writer.writeString("}")
+			return wrote
+		}
+		keyRawStart := i
+		keyStart, keyEnd, keyEscaped, next, ok := codexParseJSONStringRaw(raw, i)
+		if !ok || keyEscaped {
+			return false
+		}
+		keyRaw := raw[keyRawStart:next]
+		key := raw[keyStart:keyEnd]
+		i = codexSkipJSONSpaces(raw, next)
+		if i >= len(raw) || raw[i] != ':' {
+			return false
+		}
+		valueStart := codexSkipJSONSpaces(raw, i+1)
+		valueNext, ok := codexSkipJSONValue(raw, valueStart)
+		if !ok {
+			return false
+		}
+		if !codexComparableSkipClientMetadataKey(key) {
+			if wrote {
+				writer.writeString(",")
+			}
+			writer.write(keyRaw)
+			writer.writeString(":")
+			writer.write(bytes.TrimSpace(raw[valueStart:valueNext]))
+			wrote = true
+		}
+		i = codexSkipJSONSpaces(raw, valueNext)
+		if i >= len(raw) {
+			return false
+		}
+		switch raw[i] {
+		case ',':
+			i = codexSkipJSONSpaces(raw, i+1)
+		case '}':
+			i = codexSkipJSONSpaces(raw, i+1)
+			if i != len(raw) {
+				return false
+			}
+			writer.writeString("}")
+			return wrote
+		default:
+			return false
+		}
+	}
+}
+
 func codexComparableRequestWithoutInput(body []byte) ([]byte, bool) {
 	return codexComparableRequestWithoutInputWithInputResult(body, gjson.Result{})
 }
@@ -2450,6 +2748,15 @@ func codexGJSONGetImmutableBytes(source []byte, path string) gjson.Result {
 		return gjson.Result{}
 	}
 	return gjson.Get(unsafe.String(unsafe.SliceData(source), len(source)), path)
+}
+
+// codexGJSONGetManyImmutableBytes is the multi-path counterpart to
+// codexGJSONGetImmutableBytes. Returned results borrow source.
+func codexGJSONGetManyImmutableBytes(source []byte, paths ...string) []gjson.Result {
+	if len(source) == 0 {
+		return make([]gjson.Result, len(paths))
+	}
+	return gjson.GetMany(unsafe.String(unsafe.SliceData(source), len(source)), paths...)
 }
 
 // codexGJSONParseImmutableBytes parses without gjson.ParseBytes' defensive
@@ -2776,7 +3083,7 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 }
 
 func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Context, from sdktranslator.Format, executionSessionID string, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header, string) {
-	headers := make(http.Header, codexWebsocketHeaderInitialCapacity)
+	headers := codexNewRequestHeader(codexWebsocketHeaderInitialCapacity, codexWebsocketHeaderValueCapacity)
 	if len(rawJSON) == 0 {
 		return rawJSON, headers, ""
 	}
@@ -2882,8 +3189,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	}
 	codexEnsureFedramp(headers, profileHeaders, auth, apiKeyAuth)
 
-	attrs := codexClientProfileCustomHeaderAttrs(auth)
-	if util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs) {
+	if codexApplyCustomHeadersFromAuth(&http.Request{Header: headers}, auth) {
 		codexEnsureVersionHeader(headers, nil)
 		if cfgUserAgent != "" {
 			codexSetSingleHeaderValue(headers, "User-Agent", cfgUserAgent)

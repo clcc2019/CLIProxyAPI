@@ -253,6 +253,27 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	return LookupStaticModelInfo(modelID)
 }
 
+// LookupModelInfoReadOnly searches the same sources as LookupModelInfo but
+// returns the registry-owned immutable snapshot. Callers must not mutate the
+// returned ModelInfo or any nested data. It is intended for per-request
+// capability checks that only read model metadata.
+func LookupModelInfoReadOnly(modelID string, provider ...string) *ModelInfo {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil
+	}
+
+	p := ""
+	if len(provider) > 0 {
+		p = strings.ToLower(strings.TrimSpace(provider[0]))
+	}
+
+	if info := GetGlobalRegistry().getModelInfoReadOnly(modelID, p); info != nil {
+		return info
+	}
+	return lookupStaticModelInfo(modelID)
+}
+
 // LookupModelHeaderOverrides resolves only the trusted model identity headers.
 // Returning strings by value avoids cloning the full ModelInfo and its maps on
 // every upstream request while preserving LookupModelInfo's defensive-copy API.
@@ -1368,6 +1389,22 @@ func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 		}
 		// Fallback to global info (last registered)
 		return cloneModelInfo(reg.Info)
+	}
+	return nil
+}
+
+func (r *ModelRegistry) getModelInfoReadOnly(modelID, provider string) *ModelInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if reg, ok := r.models[modelID]; ok && reg != nil {
+		if provider != "" && reg.InfoByProvider != nil && reg.Providers != nil {
+			if count, ok := reg.Providers[provider]; ok && count > 0 {
+				if info := reg.InfoByProvider[provider]; info != nil {
+					return info
+				}
+			}
+		}
+		return reg.Info
 	}
 	return nil
 }

@@ -388,12 +388,12 @@ func (s *codexStreamCompletionState) functionCallByItem(itemID string, outputInd
 }
 
 func (s *codexStreamCompletionState) functionCallForEvent(eventData []byte) *codexStreamFunctionCallState {
-	itemID := strings.TrimSpace(gjson.GetBytes(eventData, "item_id").String())
+	itemID := strings.TrimSpace(codexGJSONGetImmutableBytes(eventData, "item_id").String())
 	outputIndex := codexStreamEventOutputIndex(eventData)
 	if state := s.functionCallByItem(itemID, outputIndex); state != nil {
 		return state
 	}
-	callID := strings.TrimSpace(gjson.GetBytes(eventData, "call_id").String())
+	callID := strings.TrimSpace(codexGJSONGetImmutableBytes(eventData, "call_id").String())
 	if key := codexStreamToolCallStateKey(itemID, callID); key != "" {
 		return s.functionCallsByItem[key]
 	}
@@ -526,12 +526,12 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 
 	switch eventType {
 	case codexEventOutputItemDone:
-		itemResult := gjson.GetBytes(eventData, "item")
+		itemResult := codexGJSONGetImmutableBytes(eventData, "item")
 		if !itemResult.Exists() || itemResult.Type != gjson.JSON {
 			return
 		}
 		itemBytes := []byte(itemResult.Raw)
-		outputIndexResult := gjson.GetBytes(eventData, "output_index")
+		outputIndexResult := codexGJSONGetImmutableBytes(eventData, "output_index")
 		if outputIndexResult.Exists() {
 			if s.outputItemsByIndex == nil {
 				s.outputItemsByIndex = make(map[int64][]byte)
@@ -541,7 +541,7 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 		}
 		s.outputItemsFallback = append(s.outputItemsFallback, itemBytes)
 	case codexEventOutputItemAdded:
-		item := gjson.GetBytes(eventData, "item")
+		item := codexGJSONGetImmutableBytes(eventData, "item")
 		itemType := strings.TrimSpace(item.Get("type").String())
 		if !item.Exists() || (itemType != "function_call" && itemType != "custom_tool_call" && itemType != "local_shell_call" && itemType != "tool_search_call") {
 			return
@@ -618,13 +618,13 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 		if eventType == codexEventCustomToolCallInputDelta {
 			state.ItemType = "custom_tool_call"
 		}
-		state.appendArgumentsDelta(gjson.GetBytes(eventData, "delta").String())
+		state.appendArgumentsDelta(codexGJSONGetImmutableBytes(eventData, "delta").String())
 	case codexEventFunctionCallArgumentsDone:
 		state := s.functionCallForEvent(eventData)
 		if state == nil {
 			return
 		}
-		if arguments := gjson.GetBytes(eventData, "arguments").String(); arguments != "" {
+		if arguments := codexGJSONGetImmutableBytes(eventData, "arguments").String(); arguments != "" {
 			state.setArguments(arguments)
 		}
 	}
@@ -1213,7 +1213,7 @@ func codexSkipJSONNumber(data []byte, i int) (int, bool) {
 }
 
 func codexStreamEventOutputIndex(eventData []byte) int64 {
-	outputIndex := gjson.GetBytes(eventData, "output_index")
+	outputIndex := codexGJSONGetImmutableBytes(eventData, "output_index")
 	if !outputIndex.Exists() {
 		return -1
 	}
@@ -1254,7 +1254,7 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 		return completedData, 0
 	}
 
-	outputResult := gjson.GetBytes(completedData, "response.output")
+	outputResult := codexGJSONGetImmutableBytes(completedData, "response.output")
 	if outputResult.Exists() && outputResult.IsArray() && codexJSONArrayHasItemsRaw(outputResult.Raw) {
 		return completedData, 0
 	}
@@ -1285,19 +1285,19 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 	for _, idx := range indexes {
 		raw := s.outputItemsByIndex[idx]
 		recovered = append(recovered, codexRecoveredStreamItem{outputIndex: idx, raw: raw})
-		if callID := strings.TrimSpace(gjson.GetBytes(raw, "call_id").String()); callID != "" {
+		if callID := strings.TrimSpace(codexGJSONGetImmutableBytes(raw, "call_id").String()); callID != "" {
 			seenCallIDs[callID] = struct{}{}
 		}
-		if itemID := strings.TrimSpace(gjson.GetBytes(raw, "id").String()); itemID != "" {
+		if itemID := strings.TrimSpace(codexGJSONGetImmutableBytes(raw, "id").String()); itemID != "" {
 			seenItemIDs[itemID] = struct{}{}
 		}
 	}
 	for _, raw := range s.outputItemsFallback {
 		recovered = append(recovered, codexRecoveredStreamItem{outputIndex: int64(len(indexes) + len(recovered)), raw: raw})
-		if callID := strings.TrimSpace(gjson.GetBytes(raw, "call_id").String()); callID != "" {
+		if callID := strings.TrimSpace(codexGJSONGetImmutableBytes(raw, "call_id").String()); callID != "" {
 			seenCallIDs[callID] = struct{}{}
 		}
-		if itemID := strings.TrimSpace(gjson.GetBytes(raw, "id").String()); itemID != "" {
+		if itemID := strings.TrimSpace(codexGJSONGetImmutableBytes(raw, "id").String()); itemID != "" {
 			seenItemIDs[itemID] = struct{}{}
 		}
 	}
@@ -1452,7 +1452,7 @@ func (s *codexStreamCompletionState) patchCompletedOutputFromRecordedItemsOnly(c
 }
 
 func patchCodexCompletedOutputWithSingleItem(completedData []byte, item []byte) []byte {
-	outputResult := gjson.GetBytes(completedData, "response.output")
+	outputResult := codexGJSONGetImmutableBytes(completedData, "response.output")
 	return patchCodexCompletedOutputWithSingleItemAtResult(completedData, outputResult, item)
 }
 
@@ -1468,7 +1468,7 @@ func patchCodexCompletedOutputWithSingleItemAtResult(completedData []byte, outpu
 }
 
 func patchCodexCompletedOutputWithItems(completedData []byte, items [][]byte) []byte {
-	outputResult := gjson.GetBytes(completedData, "response.output")
+	outputResult := codexGJSONGetImmutableBytes(completedData, "response.output")
 	return patchCodexCompletedOutputWithItemsAtResult(completedData, outputResult, items)
 }
 

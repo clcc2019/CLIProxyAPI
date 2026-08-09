@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"sync"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -181,6 +182,45 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
+func (m *Manager) directStreamResult(ctx context.Context, authID, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, release func()) *cliproxyexecutor.StreamResult {
+	var (
+		failed     bool
+		responseID string
+		finishOnce sync.Once
+	)
+	observe := func(chunk cliproxyexecutor.StreamChunk) {
+		if len(chunk.Payload) > 0 {
+			if id := responseIDFromProviderPayload(chunk.Payload); id != "" {
+				responseID = id
+			}
+		}
+		if chunk.Err != nil && !failed {
+			failed = true
+			streamResult := Result{AuthID: authID, Provider: provider, Model: resultModel, Success: false}
+			applyResultError(&streamResult, chunk.Err)
+			m.MarkResult(ctx, streamResult)
+		}
+	}
+	finalize := func(completed bool) {
+		finishOnce.Do(func() {
+			if completed && !failed {
+				m.MarkResult(ctx, Result{AuthID: authID, Provider: provider, Model: resultModel, Success: true})
+				m.bindPreviousResponseID(ctx, responseID, authID)
+			}
+			if release != nil {
+				release()
+			}
+		})
+	}
+	return &cliproxyexecutor.StreamResult{
+		Headers:  headers,
+		Chunks:   remaining,
+		Buffered: buffered,
+		Observe:  observe,
+		Finalize: finalize,
+	}
+}
+
 func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, execModels []string, pooled bool) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -339,7 +379,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				remaining = closedCh
 			}
 			lease.HandOff()
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, lease.Finish), nil
+			if opts.DirectStream {
+				return m.directStreamResult(ctx, auth.ID, provider, resultModel, streamResult.Headers, buffered, remaining, lease.Finish), nil
+			}
+			authSnapshot := auth.Clone()
+			return m.wrapStreamResult(ctx, authSnapshot, provider, resultModel, streamResult.Headers, buffered, remaining, lease.Finish), nil
 		}
 	}
 	if lastErr == nil {

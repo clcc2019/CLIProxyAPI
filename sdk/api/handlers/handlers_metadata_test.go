@@ -269,6 +269,16 @@ func TestExecuteCountWithAuthManagerBuildsSharedExecutionRequest(t *testing.T) {
 	if got := meta[coreexecutor.RequestContentTypeMetadataKey]; got != "application/json" {
 		t.Fatalf("content type metadata = %v", got)
 	}
+	requestMeta := opts.RequestMetadata
+	if !requestMeta.Parsed || requestMeta.RequestedModel != model || requestMeta.NormalizedModel != model {
+		t.Fatalf("structured request metadata models = %#v", requestMeta)
+	}
+	if requestMeta.ReasoningEffort != "medium" || requestMeta.ServiceTier != "priority" {
+		t.Fatalf("structured request metadata usage = %#v", requestMeta)
+	}
+	if requestMeta.RequestPath != "/v1/responses/input_tokens" || requestMeta.ContentType != "application/json" || requestMeta.IdempotencyKey != "count-key" {
+		t.Fatalf("structured request metadata HTTP fields = %#v", requestMeta)
+	}
 }
 
 func TestExecuteImageWithAuthManagerAllowsImageOnlyModel(t *testing.T) {

@@ -13,15 +13,26 @@ import (
 )
 
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
-	input := gjson.GetBytes(body, "input")
+	input := codexGJSONGetImmutableBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+	hasReasoning := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if strings.TrimSpace(item.Get("type").String()) == "reasoning" {
+			hasReasoning = true
+			return false
+		}
+		return true
+	})
+	if !hasReasoning {
 		return body
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		provider = "openai responses upstream"
 	}
-	stripOrphanReasoningIDs := !gjson.GetBytes(body, "store").Bool()
+	stripOrphanReasoningIDs := !codexGJSONGetImmutableBytes(body, "store").Bool()
 
 	items := input.Array()
 	rawItems := make([][]byte, 0, len(items))
@@ -95,7 +106,7 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 	if !changed {
 		return body
 	}
-	updated, err := helps.SetRawJSONBytes(body, "input", codexRawJSONArray(rawItems))
+	updated, err := sjson.SetRawBytes(body, "input", codexRawJSONArray(rawItems))
 	if err != nil {
 		helps.LogWithRequestID(ctx).Debugf("%s: failed to rewrite sanitized reasoning input: %v", provider, err)
 		return body
@@ -107,7 +118,7 @@ func dropOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider 
 	if !bytes.Contains(body, []byte(`"encrypted_content"`)) {
 		return body, false
 	}
-	input := gjson.GetBytes(body, "input")
+	input := codexGJSONGetImmutableBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
 		return body, false
 	}
@@ -119,7 +130,7 @@ func dropOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider 
 	if reason == "" {
 		reason = "upstream rejected encrypted content"
 	}
-	stripOrphanReasoningIDs := !gjson.GetBytes(body, "store").Bool()
+	stripOrphanReasoningIDs := !codexGJSONGetImmutableBytes(body, "store").Bool()
 
 	items := input.Array()
 	rawItems := make([][]byte, 0, len(items))
@@ -155,7 +166,7 @@ func dropOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider 
 	if !changed {
 		return body, false
 	}
-	updated, err := helps.SetRawJSONBytes(body, "input", codexRawJSONArray(rawItems))
+	updated, err := sjson.SetRawBytes(body, "input", codexRawJSONArray(rawItems))
 	if err != nil {
 		helps.LogWithRequestID(ctx).Debugf("%s: failed to rewrite reasoning input after encrypted_content drop: %v", provider, err)
 		return body, false

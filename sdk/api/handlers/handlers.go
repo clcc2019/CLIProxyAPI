@@ -337,6 +337,17 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 // embedded in the provided context. This allows session affinity selectors to read
 // client headers used for session affinity.
 func requestHeadersFromContext(ctx context.Context) http.Header {
+	headers := requestHeadersViewFromContext(ctx)
+	if headers == nil {
+		return nil
+	}
+	return headers.Clone()
+}
+
+// requestHeadersViewFromContext returns the inbound header map as a read-only
+// view. The request preparation path uses it to avoid cloning the complete map;
+// executors must copy individual values before mutation.
+func requestHeadersViewFromContext(ctx context.Context) http.Header {
 	if ctx == nil {
 		return nil
 	}
@@ -344,7 +355,7 @@ func requestHeadersFromContext(ctx context.Context) http.Header {
 	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.Header == nil {
 		return nil
 	}
-	return ginCtx.Request.Header.Clone()
+	return ginCtx.Request.Header
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {
@@ -791,6 +802,44 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
 }
 
+// ExecuteStreamResultWithAuthManager returns the auth manager's stream directly.
+// Built-in handlers use this path to avoid an additional relay goroutine, two
+// channels, and a copy of every payload. ExecuteStreamWithAuthManager remains as
+// the compatibility adapter for SDK users that consume separate data/error
+// channels.
+func (h *BaseAPIHandler) ExecuteStreamResultWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (*coreexecutor.StreamResult, *interfaces.ErrorMessage) {
+	return h.executeStreamResultWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+}
+
+func (h *BaseAPIHandler) executeStreamResultWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (*coreexecutor.StreamResult, *interfaces.ErrorMessage) {
+	prepared, errMsg := h.prepareExecutionRequest(ctx, handlerType, modelName, rawJSON, alt, executionRequestMode{
+		stream:          true,
+		allowImageModel: allowImageModel,
+	})
+	if errMsg != nil {
+		return nil, errMsg
+	}
+	prepared.options.DirectStream = true
+	streamResult, err := h.AuthManager.ExecuteStream(prepared.ctx, prepared.providers, prepared.request, prepared.options)
+	if err != nil {
+		err = enrichAuthSelectionError(err, prepared.providers, prepared.normalizedModel)
+		return nil, errorMessageFromError(err, http.StatusInternalServerError)
+	}
+	if streamResult == nil || streamResult.Chunks == nil {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadGateway,
+			Error:      invalidStreamResultHandlerError("auth manager returned stream result without chunks"),
+		}
+	}
+	result := *streamResult
+	if prepared.passthroughHeaders {
+		result.Headers = FilterUpstreamHeaders(streamResult.Headers)
+	} else {
+		result.Headers = nil
+	}
+	return &result, nil
+}
+
 // ExecuteImageStreamWithAuthManager executes a streaming OpenAI-compatible image endpoint request.
 func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
@@ -921,7 +970,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 				}
 				if len(chunk.Payload) > 0 {
 					if handlerType == "openai-response" {
-						if err := validateSSEDataJSON(chunk.Payload); err != nil {
+						if err := ValidateSSEDataJSON(chunk.Payload); err != nil {
 							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 							return
 						}
@@ -939,7 +988,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 
 var sseDoneMarkerBytes = []byte("[DONE]")
 
-func validateSSEDataJSON(chunk []byte) error {
+// ValidateSSEDataJSON verifies that every non-empty SSE data field contains
+// JSON (or the OpenAI [DONE] marker).
+func ValidateSSEDataJSON(chunk []byte) error {
 	for len(chunk) > 0 {
 		line := chunk
 		if idx := bytes.IndexByte(chunk, '\n'); idx >= 0 {

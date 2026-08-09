@@ -1,0 +1,41 @@
+{
+  "skill_name": "cliproxyapi-api",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我的 CLIProxyAPI 跑在本机 8317，API key 已经放在 CLIPROXY_API_KEY。请给我一个先确认模型、再用 gpt-5.5 调用非流式 Responses API 的 curl 方案；不要输出密钥，也不要真的发请求。",
+      "expected_output": "A ready-to-run, unexecuted model-discovery command followed by a non-streaming POST /v1/responses command that uses environment-variable authentication and flags that gpt-5.5 must be verified against the live model list.",
+      "files": [],
+      "expectations": [
+        "Uses GET /v1/models before POST /v1/responses.",
+        "Uses Authorization: Bearer $CLIPROXY_API_KEY without exposing a literal secret.",
+        "Uses a Responses-shaped body with model, input, and stream false.",
+        "States that the requested model must exist in the live model list and labels commands as unexecuted."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "把一个 Python 服务的 Anthropic SDK 指到这个仓库的本地代理，并演示 messages 调用。服务地址默认 localhost:8317，key 从环境变量读取。顺便说明 base_url 到底要不要带 /v1。",
+      "expected_output": "A correct Anthropic Python SDK snippet using the server origin as base_url, an environment variable for the client API key, and a Claude Messages request, with a concise explanation that the SDK appends /v1/messages.",
+      "files": [],
+      "expectations": [
+        "Uses Anthropic(base_url=http://127.0.0.1:8317) without appending /v1.",
+        "Reads CLIPROXY_API_KEY from the environment.",
+        "Calls client.messages.create with model, max_tokens, and messages.",
+        "Does not confuse the client API key with the management key or an upstream OAuth token."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "帮我通过 Management API 查看最近 20 条详细用量，然后开启 request-log。管理密码在 CLIPROXY_MANAGEMENT_KEY，目标是本机服务。给出安全的执行顺序和 curl 命令，不要读取完整 config.yaml。",
+      "expected_output": "A localhost-only management workflow that uses the management key, fetches recent usage, snapshots request-log, updates it with the exact value wrapper, and verifies the change without retrieving the full config.",
+      "files": [],
+      "expectations": [
+        "Uses /v0/management/usage/details?recent=20 and management authentication.",
+        "GETs /v0/management/request-log before the mutation.",
+        "Uses PUT or PATCH /v0/management/request-log with {\"value\":true} and verifies with GET.",
+        "Keeps the management key in CLIPROXY_MANAGEMENT_KEY and does not fetch /config.yaml."
+      ]
+    }
+  ]
+}

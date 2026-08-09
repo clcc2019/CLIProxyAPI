@@ -103,13 +103,11 @@ func (m *codexFinalUpstreamBodyMemo) get(baseModel string, authProvider string, 
 
 // getWithHash returns a private copy of the cached output.
 //
-// The copy is not optional. Callers feed the result into sjson helpers
-// configured with ReplaceInPlace (see helps.optimisticJSONOptions), which write
-// through the slice whenever the replacement value fits the existing span — a
-// same-length prompt_cache_key, for instance. Handing out the memo's own buffer
-// would let one request's edit rewrite what every later cache hit observes,
-// leaking values across unrelated requests through a cache that is supposed to
-// be immutable.
+// General callers feed the result into sjson helpers configured with
+// ReplaceInPlace (see helps.optimisticJSONOptions), which write through the
+// slice whenever the replacement value fits the existing span. The dedicated
+// request-preparation fast path below may borrow the cache entry only because
+// every transformation on that path is copy-on-write.
 //
 // It is also cheap relative to what it protects: copying a cached body costs
 // ~4us against ~482us to recompute it, so under 1% of the memo's benefit.
@@ -121,9 +119,14 @@ func (m *codexFinalUpstreamBodyMemo) getWithHash(hash uint64, baseModel string, 
 	return bytes.Clone(output)
 }
 
-// getEntryOutputWithHash returns the memo-owned buffer itself. It is unexported
-// and has exactly one caller — getWithHash — so that every path out of this
-// cache is a copy. Do not return its result to callers; see getWithHash.
+// getSharedWithHash returns the immutable cache-owned output. Callers must use
+// copy-on-write JSON helpers and must never mutate the returned slice.
+func (m *codexFinalUpstreamBodyMemo) getSharedWithHash(hash uint64, baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
+	return m.getEntryOutputWithHash(hash, baseModel, authProvider, opts, input)
+}
+
+// getEntryOutputWithHash returns the memo-owned buffer itself. Only the public
+// clone path and the explicitly immutable internal path above may call it.
 func (m *codexFinalUpstreamBodyMemo) getEntryOutputWithHash(hash uint64, baseModel string, authProvider string, opts codexFinalUpstreamBodyOptions, input []byte) []byte {
 	if m == nil || len(input) == 0 {
 		return nil
@@ -335,6 +338,17 @@ func (m *codexPromptResolutionMemo) orderLen() int {
 }
 
 func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *cliproxyauth.Auth, opts codexFinalUpstreamBodyOptions) []byte {
+	return normalizeCodexFinalUpstreamBodyWithCacheOwnership(body, baseModel, auth, opts, false)
+}
+
+// normalizeCodexFinalUpstreamBodyBorrowed may return an immutable memo-owned
+// buffer on cache hits. It is reserved for request preparation paths whose
+// downstream transformations are copy-on-write.
+func normalizeCodexFinalUpstreamBodyBorrowed(body []byte, baseModel string, auth *cliproxyauth.Auth, opts codexFinalUpstreamBodyOptions) []byte {
+	return normalizeCodexFinalUpstreamBodyWithCacheOwnership(body, baseModel, auth, opts, true)
+}
+
+func normalizeCodexFinalUpstreamBodyWithCacheOwnership(body []byte, baseModel string, auth *cliproxyauth.Auth, opts codexFinalUpstreamBodyOptions, borrowCacheHit bool) []byte {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
@@ -342,19 +356,27 @@ func normalizeCodexFinalUpstreamBody(body []byte, baseModel string, auth *clipro
 		codexMetrics.memoBodyMiss.Add(1)
 		return normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
 	}
+	cacheInput := body
 	authProvider := codexFinalUpstreamBodyMemoAuthProvider(auth, baseModel)
-	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, authProvider, opts, body)
-	if cached := globalCodexFinalUpstreamBodyMemo.getWithHash(hash, baseModel, authProvider, opts, body); cached != nil {
+	hash := hashCodexFinalUpstreamBodyMemoKey(baseModel, authProvider, opts, cacheInput)
+	var cached []byte
+	if borrowCacheHit {
+		cached = globalCodexFinalUpstreamBodyMemo.getSharedWithHash(hash, baseModel, authProvider, opts, body)
+	} else {
+		cached = globalCodexFinalUpstreamBodyMemo.getWithHash(hash, baseModel, authProvider, opts, body)
+	}
+	if cached != nil {
 		return cached
 	}
 
-	// The memo cache on its own is sufficient: each caller gets an independent
-	// clone (see memo.get) so concurrent callers with the same input may
-	// redundantly recompute once before the memo warms up, but avoiding the
-	// singleflight channel/goroutine hop keeps per-request latency lower for
-	// the common case where each request's body is unique.
+	// Concurrent callers with the same input may redundantly recompute once
+	// before the memo warms up, but avoiding a singleflight channel/goroutine
+	// hop keeps per-request latency lower for unique request bodies.
+	if borrowCacheHit {
+		body = bytes.Clone(body)
+	}
 	out := normalizeCodexFinalUpstreamBodyUncached(body, baseModel, auth, opts)
-	globalCodexFinalUpstreamBodyMemo.setWithHash(hash, baseModel, authProvider, opts, body, out)
+	globalCodexFinalUpstreamBodyMemo.setWithHash(hash, baseModel, authProvider, opts, cacheInput, out)
 	return out
 }
 

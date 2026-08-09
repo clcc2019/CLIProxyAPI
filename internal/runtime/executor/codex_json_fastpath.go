@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func codexSetPromptCacheKey(body []byte, cacheID string) []byte {
@@ -25,7 +25,7 @@ func codexSetPromptCacheKey(body []byte, cacheID string) []byte {
 		}
 	}
 
-	updated, err := helps.SetJSONBytes(body, "prompt_cache_key", cacheID)
+	updated, err := sjson.SetBytes(body, "prompt_cache_key", cacheID)
 	if err != nil {
 		return body
 	}
@@ -68,6 +68,36 @@ func codexAppendTopLevelSingleStringObjectField(body []byte, field string, key s
 	buf = append(buf, ':')
 	buf = strconv.AppendQuote(buf, value)
 	buf = append(buf, '}', '}')
+	buf = append(buf, suffix...)
+	return buf, true
+}
+
+func codexAppendTopLevelReasoningEffortAndInstructions(body []byte, effort string) ([]byte, bool) {
+	trimmed, suffix, hasFields, ok := codexPrepareTopLevelObjectAppend(body)
+	if !ok {
+		return nil, false
+	}
+
+	extra := codexJSONStringCapacity("reasoning") +
+		codexJSONStringCapacity("effort") +
+		codexJSONStringCapacity(effort) +
+		codexJSONStringCapacity("instructions") + 8
+	if hasFields {
+		extra++
+	}
+	buf := make([]byte, 0, len(body)+extra)
+	buf = append(buf, trimmed[:len(trimmed)-1]...)
+	if hasFields {
+		buf = append(buf, ',')
+	}
+	buf = codexAppendJSONString(buf, "reasoning")
+	buf = append(buf, ':', '{')
+	buf = codexAppendJSONString(buf, "effort")
+	buf = append(buf, ':')
+	buf = codexAppendJSONString(buf, effort)
+	buf = append(buf, '}', ',')
+	buf = codexAppendJSONString(buf, "instructions")
+	buf = append(buf, ':', '"', '"', '}')
 	buf = append(buf, suffix...)
 	return buf, true
 }

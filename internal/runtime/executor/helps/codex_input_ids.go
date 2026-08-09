@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -18,7 +19,7 @@ const codexInputItemIDLimit = 64
 // exceed the Codex limit, and deterministically shortens other overlong valid
 // input item IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
-	input := gjson.GetBytes(body, "input")
+	input := codexInputIDsGJSONGetImmutableBytes(body, "input")
 	if !input.IsArray() {
 		return body
 	}
@@ -97,6 +98,15 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+// codexInputIDsGJSONGetImmutableBytes avoids copying the complete request for
+// the no-op scan. Callers keep body immutable while the result is in use.
+func codexInputIDsGJSONGetImmutableBytes(body []byte, path string) gjson.Result {
+	if len(body) == 0 {
+		return gjson.Result{}
+	}
+	return gjson.Get(unsafe.String(unsafe.SliceData(body), len(body)), path)
 }
 
 // codexInputItemIDsNeedSanitizing reports whether an input item carries an
