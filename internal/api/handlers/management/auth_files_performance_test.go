@@ -46,28 +46,48 @@ func BenchmarkListAuthFilesFilteredManager(b *testing.B) {
 	}
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, manager)
-	requestTarget := "/v0/management/auth-files?type=claude&page=1&page_size=20&codex_subscription=skip"
-	request := func() {
-		recorder := httptest.NewRecorder()
-		ctx, _ := gin.CreateTestContext(recorder)
-		ctx.Request = httptest.NewRequest(http.MethodGet, requestTarget, nil)
-		h.ListAuthFiles(ctx)
-		if recorder.Code != http.StatusOK {
-			b.Fatalf("ListAuthFiles status = %d", recorder.Code)
-		}
-	}
-	request()
-
-	b.ReportAllocs()
-	for b.Loop() {
-		request()
+	for _, benchmark := range []struct {
+		name   string
+		target string
+	}{
+		{
+			name:   "initial_page",
+			target: "/v0/management/auth-files?summary=true&page=1&page_size=20&recent_requests=false&page_recent_requests=true&codex_subscription=skip",
+		},
+		{
+			name:   "provider_filter",
+			target: "/v0/management/auth-files?summary=true&type=claude&page=1&page_size=20&recent_requests=false&page_recent_requests=true&codex_subscription=skip",
+		},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			request := func() {
+				recorder := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recorder)
+				ctx.Request = httptest.NewRequest(http.MethodGet, benchmark.target, nil)
+				h.ListAuthFiles(ctx)
+				if recorder.Code != http.StatusOK {
+					b.Fatalf("ListAuthFiles status = %d", recorder.Code)
+				}
+			}
+			request()
+			b.ReportAllocs()
+			for b.Loop() {
+				request()
+			}
+		})
 	}
 }
 
 func TestAuthFilesListPayloadAcknowledgesPremiumFilter(t *testing.T) {
-	payload := authFilesListPayload(nil, 0, authFilesListQuery{PremiumOnly: true}, nil)
+	payload := authFilesListPayload(nil, 0, authFilesListQuery{
+		PremiumOnly:               true,
+		PageRecentRequestsApplied: true,
+	}, nil)
 	if applied, ok := payload["premium_only_applied"].(bool); !ok || !applied {
 		t.Fatalf("premium_only_applied = %#v, want true", payload["premium_only_applied"])
+	}
+	if applied, ok := payload["page_recent_requests_applied"].(bool); !ok || !applied {
+		t.Fatalf("page_recent_requests_applied = %#v, want true", payload["page_recent_requests_applied"])
 	}
 }
 

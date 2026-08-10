@@ -161,11 +161,16 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 	if summaries != nil {
 		countSource = summaries
 	}
-	countEntries := make([]gin.H, 0, len(countSource))
+	var countEntries []gin.H
+	if q.Type != "" {
+		countEntries = make([]gin.H, 0, len(countSource))
+	}
 	displayEntries := make([]gin.H, 0, len(auths))
-	for _, auth := range countSource {
-		if entry := authFileTypeCountEntryForQuery(auth, q); entry != nil {
-			countEntries = append(countEntries, entry)
+	if q.Type != "" {
+		for _, auth := range countSource {
+			if entry := authFileTypeCountEntryForQuery(auth, q); entry != nil {
+				countEntries = append(countEntries, entry)
+			}
 		}
 	}
 	for _, auth := range auths {
@@ -178,7 +183,11 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 		}
 	}
 	displayEntries = dedupeAuthFileEntries(displayEntries)
-	typeCounts := authFileEntryTypeCounts(dedupeAuthFileEntries(countEntries), q)
+	typeCountEntries := displayEntries
+	if q.Type != "" {
+		typeCountEntries = dedupeAuthFileEntries(countEntries)
+	}
+	typeCounts := authFileEntryTypeCounts(typeCountEntries, q)
 
 	filtered := make([]gin.H, 0, len(displayEntries))
 	for _, entry := range displayEntries {
@@ -214,9 +223,13 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 	}
 	h.maybeClearExpiredQuotaCooldowns(manager, c.Request.Context())
 
-	summaries := manager.ListManagementSummaryWithoutRecentRequests()
+	summaries := manager.ListManagementSummaryWithoutRecentRequestsContext(c.Request.Context())
+	if c.Request.Context().Err() != nil {
+		return true
+	}
 	entrySubscriptionMode := codexSubscriptionMode
 	deferRefreshToPage := codexSubscriptionMode == codexSubscriptionListRefresh
+	includePageRecentRequests := q.IncludeRecentRequests || q.PageRecentRequests
 	if deferRefreshToPage {
 		entrySubscriptionMode = codexSubscriptionListCache
 	}
@@ -227,15 +240,23 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 		RecentRequestSnapshotter: recentSnapshotter,
 	}
 
-	countEntries := make([]gin.H, 0, len(summaries))
+	var countEntries []gin.H
+	if q.Type != "" {
+		countEntries = make([]gin.H, 0, len(summaries))
+	}
 	displayEntries := make([]gin.H, 0, len(summaries))
 	var summaryAuthIDsByName map[string][]string
-	if q.Summary && (q.IncludeRecentRequests || deferRefreshToPage) {
+	if q.Summary && (includePageRecentRequests || deferRefreshToPage) {
 		summaryAuthIDsByName = make(map[string][]string, len(summaries))
 	}
-	for _, auth := range summaries {
-		if entry := authFileTypeCountEntryForQuery(auth, q); entry != nil {
-			countEntries = append(countEntries, entry)
+	for index, auth := range summaries {
+		if index%64 == 0 && c.Request.Context().Err() != nil {
+			return true
+		}
+		if q.Type != "" {
+			if entry := authFileTypeCountEntryForQuery(auth, q); entry != nil {
+				countEntries = append(countEntries, entry)
+			}
 		}
 		if !authFileMatchesListPreQuery(auth, q) {
 			continue
@@ -243,7 +264,7 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 		auth = h.enrichCodexSubscriptionInfo(c.Request.Context(), auth, entrySubscriptionMode)
 		if entry := h.buildAuthFileEntryWithOptions(auth, summaryOpts); entry != nil {
 			displayEntries = append(displayEntries, entry)
-			if q.Summary && (q.IncludeRecentRequests || deferRefreshToPage) {
+			if q.Summary && (includePageRecentRequests || deferRefreshToPage) {
 				name := authFileListKey(valueAsString(entry["name"]))
 				id := strings.TrimSpace(auth.ID)
 				if name != "" && id != "" {
@@ -254,7 +275,11 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 	}
 
 	displayEntries = dedupeAuthFileEntries(displayEntries)
-	typeCounts := authFileEntryTypeCounts(dedupeAuthFileEntries(countEntries), q)
+	typeCountEntries := displayEntries
+	if q.Type != "" {
+		typeCountEntries = dedupeAuthFileEntries(countEntries)
+	}
+	typeCounts := authFileEntryTypeCounts(typeCountEntries, q)
 	filtered := make([]gin.H, 0, len(displayEntries))
 	for _, entry := range displayEntries {
 		if authFileEntryMatchesListQuery(entry, q) {
@@ -289,7 +314,7 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 	q = clampAuthFilesListPage(q, total)
 	pageEntries := authFileEntryPageSlice(filtered, q)
 	if q.Summary {
-		if q.IncludeRecentRequests || deferRefreshToPage {
+		if includePageRecentRequests || deferRefreshToPage {
 			pageRecentIDs := make([]string, 0, len(pageEntries))
 			for _, entry := range pageEntries {
 				name := authFileListKey(valueAsString(entry["name"]))
@@ -297,7 +322,7 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 			}
 			pageRecentAuths := manager.ListManagementSummaryByIDs(pageRecentIDs)
 			var recentAuthsByName map[string][]*coreauth.Auth
-			if q.IncludeRecentRequests {
+			if includePageRecentRequests {
 				recentAuthsByName = make(map[string][]*coreauth.Auth, len(pageRecentAuths))
 				for _, auth := range pageRecentAuths {
 					name := strings.TrimSpace(auth.FileName)
@@ -314,14 +339,15 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 			if deferRefreshToPage {
 				pageEntries = h.refreshAuthFileEntryPageFromManager(c.Request.Context(), pageEntries, pageRecentAuths, authFileEntryBuildOptions{
 					Summary:                  true,
-					SkipRecentRequests:       !q.IncludeRecentRequests,
+					SkipRecentRequests:       !includePageRecentRequests,
 					RecentRequestSnapshotter: recentSnapshotter,
 				})
-				if q.IncludeRecentRequests {
+				if includePageRecentRequests {
 					populateSummaryPageRecentRequests(pageEntries, recentAuthsByName, recentSnapshotter)
 				}
 			}
 		}
+		q.PageRecentRequestsApplied = q.PageRecentRequests
 		c.JSON(http.StatusOK, authFilesListPayload(pageEntries, total, q, typeCounts))
 		return true
 	}

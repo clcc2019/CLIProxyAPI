@@ -215,6 +215,15 @@ func TestManagerAuthLookupSnapshotsContainOnlyScalarLookupFields(t *testing.T) {
 	}
 }
 
+func TestManagerManagementSummaryStopsForCanceledContext(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := manager.ListManagementSummaryWithoutRecentRequestsContext(ctx); got != nil {
+		t.Fatalf("canceled management summary = %#v, want nil", got)
+	}
+}
+
 func BenchmarkManagerListByProvider(b *testing.B) {
 	manager := NewManager(nil, nil, nil)
 	const codexCount = 100

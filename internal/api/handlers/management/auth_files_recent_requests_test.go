@@ -189,6 +189,61 @@ func TestListAuthFilesSummaryOmitsHeavyRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestListAuthFilesSummaryIncludesRecentRequestsForCurrentPageOnly(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, name := range []string{"a.json", "b.json", "c.json"} {
+		if _, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID:       name,
+			FileName: name,
+			Provider: "codex",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"runtime_only": "true",
+			},
+		}); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+		manager.MarkResult(context.Background(), coreauth.Result{
+			AuthID: name, Provider: "codex", Model: "gpt-5", Success: true,
+		})
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(
+		http.MethodGet,
+		"/v0/management/auth-files?summary=true&page=2&page_size=1&sort=az&recent_requests=false&page_recent_requests=true",
+		nil,
+	)
+
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Files                     []map[string]any `json:"files"`
+		PageRecentRequestsApplied bool             `json:"page_recent_requests_applied"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if !payload.PageRecentRequestsApplied {
+		t.Fatal("page_recent_requests_applied = false, want true")
+	}
+	if len(payload.Files) != 1 || payload.Files[0]["name"] != "b.json" {
+		t.Fatalf("files = %#v, want only b.json", payload.Files)
+	}
+	recent, ok := payload.Files[0]["recent_requests"].([]any)
+	if !ok || len(recent) != 20 {
+		t.Fatalf("recent_requests = %#v, want 20 buckets", payload.Files[0]["recent_requests"])
+	}
+}
+
 func TestMergeAuthFileEntryGroupKeepsNonZeroRecentRequests(t *testing.T) {
 	zeroBuckets := make([]coreauth.RecentRequestBucket, 20)
 	activeBuckets := make([]coreauth.RecentRequestBucket, 20)

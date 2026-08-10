@@ -838,7 +838,7 @@ func cloneAuthAttributesForManagementSummary(src map[string]string) map[string]s
 	if len(src) == 0 {
 		return nil
 	}
-	dst := make(map[string]string, 16)
+	var dst map[string]string
 	for _, key := range []string{
 		"path",
 		"runtime_only",
@@ -873,11 +873,11 @@ func cloneAuthAttributesForManagementSummary(src map[string]string) map[string]s
 		"authKind",
 	} {
 		if value := src[key]; value != "" {
+			if dst == nil {
+				dst = make(map[string]string)
+			}
 			dst[key] = value
 		}
-	}
-	if len(dst) == 0 {
-		return nil
 	}
 	return dst
 }
@@ -897,7 +897,7 @@ func cloneAuthMetadataForManagementSummary(src map[string]any) map[string]any {
 	if len(src) == 0 {
 		return nil
 	}
-	dst := make(map[string]any, 24)
+	dst := make(map[string]any)
 	copyKeys := []string{
 		"email",
 		"project_id",
@@ -1087,7 +1087,7 @@ func cloneSelectedManagementSummaryNestedMap(value any, keys []string) map[strin
 	if value == nil {
 		return nil
 	}
-	dst := make(map[string]any, len(keys))
+	dst := make(map[string]any)
 	switch typed := value.(type) {
 	case map[string]any:
 		for _, key := range keys {

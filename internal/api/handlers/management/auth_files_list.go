@@ -26,6 +26,10 @@ type authFilesListQuery struct {
 	// default stays enabled for existing clients; the web UI can defer them
 	// until its lightweight card list has painted.
 	IncludeRecentRequests bool
+	// PageRecentRequests asks paginated summary responses to populate request
+	// buckets only after the current page has been selected.
+	PageRecentRequests        bool
+	PageRecentRequestsApplied bool
 	// TypeCountsOnly returns provider counts without constructing full list entries.
 	// It is a compatibility-friendly split path for filter controls that do not
 	// need any card payload.
@@ -82,6 +86,9 @@ func authFilesListQueryFromRequest(c *gin.Context) authFilesListQuery {
 		q.PageSize = pageSize
 		q.Paginated = true
 	}
+	q.PageRecentRequests = q.Paginated && q.Summary && isTruthyQueryValue(
+		firstNonEmptyQueryValue(c, "page_recent_requests", "pageRecentRequests"),
+	)
 	q.ProblemOnly = isTruthyQueryValue(firstNonEmptyQueryValue(c, "problem", "problem_only", "problemOnly"))
 	q.DisabledOnly = isTruthyQueryValue(firstNonEmptyQueryValue(c, "disabled", "disabled_only", "disabledOnly"))
 	q.PremiumOnly = isTruthyQueryValue(firstNonEmptyQueryValue(c, "premium", "premium_only", "premiumOnly"))
@@ -122,6 +129,9 @@ func authFilesListPayload(files []gin.H, total int, q authFilesListQuery, typeCo
 		payload["page"] = q.Page
 		payload["page_size"] = q.PageSize
 		payload["has_more"] = q.offset()+len(files) < total
+	}
+	if q.PageRecentRequestsApplied {
+		payload["page_recent_requests_applied"] = true
 	}
 	if len(typeCounts) > 0 {
 		payload["type_counts"] = typeCounts

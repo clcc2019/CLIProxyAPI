@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"time"
@@ -63,14 +64,37 @@ func (m *Manager) ListManagementSummary() []*Auth {
 // Paginated callers can clone only the candidates that land on the requested
 // page when they need to expose recent request buckets.
 func (m *Manager) ListManagementSummaryWithoutRecentRequests() []*Auth {
+	return m.ListManagementSummaryWithoutRecentRequestsContext(context.Background())
+}
+
+// ListManagementSummaryWithoutRecentRequestsContext is the cancellable form
+// used by rapidly changing management filters.
+func (m *Manager) ListManagementSummaryWithoutRecentRequestsContext(ctx context.Context) []*Auth {
 	if m == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	list := make([]*Auth, 0, len(m.auths))
+	index := 0
 	for _, auth := range m.auths {
+		if index%64 == 0 {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+			}
+		}
 		list = append(list, auth.cloneForManagementSummary(false))
+		index++
 	}
 	return list
 }
