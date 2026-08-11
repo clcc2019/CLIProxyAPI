@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -99,6 +100,8 @@ func TestDirectStreamResultFailureMarkedOnce(t *testing.T) {
 func TestDirectStreamResultCancellationOnlyReleases(t *testing.T) {
 	hook := &streamResultRecordingHook{}
 	manager := NewManager(nil, nil, hook)
+	remaining := make(chan cliproxyexecutor.StreamChunk)
+	released := make(chan struct{})
 	var releases atomic.Int32
 	result := manager.directStreamResult(
 		context.Background(),
@@ -107,8 +110,11 @@ func TestDirectStreamResultCancellationOnlyReleases(t *testing.T) {
 		"gpt-5.4",
 		nil,
 		nil,
-		nil,
-		func() { releases.Add(1) },
+		remaining,
+		func() {
+			releases.Add(1)
+			close(released)
+		},
 	)
 
 	result.Finalize(false)
@@ -117,7 +123,16 @@ func TestDirectStreamResultCancellationOnlyReleases(t *testing.T) {
 	if results := hook.snapshot(); len(results) != 0 {
 		t.Fatalf("results = %#v, want no success or failure on cancellation", results)
 	}
+	if got := releases.Load(); got != 0 {
+		t.Fatalf("release count before upstream close = %d, want 0", got)
+	}
+	close(remaining)
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("release was not called after upstream closed")
+	}
 	if got := releases.Load(); got != 1 {
-		t.Fatalf("release count = %d, want 1", got)
+		t.Fatalf("release count after upstream close = %d, want 1", got)
 	}
 }

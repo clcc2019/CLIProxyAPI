@@ -3,11 +3,14 @@ package auth
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -74,88 +77,88 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			authWideFailure := result.AuthScoped || isAuthWideResultError(result.Error)
-			if result.Model != "" && !authWideFailure {
-				if !isRequestScopedNotFoundResultError(result.Error) && !isSessionContextResultError(result.Error) {
-					disableCooling := quotaCooldownDisabledForAuth(auth)
-					state := ensureModelState(auth, result.Model)
-					state.Unavailable = true
-					state.Status = StatusError
-					state.UpdatedAt = now
-					if result.Error != nil {
-						state.LastError = cloneError(result.Error)
-						state.StatusMessage = result.Error.Message
-						auth.LastError = cloneError(result.Error)
-						auth.StatusMessage = result.Error.Message
-					}
-
-					statusCode := statusCodeFromResult(result.Error)
-					if isModelSupportResultError(result.Error) {
-						next := now.Add(12 * time.Hour)
-						state.NextRetryAfter = next
-						suspendReason = "model_not_supported"
-						shouldSuspendModel = true
-					} else {
-						switch statusCode {
-						case 401:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(30 * time.Minute)
-								state.NextRetryAfter = next
-								suspendReason = "unauthorized"
-								shouldSuspendModel = true
-							}
-						case 402, 403:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(30 * time.Minute)
-								state.NextRetryAfter = next
-								suspendReason = "payment_required"
-								shouldSuspendModel = true
-							}
-						case 404:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(12 * time.Hour)
-								state.NextRetryAfter = next
-								suspendReason = "not_found"
-								shouldSuspendModel = true
-							}
-						case 429:
-							var next time.Time
-							if !disableCooling {
-								next = quotaRecoverAt(now, result.RetryAfter)
-							}
-							state.NextRetryAfter = next
-							state.Quota = QuotaState{
-								Exceeded:      true,
-								Reason:        "quota",
-								NextRecoverAt: next,
-							}
-							if !disableCooling {
-								suspendReason = "quota"
-								shouldSuspendModel = true
-								setModelQuota = true
-							}
-						case 408, 500, 502, 503, 504:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
-							}
-						default:
-							state.NextRetryAfter = time.Time{}
-						}
-					}
-
-					auth.Status = StatusError
-					auth.UpdatedAt = now
-					updateAggregatedAvailability(auth, now)
-					schedulerDirty = true
+			if shouldSkipCredentialCooldown(result.Error) {
+				// Request and connection lifecycle failures do not describe credential health.
+			} else if result.Model != "" && !authWideFailure {
+				disableCooling := quotaCooldownDisabledForAuth(auth)
+				state := ensureModelState(auth, result.Model)
+				state.Unavailable = true
+				state.Status = StatusError
+				state.UpdatedAt = now
+				if result.Error != nil {
+					state.LastError = cloneError(result.Error)
+					state.StatusMessage = result.Error.Message
+					auth.LastError = cloneError(result.Error)
+					auth.StatusMessage = result.Error.Message
 				}
+
+				statusCode := statusCodeFromResult(result.Error)
+				if isModelSupportResultError(result.Error) {
+					next := now.Add(12 * time.Hour)
+					state.NextRetryAfter = next
+					suspendReason = "model_not_supported"
+					shouldSuspendModel = true
+				} else {
+					switch statusCode {
+					case 401:
+						if disableCooling {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(30 * time.Minute)
+							state.NextRetryAfter = next
+							suspendReason = "unauthorized"
+							shouldSuspendModel = true
+						}
+					case 402, 403:
+						if disableCooling {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(30 * time.Minute)
+							state.NextRetryAfter = next
+							suspendReason = "payment_required"
+							shouldSuspendModel = true
+						}
+					case 404:
+						if disableCooling {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(12 * time.Hour)
+							state.NextRetryAfter = next
+							suspendReason = "not_found"
+							shouldSuspendModel = true
+						}
+					case 429:
+						var next time.Time
+						if !disableCooling {
+							next = quotaRecoverAt(now, result.RetryAfter)
+						}
+						state.NextRetryAfter = next
+						state.Quota = QuotaState{
+							Exceeded:      true,
+							Reason:        "quota",
+							NextRecoverAt: next,
+						}
+						if !disableCooling {
+							suspendReason = "quota"
+							shouldSuspendModel = true
+							setModelQuota = true
+						}
+					case 408, 500, 502, 503, 504:
+						if disableCooling {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(1 * time.Minute)
+							state.NextRetryAfter = next
+						}
+					default:
+						state.NextRetryAfter = time.Time{}
+					}
+				}
+
+				auth.Status = StatusError
+				auth.UpdatedAt = now
+				updateAggregatedAvailability(auth, now)
+				schedulerDirty = true
 			} else {
 				// Auth-wide failures suspend the credential itself, not just the
 				// triggering model. Auth-scoped quota errors and generic 401s both
@@ -808,18 +811,61 @@ func resultErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
 	}
+	var resultErr *Error
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil {
-		resultErr := cloneError(authErr)
-		applyUsageLimitResultClassification(resultErr, err)
-		return resultErr
+		resultErr = cloneError(authErr)
+	} else {
+		resultErr = &Error{Message: err.Error()}
 	}
-	resultErr := &Error{Message: err.Error()}
-	if status := statusCodeFromError(err); status > 0 {
-		resultErr.HTTPStatus = status
+	if resultErr.HTTPStatus == 0 {
+		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
 	applyUsageLimitResultClassification(resultErr, err)
+	if isConnectionLifecycleError(err) && resultErr.Code == "" {
+		resultErr.Code = connectionLifecycleErrorCode
+	}
 	return resultErr
+}
+
+func shouldSkipCredentialCooldown(err *Error) bool {
+	return isRequestInvalidResultError(err) || isSessionContextResultError(err) || isConnectionLifecycleResultError(err)
+}
+
+func isConnectionLifecycleError(err error) bool {
+	if err == nil || statusCodeFromError(err) != 0 {
+		return false
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) && closeErr != nil {
+		switch closeErr.Code {
+		case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure:
+			return true
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return isConnectionLifecycleMessage(err.Error())
+}
+
+func isConnectionLifecycleResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != 0 {
+		return false
+	}
+	return err.Code == connectionLifecycleErrorCode || isConnectionLifecycleMessage(err.Message)
+}
+
+func isConnectionLifecycleMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	switch lower {
+	case "context canceled", "eof", "unexpected eof":
+		return true
+	}
+	return strings.Contains(lower, "unexpected eof") ||
+		strings.Contains(lower, "websocket: close 1000") ||
+		strings.Contains(lower, "websocket: close 1001") ||
+		strings.Contains(lower, "websocket: close 1006")
 }
 
 func applyUsageLimitResultClassification(resultErr *Error, err error) {
@@ -1149,29 +1195,12 @@ func isRequestInvalidResultError(err *Error) bool {
 	if isModelSupportResultError(err) {
 		return false
 	}
-	switch statusCodeFromResult(err) {
-	case http.StatusBadRequest:
-		return isMissingResponsesRequestAnchorErrorMessage(err.Error())
-	case http.StatusNotFound:
-		return isRequestScopedNotFoundMessage(err.Error())
-	case http.StatusUnprocessableEntity:
-		return true
-	case http.StatusInternalServerError:
-		msg := err.Error()
-		return strings.Contains(msg, "\"status\":\"UNKNOWN\"") ||
-			strings.Contains(msg, "\"status\": \"UNKNOWN\"")
-	default:
-		return false
-	}
+	return isRequestInvalidStatusError(statusCodeFromResult(err), errors.New(err.Message))
 }
 
-// isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it treats request-scoped 404
-// item misses caused by `store=false`, all 422 responses, and Responses requests
-// missing every valid request anchor as request-shape failures, where switching
-// auths or pooled upstream models will not help. Other 400s deliberately fall
-// through to credential failover so the next auth starts with a fresh upstream
-// session instead of reusing polluted provider state.
+// isRequestInvalidError reports request faults that another credential cannot fix.
+// Generic 400s still fall through because this project uses credential failover
+// to recover provider-scoped session and account-policy failures.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -1183,18 +1212,24 @@ func isRequestInvalidError(err error) bool {
 	if isModelSupportError(err) {
 		return false
 	}
-	status := statusCodeFromError(err)
+	return isRequestInvalidStatusError(statusCodeFromError(err), err)
+}
+
+func isRequestInvalidStatusError(status int, err error) bool {
 	switch status {
-	case http.StatusBadRequest:
-		return isMissingResponsesRequestAnchorErrorMessage(err.Error())
-	case http.StatusNotFound:
-		return isRequestScopedNotFoundMessage(err.Error())
-	case http.StatusUnprocessableEntity:
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusTooManyRequests:
+		return false
+	}
+	if clienterror.HasRequestFault(err) {
 		return true
-	case http.StatusInternalServerError:
-		msg := err.Error()
-		return strings.Contains(msg, "\"status\":\"UNKNOWN\"") ||
-			strings.Contains(msg, "\"status\": \"UNKNOWN\"")
+	}
+	switch status {
+	case http.StatusConflict, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	case http.StatusBadRequest:
+		return err != nil && isMissingResponsesRequestAnchorErrorMessage(err.Error())
+	case http.StatusNotFound:
+		return err != nil && isRequestScopedNotFoundMessage(err.Error())
 	default:
 		return false
 	}
@@ -1251,7 +1286,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
-	if isRequestScopedNotFoundResultError(resultErr) || isSessionContextResultError(resultErr) {
+	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
 	disableCooling := quotaCooldownDisabledForAuth(auth)

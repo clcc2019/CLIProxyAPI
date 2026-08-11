@@ -64,3 +64,33 @@ func TestBuildOpenAIResponsesStreamErrorChunkRedactsSensitiveMessage(t *testing.
 		t.Fatalf("stream error chunk missing redaction: %s", text)
 	}
 }
+
+func TestBuildOpenAIResponsesStreamFailedChunkPreservesNestedError(t *testing.T) {
+	chunk := BuildOpenAIResponsesStreamFailedChunk(
+		http.StatusBadRequest,
+		`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`,
+		0,
+	)
+	var payload struct {
+		Type     string `json:"type"`
+		Response struct {
+			Status string `json:"status"`
+			Error  struct {
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(chunk, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Type != "response.failed" || payload.Response.Status != "failed" {
+		t.Fatalf("payload = %s", chunk)
+	}
+	if payload.Response.Error.Type != "invalid_request" ||
+		payload.Response.Error.Code != "cyber_policy" ||
+		payload.Response.Error.Message != "blocked" {
+		t.Fatalf("nested error = %#v", payload.Response.Error)
+	}
+}

@@ -207,9 +207,18 @@ func (m *Manager) directStreamResult(ctx context.Context, authID, provider, resu
 				m.MarkResult(ctx, Result{AuthID: authID, Provider: provider, Model: resultModel, Success: true})
 				m.bindPreviousResponseID(ctx, responseID, authID)
 			}
-			if release != nil {
-				release()
+			if release == nil {
+				return
 			}
+			if completed || remaining == nil {
+				release()
+				return
+			}
+			go func() {
+				for range remaining {
+				}
+				release()
+			}()
 		})
 	}
 	return &cliproxyexecutor.StreamResult{

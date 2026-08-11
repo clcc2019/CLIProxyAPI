@@ -78,7 +78,7 @@ func (h *BaseAPIHandler) prepareExecutionRequest(ctx context.Context, handlerTyp
 		options: coreexecutor.Options{
 			Stream:          mode.stream,
 			Alt:             alt,
-			Headers:         requestHeadersViewFromContext(ctx),
+			Headers:         requestHeadersFromContext(ctx),
 			OriginalRequest: rawJSON,
 			SourceFormat:    sdktranslator.FromString(handlerType),
 			Metadata:        metadata,

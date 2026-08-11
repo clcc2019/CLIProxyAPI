@@ -658,7 +658,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		if errForward != nil {
 			wsTerminateErr = errForward
-			log.Warnf("responses websocket: forward failed id=%s error=%v", connectionID, errForward)
+			if !errors.Is(errForward, websocket.ErrCloseSent) {
+				log.Warnf("responses websocket: forward failed id=%s error=%v", connectionID, errForward)
+			}
 			return
 		}
 		if shouldReleaseResponsesWebsocketPinnedAuth(forwardRetryState.terminalError) {
@@ -1906,6 +1908,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 		pendingRetryPreludeBytes = 0
 		return nil
 	}
+	discardPendingRetryPrelude := func() {
+		stopPendingRetryPreludeTimer()
+		pendingRetryPrelude = pendingRetryPrelude[:0]
+		pendingRetryPreludeBytes = 0
+	}
 	bufferRetryPrelude := func(payload []byte, eventType string) bool {
 		if !options.bufferRetryPrelude || emittedPayload {
 			return false
@@ -1931,16 +1938,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 		}
 		return true
 	}
-	failNilStreamChannels := func() error {
-		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errResponsesWebsocketNilStreamChannels}
-		recordResponsesWebsocketAPIResponseError(h, c, errMsg)
-		_, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
-		cancel(errResponsesWebsocketNilStreamChannels)
-		if errWrite != nil {
-			return errWrite
-		}
-		return errResponsesWebsocketNilStreamChannels
-	}
 	shouldRetryWithFullTranscript := func(errMsg *interfaces.ErrorMessage) bool {
 		return options.allowFullTranscriptRetry &&
 			errMsg != nil &&
@@ -1948,43 +1945,61 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 			(responsesWebsocketShouldRetryFullTranscript(errMsg) ||
 				(options.retryCredentialFailover && responsesWebsocketIsCredentialFailoverFailure(errMsg.Error)))
 	}
-	forwardTerminalError := func(errMsg *interfaces.ErrorMessage) error {
-		if errMsg != nil {
-			if options.retryState != nil {
-				options.retryState.terminalError = errMsg
-			}
-			recordResponsesWebsocketAPIResponseError(h, c, errMsg)
-			if errFlush := flushPendingRetryPrelude(); errFlush != nil {
-				cancel(errFlush)
-				return errFlush
-			}
-			errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
-			log.Infof(
-				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
-				sessionID,
-				websocket.TextMessage,
-				websocketPayloadEventType(errorPayload),
-				websocketPayloadPreview(errorPayload),
-			)
-			if errWrite != nil {
-				log.Warnf(
-					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-					sessionID,
-					websocketPayloadEventType(errorPayload),
-					errWrite,
-				)
-				if errMsg.Error != nil {
-					cancel(handlers.ErrorMessageCause(errMsg))
-				} else {
-					cancel(errWrite)
-				}
-				return errWrite
-			}
-			cancel(handlers.ErrorMessageCause(errMsg))
+	terminateUpstreamError := func(errMsg *interfaces.ErrorMessage, payload []byte, eventType string, timestamp time.Time) error {
+		if errMsg == nil {
+			cancel(nil)
 			return nil
 		}
-		cancel(nil)
-		return nil
+		if options.retryState != nil {
+			options.retryState.terminalError = errMsg
+		}
+		recordResponsesWebsocketAPIResponseError(h, c, errMsg)
+		discardPendingRetryPrelude()
+		cause := handlers.ErrorMessageCause(errMsg)
+		if !shouldExposeResponsesUpstreamError(errMsg) {
+			appendWebsocketTimelineDisconnect(wsTimelineLog, cause, timestamp)
+			cancel(cause)
+			if errClose := conn.Close(); errClose != nil {
+				return errClose
+			}
+			return websocket.ErrCloseSent
+		}
+
+		var errWrite error
+		if len(payload) > 0 {
+			errWrite = writeForwardedPayload(payload, eventType, timestamp)
+		} else {
+			var errorPayload []byte
+			errorPayload, errWrite = writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
+			if errWrite == nil {
+				log.Infof(
+					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+					sessionID,
+					websocket.TextMessage,
+					websocketPayloadEventType(errorPayload),
+					websocketPayloadPreview(errorPayload),
+				)
+			}
+		}
+		cancel(cause)
+		if errWrite != nil {
+			return errWrite
+		}
+		if errClose := conn.Close(); errClose != nil {
+			return errClose
+		}
+		return websocket.ErrCloseSent
+	}
+	failNilStreamChannels := func() error {
+		return terminateUpstreamError(
+			&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errResponsesWebsocketNilStreamChannels},
+			nil,
+			"",
+			time.Now(),
+		)
+	}
+	forwardTerminalError := func(errMsg *interfaces.ErrorMessage) error {
+		return terminateUpstreamError(errMsg, nil, "", time.Now())
 	}
 	if data == nil && errs == nil {
 		return completedOutput, completedResponseID, completed, failNilStreamChannels()
@@ -2078,23 +2093,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 					}
 					if eventType == wsEventTypeError {
 						payloadErrMsg := responsesWebsocketErrorMessageFromPayload(filteredPayload)
-						if options.retryState != nil {
-							options.retryState.terminalError = payloadErrMsg
-						}
-						recordResponsesWebsocketAPIResponseError(h, c, payloadErrMsg)
-						if errWrite := flushPendingRetryPrelude(); errWrite != nil {
-							cancel(errWrite)
-							forwardErr = errWrite
-							stopForward = true
-							return false
-						}
-						if errWrite := writeForwardedPayload(filteredPayload, eventType, now); errWrite != nil {
-							cancel(errWrite)
-							forwardErr = errWrite
-							stopForward = true
-							return false
-						}
-						cancel(nil)
+						forwardErr = terminateUpstreamError(payloadErrMsg, filteredPayload, eventType, now)
 						stopForward = true
 						return false
 					}
@@ -2259,6 +2258,25 @@ func sortedStringSet(values map[string]struct{}) []string {
 	return out
 }
 
+type responsesWebsocketPayloadError struct {
+	status  int
+	payload []byte
+}
+
+func (e *responsesWebsocketPayloadError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return string(e.payload)
+}
+
+func (e *responsesWebsocketPayloadError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.status
+}
+
 func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.ErrorMessage {
 	status := int(gjson.GetBytes(payload, "status").Int())
 	if status <= 0 {
@@ -2273,17 +2291,14 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
-	errText := strings.TrimSpace(gjson.GetBytes(payload, "error.message").String())
-	if errText == "" {
-		errText = strings.TrimSpace(gjson.GetBytes(payload, "message").String())
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) > 0 {
+		return &interfaces.ErrorMessage{
+			StatusCode: status,
+			Error:      &responsesWebsocketPayloadError{status: status, payload: bytes.Clone(trimmed)},
+		}
 	}
-	if errText == "" {
-		errText = strings.TrimSpace(string(payload))
-	}
-	if errText == "" {
-		errText = http.StatusText(status)
-	}
-	return &interfaces.ErrorMessage{StatusCode: status, Error: fmt.Errorf("%s", errText)}
+	return &interfaces.ErrorMessage{StatusCode: status, Error: errors.New(http.StatusText(status))}
 }
 
 func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) bool {

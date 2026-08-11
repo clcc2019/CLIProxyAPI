@@ -96,8 +96,7 @@ type Options struct {
 	Stream bool
 	// Alt carries optional alternate format hint (e.g. SSE JSON key).
 	Alt string
-	// Headers are a read-only view forwarded to the provider request builder.
-	// Executors must copy values into their own request before mutation.
+	// Headers are a request-owned copy forwarded to the provider request builder.
 	Headers http.Header
 	// Query contains optional query string parameters.
 	Query url.Values

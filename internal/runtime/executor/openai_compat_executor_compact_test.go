@@ -157,3 +157,40 @@ func TestOpenAICompatExecutorClaudeStreamPopulatesInputTokens(t *testing.T) {
 		t.Fatalf("message_start input_tokens = %d, want positive estimate", inputTokens)
 	}
 }
+
+func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk-1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"cost\":\"0\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "test-model",
+		Payload: []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var payloads [][]byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+		payloads = append(payloads, bytes.Clone(chunk.Payload))
+	}
+	if len(payloads) != 1 || gjson.GetBytes(payloads[0], "id").String() != "chunk-1" {
+		t.Fatalf("payloads = %q, want only pre-DONE chunk", payloads)
+	}
+}

@@ -65,7 +65,7 @@ func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bo
 	// buffer overflows would turn a logging-only limit into a hard request
 	// failure, which is not what the operator enabled `RequestLog` for.
 	captureTruncated := false
-	err := helps.ReadStreamLinesBorrowed(body, func(line []byte) error {
+	err := helps.ReadStreamLines(body, func(line []byte) error {
 		if captureBody && !captureTruncated {
 			if int64(len(result.body)+len(line)+1) > codexAggregateCapturedBodyMaxBytes {
 				codexMetrics.captureTruncated.Add(1)

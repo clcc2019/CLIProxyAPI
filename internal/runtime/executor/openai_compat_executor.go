@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -32,6 +33,8 @@ const (
 	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
 	openAICompatMultipartMemory       int64 = 32 << 20
 )
+
+var errOpenAICompatStreamDone = errors.New("openai-compatible stream completed")
 
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
 // It performs request/response translation and executes against the provider base URL
@@ -341,7 +344,8 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 		errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 			helps.AppendAPIResponseChunk(state.ctx, e.cfg, line)
 			streamUsage.ObserveOpenAIStream(line)
-			if isOpenAIStreamTerminalLine(line) {
+			done := isOpenAIStreamTerminalLine(line)
+			if done {
 				streamCompleted = true
 			}
 			if len(line) == 0 {
@@ -353,8 +357,11 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 			}
 			if passthroughOpenAI {
 				payload := bytes.TrimSpace(line[5:])
-				if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+				if len(payload) == 0 {
 					return nil
+				}
+				if done {
+					return errOpenAICompatStreamDone
 				}
 				out <- cliproxyexecutor.StreamChunk{Payload: payload}
 				return nil
@@ -366,14 +373,20 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
+			if done {
+				return errOpenAICompatStreamDone
+			}
 			return nil
 		})
+		if errors.Is(errRead, errOpenAICompatStreamDone) {
+			errRead = nil
+		}
 		errRead = resolveStreamIdleError(idleGuard, errRead, streamCompleted)
 		if errRead != nil {
 			helps.RecordAPIResponseError(state.ctx, e.cfg, errRead)
 			state.reporter.PublishFailureWithError(state.ctx, errRead)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
-		} else if !passthroughOpenAI {
+		} else if !passthroughOpenAI && !streamCompleted {
 			// In case the upstream close the stream without a terminal [DONE] marker.
 			// Feed a synthetic done marker through the translator so pending
 			// response.completed events are still emitted exactly once.
@@ -417,9 +430,12 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 				return nil
 			}
 			payload := bytes.TrimSpace(trimmed[5:])
-			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
-				streamCompleted = true
+			if len(payload) == 0 {
 				return nil
+			}
+			if bytes.Equal(payload, []byte("[DONE]")) {
+				streamCompleted = true
+				return errOpenAICompatStreamDone
 			}
 			// This path speaks the Responses protocol, whose terminal marker is
 			// a typed event rather than the [DONE] sentinel handled above.
@@ -434,6 +450,9 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 			out <- cliproxyexecutor.StreamChunk{Payload: payload}
 			return nil
 		})
+		if errors.Is(errRead, errOpenAICompatStreamDone) {
+			errRead = nil
+		}
 		errRead = resolveStreamIdleError(idleGuard, errRead, streamCompleted)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)

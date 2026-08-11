@@ -338,6 +338,35 @@ func TestRequestHeadersFromContextReturnsClone(t *testing.T) {
 	}
 }
 
+func TestPrepareExecutionRequestOwnsHeaders(t *testing.T) {
+	const (
+		authID = "test-request-header-owner"
+		model  = "test-request-header-model"
+	)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "codex"}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Request.Header.Set("Session_id", "original")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	prepared, errMsg := handler.prepareExecutionRequest(ctx, "openai-response", model, []byte(`{"model":"`+model+`"}`), "", executionRequestMode{})
+	if errMsg != nil {
+		t.Fatalf("prepareExecutionRequest error: %v", errMsg.Error)
+	}
+	prepared.options.Headers.Set("Session_id", "mutated")
+	if got := ginCtx.Request.Header.Get("Session_id"); got != "original" {
+		t.Fatalf("inbound Session_id = %q, want original", got)
+	}
+}
+
 func BenchmarkRequestHeadersFromContext(b *testing.B) {
 	gin.SetMode(gin.ReleaseMode)
 	recorder := httptest.NewRecorder()

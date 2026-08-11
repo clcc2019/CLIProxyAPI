@@ -10,8 +10,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -255,20 +257,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStreamResult(c *gin.Context,
 			return framer.WriteChunk(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			_ = framer.Flush(c.Writer)
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			errText := http.StatusText(status)
-			if errMsg.Error != nil && errMsg.Error.Error() != "" {
-				errText = errMsg.Error.Error()
-			}
-			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-			handlers.WriteSSEEventDataFrameWithLeadingNewline(c.Writer, "error", chunk)
+			writeResponsesStreamTerminalError(c, framer, errMsg)
 		},
 		WriteDone: func() {
 			_ = framer.Flush(c.Writer)
@@ -286,24 +275,61 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			return framer.WriteChunk(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			_ = framer.Flush(c.Writer)
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			errText := http.StatusText(status)
-			if errMsg.Error != nil && errMsg.Error.Error() != "" {
-				errText = errMsg.Error.Error()
-			}
-			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-			handlers.WriteSSEEventDataFrameWithLeadingNewline(c.Writer, "error", chunk)
+			writeResponsesStreamTerminalError(c, framer, errMsg)
 		},
 		WriteDone: func() {
 			_ = framer.Flush(c.Writer)
 			_, _ = c.Writer.Write([]byte("\n"))
 		},
 	})
+}
+
+func writeResponsesStreamTerminalError(c *gin.Context, framer *responsesSSEFramer, errMsg *interfaces.ErrorMessage) {
+	_ = framer.Flush(c.Writer)
+	if !shouldExposeResponsesUpstreamError(errMsg) {
+		return
+	}
+	status := responsesUpstreamErrorStatus(errMsg)
+	errText := http.StatusText(status)
+	if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
+		errText = errMsg.Error.Error()
+	}
+	event := "error"
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+	if isCodexResponsesClientRequest(c) {
+		event = "response.failed"
+		chunk = handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
+	}
+	handlers.WriteSSEEventDataFrameWithLeadingNewline(c.Writer, event, chunk)
+}
+
+func responsesUpstreamErrorStatus(errMsg *interfaces.ErrorMessage) int {
+	if errMsg == nil {
+		return 0
+	}
+	if errMsg.StatusCode > 0 {
+		return errMsg.StatusCode
+	}
+	return clienterror.HTTPStatusFromError(errMsg.Error)
+}
+
+func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
+	return errMsg != nil && clienterror.IsRequestFault(responsesUpstreamErrorStatus(errMsg), errMsg.Error)
+}
+
+func isCodexResponsesClientRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	userAgent := strings.TrimSpace(c.GetHeader("User-Agent"))
+	if strings.HasPrefix(userAgent, "Codex Desktop/") ||
+		strings.HasPrefix(userAgent, "codex-tui/") ||
+		strings.HasPrefix(userAgent, "codex_cli_rs/") {
+		return true
+	}
+	originator := strings.ToLower(strings.TrimSpace(c.GetHeader("Originator")))
+	return originator == "codex desktop" || originator == "codex-tui" || originator == "codex_cli_rs" ||
+		strings.HasPrefix(originator, "codex desktop/") ||
+		strings.HasPrefix(originator, "codex-tui/") ||
+		strings.HasPrefix(originator, "codex_cli_rs/")
 }

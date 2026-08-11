@@ -33,6 +33,20 @@ func TestReadStreamLinesReadsBlankAndTrailingLines(t *testing.T) {
 	}
 }
 
+func TestReadStreamLinesRetainsStableLineOwnership(t *testing.T) {
+	var lines [][]byte
+	err := ReadStreamLines(strings.NewReader("first\nsecond\nthird\n"), func(line []byte) error {
+		lines = append(lines, line)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ReadStreamLines error: %v", err)
+	}
+	if got := string(bytes.Join(lines, []byte(","))); got != "first,second,third" {
+		t.Fatalf("retained lines = %q", got)
+	}
+}
+
 func TestReadStreamLinesRejectsOversizedLine(t *testing.T) {
 	oversized := strings.Repeat("a", streamLineMaxSizeBytes+1)
 	err := ReadStreamLines(strings.NewReader(oversized), func([]byte) error { return nil })
@@ -41,45 +55,11 @@ func TestReadStreamLinesRejectsOversizedLine(t *testing.T) {
 	}
 }
 
-func TestReadStreamLinesBorrowedReadsBlankTrailingAndFragmentedLines(t *testing.T) {
-	long := strings.Repeat("x", streamLineInitialSize+32)
-	input := "data: one\n\n" + long
-	var lines []string
-	err := ReadStreamLinesBorrowed(strings.NewReader(input), func(line []byte) error {
-		lines = append(lines, string(line))
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("ReadStreamLinesBorrowed error: %v", err)
-	}
-	if len(lines) != 3 || lines[0] != "data: one" || lines[1] != "" || lines[2] != long {
-		t.Fatalf("lines = %#v", lines)
-	}
-}
-
-func TestReadStreamLinesBorrowedRejectsOversizedLine(t *testing.T) {
-	oversized := strings.Repeat("a", streamLineMaxSizeBytes+1)
-	err := ReadStreamLinesBorrowed(strings.NewReader(oversized), func([]byte) error { return nil })
-	if !errors.Is(err, ErrStreamLineTooLong) {
-		t.Fatalf("ReadStreamLinesBorrowed error = %v, want ErrStreamLineTooLong", err)
-	}
-}
-
 func BenchmarkReadStreamLinesSmallSSE(b *testing.B) {
 	input := strings.Repeat("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n", 8)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		if err := ReadStreamLines(strings.NewReader(input), func([]byte) error { return nil }); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkReadStreamLinesBorrowedSmallSSE(b *testing.B) {
-	input := strings.Repeat("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n", 8)
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if err := ReadStreamLinesBorrowed(strings.NewReader(input), func([]byte) error { return nil }); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -337,17 +337,6 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 // embedded in the provided context. This allows session affinity selectors to read
 // client headers used for session affinity.
 func requestHeadersFromContext(ctx context.Context) http.Header {
-	headers := requestHeadersViewFromContext(ctx)
-	if headers == nil {
-		return nil
-	}
-	return headers.Clone()
-}
-
-// requestHeadersViewFromContext returns the inbound header map as a read-only
-// view. The request preparation path uses it to avoid cloning the complete map;
-// executors must copy individual values before mutation.
-func requestHeadersViewFromContext(ctx context.Context) http.Header {
 	if ctx == nil {
 		return nil
 	}
@@ -355,7 +344,7 @@ func requestHeadersViewFromContext(ctx context.Context) http.Header {
 	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.Header == nil {
 		return nil
 	}
-	return ginCtx.Request.Header
+	return ginCtx.Request.Header.Clone()
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {

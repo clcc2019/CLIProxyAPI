@@ -12,7 +12,6 @@ const (
 	StreamChunkBufferSize  = 32
 	streamLineInitialSize  = 4 * 1024
 	streamLineMaxSizeBytes = 8 * 1024 * 1024
-	streamLinePoolMaxBytes = 256 * 1024
 )
 
 var ErrStreamLineTooLong = errors.New("stream line exceeds configured maximum")
@@ -20,13 +19,6 @@ var ErrStreamLineTooLong = errors.New("stream line exceeds configured maximum")
 var streamReaderPool = sync.Pool{
 	New: func() any {
 		return bufio.NewReaderSize(nil, streamLineInitialSize)
-	},
-}
-
-var streamLinePool = sync.Pool{
-	New: func() any {
-		line := make([]byte, 0, streamLineInitialSize)
-		return &line
 	},
 }
 
@@ -51,70 +43,6 @@ func ReadStreamLines(r io.Reader, handler func([]byte) error) error {
 		}
 		if errHandle := handler(line); errHandle != nil {
 			return errHandle
-		}
-	}
-}
-
-// ReadStreamLinesBorrowed is the allocation-conscious variant used by built-in
-// streaming executors. A line is valid only until handler returns; callers that
-// retain it must copy it. Single-buffer lines alias bufio.Reader, while long
-// fragmented lines use a bounded scratch pool.
-func ReadStreamLinesBorrowed(r io.Reader, handler func([]byte) error) error {
-	reader := streamReaderPool.Get().(*bufio.Reader)
-	reader.Reset(r)
-	defer func() {
-		reader.Reset(nil)
-		streamReaderPool.Put(reader)
-	}()
-
-	for {
-		fragment, isPrefix, err := reader.ReadLine()
-		if err != nil {
-			if errors.Is(err, io.EOF) && len(fragment) == 0 {
-				return nil
-			}
-			if err != nil && !errors.Is(err, io.EOF) {
-				return err
-			}
-		}
-		if !isPrefix {
-			if errHandle := handler(fragment); errHandle != nil {
-				return errHandle
-			}
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			continue
-		}
-
-		linePtr := streamLinePool.Get().(*[]byte)
-		line := (*linePtr)[:0]
-		line = append(line, fragment...)
-		lineErr := error(nil)
-		for isPrefix {
-			fragment, isPrefix, err = reader.ReadLine()
-			line = append(line, fragment...)
-			if len(line) > streamLineMaxSizeBytes {
-				lineErr = fmt.Errorf("%w: %d bytes", ErrStreamLineTooLong, len(line))
-				break
-			}
-			if err != nil && !errors.Is(err, io.EOF) {
-				lineErr = err
-				break
-			}
-		}
-		if lineErr == nil {
-			lineErr = handler(line)
-		}
-		if cap(line) <= streamLinePoolMaxBytes {
-			*linePtr = line[:0]
-			streamLinePool.Put(linePtr)
-		}
-		if lineErr != nil {
-			return lineErr
-		}
-		if errors.Is(err, io.EOF) {
-			return nil
 		}
 	}
 }

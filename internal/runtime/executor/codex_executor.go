@@ -628,7 +628,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			// partial payload chunks. Without this the client would treat a
 			// partially-delivered response as a successful completion.
 			var pendingTerminalErr error
-			errRead := helps.ReadStreamLinesBorrowed(streamBody, func(line []byte) error {
+			errRead := helps.ReadStreamLines(streamBody, func(line []byte) error {
 				if err := upstreamCtx.Err(); err != nil {
 					return err
 				}
