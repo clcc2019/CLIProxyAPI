@@ -198,6 +198,23 @@ type readyBucket struct {
 	ws  readyView
 }
 
+func (b *readyBucket) preferredView(preferWebsocket bool, filter authFilter) *readyView {
+	if b == nil {
+		return nil
+	}
+	if !preferWebsocket {
+		return &b.all
+	}
+	if filter.empty() {
+		if len(b.ws.flat) > 0 {
+			return &b.ws
+		}
+	} else if b.ws.pickFirst(filter) != nil {
+		return &b.ws
+	}
+	return &b.all
+}
+
 // readyView holds the selection order and per-view state for built-in strategies.
 type readyView struct {
 	cursor        int
@@ -676,7 +693,7 @@ func (s *authScheduler) pickMixedStableNormalized(ctx context.Context, normalize
 			continue
 		}
 		shard.promoteExpired(now)
-		priorityReady, okPriority := shard.highestReadyPriority(preferWebsocketForProvider(preferUpstreamWebsocket, providerKey), filter)
+		priorityReady, okPriority := shard.highestReadyPriority(filter)
 		if !okPriority {
 			continue
 		}
@@ -1331,7 +1348,7 @@ func (m *modelScheduler) pickReadyStable(preferWebsocket bool, filter authFilter
 	}
 	m.mu.Lock()
 	m.promoteExpiredLocked(time.Now())
-	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, filter)
+	priorityReady, okPriority := m.highestReadyPriorityLocked(filter)
 	if !okPriority {
 		m.mu.Unlock()
 		return nil
@@ -1347,19 +1364,19 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 		return nil
 	}
 	m.promoteExpiredLocked(time.Now())
-	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, filter)
+	priorityReady, okPriority := m.highestReadyPriorityLocked(filter)
 	if !okPriority {
 		return nil
 	}
 	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, filter, load)
 }
 
-func (m *modelScheduler) highestReadyPriority(preferWebsocket bool, filter authFilter) (int, bool) {
+func (m *modelScheduler) highestReadyPriority(filter authFilter) (int, bool) {
 	if m == nil {
 		return 0, false
 	}
 	m.mu.RLock()
-	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, filter)
+	priorityReady, okPriority := m.highestReadyPriorityLocked(filter)
 	m.mu.RUnlock()
 	return priorityReady, okPriority
 }
@@ -1369,7 +1386,7 @@ func (m *modelScheduler) highestReadyPriorityAndCount(preferWebsocket bool, filt
 		return 0, 0, false
 	}
 	m.mu.RLock()
-	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, filter)
+	priorityReady, okPriority := m.highestReadyPriorityLocked(filter)
 	if !okPriority {
 		m.mu.RUnlock()
 		return 0, 0, false
@@ -1384,7 +1401,7 @@ func (m *modelScheduler) highestReadyPriorityAndLoadStats(preferWebsocket bool, 
 		return 0, 0, 0, 0, false
 	}
 	m.mu.RLock()
-	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, filter)
+	priorityReady, okPriority := m.highestReadyPriorityLocked(filter)
 	if !okPriority {
 		m.mu.RUnlock()
 		return 0, 0, 0, 0, false
@@ -1396,19 +1413,11 @@ func (m *modelScheduler) highestReadyPriorityAndLoadStats(preferWebsocket bool, 
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, filter authFilter) (int, bool) {
+func (m *modelScheduler) highestReadyPriorityLocked(filter authFilter) (int, bool) {
 	if m == nil {
 		return 0, false
 	}
 	if filter.empty() {
-		if preferWebsocket {
-			for _, priority := range m.priorityOrder {
-				bucket := m.readyByPriority[priority]
-				if bucket != nil && len(bucket.ws.flat) > 0 {
-					return priority, true
-				}
-			}
-		}
 		for _, priority := range m.priorityOrder {
 			bucket := m.readyByPriority[priority]
 			if bucket != nil && len(bucket.all.flat) > 0 {
@@ -1416,19 +1425,6 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, filter
 			}
 		}
 		return 0, false
-	}
-	if preferWebsocket {
-		// When downstream is websocket and Codex supports websocket transport, prefer websocket-enabled
-		// credentials even if they are in a lower priority tier than HTTP-only credentials.
-		for _, priority := range m.priorityOrder {
-			bucket := m.readyByPriority[priority]
-			if bucket == nil {
-				continue
-			}
-			if bucket.ws.pickFirst(filter) != nil {
-				return priority, true
-			}
-		}
 	}
 	for _, priority := range m.priorityOrder {
 		bucket := m.readyByPriority[priority]
@@ -1470,16 +1466,7 @@ func (m *modelScheduler) pickReadyStableAtPriorityLocked(preferWebsocket bool, p
 	if bucket == nil {
 		return nil
 	}
-	view := &bucket.all
-	if preferWebsocket {
-		if filter.empty() {
-			if len(bucket.ws.flat) > 0 {
-				view = &bucket.ws
-			}
-		} else if bucket.ws.pickFirst(filter) != nil {
-			view = &bucket.ws
-		}
-	}
+	view := bucket.preferredView(preferWebsocket, filter)
 	picked := view.pickStable(filter, affinityKey)
 	if picked == nil || picked.auth == nil {
 		return nil
@@ -1497,16 +1484,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	if bucket == nil {
 		return nil
 	}
-	view := &bucket.all
-	if preferWebsocket {
-		if filter.empty() {
-			if len(bucket.ws.flat) > 0 {
-				view = &bucket.ws
-			}
-		} else if bucket.ws.pickFirst(filter) != nil {
-			view = &bucket.ws
-		}
-	}
+	view := bucket.preferredView(preferWebsocket, filter)
 	var picked *scheduledAuth
 	if strategy == schedulerStrategyWeightedRoundRobin {
 		picked = view.pickWeighted(filter, load)
@@ -1549,10 +1527,7 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 	if bucket == nil {
 		return 0
 	}
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
-		return len(bucket.ws.flat)
-	}
-	return len(bucket.all.flat)
+	return len(bucket.preferredView(preferWebsocket, authFilter{}).flat)
 }
 
 func (m *modelScheduler) matchingReadyCountAtPriorityLocked(preferWebsocket bool, priority int, filter authFilter) int {
@@ -1563,10 +1538,7 @@ func (m *modelScheduler) matchingReadyCountAtPriorityLocked(preferWebsocket bool
 	if bucket == nil {
 		return 0
 	}
-	view := &bucket.all
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
-		view = &bucket.ws
-	}
+	view := bucket.preferredView(preferWebsocket, filter)
 	if filter.empty() {
 		return len(view.flat)
 	}
@@ -1589,16 +1561,7 @@ func (m *modelScheduler) weightedEntriesAtPriority(preferWebsocket bool, priorit
 		m.mu.RUnlock()
 		return nil
 	}
-	view := &bucket.all
-	if preferWebsocket {
-		if filter.empty() {
-			if len(bucket.ws.flat) > 0 {
-				view = &bucket.ws
-			}
-		} else if bucket.ws.pickFirst(filter) != nil {
-			view = &bucket.ws
-		}
-	}
+	view := bucket.preferredView(preferWebsocket, filter)
 	entries := append([]*scheduledAuth(nil), view.entriesAtLoad(filter, load, targetLoad)...)
 	m.mu.RUnlock()
 	return entries
@@ -1612,10 +1575,7 @@ func (m *modelScheduler) loadStatsAtPriorityLocked(preferWebsocket bool, priorit
 	if bucket == nil {
 		return 0, 0, 0
 	}
-	view := &bucket.all
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
-		view = &bucket.ws
-	}
+	view := bucket.preferredView(preferWebsocket, filter)
 	if len(view.flat) == 0 {
 		return 0, 0, 0
 	}
@@ -1695,16 +1655,7 @@ func (m *modelScheduler) pickReadyAtPriorityOffsetLocked(preferWebsocket bool, p
 	if bucket == nil {
 		return nil
 	}
-	view := &bucket.all
-	if preferWebsocket {
-		if filter.empty() {
-			if len(bucket.ws.flat) > 0 {
-				view = &bucket.ws
-			}
-		} else if bucket.ws.pickFirst(filter) != nil {
-			view = &bucket.ws
-		}
-	}
+	view := bucket.preferredView(preferWebsocket, filter)
 	var picked *scheduledAuth
 	if load == nil {
 		if filter.empty() {

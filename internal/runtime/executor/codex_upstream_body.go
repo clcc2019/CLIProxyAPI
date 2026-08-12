@@ -63,6 +63,7 @@ type codexFinalUpstreamBodyOptions struct {
 	preservePreviousResponseID  bool
 	preserveGenerate            bool
 	preserveNativeFields        bool
+	preserveCompactionTrigger   bool
 	store                       bool
 	omitServiceTier             bool
 	suppressDefaultInstructions bool
@@ -471,9 +472,9 @@ func normalizeCodexFinalUpstreamText(body []byte, capabilities *registry.CodexCl
 
 func normalizeCodexFinalUpstreamInputItems(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
 	if opts.preservePreviousResponseID && strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" {
-		return codexcommon.NormalizeResponseInputItems(body)
+		return codexcommon.NormalizeResponseInputItemsForUpstream(body, opts.preserveCompactionTrigger)
 	}
-	return codexcommon.NormalizeFullTranscriptResponseInputItems(body)
+	return codexcommon.NormalizeFullTranscriptResponseInputItemsForUpstream(body, opts.preserveCompactionTrigger)
 }
 
 // normalizeCodexFinalUpstreamInputShape makes compatibility input forms valid

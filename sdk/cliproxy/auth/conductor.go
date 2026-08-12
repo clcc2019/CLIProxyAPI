@@ -51,6 +51,12 @@ type ExecutionSessionResetter interface {
 	ResetExecutionSession(sessionID string)
 }
 
+// AuthContinuityResetter lets an executor discard runtime state that must not
+// survive when an auth ID is rebound to a different credential principal.
+type AuthContinuityResetter interface {
+	ResetAuthContinuity(authID string)
+}
+
 const (
 	homeAuthCountMetadataKey = "__cliproxy_home_auth_count"
 	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.

@@ -75,6 +75,20 @@ func TestNormalizeCodexFinalUpstreamBody_NormalizesOfficialInputItems(t *testing
 	}
 }
 
+func TestNormalizeCodexFinalUpstreamBody_PreservesRemoteCompactionV2Trigger(t *testing.T) {
+	body := []byte(`{"model":"client-alias","input":[{"type":"compaction_trigger","reason":"token_limit"}]}`)
+	gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		preserveCompactionTrigger:   true,
+		suppressDefaultInstructions: true,
+	})
+
+	if got := gjson.GetBytes(gotBody, "input.0.type").String(); got != "compaction_trigger" {
+		t.Fatalf("input trigger type = %q, want compaction_trigger; body=%s", got, gotBody)
+	}
+}
+
 func TestNormalizeCodexFinalUpstreamBody_DefaultsMissingInputToArray(t *testing.T) {
 	gotBody := normalizeCodexFinalUpstreamBody([]byte(`{"model":"client-alias"}`), "gpt-5.4", &cliproxyauth.Auth{Provider: "codex"}, codexFinalUpstreamBodyOptions{
 		requestKind:                 codexFinalUpstreamResponses,

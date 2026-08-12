@@ -513,6 +513,24 @@ func TestSchedulerPick_MixedProvidersPrefersWebsocketAuthWithinCodexProvider(t *
 	}
 }
 
+func TestSchedulerPick_MixedProvidersFallsBackToHTTPWhenWebsocketTried(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"priority": "10", "websockets": "true"}},
+		&Auth{ID: "claude-low", Provider: "claude", Attributes: map[string]string{"priority": "0"}},
+	)
+
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	tried := map[string]struct{}{"codex-ws": {}}
+	got, provider, err := scheduler.pickMixed(ctx, []string{"codex", "claude"}, "", cliproxyexecutor.Options{}, tried)
+	if err != nil || got == nil || got.ID != "codex-http" || provider != "codex" {
+		t.Fatalf("pickMixed() = %#v, %q, %v; want codex-http from codex", got, provider, err)
+	}
+}
+
 func TestSchedulerPick_MixedStablePrefersWebsocketAuthWithinCodexProvider(t *testing.T) {
 	t.Parallel()
 
@@ -574,7 +592,7 @@ func TestSchedulerPick_PinnedAuthDiagnosticWhenNoPinnedCandidateAvailable(t *tes
 	}
 }
 
-func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *testing.T) {
+func TestSchedulerPick_CodexPriorityPrecedesWebsocketPreference(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -585,8 +603,7 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 	)
 
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
-	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
-	for index, wantID := range want {
+	for index := 0; index < 3; index++ {
 		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
@@ -594,8 +611,8 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 		if got == nil {
 			t.Fatalf("pickSingle() #%d auth = nil", index)
 		}
-		if got.ID != wantID {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		if got.ID != "codex-http" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want codex-http", index, got.ID)
 		}
 	}
 }
@@ -1015,6 +1032,31 @@ func TestManagerPickNextSessionAffinityUsesSchedulerAndFailsOver(t *testing.T) {
 	}
 	if third == nil || third.ID == first.ID {
 		t.Fatalf("after cached auth disabled pick = %v, want a different auth than %s", third, first.ID)
+	}
+}
+
+func TestManagerPickNextSessionAffinityNewSessionHonorsPriorityBeforeWebsocket(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+
+	for _, auth := range []*Auth{
+		{ID: "http-high", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "10"}},
+		{ID: "ws-low", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+	}
+
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"session_id":"new-session"}}`)}
+	picked, _, err := manager.pickNext(ctx, "codex", "", opts, nil)
+	if err != nil || picked == nil || picked.ID != "http-high" {
+		t.Fatalf("new session pick = %#v, %v; want http-high", picked, err)
 	}
 }
 

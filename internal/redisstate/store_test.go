@@ -118,6 +118,18 @@ func TestClientAPIKeyQuotaCounterKeySeparatesResources(t *testing.T) {
 	}
 }
 
+func TestPreviousResponseAuthKeysSeparateResponseAndAuthIndexes(t *testing.T) {
+	store := &Store{keyPrefix: "team"}
+	responseKey := store.previousResponseAuthKey("resp-1")
+	indexKey := store.previousResponseAuthIndexKey("auth-1")
+	if responseKey == indexKey {
+		t.Fatalf("response and auth index keys collide: %q", responseKey)
+	}
+	if indexKey == store.previousResponseAuthIndexKey("auth-2") {
+		t.Fatal("different auth IDs share a previous-response index key")
+	}
+}
+
 func TestRedisQuotaCountParsesOnlyIntegers(t *testing.T) {
 	tests := []struct {
 		name  string

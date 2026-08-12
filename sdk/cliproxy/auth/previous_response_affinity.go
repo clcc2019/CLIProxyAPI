@@ -29,6 +29,7 @@ type previousResponseAuthEntry struct {
 type previousResponseAuthCache struct {
 	mu          sync.RWMutex
 	entries     map[string]previousResponseAuthEntry
+	invalidated map[string]time.Time
 	order       *list.List
 	ttl         time.Duration
 	maxEntries  int
@@ -43,10 +44,11 @@ func newPreviousResponseAuthCache(ttl time.Duration, maxEntries int) *previousRe
 		maxEntries = previousResponseAuthMaxEntries
 	}
 	return &previousResponseAuthCache{
-		entries:    make(map[string]previousResponseAuthEntry),
-		order:      list.New(),
-		ttl:        ttl,
-		maxEntries: maxEntries,
+		entries:     make(map[string]previousResponseAuthEntry),
+		invalidated: make(map[string]time.Time),
+		order:       list.New(),
+		ttl:         ttl,
+		maxEntries:  maxEntries,
 	}
 }
 
@@ -115,6 +117,7 @@ func (c *previousResponseAuthCache) Set(responseID, authID string) {
 	}
 	now := time.Now()
 	c.mu.Lock()
+	delete(c.invalidated, responseID)
 	c.cleanupExpiredLocked(now)
 	if entry, exists := c.entries[responseID]; exists {
 		entry.authID = authID
@@ -154,12 +157,32 @@ func (c *previousResponseAuthCache) InvalidateAuth(authID string) {
 		return
 	}
 	c.mu.Lock()
+	if c.invalidated == nil {
+		c.invalidated = make(map[string]time.Time)
+	}
 	for responseID, entry := range c.entries {
 		if entry.authID == authID {
+			c.invalidated[responseID] = entry.expiresAt
 			c.deleteLocked(responseID)
 		}
 	}
 	c.mu.Unlock()
+}
+
+func (c *previousResponseAuthCache) IsInvalidated(responseID string) bool {
+	responseID = strings.TrimSpace(responseID)
+	if c == nil || responseID == "" {
+		return false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	expiresAt, ok := c.invalidated[responseID]
+	if ok && !now.Before(expiresAt) {
+		delete(c.invalidated, responseID)
+		ok = false
+	}
+	c.mu.Unlock()
+	return ok
 }
 
 func (c *previousResponseAuthCache) cleanupExpiredLocked(now time.Time) {
@@ -188,6 +211,11 @@ func (c *previousResponseAuthCache) cleanupExpiredLocked(now time.Time) {
 			break
 		}
 		c.deleteLocked(responseID)
+	}
+	for responseID, expiresAt := range c.invalidated {
+		if !now.Before(expiresAt) {
+			delete(c.invalidated, responseID)
+		}
 	}
 	c.lastCleanup = now
 }
@@ -295,6 +323,9 @@ func (m *Manager) bindPreviousResponseFromPayload(ctx context.Context, authID st
 	if m == nil {
 		return
 	}
+	if !m.executionAuthPrincipalMatchesID(ctx, authID) {
+		return
+	}
 	m.bindPreviousResponseID(ctx, responseIDFromProviderPayload(payload), authID)
 }
 
@@ -319,35 +350,38 @@ func (m *Manager) bindPreviousResponseID(ctx context.Context, responseID, authID
 	}
 }
 
-func (m *Manager) previousResponsePinnedAuthID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (string, string) {
+func (m *Manager) previousResponsePinnedAuthID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (string, string, bool) {
 	if m == nil || m.previousResponseAuths == nil {
-		return "", ""
+		return "", "", false
 	}
 	responseID := previousResponseIDFromExecution(req, opts)
 	if responseID == "" {
-		return "", ""
+		return "", "", false
+	}
+	if m.previousResponseAuths.IsInvalidated(responseID) {
+		return responseID, "", true
 	}
 	authID, ok := m.previousResponseAuths.GetAndRefresh(responseID)
 	if ok {
-		return responseID, authID
+		return responseID, authID, false
 	}
 	store := m.previousResponseStoreSnapshot()
 	if store == nil {
-		return responseID, ""
+		return responseID, "", false
 	}
 	storeCtx, cancel := previousResponseStoreContext(ctx)
 	defer cancel()
 	authID, ok, err := store.GetPreviousResponseAuth(storeCtx, responseID, m.previousResponseAuths.TTL())
 	if err != nil {
 		log.WithError(err).Debug("previous-response affinity: failed to load binding")
-		return responseID, ""
+		return responseID, "", false
 	}
 	authID = strings.TrimSpace(authID)
 	if !ok || authID == "" {
-		return responseID, ""
+		return responseID, "", false
 	}
 	m.previousResponseAuths.Set(responseID, authID)
-	return responseID, authID
+	return responseID, authID, false
 }
 
 func (m *Manager) invalidatePreviousResponseID(ctx context.Context, responseID string) {
@@ -369,6 +403,32 @@ func (m *Manager) invalidatePreviousResponseID(ctx context.Context, responseID s
 	defer cancel()
 	if err := store.DeletePreviousResponseAuth(storeCtx, responseID); err != nil {
 		log.WithError(err).Debug("previous-response affinity: failed to delete binding")
+	}
+}
+
+func (m *Manager) invalidatePreviousResponsesForAuth(ctx context.Context, authID string) {
+	if m == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	if m.previousResponseAuths != nil {
+		m.previousResponseAuths.InvalidateAuth(authID)
+	}
+	m.invalidatePreviousResponseStoreForAuth(ctx, authID)
+}
+
+func (m *Manager) invalidatePreviousResponseStoreForAuth(ctx context.Context, authID string) {
+	store, ok := m.previousResponseStoreSnapshot().(PreviousResponseAuthInvalidator)
+	if !ok || store == nil {
+		return
+	}
+	storeCtx, cancel := previousResponseStoreContext(ctx)
+	defer cancel()
+	if err := store.DeletePreviousResponseAuthByAuthID(storeCtx, authID); err != nil {
+		log.WithError(err).Debug("previous-response affinity: failed to delete auth bindings")
 	}
 }
 

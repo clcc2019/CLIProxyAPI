@@ -39,8 +39,9 @@ type codexClientProfile struct {
 }
 
 type codexClientProfileKey struct {
-	id   string
-	auth *cliproxyauth.Auth
+	id        string
+	principal string
+	auth      *cliproxyauth.Auth
 }
 
 var (
@@ -361,7 +362,8 @@ func codexClientProfileKeyForAuth(auth *cliproxyauth.Auth) (codexClientProfileKe
 		return codexClientProfileKey{}, false
 	}
 	if id := strings.TrimSpace(auth.ID); id != "" {
-		return codexClientProfileKey{id: id}, true
+		kind, principal := cliproxyauth.CredentialPrincipal(auth)
+		return codexClientProfileKey{id: id, principal: kind + "\x00" + principal}, true
 	}
 	return codexClientProfileKey{auth: auth}, true
 }
@@ -444,6 +446,20 @@ func codexResetClientProfilesForTest() {
 	codexClientProfilesMu.Lock()
 	defer codexClientProfilesMu.Unlock()
 	codexClientProfiles = make(map[codexClientProfileKey]codexClientProfile)
+}
+
+func codexResetClientProfileForAuthID(authID string) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	codexClientProfilesMu.Lock()
+	for key := range codexClientProfiles {
+		if key.id == authID {
+			delete(codexClientProfiles, key)
+		}
+	}
+	codexClientProfilesMu.Unlock()
 }
 
 func codexLegacyClientProfilePinned(auth *cliproxyauth.Auth) bool {

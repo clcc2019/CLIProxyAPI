@@ -12,6 +12,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -294,6 +295,22 @@ func isRecoverableAffinityPickError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func remoteCompactionInput(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
+	for _, body := range [][]byte{req.Payload, opts.OriginalRequest} {
+		input := gjson.GetBytes(body, "input")
+		if !input.IsArray() {
+			continue
+		}
+		for _, item := range input.Array() {
+			switch strings.TrimSpace(item.Get("type").String()) {
+			case "compaction_trigger", "compaction", "compaction_summary", "context_compaction":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func recoverableAffinityPickErrorCode(err error) string {

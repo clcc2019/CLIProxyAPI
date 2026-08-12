@@ -112,6 +112,18 @@ func (e *CodexAutoExecutor) ResetExecutionSession(sessionID string) {
 	}
 }
 
+func (e *CodexAutoExecutor) ResetAuthContinuity(authID string) {
+	if e == nil {
+		return
+	}
+	if e.httpExec != nil {
+		e.httpExec.ResetAuthContinuity(authID)
+	}
+	if e.wsExec != nil {
+		e.wsExec.closeAuthSessions(authID, "auth_principal_changed")
+	}
+}
+
 // codexUseWebsocketTransport returns true when the request context prefers
 // websocket upstream AND the resolved auth has websockets enabled. Both gates
 // must hold; downstream websocket requests imply the upstream preference, while

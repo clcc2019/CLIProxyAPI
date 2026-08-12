@@ -865,8 +865,8 @@ func TestNormalizeResponsesWebsocketRequestCreateNormalizesCodexInputItems(t *te
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
 	items := gjson.GetBytes(normalized, "input").Array()
-	if len(items) != 3 {
-		t.Fatalf("input len = %d, want 3 after dropping compaction_trigger: %s", len(items), normalized)
+	if len(items) != 4 {
+		t.Fatalf("input len = %d, want 4 with compaction_trigger preserved: %s", len(items), normalized)
 	}
 	if got := items[1].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("mcp output type = %q, want function_call_output: %s", got, normalized)
@@ -876,6 +876,9 @@ func TestNormalizeResponsesWebsocketRequestCreateNormalizesCodexInputItems(t *te
 	}
 	if got := items[2].Get("type").String(); got != "compaction" {
 		t.Fatalf("compaction_summary type = %q, want compaction: %s", got, normalized)
+	}
+	if got := items[3].Get("type").String(); got != "compaction_trigger" {
+		t.Fatalf("compaction trigger type = %q, want compaction_trigger: %s", got, normalized)
 	}
 	if !bytes.Equal(last, normalized) {
 		t.Fatalf("last request snapshot should match normalized request")
@@ -935,8 +938,8 @@ func TestNormalizeResponsesWebsocketRequestSubsequentNormalizesCodexInputItems(t
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
 	items := gjson.GetBytes(normalized, "input").Array()
-	if len(items) != 4 {
-		t.Fatalf("merged input len = %d, want 4 after dropping compaction_trigger: %s", len(items), normalized)
+	if len(items) != 5 {
+		t.Fatalf("merged input len = %d, want 5 with compaction_trigger preserved: %s", len(items), normalized)
 	}
 	if got := items[3].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("mcp output type = %q, want function_call_output: %s", got, normalized)
@@ -949,6 +952,9 @@ func TestNormalizeResponsesWebsocketRequestSubsequentNormalizesCodexInputItems(t
 	}
 	if got := items[3].Get("output.1.detail").String(); got != "low" {
 		t.Fatalf("mcp image detail = %q, want low: %s", got, normalized)
+	}
+	if got := items[4].Get("type").String(); got != "compaction_trigger" {
+		t.Fatalf("compaction trigger type = %q, want compaction_trigger: %s", got, normalized)
 	}
 	if !bytes.Equal(next, normalized) {
 		t.Fatalf("next request snapshot should match normalized request")
@@ -5288,14 +5294,17 @@ func TestNormalizeResponsesWebsocketTranscriptReplacementNormalizesCodexInputIte
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
 	items := gjson.GetBytes(normalized, "input").Array()
-	if len(items) != 3 {
-		t.Fatalf("replacement input len = %d, want 3 after dropping compaction_trigger: %s", len(items), normalized)
+	if len(items) != 4 {
+		t.Fatalf("replacement input len = %d, want 4 with compaction_trigger preserved: %s", len(items), normalized)
 	}
 	if got := items[1].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("mcp output type = %q, want function_call_output: %s", got, normalized)
 	}
 	if got := items[1].Get("output").String(); got != "Wall time: 0.0000 seconds\nOutput:\n"+`{"ok":true}` {
 		t.Fatalf("mcp output = %q, want structured content JSON: %s", got, normalized)
+	}
+	if got := items[2].Get("type").String(); got != "compaction_trigger" {
+		t.Fatalf("compaction trigger type = %q, want compaction_trigger: %s", got, normalized)
 	}
 	if !bytes.Equal(next, normalized) {
 		t.Fatalf("next request snapshot should match replacement request")

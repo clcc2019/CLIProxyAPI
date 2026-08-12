@@ -16,6 +16,18 @@ type fakePreviousResponseStore struct {
 	ttls     map[string]time.Duration
 }
 
+func (s *fakePreviousResponseStore) DeletePreviousResponseAuthByAuthID(_ context.Context, authID string) error {
+	s.mu.Lock()
+	for responseID, boundAuthID := range s.bindings {
+		if boundAuthID == authID {
+			delete(s.bindings, responseID)
+			delete(s.ttls, responseID)
+		}
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 func newFakePreviousResponseStore() *fakePreviousResponseStore {
 	return &fakePreviousResponseStore{
 		bindings: make(map[string]string),
@@ -89,7 +101,7 @@ func TestPreviousResponseAffinityLoadsBindingAcrossManagers(t *testing.T) {
 	first.bindPreviousResponseID(context.Background(), "resp_shared", "auth_1")
 
 	req := cliproxyexecutor.Request{Payload: []byte(`{"previous_response_id":"resp_shared"}`)}
-	responseID, authID := second.previousResponsePinnedAuthID(context.Background(), req, cliproxyexecutor.Options{})
+	responseID, authID, _ := second.previousResponsePinnedAuthID(context.Background(), req, cliproxyexecutor.Options{})
 	if responseID != "resp_shared" || authID != "auth_1" {
 		t.Fatalf("remote affinity = (%q, %q), want (resp_shared, auth_1)", responseID, authID)
 	}
@@ -102,7 +114,7 @@ func TestPreviousResponseAffinityLoadsBindingAcrossManagers(t *testing.T) {
 		t.Fatalf("persisted TTL = %s, want 45m", ttl)
 	}
 
-	_, authID = second.previousResponsePinnedAuthID(context.Background(), req, cliproxyexecutor.Options{})
+	_, authID, _ = second.previousResponsePinnedAuthID(context.Background(), req, cliproxyexecutor.Options{})
 	if authID != "auth_1" {
 		t.Fatalf("local hot-cache affinity = %q, want auth_1", authID)
 	}
@@ -124,5 +136,45 @@ func TestPreviousResponseAffinityInvalidationDeletesExternalBinding(t *testing.T
 	}
 	if _, ok := manager.previousResponseAuths.GetAndRefresh("resp_stale"); ok {
 		t.Fatal("local previous-response binding was not deleted")
+	}
+}
+
+func TestPreviousResponseAuthInvalidationMarksExistingBindings(t *testing.T) {
+	cache := newPreviousResponseAuthCache(time.Hour, 8)
+	cache.Set("resp_compacted", "auth_old")
+	cache.InvalidateAuth("auth_old")
+	if !cache.IsInvalidated("resp_compacted") {
+		t.Fatal("expected invalidated previous response marker")
+	}
+	if !cache.IsInvalidated("resp_compacted") {
+		t.Fatal("invalidated marker should remain until its original TTL")
+	}
+}
+
+func TestPreviousResponseAffinityRejectsLateOldAccountBinding(t *testing.T) {
+	store := newFakePreviousResponseStore()
+	manager := NewManager(nil, nil, nil)
+	manager.SetPreviousResponseStore(store)
+	oldAuth := &Auth{ID: "same-file.json", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"auth_kind": "oauth", "account_id": "account-old"}}
+	if _, err := manager.Register(context.Background(), oldAuth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	requestCtx := withExecutionAuthPrincipal(context.Background(), oldAuth)
+
+	newAuth := oldAuth.Clone()
+	newAuth.Metadata["account_id"] = "account-new"
+	if _, err := manager.Update(context.Background(), newAuth); err != nil {
+		t.Fatalf("replace auth: %v", err)
+	}
+
+	responseExecutionModeExecute.recordSuccess(manager, requestCtx, oldAuth, cliproxyexecutor.Response{Payload: []byte(`{"id":"resp_old_late"}`)})
+	if _, ok := manager.previousResponseAuths.GetAndRefresh("resp_old_late"); ok {
+		t.Fatal("late old-account response was rebound locally")
+	}
+	store.mu.Lock()
+	_, persisted := store.bindings["resp_old_late"]
+	store.mu.Unlock()
+	if persisted {
+		t.Fatal("late old-account response was rebound in external store")
 	}
 }

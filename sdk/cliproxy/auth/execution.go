@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -175,19 +176,30 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 		}
 		previousResponseID := ""
 		previousResponseAuthID := ""
+		previousResponseInvalidated := false
 		if policy.usePreviousResponseAffinity {
-			previousResponseID, previousResponseAuthID = m.previousResponsePinnedAuthID(state.ctx, state.req, pickOpts)
+			previousResponseID, previousResponseAuthID, previousResponseInvalidated = m.previousResponsePinnedAuthID(state.ctx, state.req, pickOpts)
+			if previousResponseInvalidated && remoteCompactionInput(state.req, pickOpts) {
+				return nil, &Error{Code: "previous_response_auth_changed", Message: "remote compaction state belongs to a replaced credential; start a new conversation", HTTPStatus: http.StatusConflict}
+			}
+			if previousResponseInvalidated {
+				forceNewUpstreamSessionForNextCredential(&pickOpts)
+			}
 			if previousResponseAuthID != "" {
 				pickOpts = withPinnedAuthMetadata(pickOpts, previousResponseAuthID)
 			}
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(state.ctx, state.providers, state.routeModel, pickOpts, state.tried)
 		if errPick != nil && previousResponseAuthID != "" && isRecoverableAffinityPickError(errPick) {
+			if remoteCompactionInput(state.req, pickOpts) {
+				return nil, &Error{Code: "previous_response_auth_changed", Message: "remote compaction state belongs to an unavailable credential; start a new conversation", HTTPStatus: http.StatusConflict}
+			}
 			m.invalidatePreviousResponseID(state.ctx, previousResponseID)
 			fallbackPickOpts := state.opts
 			if state.homeMode {
 				fallbackPickOpts = withHomeAuthCount(state.opts, state.homeAuthCount)
 			}
+			forceNewUpstreamSessionForNextCredential(&fallbackPickOpts)
 			auth, executor, provider, errPick = m.pickNextMixed(state.ctx, state.providers, state.routeModel, fallbackPickOpts, state.tried)
 		}
 		if errPick != nil {
@@ -204,6 +216,7 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 		state.tried[auth.ID] = struct{}{}
 
 		execCtx := state.ctx
+		execCtx = withExecutionAuthPrincipal(execCtx, auth)
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
@@ -232,6 +245,7 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 			state.lastErr = errPrepare
 			continue
 		}
+		execCtx = withExecutionAuthPrincipal(execCtx, preparedAuth)
 		return &preparedMixedCredential{
 			auth:     preparedAuth,
 			executor: executor,
@@ -316,9 +330,9 @@ func (mode responseExecutionMode) execute(ctx context.Context, executor Provider
 	return executor.Execute(ctx, auth, req, opts)
 }
 
-func (mode responseExecutionMode) recordSuccess(m *Manager, ctx context.Context, authID string, resp cliproxyexecutor.Response) {
-	if mode == responseExecutionModeExecute {
-		m.bindPreviousResponseFromPayload(ctx, authID, resp.Payload)
+func (mode responseExecutionMode) recordSuccess(m *Manager, ctx context.Context, auth *Auth, resp cliproxyexecutor.Response) {
+	if mode == responseExecutionModeExecute && m.executionAuthPrincipalMatches(ctx, auth) {
+		m.bindPreviousResponseFromPayload(ctx, auth.ID, resp.Payload)
 	}
 }
 
@@ -407,7 +421,7 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 					break
 				}
 				m.MarkResult(credential.ctx, result)
-				mode.recordSuccess(m, credential.ctx, credential.auth.ID, resp)
+				mode.recordSuccess(m, credential.ctx, credential.auth, resp)
 				return resp, nil
 			}
 			if stopModelLoop {

@@ -8,10 +8,48 @@ import (
 type refreshUpdateContextKey struct{}
 type authUpdateContextKey struct{}
 type rateLimitUpdateContextKey struct{}
+type executionAuthPrincipalContextKey struct{}
 
 type RefreshUpdateCallback func(context.Context, *Auth)
 type AuthUpdateCallback func(context.Context, *Auth)
 type RateLimitUpdateCallback func(context.Context, string, []RateLimitSnapshot)
+
+func withExecutionAuthPrincipal(ctx context.Context, auth *Auth) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	kind, principal := authCredentialPrincipal(auth)
+	if kind == "" || principal == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, executionAuthPrincipalContextKey{}, kind+"\x00"+principal)
+}
+
+func executionAuthPrincipalMatches(ctx context.Context, auth *Auth) bool {
+	if ctx == nil {
+		return true
+	}
+	expected, _ := ctx.Value(executionAuthPrincipalContextKey{}).(string)
+	if expected == "" {
+		return true
+	}
+	kind, principal := authCredentialPrincipal(auth)
+	return kind != "" && principal != "" && expected == kind+"\x00"+principal
+}
+
+func withExecutionAuthPrincipalSnapshot(ctx, source context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if source == nil {
+		return ctx
+	}
+	principal, _ := source.Value(executionAuthPrincipalContextKey{}).(string)
+	if principal == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, executionAuthPrincipalContextKey{}, principal)
+}
 
 func WithRefreshUpdateCallback(ctx context.Context, cb RefreshUpdateCallback) context.Context {
 	if ctx == nil {

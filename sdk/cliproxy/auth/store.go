@@ -31,6 +31,11 @@ type PreviousResponseStore interface {
 	DeletePreviousResponseAuth(ctx context.Context, responseID string) error
 }
 
+// PreviousResponseAuthInvalidator is an optional bulk invalidation extension.
+type PreviousResponseAuthInvalidator interface {
+	DeletePreviousResponseAuthByAuthID(ctx context.Context, authID string) error
+}
+
 // ProxyLease records a stable proxy assignment for an auth file.
 type ProxyLease struct {
 	AuthID     string

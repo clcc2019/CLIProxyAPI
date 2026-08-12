@@ -90,7 +90,7 @@ func TestManagerWeightedSchedulerHonorsCodexQuotaUrgency(t *testing.T) {
 	}
 }
 
-func TestManagerWeightedSchedulerPreservesCodexWebsocketPreference(t *testing.T) {
+func TestManagerWeightedSchedulerPriorityPrecedesCodexWebsocketPreference(t *testing.T) {
 	t.Parallel()
 
 	manager := newWeightedSchedulerManager(t, &WeightedRoundRobinSelector{},
@@ -100,8 +100,8 @@ func TestManagerWeightedSchedulerPreservesCodexWebsocketPreference(t *testing.T)
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
 	for i := 0; i < 4; i++ {
 		picked, _, err := manager.pickNext(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
-		if err != nil || picked == nil || picked.ID != "ws-low" {
-			t.Fatalf("pickNext() #%d = %#v, %v; want ws-low", i, picked, err)
+		if err != nil || picked == nil || picked.ID != "http-high" {
+			t.Fatalf("pickNext() #%d = %#v, %v; want http-high", i, picked, err)
 		}
 	}
 }

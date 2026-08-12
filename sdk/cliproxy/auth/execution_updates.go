@@ -14,6 +14,7 @@ func (m *Manager) handleExecutionRefreshUpdate(ctx context.Context, updated *Aut
 	if ctx != nil {
 		updateCtx = context.WithoutCancel(ctx)
 	}
+	updateCtx = withExecutionAuthPrincipalSnapshot(updateCtx, ctx)
 	if _, err := m.Update(withRefreshUpdate(updateCtx), updated); err != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", updated.ID).Warnf("failed to persist refreshed auth: %v", err)
 	}
@@ -27,6 +28,7 @@ func (m *Manager) handleExecutionAuthUpdate(ctx context.Context, updated *Auth) 
 	if ctx != nil {
 		updateCtx = context.WithoutCancel(ctx)
 	}
+	updateCtx = withExecutionAuthPrincipalSnapshot(updateCtx, ctx)
 	if isExecutionAuthProfileUpdate(ctx) {
 		updateCtx = withExecutionAuthProfileUpdate(updateCtx)
 	}
@@ -42,6 +44,27 @@ func (m *Manager) handleExecutionRateLimitUpdate(ctx context.Context, authID str
 	m.UpdateRateLimits(ctx, authID, snapshots)
 }
 
+func (m *Manager) executionAuthPrincipalMatches(ctx context.Context, candidate *Auth) bool {
+	if m == nil || candidate == nil || strings.TrimSpace(candidate.ID) == "" {
+		return false
+	}
+	m.mu.RLock()
+	current := m.auths[candidate.ID]
+	matches := current != nil && executionAuthPrincipalMatches(ctx, current) && !authCredentialPrincipalChanged(current, candidate)
+	m.mu.RUnlock()
+	return matches
+}
+
+func (m *Manager) executionAuthPrincipalMatchesID(ctx context.Context, authID string) bool {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return false
+	}
+	m.mu.RLock()
+	matches := executionAuthPrincipalMatches(ctx, m.auths[authID])
+	m.mu.RUnlock()
+	return matches
+}
+
 func (m *Manager) UpdateRateLimits(ctx context.Context, authID string, snapshots []RateLimitSnapshot) {
 	if m == nil || strings.TrimSpace(authID) == "" || len(snapshots) == 0 {
 		return
@@ -51,7 +74,7 @@ func (m *Manager) UpdateRateLimits(ctx context.Context, authID string, snapshots
 	var schedulerSnapshot *Auth
 
 	m.mu.Lock()
-	if auth, ok := m.auths[authID]; ok && auth != nil {
+	if auth, ok := m.auths[authID]; ok && auth != nil && executionAuthPrincipalMatches(ctx, auth) {
 		changed := mergeRateLimitSnapshots(auth, snapshots, now)
 		if changed {
 			auth.UpdatedAt = now

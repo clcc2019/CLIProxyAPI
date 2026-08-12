@@ -745,6 +745,37 @@ func TestPrepareCodexWebsocketRequestResetsTurnStateForGeneratedTurnMetadata(t *
 	}
 }
 
+func TestCodexWebsocketReuseKeySeparatesReplacedAccounts(t *testing.T) {
+	executor := NewCodexWebsocketsExecutor(nil)
+	executor.store = &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+	prepare := func(accountID string) *codexPreparedWebsocketRequest {
+		t.Helper()
+		auth := &cliproxyauth.Auth{ID: "same-file.json", Provider: "codex", Metadata: map[string]any{"account_id": accountID}}
+		prepared, err := executor.prepareCodexWebsocketRequest(
+			context.Background(), auth,
+			cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"input":[]}`)},
+			cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "session-1"}},
+			[]byte(`{"model":"gpt-5.4","prompt_cache_key":"cache-1","input":[]}`),
+			"oauth-token", "https://chatgpt.com/backend-api/codex/responses",
+		)
+		if err != nil {
+			t.Fatalf("prepare websocket request: %v", err)
+		}
+		return prepared
+	}
+	oldPrepared := prepare("account-old")
+	oldKey := oldPrepared.reuseKey
+	oldPrepared.unlockSession()
+	newPrepared := prepare("account-new")
+	defer newPrepared.unlockSession()
+	if oldKey == newPrepared.reuseKey {
+		t.Fatalf("websocket reuse key is shared across accounts: %q", oldKey)
+	}
+}
+
 func TestPrepareCodexWebsocketRequestResetsTurnStateWhenTurnMetadataChanges(t *testing.T) {
 	executor := NewCodexWebsocketsExecutor(nil)
 	executor.store = &codexWebsocketSessionStore{

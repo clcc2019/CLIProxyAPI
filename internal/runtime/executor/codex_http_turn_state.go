@@ -120,6 +120,16 @@ func (e *CodexExecutor) ResetExecutionSession(sessionID string) {
 	e.clearCodexHTTPTurnStateSession(sessionID)
 }
 
+func (e *CodexExecutor) ResetAuthContinuity(authID string) {
+	if e == nil {
+		return
+	}
+	codexResetClientProfileForAuthID(authID)
+	if e.httpTurnState != nil {
+		e.httpTurnState.deleteAuth(authID)
+	}
+}
+
 func (e *CodexExecutor) clearCodexHTTPTurnStateSession(sessionID string) {
 	if e == nil || e.httpTurnState == nil {
 		return
@@ -140,7 +150,7 @@ func (e *CodexExecutor) codexHTTPTurnStateKey(auth *cliproxyauth.Auth, execution
 	if executionSessionID == "" {
 		return ""
 	}
-	return e.codexResponseDedupeScope(auth) + "|" + executionSessionID
+	return e.codexResponseDedupeScope(auth) + "|session:" + executionSessionID
 }
 
 func codexHTTPTurnStateScope(rawMetadata string) string {
@@ -268,11 +278,26 @@ func (s *codexHTTPTurnStateStore) deleteExecutionSession(sessionID string) {
 	if s == nil || sessionID == "" {
 		return
 	}
-	suffix := "|" + sessionID
+	suffix := "|session:" + sessionID
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, entry := range s.entries {
 		if strings.HasSuffix(key, suffix) {
+			s.removeEntryLocked(key, entry)
+		}
+	}
+}
+
+func (s *codexHTTPTurnStateStore) deleteAuth(authID string) {
+	authID = strings.TrimSpace(authID)
+	if s == nil || authID == "" {
+		return
+	}
+	prefix := "id:" + authID + "|"
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, entry := range s.entries {
+		if strings.HasPrefix(key, prefix) {
 			s.removeEntryLocked(key, entry)
 		}
 	}

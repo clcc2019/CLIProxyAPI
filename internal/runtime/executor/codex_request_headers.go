@@ -11,6 +11,35 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+const codexRemoteCompactionV2Feature = "remote_compaction_v2"
+
+func codexRemoteCompactionV2Enabled(auth *cliproxyauth.Auth, cfg *config.Config, requestHeaders http.Header) bool {
+	if value := codexAuthHeaderValue(auth, "X-Codex-Beta-Features"); value != "" {
+		return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
+	}
+	if profile, ok := codexPinnedClientProfileViewForAuth(auth); ok {
+		if value := trimHeaderValue(profile.headers, "X-Codex-Beta-Features"); value != "" {
+			return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
+		}
+		_, configured := codexHeaderDefaults(cfg, auth)
+		return codexBetaFeaturesContain(configured, codexRemoteCompactionV2Feature)
+	}
+	if value := trimHeaderValue(requestHeaders, "X-Codex-Beta-Features"); value != "" {
+		return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
+	}
+	_, configured := codexHeaderDefaults(cfg, auth)
+	return codexBetaFeaturesContain(configured, codexRemoteCompactionV2Feature)
+}
+
+func codexBetaFeaturesContain(value string, feature string) bool {
+	for _, candidate := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		if strings.EqualFold(candidate, feature) {
+			return true
+		}
+	}
+	return false
+}
+
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
 	requestKind := codexFinalUpstreamResponses
 	if r != nil && r.URL != nil {

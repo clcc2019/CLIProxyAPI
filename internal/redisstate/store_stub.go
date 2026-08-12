@@ -66,7 +66,8 @@ func (s *Store) GetPreviousResponseAuth(_ context.Context, _ string, _ time.Dura
 func (s *Store) SetPreviousResponseAuth(_ context.Context, _, _ string, _ time.Duration) error {
 	return nil
 }
-func (s *Store) DeletePreviousResponseAuth(_ context.Context, _ string) error { return nil }
+func (s *Store) DeletePreviousResponseAuth(_ context.Context, _ string) error         { return nil }
+func (s *Store) DeletePreviousResponseAuthByAuthID(_ context.Context, _ string) error { return nil }
 func (s *Store) AcquireProxyLease(_ context.Context, _ string, _ []string) (coreauth.ProxyLease, bool, error) {
 	return coreauth.ProxyLease{}, false, nil
 }

@@ -540,8 +540,8 @@ func TestConvertOpenAIResponsesRequestToCodex_NormalizesOfficialInputItems(t *te
 		t.Fatalf("input should remain an array: %s", string(output))
 	}
 	items := input.Array()
-	if len(items) != 6 {
-		t.Fatalf("input length = %d, want 6 after filtering compaction_trigger: %s", len(items), string(output))
+	if len(items) != 7 {
+		t.Fatalf("input length = %d, want 7 with compaction_trigger preserved: %s", len(items), string(output))
 	}
 	if got := items[1].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("mcp_tool_call_output should map to function_call_output, got %q: %s", got, string(output))
@@ -567,11 +567,14 @@ func TestConvertOpenAIResponsesRequestToCodex_NormalizesOfficialInputItems(t *te
 	if got := items[4].Get("type").String(); got != "context_compaction" {
 		t.Fatalf("context_compaction should be preserved, got %q: %s", got, string(output))
 	}
-	if got := items[5].Get("type").String(); got != "compaction" {
+	if got := items[5].Get("type").String(); got != "compaction_trigger" {
+		t.Fatalf("compaction_trigger should be preserved for final feature gating, got %q: %s", got, string(output))
+	}
+	if got := items[6].Get("type").String(); got != "compaction" {
 		t.Fatalf("existing compaction should be preserved, got %q: %s", got, string(output))
 	}
 	for _, item := range items {
-		if got := item.Get("type").String(); got == "compaction_trigger" || got == "mcp_tool_call_output" || got == "compaction_summary" {
+		if got := item.Get("type").String(); got == "mcp_tool_call_output" || got == "compaction_summary" {
 			t.Fatalf("unsupported official input item type leaked upstream: %s", string(output))
 		}
 	}

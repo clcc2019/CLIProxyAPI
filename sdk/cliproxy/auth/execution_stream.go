@@ -176,7 +176,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		if !failed {
 			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
-			m.bindPreviousResponseID(ctx, responseID, auth.ID)
+			if m.executionAuthPrincipalMatches(ctx, auth) {
+				m.bindPreviousResponseID(ctx, responseID, auth.ID)
+			}
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -205,7 +207,9 @@ func (m *Manager) directStreamResult(ctx context.Context, authID, provider, resu
 		finishOnce.Do(func() {
 			if completed && !failed {
 				m.MarkResult(ctx, Result{AuthID: authID, Provider: provider, Model: resultModel, Success: true})
-				m.bindPreviousResponseID(ctx, responseID, authID)
+				if m.executionAuthPrincipalMatchesID(ctx, authID) {
+					m.bindPreviousResponseID(ctx, responseID, authID)
+				}
 			}
 			if release == nil {
 				return
@@ -234,6 +238,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
+	ctx = withExecutionAuthPrincipal(ctx, auth)
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
 	ctx = WithRefreshUpdateCallback(ctx, m.handleExecutionRefreshUpdate)
 	ctx = WithAuthUpdateCallback(ctx, m.handleExecutionAuthUpdate)

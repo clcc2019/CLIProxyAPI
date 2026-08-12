@@ -17,7 +17,7 @@ import (
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
-	if result.AuthID == "" {
+	if m == nil || result.AuthID == "" {
 		return
 	}
 	if m.markCleanModelSuccessResult(ctx, result) {
@@ -41,7 +41,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	publishErrorEvent := m.shouldPublishErrorEvent(result)
 
 	m.mu.Lock()
-	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+	if auth, ok := m.auths[result.AuthID]; ok && auth != nil && executionAuthPrincipalMatches(ctx, auth) {
 		now := time.Now()
 		auth.recordRuntimeResult(now, result.Success)
 		persistAuthID = auth.ID
@@ -558,6 +558,13 @@ func (m *Manager) invalidateSessionAffinityForAuth(authID string) {
 	if m.previousResponseAuths != nil {
 		m.previousResponseAuths.InvalidateAuth(authID)
 	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	m.invalidateSessionAffinityForAuthLocked(authID, selector)
+}
+
+func (m *Manager) invalidateSessionAffinityForAuthLocked(authID string, selector Selector) {
 	seen := make(map[*SessionAffinitySelector]struct{}, 2)
 	invalidate := func(selector Selector) {
 		affinity, ok := selector.(*SessionAffinitySelector)
@@ -570,10 +577,6 @@ func (m *Manager) invalidateSessionAffinityForAuth(authID string) {
 		seen[affinity] = struct{}{}
 		affinity.InvalidateAuth(authID)
 	}
-
-	m.mu.RLock()
-	selector := m.selector
-	m.mu.RUnlock()
 
 	invalidate(selector)
 }
@@ -588,7 +591,7 @@ func (m *Manager) markCleanModelSuccessResult(ctx context.Context, result Result
 	m.mu.RLock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		state := lookupModelState(auth, result.Model)
-		if authStateIsClean(auth) && (state == nil || modelStateIsClean(state)) {
+		if executionAuthPrincipalMatches(ctx, auth) && authStateIsClean(auth) && (state == nil || modelStateIsClean(state)) {
 			auth.recordRuntimeResult(now, true)
 			persistAuthID = auth.ID
 		}

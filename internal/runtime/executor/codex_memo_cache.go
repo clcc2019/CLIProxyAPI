@@ -420,6 +420,7 @@ func hashCodexFinalUpstreamBodyMemoKey(baseModel string, authProvider string, op
 		boolToByte(opts.preservePreviousResponseID),
 		boolToByte(opts.preserveGenerate),
 		boolToByte(opts.preserveNativeFields),
+		boolToByte(opts.preserveCompactionTrigger),
 		boolToByte(opts.store),
 		boolToByte(opts.omitServiceTier),
 		boolToByte(opts.suppressDefaultInstructions),

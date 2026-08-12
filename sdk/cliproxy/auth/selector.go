@@ -262,20 +262,6 @@ func getAvailableAuthsWithWebsocketPreference(preferWebsocket bool, auths []*Aut
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
-	if preferWebsocket {
-		wsByPriority := make(map[int][]*Auth, len(availableByPriority))
-		for priority, candidates := range availableByPriority {
-			for _, candidate := range candidates {
-				if authWebsocketsEnabled(candidate) {
-					wsByPriority[priority] = append(wsByPriority[priority], candidate)
-				}
-			}
-		}
-		if len(wsByPriority) > 0 {
-			availableByPriority = wsByPriority
-		}
-	}
-
 	bestPriority := 0
 	found := false
 	for priority := range availableByPriority {
@@ -286,6 +272,17 @@ func getAvailableAuthsWithWebsocketPreference(preferWebsocket bool, auths []*Aut
 	}
 
 	available := availableByPriority[bestPriority]
+	if preferWebsocket {
+		websocketAuths := make([]*Auth, 0, len(available))
+		for _, candidate := range available {
+			if authWebsocketsEnabled(candidate) {
+				websocketAuths = append(websocketAuths, candidate)
+			}
+		}
+		if len(websocketAuths) > 0 {
+			available = websocketAuths
+		}
+	}
 	if len(available) > 1 {
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}

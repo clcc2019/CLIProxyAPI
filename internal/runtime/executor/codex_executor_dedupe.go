@@ -309,6 +309,10 @@ func writeCodexResponseDedupeScope(builder *strings.Builder, auth *cliproxyauth.
 	if id := strings.TrimSpace(auth.ID); id != "" {
 		builder.WriteString("id:")
 		builder.WriteString(id)
+		if kind, principal := cliproxyauth.CredentialPrincipal(auth); kind != "" && principal != "" {
+			builder.WriteString("|principal:")
+			writeShortHashString(builder, kind+"\x00"+principal)
+		}
 		return
 	}
 
@@ -351,7 +355,11 @@ func codexResponseDedupeScopeLen(auth *cliproxyauth.Auth) int {
 		return len("default")
 	}
 	if id := strings.TrimSpace(auth.ID); id != "" {
-		return len("id:") + len(id)
+		length := len("id:") + len(id)
+		if kind, principal := cliproxyauth.CredentialPrincipal(auth); kind != "" && principal != "" {
+			length += len("|principal:") + codexResponseDedupeHashLen
+		}
+		return length
 	}
 
 	length := 0

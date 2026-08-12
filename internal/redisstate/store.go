@@ -83,6 +83,17 @@ end
 return ""
 `)
 
+var deletePreviousResponseAuthByAuthIDScript = redis.NewScript(`
+local keys = redis.call("SMEMBERS", KEYS[1])
+for _, key in ipairs(keys) do
+  if redis.call("GET", key) == ARGV[1] then
+    redis.call("DEL", key)
+  end
+end
+redis.call("DEL", KEYS[1])
+return #keys
+`)
+
 var acquireProxyLeasesScript = redis.NewScript(`
 local auth_count = tonumber(ARGV[1]) or 0
 local proxy_count = tonumber(ARGV[2]) or 0
@@ -508,7 +519,16 @@ func (s *Store) SetPreviousResponseAuth(ctx context.Context, responseID, authID 
 	if ttl <= 0 {
 		ttl = 2 * time.Hour
 	}
-	return s.client.Set(ctx, key, authID, ttl).Err()
+	indexKey := s.previousResponseAuthIndexKey(authID)
+	if indexKey == "" {
+		return nil
+	}
+	pipe := s.client.TxPipeline()
+	pipe.Set(ctx, key, authID, ttl)
+	pipe.SAdd(ctx, indexKey, key)
+	pipe.Expire(ctx, indexKey, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 func (s *Store) DeletePreviousResponseAuth(ctx context.Context, responseID string) error {
@@ -520,6 +540,18 @@ func (s *Store) DeletePreviousResponseAuth(ctx context.Context, responseID strin
 		return nil
 	}
 	return s.client.Del(ctx, key).Err()
+}
+
+func (s *Store) DeletePreviousResponseAuthByAuthID(ctx context.Context, authID string) error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	indexKey := s.previousResponseAuthIndexKey(authID)
+	if indexKey == "" {
+		return nil
+	}
+	_, err := deletePreviousResponseAuthByAuthIDScript.Run(ctx, s.client, []string{indexKey}, strings.TrimSpace(authID)).Result()
+	return err
 }
 
 func (s *Store) LoadClientAPIKeyQuotaUsage(ctx context.Context, apiKey string, now time.Time) (internalusage.ClientAPIKeyQuotaUsage, bool, error) {
@@ -1050,6 +1082,15 @@ func (s *Store) previousResponseAuthKey(responseID string) string {
 	}
 	sum := sha256.Sum256([]byte(responseID))
 	return s.key("affinity", "previous-response", hex.EncodeToString(sum[:]))
+}
+
+func (s *Store) previousResponseAuthIndexKey(authID string) string {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(authID))
+	return s.key("affinity", "previous-response-auth", hex.EncodeToString(sum[:]))
 }
 
 func (s *Store) clientAPIKeyQuotaKey(apiKeyHash, scope, bucket string) string {

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -340,5 +341,21 @@ func TestCodexExecutorResetExecutionSessionClearsHTTPTurnState(t *testing.T) {
 	}
 	if seenTurnState[1] != "" {
 		t.Fatalf("second request turn state = %q, want empty after session reset", seenTurnState[1])
+	}
+}
+
+func TestCodexExecutorSeparatesHTTPTurnStateAcrossReplacedAccounts(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	oldAuth := &cliproxyauth.Auth{ID: "same-file.json", Provider: "codex", Metadata: map[string]any{"account_id": "account-old"}}
+	newAuth := oldAuth.Clone()
+	newAuth.Metadata["account_id"] = "account-new"
+	oldKey := executor.codexHTTPTurnStateKey(oldAuth, "exec-1")
+	newKey := executor.codexHTTPTurnStateKey(newAuth, "exec-1")
+	if oldKey == newKey {
+		t.Fatalf("turn-state keys are shared across accounts: %q", oldKey)
+	}
+	executor.httpTurnState.put(oldKey, "scope", "old-state", time.Now())
+	if got := executor.httpTurnState.get(newKey, "scope", time.Now()); got != "" {
+		t.Fatalf("new account inherited old turn state %q", got)
 	}
 }

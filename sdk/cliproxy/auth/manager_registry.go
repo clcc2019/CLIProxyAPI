@@ -56,15 +56,25 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	applyDefaultRefreshInterval(auth)
 	auth.EnsureIndex()
-	auth.ApplyRuntimeStateFromMetadata()
 	m.applyProxyPoolLease(ctx, auth)
 	m.mu.Lock()
 	if m.shouldSuppressRemovedAuthUpsertLocked(auth) {
 		m.mu.Unlock()
 		return nil, nil
 	}
-	m.applyPersistedRuntimeStateLocked(auth)
-	if existing := m.auths[auth.ID]; existing != nil {
+	existing := m.auths[auth.ID]
+	continuityChanged := authCredentialPrincipalChanged(existing, auth)
+	if continuityChanged {
+		m.invalidateAuthAffinityLocked(auth.ID)
+		clearAuthRuntimeState(auth)
+		if m.runtimeStates != nil {
+			delete(m.runtimeStates, auth.ID)
+		}
+	} else {
+		auth.ApplyRuntimeStateFromMetadata()
+		m.applyPersistedRuntimeStateLocked(auth)
+	}
+	if existing != nil && !continuityChanged {
 		// Register is normally used for initial loading, but a caller can also
 		// upsert an existing auth. Do not let a stale file snapshot overwrite a
 		// quota cooldown learned while this manager is running.
@@ -72,7 +82,13 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	if continuityChanged {
+		m.resetAuthContinuityLocked(ctx, auth.ID)
+	}
 	m.mu.Unlock()
+	if continuityChanged {
+		m.invalidatePreviousResponseStoreForAuth(ctx, auth.ID)
+	}
 	m.clearRouteAwareCaches()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
@@ -100,6 +116,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.applyProxyPoolLease(ctx, auth)
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
+	if !executionAuthPrincipalMatches(ctx, existing) {
+		var existingClone *Auth
+		if existing != nil {
+			existingClone = existing.Clone()
+		}
+		m.mu.Unlock()
+		return existingClone, nil
+	}
 	if isRefreshUpdate(ctx) && (!ok || authRefreshSuppressed(existing)) {
 		var existingClone *Auth
 		if existing != nil {
@@ -121,7 +145,13 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			return existingClone, nil
 		}
 	}
-	if ok && existing != nil {
+	continuityChanged := ok && existing != nil && authCredentialPrincipalChanged(existing, auth)
+	if continuityChanged && isRefreshUpdate(ctx) {
+		existingClone := existing.Clone()
+		m.mu.Unlock()
+		return existingClone, nil
+	}
+	if ok && existing != nil && !continuityChanged {
 		if isRefreshUpdate(ctx) {
 			preserveEditableAuthFileOptions(existing, auth)
 		}
@@ -135,14 +165,27 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 				auth.ModelStates = existing.ModelStates
 			}
 		}
-	} else {
+	} else if !continuityChanged {
 		auth.ApplyRuntimeStateFromMetadata()
 		m.applyPersistedRuntimeStateLocked(auth)
+	}
+	if continuityChanged {
+		m.invalidateAuthAffinityLocked(auth.ID)
+		clearAuthRuntimeState(auth)
+		if m.runtimeStates != nil {
+			delete(m.runtimeStates, auth.ID)
+		}
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	if continuityChanged {
+		m.resetAuthContinuityLocked(ctx, auth.ID)
+	}
 	m.mu.Unlock()
+	if continuityChanged {
+		m.invalidatePreviousResponseStoreForAuth(ctx, auth.ID)
+	}
 	m.clearRouteAwareCaches()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
@@ -217,6 +260,7 @@ func (m *Manager) Remove(ctx context.Context, id string) (*Auth, error) {
 	loop = m.refreshLoop
 	runtimeStore = m.runtimeStateStore
 	m.mu.Unlock()
+	m.resetAuthContinuity(ctx, id)
 
 	if authProxyPoolAssigned(removed) {
 		m.releaseProxyLease(ctx, id)
@@ -250,6 +294,115 @@ func (m *Manager) Remove(ctx context.Context, id string) (*Auth, error) {
 		m.hook.OnAuthUpdated(ctx, notification)
 	}
 	return removed, runtimeErr
+}
+
+func (m *Manager) resetAuthContinuity(ctx context.Context, authID string) {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return
+	}
+	m.invalidateSessionAffinityForAuth(authID)
+	m.invalidatePreviousResponsesForAuth(ctx, authID)
+	m.mu.RLock()
+	m.resetAuthContinuityLocked(ctx, authID)
+	m.mu.RUnlock()
+}
+
+func (m *Manager) invalidateAuthAffinityLocked(authID string) {
+	if m.previousResponseAuths != nil {
+		m.previousResponseAuths.InvalidateAuth(authID)
+	}
+	m.invalidateSessionAffinityForAuthLocked(authID, m.selector)
+}
+
+// resetAuthContinuityLocked blocks manager callbacks from old in-flight
+// requests while executor state is cleared. Caller must hold m.mu.
+func (m *Manager) resetAuthContinuityLocked(ctx context.Context, authID string) {
+	executors := make([]ProviderExecutor, 0, len(m.executors))
+	for _, executor := range m.executors {
+		executors = append(executors, executor)
+	}
+	for _, executor := range executors {
+		if resetter, ok := executor.(AuthContinuityResetter); ok && resetter != nil {
+			resetter.ResetAuthContinuity(authID)
+		}
+	}
+}
+
+func authCredentialPrincipalChanged(existing, replacement *Auth) bool {
+	if existing == nil || replacement == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(existing.Provider), strings.TrimSpace(replacement.Provider)) {
+		return true
+	}
+	oldKind, oldPrincipal := authCredentialPrincipal(existing)
+	newKind, newPrincipal := authCredentialPrincipal(replacement)
+	return oldKind != "" && newKind != "" && (oldKind != newKind || oldPrincipal != newPrincipal)
+}
+
+func authCredentialPrincipal(auth *Auth) (string, string) {
+	if auth == nil {
+		return "", ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "codex" {
+		kind := CodexAuthKind(auth)
+		if accountID := codexCredentialIdentityValue(auth, "account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"); accountID != "" {
+			return provider + ":account", accountID
+		}
+		if kind == CodexAuthKindAgentIdentity {
+			if runtimeID := codexCredentialIdentityValue(auth, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID"); runtimeID != "" {
+				return provider + ":" + kind, runtimeID
+			}
+		}
+		if kind == CodexAuthKindOAuth {
+			if email := codexCredentialIdentityValue(auth, "email"); email != "" {
+				return provider + ":" + kind, strings.ToLower(email)
+			}
+			return "", ""
+		}
+	}
+	if auth.Attributes != nil {
+		if apiKey := strings.TrimSpace(auth.Attributes["api_key"]); apiKey != "" {
+			return provider + ":api_key", apiKey
+		}
+	}
+	if auth.Metadata != nil {
+		for _, key := range []string{"email", "username", "user_id", "userId"} {
+			if principal := strings.TrimSpace(metadataString(auth.Metadata, key)); principal != "" {
+				return provider + ":oauth", strings.ToLower(principal)
+			}
+		}
+	}
+	return "", ""
+}
+
+// CredentialPrincipal returns the stable credential subject used to isolate
+// executor state when an auth ID can be rebound to another account.
+func CredentialPrincipal(auth *Auth) (string, string) {
+	return authCredentialPrincipal(auth)
+}
+
+func clearAuthRuntimeState(auth *Auth) {
+	if auth == nil {
+		return
+	}
+	auth.Success = 0
+	auth.Failed = 0
+	auth.recentRequests = nil
+	auth.Unavailable = false
+	auth.Quota = QuotaState{}
+	auth.RateLimits = nil
+	auth.LastError = nil
+	auth.NextRetryAfter = time.Time{}
+	auth.ModelStates = nil
+	if auth.Status != StatusDisabled {
+		auth.Status = StatusActive
+		auth.StatusMessage = ""
+	}
+	if auth.Metadata != nil {
+		delete(auth.Metadata, runtimeStateMetadataKey)
+	}
 }
 
 func authIDFromModelPoolOffsetKey(key string) string {

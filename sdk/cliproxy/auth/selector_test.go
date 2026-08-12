@@ -133,8 +133,8 @@ func TestWeightedRoundRobinSelectorPick_PreservesPriorityAndWebsocketPreference(
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
 	for i := 0; i < 4; i++ {
 		got, err := selector.Pick(ctx, "codex", "model", cliproxyexecutor.Options{}, websocketAuths)
-		if err != nil || got == nil || got.ID != "ws" {
-			t.Fatalf("websocket Pick() #%d = %#v, %v; want ws", i, got, err)
+		if err != nil || got == nil || got.ID != "http" {
+			t.Fatalf("websocket Pick() #%d = %#v, %v; want high-priority http", i, got, err)
 		}
 	}
 }
@@ -260,7 +260,7 @@ func TestRoundRobinSelectorPick_PrefersWebsocketAuthsForUpstreamPreference(t *te
 	}
 }
 
-func TestRoundRobinSelectorPick_PrefersWebsocketAuthsAcrossPriorities(t *testing.T) {
+func TestRoundRobinSelectorPick_PriorityPrecedesWebsocketPreference(t *testing.T) {
 	t.Parallel()
 
 	selector := &RoundRobinSelector{}
@@ -271,8 +271,7 @@ func TestRoundRobinSelectorPick_PrefersWebsocketAuthsAcrossPriorities(t *testing
 	}
 
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
-	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
-	for i, id := range want {
+	for i := 0; i < 3; i++ {
 		got, err := selector.Pick(ctx, "codex", "", cliproxyexecutor.Options{}, auths)
 		if err != nil {
 			t.Fatalf("Pick() #%d error = %v", i, err)
@@ -280,8 +279,8 @@ func TestRoundRobinSelectorPick_PrefersWebsocketAuthsAcrossPriorities(t *testing
 		if got == nil {
 			t.Fatalf("Pick() #%d auth = nil", i)
 		}
-		if got.ID != id {
-			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		if got.ID != "codex-http" {
+			t.Fatalf("Pick() #%d auth.ID = %q, want codex-http", i, got.ID)
 		}
 	}
 }

@@ -1395,6 +1395,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		streamMode:                 codexStreamFieldTrue,
 		preservePreviousResponseID: true,
 		preserveGenerate:           true,
+		preserveCompactionTrigger:  codexRemoteCompactionV2Enabled(auth, e.cfg, ginHeaders),
 		preserveNativeFields: codexNativeClientRequest(opts.SourceFormat, opts.Headers, body) ||
 			codexNativeClientRequest(opts.SourceFormat, ginHeaders, body),
 		store:           codexShouldStoreResponses(auth, httpURL),
@@ -1448,12 +1449,14 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		executionSessionID: executionSessionID,
 	}
 	if prepared.executionSessionID != "" {
+		_, authPrincipal := cliproxyauth.CredentialPrincipal(auth)
 		prepared.reuseKey = codexWebsocketReusableKeyFromParts(
 			authID,
 			wsURL,
 			promptCacheID,
 			trimHeaderValue(wsHeaders, codexHeaderWindowID),
 			codexWebsocketProxyPolicyFingerprint(e.cfg, auth),
+			authPrincipal,
 		)
 		prepared.sess = e.getOrCreateSession(prepared.executionSessionID, prepared.reuseKey)
 		if prepared.sess != nil {
@@ -1526,7 +1529,7 @@ func codexWebsocketReusableKey(_ sdktranslator.Format, authID string, wsURL stri
 	return codexWebsocketReusableKeyFromParts(authID, wsURL, promptCacheID, windowID)
 }
 
-func codexWebsocketReusableKeyFromParts(authID string, wsURL string, promptCacheID string, windowID string, proxyPolicy ...string) string {
+func codexWebsocketReusableKeyFromParts(authID string, wsURL string, promptCacheID string, windowID string, isolation ...string) string {
 	promptCacheID = strings.TrimSpace(promptCacheID)
 	if promptCacheID == "" {
 		return ""
@@ -1537,16 +1540,22 @@ func codexWebsocketReusableKeyFromParts(authID string, wsURL string, promptCache
 		return ""
 	}
 	policySegment := ""
-	if len(proxyPolicy) > 0 {
-		if fingerprint := strings.TrimSpace(proxyPolicy[0]); fingerprint != "" {
+	if len(isolation) > 0 {
+		if fingerprint := strings.TrimSpace(isolation[0]); fingerprint != "" {
 			policySegment = "|proxy=" + fingerprint
+		}
+	}
+	principalSegment := ""
+	if len(isolation) > 1 {
+		if principal := strings.TrimSpace(isolation[1]); principal != "" {
+			principalSegment = "|principal=" + shortHashString(principal)
 		}
 	}
 	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {
-		return authID + "|" + wsURL + policySegment + "|" + promptCacheID
+		return authID + "|" + wsURL + policySegment + principalSegment + "|" + promptCacheID
 	}
-	return authID + "|" + wsURL + policySegment + "|" + promptCacheID + "|" + windowID
+	return authID + "|" + wsURL + policySegment + principalSegment + "|" + promptCacheID + "|" + windowID
 }
 
 func (e *CodexWebsocketsExecutor) retryCodexWebsocketWithoutPreviousResponse(
@@ -3780,6 +3789,84 @@ func (e *CodexWebsocketsExecutor) ResetExecutionSession(sessionID string) {
 	for i := range toClose {
 		e.closeExecutionSession(toClose[i], "session_reset")
 	}
+}
+
+func (e *CodexWebsocketsExecutor) ResetAuthContinuity(authID string) {
+	if e == nil {
+		return
+	}
+	if e.CodexExecutor != nil {
+		e.CodexExecutor.ResetAuthContinuity(authID)
+	}
+	e.closeAuthSessions(authID, "auth_principal_changed")
+}
+
+func (e *CodexWebsocketsExecutor) closeAuthSessions(authID string, reason string) {
+	authID = strings.TrimSpace(authID)
+	if e == nil || authID == "" {
+		return
+	}
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	if store == nil {
+		return
+	}
+
+	toClose := make([]*codexWebsocketSession, 0)
+	seen := make(map[*codexWebsocketSession]struct{})
+	store.sessionsMu.Lock()
+	for sessionID, sess := range store.sessions {
+		if !codexWebsocketSessionBelongsToAuth(sess, authID) {
+			continue
+		}
+		delete(store.sessions, sessionID)
+		seen[sess] = struct{}{}
+		toClose = append(toClose, sess)
+	}
+	store.sessionsMu.Unlock()
+
+	store.parkedMu.Lock()
+	for reuseKey, sess := range store.parked {
+		if !codexWebsocketSessionBelongsToAuth(sess, authID) {
+			continue
+		}
+		delete(store.parked, reuseKey)
+		if sess != nil && sess.parkTimer != nil {
+			sess.parkTimer.Stop()
+			sess.parkTimer = nil
+		}
+		if _, ok := seen[sess]; !ok {
+			seen[sess] = struct{}{}
+			toClose = append(toClose, sess)
+		}
+	}
+	store.parkedMu.Unlock()
+
+	for _, sess := range toClose {
+		closeCodexWebsocketSession(sess, reason)
+	}
+}
+
+func codexWebsocketSessionBelongsToAuth(sess *codexWebsocketSession, authID string) bool {
+	if sess == nil || authID == "" {
+		return false
+	}
+	if codexWebsocketSessionAuthID(sess) == authID {
+		return true
+	}
+	return strings.HasPrefix(strings.TrimSpace(sess.reuseKey()), authID+"|")
+}
+
+func codexWebsocketSessionAuthID(sess *codexWebsocketSession) string {
+	if sess == nil {
+		return ""
+	}
+	sess.connMu.Lock()
+	authID := strings.TrimSpace(sess.authID)
+	sess.connMu.Unlock()
+	return authID
 }
 
 func (e *CodexWebsocketsExecutor) closeAllExecutionSessions(reason string) {

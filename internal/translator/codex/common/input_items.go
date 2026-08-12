@@ -43,6 +43,16 @@ type normalizedResponseInputItem struct {
 // conversion for Codex-only input item variants before the payload reaches the
 // OpenAI Responses API.
 func NormalizeResponseInputItems(rawJSON []byte) []byte {
+	return normalizeResponseInputItems(rawJSON, true)
+}
+
+// NormalizeResponseInputItemsForUpstream converts Codex-only input variants
+// and optionally preserves the remote_compaction_v2 trigger item.
+func NormalizeResponseInputItemsForUpstream(rawJSON []byte, preserveCompactionTrigger bool) []byte {
+	return normalizeResponseInputItems(rawJSON, preserveCompactionTrigger)
+}
+
+func normalizeResponseInputItems(rawJSON []byte, preserveCompactionTrigger bool) []byte {
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if !inputResult.IsArray() {
 		return rawJSON
@@ -66,7 +76,7 @@ func NormalizeResponseInputItems(rawJSON []byte) []byte {
 		keptItems++
 	}
 	for idx, item := range inputItems {
-		itemRaw, keep, itemChanged := normalizeResponseInputItem(item)
+		itemRaw, keep, itemChanged := normalizeResponseInputItem(item, preserveCompactionTrigger)
 		if !itemChanged && normalizedInput == nil {
 			continue
 		}
@@ -98,10 +108,16 @@ func NormalizeResponseInputItems(rawJSON []byte) []byte {
 // plus the official full-history invariant repair used before sending a
 // complete transcript upstream.
 func NormalizeFullTranscriptResponseInputItems(rawJSON []byte) []byte {
-	return normalizeFullTranscriptResponseInputItems(rawJSON)
+	return normalizeFullTranscriptResponseInputItems(rawJSON, true)
 }
 
-func normalizeFullTranscriptResponseInputItems(rawJSON []byte) []byte {
+// NormalizeFullTranscriptResponseInputItemsForUpstream applies full-history
+// repair and optionally preserves the remote_compaction_v2 trigger item.
+func NormalizeFullTranscriptResponseInputItemsForUpstream(rawJSON []byte, preserveCompactionTrigger bool) []byte {
+	return normalizeFullTranscriptResponseInputItems(rawJSON, preserveCompactionTrigger)
+}
+
+func normalizeFullTranscriptResponseInputItems(rawJSON []byte, preserveCompactionTrigger bool) []byte {
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if !inputResult.IsArray() {
 		return rawJSON
@@ -118,7 +134,7 @@ func normalizeFullTranscriptResponseInputItems(rawJSON []byte) []byte {
 	changed := false
 	normalizedItems := make([]normalizedResponseInputItem, 0, len(inputItems))
 	for _, item := range inputItems {
-		itemRaw, keep, itemChanged := normalizeResponseInputItem(item)
+		itemRaw, keep, itemChanged := normalizeResponseInputItem(item, preserveCompactionTrigger)
 		if itemChanged {
 			changed = true
 		}
@@ -220,7 +236,7 @@ func rawContainsAny(raw string, markers []string) bool {
 	return false
 }
 
-func normalizeResponseInputItem(item gjson.Result) ([]byte, bool, bool) {
+func normalizeResponseInputItem(item gjson.Result, preserveCompactionTrigger bool) ([]byte, bool, bool) {
 	itemRaw := []byte(item.Raw)
 	switch item.Get("type").String() {
 	case "mcp_tool_call_output":
@@ -239,6 +255,9 @@ func normalizeResponseInputItem(item gjson.Result) ([]byte, bool, bool) {
 		}
 		return updated, true, true
 	case "compaction_trigger":
+		if preserveCompactionTrigger {
+			return itemRaw, true, false
+		}
 		return nil, false, true
 	default:
 		return itemRaw, true, false

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -747,6 +748,60 @@ func TestManager_CachedUnavailableAuthReselectForcesNewUpstreamSession(t *testin
 	}
 	if strings.TrimSpace(forced[0]) == "" {
 		t.Fatalf("first call forced session should be set after cached auth was reselected: %#v", forced)
+	}
+}
+
+func TestManager_PreviousResponseFallbackForcesNewUpstreamSession(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0)
+	executor := &unauthorizedFailoverSessionExecutor{}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: uuid.NewString(), Provider: "codex"}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	m.bindPreviousResponseID(context.Background(), "resp_stale", "missing-auth")
+
+	_, err := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{
+		Model:   "test-model",
+		Payload: []byte(`{"previous_response_id":"resp_stale"}`),
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	forced := executor.ForcedSessions()
+	if len(forced) != 1 || strings.TrimSpace(forced[0]) == "" {
+		t.Fatalf("fallback forced sessions = %#v, want one fresh session", forced)
+	}
+}
+
+func TestManager_RemoteCompactionRejectsChangedPreviousResponseAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &unauthorizedFailoverSessionExecutor{}
+	m.RegisterExecutor(executor)
+	auth := &Auth{ID: uuid.NewString(), Provider: "codex"}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	m.bindPreviousResponseID(context.Background(), "resp_compacted", "old-auth")
+	m.previousResponseAuths.InvalidateAuth("old-auth")
+
+	_, err := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{
+		Model: "test-model",
+		Payload: []byte(`{"previous_response_id":"resp_compacted","input":[` +
+			`{"type":"compaction","encrypted_content":"account-bound"}]}`),
+	}, cliproxyexecutor.Options{})
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr.Code != "previous_response_auth_changed" || authErr.HTTPStatus != http.StatusConflict {
+		t.Fatalf("Execute error = %#v, want previous_response_auth_changed conflict", err)
+	}
+	if forced := executor.ForcedSessions(); len(forced) != 0 {
+		t.Fatalf("executor should not receive cross-account compaction input: %#v", forced)
 	}
 }
 
