@@ -48,7 +48,7 @@ type fingerprintTransportCacheKey struct {
 	proxyURL       string
 	rootCAKey      string
 	clientHelloKey string
-	fallbackKey    string
+	fallback       http.RoundTripper
 	hostsKey       string
 }
 
@@ -327,11 +327,15 @@ func NewOpenAIAuthHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeou
 
 func newFingerprintHTTPClient(proxyURL string, rootCAs *x509.CertPool, fallback http.RoundTripper, timeout time.Duration, hosts map[string]struct{}, clientHello tls.ClientHelloID) *http.Client {
 	proxyURL = strings.TrimSpace(proxyURL)
+	if !roundTripperCacheable(fallback) {
+		transport := newFingerprintTransport(proxyURL, rootCAs, fallback, hosts, clientHello)
+		return newHTTPClient(transport, timeout)
+	}
 	transportKey := fingerprintTransportCacheKey{
 		proxyURL:       proxyURL,
 		rootCAKey:      customRootCAPoolKey(rootCAs),
 		clientHelloKey: fingerprintClientHelloKey(clientHello),
-		fallbackKey:    roundTripperCacheKey(fallback),
+		fallback:       fallback,
 		hostsKey:       fingerprintHostsKey(hosts),
 	}
 	transport := cachedFingerprintTransport(transportKey, proxyURL, rootCAs, fallback, hosts, clientHello)
@@ -371,16 +375,26 @@ func cachedFingerprintTransport(
 		}
 	}
 
-	transport := http.RoundTripper(&fallbackRoundTripper{
-		utls:               newUtlsRoundTripper(proxyURL, rootCAs, clientHello),
-		fallback:           fallback,
-		fingerprintedHosts: cloneFingerprintHosts(hosts),
-	})
+	transport := newFingerprintTransport(proxyURL, rootCAs, fallback, hosts, clientHello)
 	actual, _ := fingerprintTransportCache.LoadOrStore(key, transport)
 	if cached, ok := actual.(http.RoundTripper); ok {
 		return cached
 	}
 	return transport
+}
+
+func newFingerprintTransport(
+	proxyURL string,
+	rootCAs *x509.CertPool,
+	fallback http.RoundTripper,
+	hosts map[string]struct{},
+	clientHello tls.ClientHelloID,
+) http.RoundTripper {
+	return &fallbackRoundTripper{
+		utls:               newUtlsRoundTripper(proxyURL, rootCAs, clientHello),
+		fallback:           fallback,
+		fingerprintedHosts: cloneFingerprintHosts(hosts),
+	}
 }
 
 func cachedFingerprintHTTPClient(
@@ -410,18 +424,8 @@ func fingerprintClientHelloKey(clientHello tls.ClientHelloID) string {
 	return fmt.Sprintf("%s:%s:%d", clientHello.Client, clientHello.Version, clientHello.Seed)
 }
 
-func roundTripperCacheKey(rt http.RoundTripper) string {
-	if rt == nil {
-		return ""
-	}
-	value := reflect.ValueOf(rt)
-	typeName := reflect.TypeOf(rt).String()
-	switch value.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Chan, reflect.Func, reflect.Slice, reflect.UnsafePointer:
-		return typeName + ":" + strconv.FormatUint(uint64(value.Pointer()), 16)
-	default:
-		return typeName + ":" + fmt.Sprint(rt)
-	}
+func roundTripperCacheable(rt http.RoundTripper) bool {
+	return rt == nil || reflect.TypeOf(rt).Comparable()
 }
 
 func fingerprintHostsKey(hosts map[string]struct{}) string {

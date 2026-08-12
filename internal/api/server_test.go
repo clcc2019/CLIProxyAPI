@@ -13,6 +13,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -520,6 +521,48 @@ func TestHomeEnabledHidesManagementEndpoints(t *testing.T) {
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}
+
+func TestHomeHeartbeatGatePreservesLiveness(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	home.ClearCurrent()
+	t.Cleanup(home.ClearCurrent)
+
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+	server.SetReady(true)
+
+	testCases := []struct {
+		name       string
+		method     string
+		path       string
+		authorize  string
+		wantStatus int
+	}{
+		{name: "GET healthz", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK},
+		{name: "HEAD healthz", method: http.MethodHead, path: "/healthz", wantStatus: http.StatusOK},
+		{name: "GET readyz", method: http.MethodGet, path: "/readyz", wantStatus: http.StatusServiceUnavailable},
+		{name: "HEAD readyz", method: http.MethodHead, path: "/readyz", wantStatus: http.StatusServiceUnavailable},
+		{name: "inference", method: http.MethodPost, path: "/v1/chat/completions", authorize: "test-key", wantStatus: http.StatusServiceUnavailable},
+		{name: "management remains hidden", method: http.MethodGet, path: "/v0/management/config", authorize: "test-management-key", wantStatus: http.StatusNotFound},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.authorize != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.authorize)
+			}
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d body=%s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if tc.method == http.MethodHead && rr.Body.Len() != 0 {
+				t.Fatalf("HEAD body = %q, want empty", rr.Body.String())
+			}
+		})
 	}
 }
 

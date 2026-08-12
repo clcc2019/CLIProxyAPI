@@ -93,10 +93,60 @@ func TestNewProxyAwareHTTPClientPrefersContextRoundTripperForAuthProxy(t *testin
 	)
 
 	if client.Transport != expected {
-		t.Fatalf("transport = %T %v, want cached context round tripper", client.Transport, client.Transport)
+		t.Fatalf("transport = %T %v, want context round tripper", client.Transport, client.Transport)
 	}
-	if client != second {
-		t.Fatal("expected context round tripper client to be reused")
+	if client == second {
+		t.Fatal("expected a fresh client for a context round tripper")
+	}
+	if second.Transport != expected {
+		t.Fatalf("second transport = %T %v, want context round tripper", second.Transport, second.Transport)
+	}
+}
+
+func TestNewProxyAwareHTTPClientKeepsContextRoundTripperClosuresIsolated(t *testing.T) {
+	t.Parallel()
+
+	newRoundTripper := func(label string) http.RoundTripper {
+		return contextRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"X-Transport": []string{label}},
+				Body:       http.NoBody,
+				Request:    req,
+			}, nil
+		})
+	}
+
+	firstRT := newRoundTripper("first")
+	secondRT := newRoundTripper("second")
+	firstCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", firstRT)
+	secondCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", secondRT)
+
+	first := NewProxyAwareHTTPClient(firstCtx, &config.Config{}, nil, 0)
+	second := NewProxyAwareHTTPClient(secondCtx, &config.Config{}, nil, 0)
+
+	for _, tc := range []struct {
+		name   string
+		client *http.Client
+		want   string
+	}{
+		{name: "first", client: first, want: "first"},
+		{name: "second", client: second, want: "second"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, "http://upstream.test/v1/responses", nil)
+			if err != nil {
+				t.Fatalf("http.NewRequest() error = %v", err)
+			}
+			resp, err := tc.client.Do(req)
+			if err != nil {
+				t.Fatalf("client.Do() error = %v", err)
+			}
+			defer resp.Body.Close()
+			if got := resp.Header.Get("X-Transport"); got != tc.want {
+				t.Fatalf("transport label = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -153,7 +203,7 @@ func TestNewProxyAwareHTTPClientReusesCustomCATransport(t *testing.T) {
 	}
 }
 
-func TestNewProxyAwareHTTPClientReusesContextCustomCATransport(t *testing.T) {
+func TestNewProxyAwareHTTPClientDoesNotCacheContextCustomCATransport(t *testing.T) {
 	t.Setenv("CODEX_CA_CERTIFICATE", mustCreateProxyHelperTestCertificatePEM(t))
 	t.Setenv("SSL_CERT_FILE", "")
 
@@ -164,11 +214,14 @@ func TestNewProxyAwareHTTPClientReusesContextCustomCATransport(t *testing.T) {
 	first := NewProxyAwareHTTPClient(ctx, &config.Config{}, auth, 0)
 	second := NewProxyAwareHTTPClient(ctx, &config.Config{}, auth, 0)
 
-	if first != second {
-		t.Fatal("expected context custom-CA client to be reused")
+	if first == second {
+		t.Fatal("expected a fresh client for a context custom-CA transport")
 	}
-	if first.Transport == nil || first.Transport != second.Transport {
-		t.Fatal("expected context custom-CA transport to be reused")
+	if first.Transport == nil || second.Transport == nil {
+		t.Fatal("expected context custom-CA transports to be configured")
+	}
+	if first.Transport == second.Transport {
+		t.Fatal("expected context custom-CA wrappers to remain request-scoped")
 	}
 	if first.Transport == base {
 		t.Fatal("expected context transport to be cloned with custom root CAs")
@@ -198,6 +251,12 @@ type roundTripperSpy struct{}
 
 func (spy *roundTripperSpy) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+type contextRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f contextRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func mustCreateProxyHelperTestCertificatePEM(t *testing.T) string {

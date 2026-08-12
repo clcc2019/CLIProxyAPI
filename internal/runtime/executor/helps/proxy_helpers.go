@@ -69,7 +69,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	if contextRT != nil && authProxy != "" {
-		return cachedContextHTTPClient(contextRT, pool, timeout)
+		return contextHTTPClient(contextRT, pool, timeout)
 	}
 
 	proxyURL := resolvedProxyURLWithAuthProxy(cfg, authProxy)
@@ -86,7 +86,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	if contextRT != nil {
-		return cachedContextHTTPClient(contextRT, pool, timeout)
+		return contextHTTPClient(contextRT, pool, timeout)
 	}
 
 	if pool != nil {
@@ -102,13 +102,11 @@ func NewCodexHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 	return NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 }
 
-func cachedContextHTTPClient(rt http.RoundTripper, pool *x509.CertPool, timeout time.Duration) *http.Client {
-	transportKey := "context:" + roundTripperCacheKey(rt)
+func contextHTTPClient(rt http.RoundTripper, pool *x509.CertPool, timeout time.Duration) *http.Client {
 	if pool != nil {
-		rt = cachedCustomCATransport(transportKey, rt, pool)
-		return cachedHTTPClient("context-ca:"+transportKey+":"+customRootCAPoolKey(pool), rt, timeout)
+		rt = misc.RoundTripperWithCustomRootCAs(rt, pool)
 	}
-	return cachedHTTPClient(transportKey, rt, timeout)
+	return newHTTPClient(rt, timeout)
 }
 
 func cachedCustomCATransport(transportKey string, transport http.RoundTripper, pool *x509.CertPool) http.RoundTripper {

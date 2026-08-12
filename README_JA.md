@@ -2,11 +2,11 @@
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
-CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインターフェースを提供するプロキシサーバーです。
+CLIクライアント向けにOpenAI Chat/Responses、Claude Messages、画像、および対応WebSocket互換APIを提供するプロキシサーバーです。
 
 OAuth経由でOpenAI Codex（GPTモデル）およびClaude Codeもサポートしています。
 
-ローカルまたはマルチアカウントのCLIアクセスを、OpenAI（Responses含む）/Gemini/Claude互換のクライアントやSDKで利用できます。
+Codex、Claude、Grok/xAI、Kimi、および設定済みのOpenAI互換アップストリームを1つのローカルゲートウェイから利用でき、対応する構成ではマルチアカウントも使用できます。
 
 ## スポンサー
 
@@ -43,24 +43,22 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 
 ## 概要
 
-- CLIモデル向けのOpenAI/Gemini/Claude/Grok互換APIエンドポイント
+- OpenAI Chat CompletionsおよびResponses APIエンドポイント
+- Claude Messagesおよびトークン計数エンドポイント
 - OpenAI Codex（GPTモデル）のOAuthサポート（デバイスコードログインがデフォルト、ブラウザーコールバックも利用可能）
 - OAuthログインによるClaude Codeサポート
 - OAuthログインによるGrok Buildサポート
-- プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
+- Kimiおよび設定可能なOpenAI互換アップストリーム（例：OpenRouter）
 - ストリーミング、非ストリーミング、および対応環境でのWebSocketレスポンス
 - 設定済みの OpenAI 互換プロバイダー向け `GET /v1/realtime?model=...` GPT Realtime WebSocket プロキシ
+- OpenAI互換の画像生成・編集・バリエーションエンドポイント
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
-- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、Grok）
-- シンプルなCLI認証フロー（Gemini、OpenAI、Claude、Grok）
-- Generative Language APIキーのサポート
-- AI Studioビルドのマルチアカウント負荷分散
-- Gemini CLIのマルチアカウント負荷分散
+- 対応プロバイダーでの複数アカウント、認証情報ローテーション、負荷分散
+- Codex、Claude、Grok/xAI向けのCLI認証フロー
 - Claude Codeのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - Grok Buildのマルチアカウント負荷分散
-- 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
 - プロキシ埋め込み用の再利用可能なGo SDK（`docs/sdk-usage.md`を参照）
 
 ## はじめに
@@ -82,26 +80,6 @@ CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CLI
 ### [CPA-Manager-Plus](https://github.com/seakee/CPA-Manager-Plus)
 
 リクエスト単位の監視とコスト推定を備えたCLIProxyAPI向けのフル管理センターです。CPA-Managerは、収集したリクエストをアカウント、モデル、チャネル、レイテンシ、ステータス、Token使用量ごとに追跡し、編集可能なモデル価格とLiteLLM価格のワンクリック同期でコストを推定します。SQLiteでイベントを永続化し、Codexアカウントプール向けに一括検査、クォータ判定、異常アカウント検出、クリーンアップ提案、ワンクリック実行を提供し、日常的なマルチアカウント運用に適しています。
-
-## Amp CLIサポート
-
-CLIProxyAPIは[Amp CLI](https://ampcode.com)およびAmp IDE拡張機能の統合サポートを含んでおり、Google/ChatGPT/ClaudeのOAuthサブスクリプションをAmpのコーディングツールで使用できます：
-
-- Ampの APIパターン用のプロバイダールートエイリアス（`/api/provider/{provider}/v1...`）
-- OAuth認証およびアカウント機能用の管理プロキシ
-- 自動ルーティングによるスマートモデルフォールバック
-- 利用できないモデルを代替モデルにルーティングする**モデルマッピング**（例：`claude-opus-4.5` → `claude-sonnet-4`）
-- localhostのみの管理エンドポイントによるセキュリティファーストの設計
-
-特定のバックエンド系統のリクエスト/レスポンス形状が必要な場合は、統合された `/v1/...` エンドポイントよりも provider-specific のパスを優先してください。
-
-- messages 系のバックエンドには `/api/provider/{provider}/v1/messages`
-- モデル単位の generate 系エンドポイントには `/api/provider/{provider}/v1beta/models/...`
-- chat-completions 系のバックエンドには `/api/provider/{provider}/v1/chat/completions`
-
-これらのパスはプロトコル面の選択には役立ちますが、同じクライアント向けモデル名が複数バックエンドで再利用されている場合、それだけで推論実行系が一意に固定されるわけではありません。実際の推論ルーティングは、引き続きリクエスト内の model/alias 解決に従います。厳密にバックエンドを固定したい場合は、一意な alias や prefix を使うか、クライアント向けモデル名の重複自体を避けてください。
-
-**→ [Amp CLI統合ガイドの完全版](https://help.router-for.me/agent-client/amp-cli.html)**
 
 ## SDKドキュメント
 

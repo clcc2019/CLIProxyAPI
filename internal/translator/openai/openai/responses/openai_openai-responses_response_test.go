@@ -24,6 +24,39 @@ func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 	return event, gjson.Parse(dataLine)
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_UsesClientModelAcrossLifecycle(t *testing.T) {
+	t.Parallel()
+
+	originalRequest := []byte(`{"model":"tenant/openai-alias"}`)
+	translatedRequest := []byte(`{"model":"openai-internal-model"}`)
+	chunks := [][]byte{
+		[]byte(`data: {"id":"resp_model","object":"chat.completion.chunk","created":1773896263,"model":"upstream-model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`),
+		[]byte(`data: [DONE]`),
+	}
+
+	var param any
+	events := make(map[string]gjson.Result)
+	for _, chunk := range chunks {
+		for _, output := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "fallback-model", originalRequest, translatedRequest, chunk, &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, output)
+			events[event] = data
+		}
+	}
+
+	for _, event := range []string{"response.created", "response.in_progress", "response.completed"} {
+		data, ok := events[event]
+		if !ok {
+			t.Fatalf("missing %s event", event)
+		}
+		if got := data.Get("response.model").String(); got != "tenant/openai-alias" {
+			t.Fatalf("%s response.model = %q, want tenant/openai-alias", event, got)
+		}
+	}
+	if output := events["response.in_progress"].Get("response.output"); !output.IsArray() || len(output.Array()) != 0 {
+		t.Fatalf("response.in_progress output = %s, want []", output.Raw)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompletedWaitsForDone(t *testing.T) {
 	t.Parallel()
 

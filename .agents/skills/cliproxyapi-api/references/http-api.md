@@ -44,6 +44,8 @@ Unauthenticated utility routes are `GET|HEAD /healthz`, `GET|HEAD /readyz`, `GET
 
 An optional relay WebSocket route defaults to `/v1/ws` when attached by the host. Its authentication is conditional on `ws-auth`; prove that it is attached before relying on it.
 
+This build does not register `/api/provider/{provider}/...` or Gemini `/v1beta/...` routes. Use only the registered surfaces above.
+
 ## Discover models first
 
 ```bash
@@ -62,7 +64,7 @@ Two client-sensitive variants matter:
 - A `User-Agent` beginning with `claude-cli` returns Claude's list envelope with `data`, `has_more`, `first_id`, and `last_id`.
 - A `client_version` query parameter returns the Codex client model-list shape.
 
-Configured client-key restrictions filter the visible list. Prefixes and aliases in this response are part of the callable model ID. Provider-specific paths do not disambiguate duplicate aliases; use unique aliases/prefixes when strict backend selection matters.
+Configured client-key restrictions filter the visible list. Prefixes and aliases in this response are part of the callable model ID. Because this build exposes unified protocol surfaces only, use unique aliases/prefixes when strict backend selection matters.
 
 ## OpenAI Chat Completions
 

@@ -409,6 +409,10 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		if c != nil && c.Request != nil {
 			path := c.Request.URL.Path
+			if path == "/healthz" && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
+				c.Next()
+				return
+			}
 			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" {
 				c.Next()
 				return

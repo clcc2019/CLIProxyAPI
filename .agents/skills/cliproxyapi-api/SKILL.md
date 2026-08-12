@@ -67,7 +67,7 @@ Use the smallest endpoint matching the caller:
 
 The current `internal/api/server.go` also registers Codex aliases under `/backend-api/codex/responses` and `/backend-api/codex/responses/compact`.
 
-The README mentions `/api/provider/{provider}/...` and Gemini `v1beta` provider aliases, but this checkout's `setupRoutes` does not register them. Do not emit those URLs without first proving they exist in the running build. For this source revision, use the registered `/v1/*` surfaces to reach Gemini-backed credentials through translation.
+This build does not register `/api/provider/{provider}/...` or Gemini `/v1beta/...` routes. Do not emit those paths; use the registered `/v1/*` surfaces and a model returned by `/v1/models`.
 
 ## Execute safely
 

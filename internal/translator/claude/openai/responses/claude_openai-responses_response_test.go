@@ -29,6 +29,39 @@ func parseClaudeResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 	return event, gjson.Parse(data)
 }
 
+func TestConvertClaudeResponseToOpenAIResponses_UsesClientModelAcrossLifecycle(t *testing.T) {
+	t.Parallel()
+
+	originalRequest := []byte(`{"model":"tenant/claude-alias"}`)
+	translatedRequest := []byte(`{"model":"claude-internal-model"}`)
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_model"}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	events := make(map[string]gjson.Result)
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "fallback-model", originalRequest, translatedRequest, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			events[event] = data
+		}
+	}
+
+	for _, event := range []string{"response.created", "response.in_progress", "response.completed"} {
+		data, ok := events[event]
+		if !ok {
+			t.Fatalf("missing %s event", event)
+		}
+		if got := data.Get("response.model").String(); got != "tenant/claude-alias" {
+			t.Fatalf("%s response.model = %q, want tenant/claude-alias", event, got)
+		}
+	}
+	if output := events["response.in_progress"].Get("response.output"); !output.IsArray() || len(output.Array()) != 0 {
+		t.Fatalf("response.in_progress output = %s, want []", output.Raw)
+	}
+}
+
 func TestConvertClaudeResponseToOpenAIResponses_ThinkingIncludesSignature(t *testing.T) {
 	signature := "claude_sig_123"
 	chunks := [][]byte{

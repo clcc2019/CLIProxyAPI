@@ -62,11 +62,14 @@ func emitRespEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
 
-func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
+func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, requestModelName string, nextSeq func() int) []byte {
 	completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
 	completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 	completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 	completed, _ = sjson.SetBytes(completed, "response.created_at", st.Created)
+	if requestModelName != "" {
+		completed, _ = sjson.SetBytes(completed, "response.model", requestModelName)
+	}
 	// Inject original request fields into response as per docs/response.completed.json
 	if requestRawJSON != nil {
 		req := gjson.ParseBytes(requestRawJSON)
@@ -78,9 +81,6 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 		}
 		if v := req.Get("max_tool_calls"); v.Exists() {
 			completed, _ = sjson.SetBytes(completed, "response.max_tool_calls", v.Int())
-		}
-		if v := req.Get("model"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.model", v.String())
 		}
 		if v := req.Get("parallel_tool_calls"); v.Exists() {
 			completed, _ = sjson.SetBytes(completed, "response.parallel_tool_calls", v.Bool())
@@ -229,7 +229,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		if st.CompletionPending && !st.CompletedEmitted {
 			st.CompletedEmitted = true
-			return [][]byte{buildResponsesCompletedEvent(st, requestRawJSON, func() int { st.Seq++; return st.Seq })}
+			requestModelName := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
+			if requestModelName == "" {
+				requestModelName = modelName
+			}
+			return [][]byte{buildResponsesCompletedEvent(st, requestRawJSON, requestModelName, func() int { st.Seq++; return st.Seq })}
 		}
 		return [][]byte{}
 	}
@@ -313,12 +317,22 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
 		created, _ = sjson.SetBytes(created, "response.id", st.ResponseID)
 		created, _ = sjson.SetBytes(created, "response.created_at", st.Created)
+		requestModelName := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
+		if requestModelName == "" {
+			requestModelName = modelName
+		}
+		if requestModelName != "" {
+			created, _ = sjson.SetBytes(created, "response.model", requestModelName)
+		}
 		out = append(out, emitRespEvent("response.created", created))
 
-		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`)
+		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","output":[]}}`)
 		inprog, _ = sjson.SetBytes(inprog, "sequence_number", nextSeq())
 		inprog, _ = sjson.SetBytes(inprog, "response.id", st.ResponseID)
 		inprog, _ = sjson.SetBytes(inprog, "response.created_at", st.Created)
+		if requestModelName != "" {
+			inprog, _ = sjson.SetBytes(inprog, "response.model", requestModelName)
+		}
 		out = append(out, emitRespEvent("response.in_progress", inprog))
 		st.Started = true
 	}
