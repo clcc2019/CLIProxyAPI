@@ -122,6 +122,7 @@ func codexAuthWithPinnedClientProfile(auth *cliproxyauth.Auth, profile codexClie
 			candidate.Attributes["originator"] = value
 		}
 	}
+	cliproxyauth.StripNonPersistentCodexFeatures(candidate)
 	return candidate
 }
 
@@ -149,6 +150,9 @@ func codexNewClientProfileFromRequest(auth *cliproxyauth.Auth, target http.Heade
 			continue
 		}
 		value := firstNonEmptyHeaderValue(target, source, headerName)
+		if strings.EqualFold(headerName, codexPinnedBetaFeaturesHeader) {
+			value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
+		}
 		if value != "" && strings.EqualFold(headerName, "Version") && !codexVersionAtLeast(value, codexDefaultVersionHeader()) {
 			value = codexDefaultVersionHeader()
 		}
@@ -426,6 +430,9 @@ func codexApplyCustomHeadersFromAuth(req *http.Request, auth *cliproxyauth.Auth)
 		}
 		headerName = strings.TrimSpace(headerName)
 		value := strings.TrimSpace(rawValue)
+		if strings.EqualFold(headerName, codexPinnedBetaFeaturesHeader) {
+			value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
+		}
 		if headerName == "" || value == "" {
 			continue
 		}
@@ -478,10 +485,14 @@ func codexAuthHeaderFixed(auth *cliproxyauth.Auth, name string) bool {
 	if len(auth.Attributes) > 0 {
 		for key, value := range auth.Attributes {
 			headerName, ok := strings.CutPrefix(key, "header:")
-			if !ok {
+			if !ok || !strings.EqualFold(strings.TrimSpace(headerName), name) {
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(headerName), name) && strings.TrimSpace(value) != "" {
+			value = strings.TrimSpace(value)
+			if strings.EqualFold(name, codexPinnedBetaFeaturesHeader) {
+				value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
+			}
+			if value != "" {
 				return true
 			}
 		}
@@ -489,7 +500,11 @@ func codexAuthHeaderFixed(auth *cliproxyauth.Auth, name string) bool {
 	if len(auth.Metadata) == 0 {
 		return false
 	}
-	return codexMetadataHeaderValue(auth.Metadata, name) != ""
+	value := codexMetadataHeaderValue(auth.Metadata, name)
+	if strings.EqualFold(name, codexPinnedBetaFeaturesHeader) {
+		value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
+	}
+	return value != ""
 }
 
 func codexAuthHeaderValue(auth *cliproxyauth.Auth, name string) string {
@@ -504,14 +519,24 @@ func codexAuthHeaderValue(auth *cliproxyauth.Auth, name string) string {
 				continue
 			}
 			if strings.EqualFold(strings.TrimSpace(headerName), name) && strings.TrimSpace(value) != "" {
-				return strings.TrimSpace(value)
+				value = strings.TrimSpace(value)
+				if strings.EqualFold(name, codexPinnedBetaFeaturesHeader) {
+					value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
+				}
+				if value != "" {
+					return value
+				}
 			}
 		}
 	}
 	if len(auth.Metadata) == 0 {
 		return ""
 	}
-	return codexMetadataHeaderValue(auth.Metadata, name)
+	value := codexMetadataHeaderValue(auth.Metadata, name)
+	if strings.EqualFold(name, codexPinnedBetaFeaturesHeader) {
+		value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
+	}
+	return value
 }
 
 func codexMetadataHeaderValue(metadata map[string]any, name string) string {

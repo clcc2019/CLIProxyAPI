@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
@@ -158,6 +159,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		log.Debugf("ignoring empty auth file: %s", filepath.Base(path))
 		return
 	}
+	data = w.sanitizeAuthFileCodexFeatures(path, data)
 
 	sum := sha256.Sum256(data)
 	curHash := hex.EncodeToString(sum[:])
@@ -357,6 +359,7 @@ func (w *Watcher) scanFileClients(cfg *config.Config) fileClientScan {
 		if errReadFile != nil || len(data) == 0 {
 			continue
 		}
+		data = w.sanitizeAuthFileCodexFeatures(fullPath, data)
 		scan.readable++
 		normalizedPath := w.normalizeAuthPath(fullPath)
 		sum := sha256.Sum256(data)
@@ -377,6 +380,38 @@ func (w *Watcher) scanFileClients(cfg *config.Config) fileClientScan {
 	}
 	log.Debugf("auth directory scan complete - found %d .json files, %d readable", scan.fileCount, scan.readable)
 	return scan
+}
+
+func sanitizeAuthFileCodexFeatures(path string, data []byte) []byte {
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return data
+	}
+	sanitized, changed := coreauth.SanitizeCodexAuthMetadata(metadata)
+	if !changed {
+		return data
+	}
+	if err := misc.WriteCredentialJSONAtomic(path, sanitized, ""); err != nil {
+		log.WithError(err).Warnf("failed to remove request-scoped Codex features from %s", filepath.Base(path))
+		return data
+	}
+	normalized, err := json.Marshal(sanitized)
+	if err != nil {
+		return data
+	}
+	return append(normalized, '\n')
+}
+
+func (w *Watcher) sanitizeAuthFileCodexFeatures(path string, data []byte) []byte {
+	if w != nil && w.authFileSanitizer != nil {
+		cleaned, err := w.authFileSanitizer.SanitizeCodexAuthFile(path)
+		if err != nil {
+			log.WithError(err).Warnf("failed to remove request-scoped Codex features from %s", filepath.Base(path))
+			return data
+		}
+		return cleaned
+	}
+	return sanitizeAuthFileCodexFeatures(path, data)
 }
 
 func BuildAPIKeyClients(cfg *config.Config) (int, int, int) {

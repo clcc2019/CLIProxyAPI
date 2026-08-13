@@ -254,6 +254,50 @@ func TestFileTokenStoreListReadsJSONFilesInWalkOrder(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreListRemovesRemoteCompactionV2FromAuthFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex.json")
+	if err := os.WriteFile(path, []byte(`{
+		"type":"codex",
+		"beta_features":"feature-a,remote_compaction_v2",
+		"headers":{"X-Codex-Beta-Features":"remote_compaction_v2","X-Keep":"value"}
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("List() auth count = %d, want 1", len(auths))
+	}
+	if got := auths[0].Attributes["header:X-Codex-Beta-Features"]; got != "feature-a" {
+		t.Fatalf("runtime beta features = %q, want feature-a", got)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cleaned auth file: %v", err)
+	}
+	var metadata map[string]any
+	if err = json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("unmarshal cleaned auth file: %v", err)
+	}
+	if got := metadata["beta_features"]; got != "feature-a" {
+		t.Fatalf("persisted beta_features = %#v, want feature-a", got)
+	}
+	headers := metadata["headers"].(map[string]any)
+	if _, exists := headers["X-Codex-Beta-Features"]; exists {
+		t.Fatalf("request-scoped header remains in auth file: %#v", headers)
+	}
+	if got := headers["X-Keep"]; got != "value" {
+		t.Fatalf("unrelated header = %#v, want value", got)
+	}
+}
+
 func TestFileTokenStoreSaveRejectsPathOutsideBaseDir(t *testing.T) {
 	ctx := context.Background()
 	baseDir := t.TempDir()

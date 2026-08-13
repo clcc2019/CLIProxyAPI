@@ -88,6 +88,63 @@ func TestApplyCodexHeadersUsesAuthFileClientProfileAttributes(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeadersDoesNotPersistRemoteCompactionV2(t *testing.T) {
+	codexResetClientProfilesForTest()
+	t.Cleanup(codexResetClientProfilesForTest)
+
+	auth := &cliproxyauth.Auth{
+		ID:         "codex-request-scoped-feature",
+		Provider:   "codex",
+		Metadata:   map[string]any{"type": "codex", "access_token": "oauth-token"},
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	var published *cliproxyauth.Auth
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent":            "codex_vscode/1.2.3",
+		"Originator":            "codex_vscode",
+		"Version":               "1.2.3",
+		"X-Codex-Beta-Features": "feature-a,remote_compaction_v2",
+	})
+	ctx = cliproxyauth.WithAuthUpdateCallback(ctx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if got := req.Header.Get("X-Codex-Beta-Features"); got != "feature-a,remote_compaction_v2" {
+		t.Fatalf("request beta features = %q, want current request feature preserved", got)
+	}
+	if published == nil {
+		t.Fatal("expected client profile update")
+	}
+	if got := published.Attributes["header:X-Codex-Beta-Features"]; got != "feature-a" {
+		t.Fatalf("published beta features = %q, want feature-a", got)
+	}
+	headers := published.Metadata["headers"].(map[string]any)
+	if got := headers["X-Codex-Beta-Features"]; got != "feature-a" {
+		t.Fatalf("published metadata beta features = %#v, want feature-a", got)
+	}
+}
+
+func TestCodexAuthHeaderValueFallsBackPastRequestScopedAttribute(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"header:X-Codex-Beta-Features": "remote_compaction_v2",
+		},
+		Metadata: map[string]any{
+			"headers": map[string]any{"X-Codex-Beta-Features": "feature-a"},
+		},
+	}
+
+	if got := codexAuthHeaderValue(auth, "X-Codex-Beta-Features"); got != "feature-a" {
+		t.Fatalf("codexAuthHeaderValue() = %q, want metadata fallback feature-a", got)
+	}
+}
+
 func TestApplyCodexHeadersPinsAgentIdentityAuthFileClientFeatures(t *testing.T) {
 	codexResetClientProfilesForTest()
 	t.Cleanup(codexResetClientProfilesForTest)

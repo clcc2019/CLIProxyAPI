@@ -28,6 +28,10 @@ type authDirProvider interface {
 	AuthDir() string
 }
 
+type authFileCodexFeatureSanitizer interface {
+	SanitizeCodexAuthFile(path string) ([]byte, error)
+}
+
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
 	configPath        string
@@ -57,6 +61,7 @@ type Watcher struct {
 	pendingOrder      []string
 	dispatchCancel    context.CancelFunc
 	storePersister    storePersister
+	authFileSanitizer authFileCodexFeatureSanitizer
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
 }
@@ -102,6 +107,9 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 	}
 	w.dispatchCond = sync.NewCond(&w.dispatchMu)
 	if store := sdkAuth.GetTokenStore(); store != nil {
+		if sanitizer, ok := store.(authFileCodexFeatureSanitizer); ok {
+			w.authFileSanitizer = sanitizer
+		}
 		if persister, ok := store.(storePersister); ok {
 			w.storePersister = persister
 			log.Debug("persistence-capable token store detected; watcher will propagate persisted changes")

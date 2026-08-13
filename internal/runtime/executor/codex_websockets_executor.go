@@ -1390,12 +1390,13 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	ginHeaders := codexGinHeadersFromContext(ctx)
+	requestRemoteCompactionV2 := codexRequestRemoteCompactionV2Enabled(opts.Headers, ginHeaders)
 	body = normalizeCodexFinalUpstreamBodyBorrowed(body, baseModel, auth, codexFinalUpstreamBodyOptions{
 		requestKind:                codexFinalUpstreamResponses,
 		streamMode:                 codexStreamFieldTrue,
 		preservePreviousResponseID: true,
 		preserveGenerate:           true,
-		preserveCompactionTrigger:  codexRemoteCompactionV2Enabled(auth, e.cfg, ginHeaders),
+		preserveCompactionTrigger:  codexRemoteCompactionV2Enabled(auth, e.cfg, opts.Headers, ginHeaders),
 		preserveNativeFields: codexNativeClientRequest(opts.SourceFormat, opts.Headers, body) ||
 			codexNativeClientRequest(opts.SourceFormat, ginHeaders, body),
 		store:           codexShouldStoreResponses(auth, httpURL),
@@ -1405,6 +1406,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	executionSessionID := executionSessionIDFromOptions(opts)
 	body = codexSanitizeForcedUpstreamSessionBody(ctx, body)
 	body, wsHeaders, promptCacheID := e.applyCodexPromptCacheHeaders(ctx, opts.SourceFormat, executionSessionID, req, body)
+	codexApplyRequestScopedRemoteCompactionV2(wsHeaders, requestRemoteCompactionV2)
 	codexApplyForcedUpstreamSessionHeaders(ctx, wsHeaders)
 	responsesAPIClientMetadata := codexResponsesAPIClientMetadataFromBody(body)
 	explicitTurnMetadata := ""
@@ -3152,6 +3154,8 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	if headers == nil {
 		headers = make(http.Header, codexRequestHeaderInitialCapacity)
 	}
+	ginHeaders := codexGinHeadersFromContext(ctx)
+	requestRemoteCompactionV2 := codexRequestRemoteCompactionV2Enabled(headers, ginHeaders)
 	authorization := codexAuthorizationHeaderValue(auth, token)
 	if authorization != "" {
 		codexSetSingleHeaderValue(headers, "Authorization", authorization)
@@ -3159,7 +3163,6 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 		headers.Del("Authorization")
 	}
 
-	ginHeaders := codexGinHeadersFromContext(ctx)
 	codexPinClientProfileFromFirstRequest(ctx, auth, headers, ginHeaders, cfg)
 	codexPreparePinnedClientProfileHeaders(headers, auth)
 	profileHeaders := codexClientProfileSourceHeaders(auth, ginHeaders)
@@ -3207,6 +3210,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	if codexIsAgentIdentityAuth(auth) && authorization != "" {
 		codexSetSingleHeaderValue(headers, "Authorization", authorization)
 	}
+	codexApplyRequestScopedRemoteCompactionV2(headers, requestRemoteCompactionV2)
 	return headers
 }
 

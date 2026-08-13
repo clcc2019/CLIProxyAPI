@@ -11,21 +11,22 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-const codexRemoteCompactionV2Feature = "remote_compaction_v2"
+const codexRemoteCompactionV2Feature = cliproxyauth.CodexRemoteCompactionV2Feature
 
-func codexRemoteCompactionV2Enabled(auth *cliproxyauth.Auth, cfg *config.Config, requestHeaders http.Header) bool {
-	if value := codexAuthHeaderValue(auth, "X-Codex-Beta-Features"); value != "" {
-		return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
-	}
-	if profile, ok := codexPinnedClientProfileViewForAuth(auth); ok {
-		if value := trimHeaderValue(profile.headers, "X-Codex-Beta-Features"); value != "" {
+func codexRemoteCompactionV2Enabled(auth *cliproxyauth.Auth, cfg *config.Config, requestHeaders ...http.Header) bool {
+	for _, headers := range requestHeaders {
+		if value := trimHeaderValue(headers, codexPinnedBetaFeaturesHeader); value != "" {
 			return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
 		}
-		_, configured := codexHeaderDefaults(cfg, auth)
-		return codexBetaFeaturesContain(configured, codexRemoteCompactionV2Feature)
 	}
-	if value := trimHeaderValue(requestHeaders, "X-Codex-Beta-Features"); value != "" {
-		return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
+	if value := codexAuthHeaderValue(auth, codexPinnedBetaFeaturesHeader); value != "" {
+		return false
+	}
+	if profile, ok := codexPinnedClientProfileViewForAuth(auth); ok {
+		value := cliproxyauth.FilterCodexBetaFeaturesForPersistence(trimHeaderValue(profile.headers, codexPinnedBetaFeaturesHeader))
+		if value != "" {
+			return false
+		}
 	}
 	_, configured := codexHeaderDefaults(cfg, auth)
 	return codexBetaFeaturesContain(configured, codexRemoteCompactionV2Feature)
@@ -54,6 +55,7 @@ func applyCodexHeadersForRequestKind(r *http.Request, auth *cliproxyauth.Auth, t
 
 func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, requestKind codexFinalUpstreamRequestKind, ginHeaders http.Header) http.Header {
 	headers := r.Header
+	requestRemoteCompactionV2 := codexRequestRemoteCompactionV2Enabled(headers, ginHeaders)
 	authorization := codexAuthorizationHeaderValue(auth, token)
 	if authorization != "" {
 		codexSetPairedSingleHeaderValues(headers, "Content-Type", "application/json", "Authorization", authorization)
@@ -135,7 +137,32 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 	if codexIsAgentIdentityAuth(auth) && authorization != "" {
 		codexSetSingleHeaderValue(headers, "Authorization", authorization)
 	}
+	codexApplyRequestScopedRemoteCompactionV2(headers, requestRemoteCompactionV2)
 	return profileHeaders
+}
+
+func codexRequestRemoteCompactionV2Enabled(headers ...http.Header) bool {
+	for _, header := range headers {
+		if value := trimHeaderValue(header, codexPinnedBetaFeaturesHeader); value != "" {
+			return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
+		}
+	}
+	return false
+}
+
+func codexApplyRequestScopedRemoteCompactionV2(headers http.Header, enabled bool) {
+	if headers == nil || !enabled {
+		return
+	}
+	value := trimHeaderValue(headers, codexPinnedBetaFeaturesHeader)
+	if codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature) {
+		return
+	}
+	if value == "" {
+		codexSetSingleHeaderValue(headers, codexPinnedBetaFeaturesHeader, codexRemoteCompactionV2Feature)
+		return
+	}
+	codexSetSingleHeaderValue(headers, codexPinnedBetaFeaturesHeader, value+","+codexRemoteCompactionV2Feature)
 }
 
 func codexAuthorizationHeaderValue(auth *cliproxyauth.Auth, credential string) string {

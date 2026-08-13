@@ -49,6 +49,83 @@ func TestRemoteCompactionV2TriggerFeatureGate(t *testing.T) {
 	}
 }
 
+func TestRemoteCompactionV2RequestFeaturesOverrideConfigDefault(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.CodexHeaderDefaults.BetaFeatures = "remote_compaction_v2"
+
+	if got := codexRemoteCompactionV2Enabled(nil, cfg, http.Header{"X-Codex-Beta-Features": []string{"other"}}); got {
+		t.Fatal("explicit request beta features should override the configured remote_compaction_v2 default")
+	}
+	if got := codexRemoteCompactionV2Enabled(nil, cfg, nil); !got {
+		t.Fatal("configured remote_compaction_v2 should apply when the request has no beta feature header")
+	}
+	auth := &cliproxyauth.Auth{
+		ID:         "configured-feature-shadow",
+		Provider:   "codex",
+		Metadata:   map[string]any{"type": "codex"},
+		Attributes: map[string]string{"header:X-Codex-Beta-Features": "other"},
+	}
+	if got := codexRemoteCompactionV2Enabled(auth, cfg, nil); got {
+		t.Fatal("persisted non-compaction beta features should continue to override the configured default")
+	}
+}
+
+func TestRemoteCompactionV2FromWebsocketOptionsIsRequestScoped(t *testing.T) {
+	codexResetClientProfilesForTest()
+	t.Cleanup(codexResetClientProfilesForTest)
+
+	auth := &cliproxyauth.Auth{
+		ID:         "websocket-request-feature",
+		Provider:   "codex",
+		Metadata:   map[string]any{"type": "codex", "access_token": "token"},
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	var published *cliproxyauth.Auth
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "codex_vscode/1.2.3",
+		"Originator": "codex_vscode",
+		"Version":    "1.2.3",
+	})
+	ctx = cliproxyauth.WithAuthUpdateCallback(ctx, func(_ context.Context, updated *cliproxyauth.Auth) {
+		published = updated.Clone()
+	})
+	body := []byte(`{"model":"gpt-5.4","input":[{"type":"compaction_trigger","reason":"token_limit"}]}`)
+	prepared, err := NewCodexWebsocketsExecutor(&config.Config{}).prepareCodexWebsocketRequest(
+		ctx,
+		auth,
+		cliproxyexecutor.Request{Model: "gpt-5.4", Payload: body},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Headers:      http.Header{"X-Codex-Beta-Features": []string{"remote_compaction_v2"}},
+		},
+		body,
+		"token",
+		"https://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketRequest() error = %v", err)
+	}
+	defer prepared.unlockSession()
+
+	if got := prepared.wsHeaders.Get("X-Codex-Beta-Features"); got != "remote_compaction_v2" {
+		t.Fatalf("websocket beta features = %q, want request-scoped remote_compaction_v2", got)
+	}
+	if got := gjson.GetBytes(prepared.body, "input.0.type").String(); got != "compaction_trigger" {
+		t.Fatalf("compaction trigger type = %q, want preserved", got)
+	}
+	if published == nil {
+		t.Fatal("expected profile update")
+	}
+	if got := published.Attributes["header:X-Codex-Beta-Features"]; got != "" {
+		t.Fatalf("published beta features = %q, want empty", got)
+	}
+	if headers, ok := published.Metadata["headers"].(map[string]any); ok {
+		if got := headers["X-Codex-Beta-Features"]; got != nil {
+			t.Fatalf("published metadata beta features = %#v, want absent", got)
+		}
+	}
+}
+
 const (
 	codexLunaUserAgentForTest  = "codex-tui/0.144.1 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.1)"
 	codexLunaOriginatorForTest = "codex-tui"

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -385,6 +386,10 @@ func (s *FileTokenStore) readAuthFileFromScoped(scopedPath scopedAuthFilePath, p
 	if len(data) == 0 {
 		return nil, nil
 	}
+	data, err = s.sanitizeCodexAuthFile(scopedPath, path, data)
+	if err != nil {
+		return nil, err
+	}
 	metadata, err := cliproxyauth.DecodeAuthFileMetadata(data)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
@@ -406,6 +411,56 @@ func (s *FileTokenStore) readAuthFileFromScoped(scopedPath scopedAuthFilePath, p
 		UpdatedAt: info.ModTime(),
 	})
 	return auth, nil
+}
+
+// SanitizeCodexAuthFile removes request-scoped Codex features from a local
+// auth file while sharing the same write lock as token refresh persistence.
+func (s *FileTokenStore) SanitizeCodexAuthFile(path string) ([]byte, error) {
+	scopedPath, err := s.scopedPath(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := scopedPath.readFile()
+	if err != nil {
+		return nil, err
+	}
+	return s.sanitizeCodexAuthFile(scopedPath, path, data)
+}
+
+func (s *FileTokenStore) sanitizeCodexAuthFile(scopedPath scopedAuthFilePath, path string, data []byte) ([]byte, error) {
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, fmt.Errorf("unmarshal auth json: %w", err)
+	}
+	if _, changed := cliproxyauth.SanitizeCodexAuthMetadata(metadata); !changed {
+		return data, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// A token refresh may have completed after the initial read. Re-read while
+	// holding the store lock so cleanup never restores an older credential.
+	latest, err := scopedPath.readFile()
+	if err != nil {
+		return nil, fmt.Errorf("re-read auth json: %w", err)
+	}
+	latestMetadata := make(map[string]any)
+	if err = json.Unmarshal(latest, &latestMetadata); err != nil {
+		return nil, fmt.Errorf("unmarshal latest auth json: %w", err)
+	}
+	sanitized, changed := cliproxyauth.SanitizeCodexAuthMetadata(latestMetadata)
+	if !changed {
+		return latest, nil
+	}
+	if err = misc.WriteCredentialJSONAtomic(path, sanitized, ""); err != nil {
+		return nil, fmt.Errorf("persist sanitized auth json: %w", err)
+	}
+	cleaned, err := json.Marshal(sanitized)
+	if err != nil {
+		return nil, fmt.Errorf("marshal sanitized auth json: %w", err)
+	}
+	return append(cleaned, '\n'), nil
 }
 
 func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {

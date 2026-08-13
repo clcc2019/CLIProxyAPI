@@ -208,6 +208,31 @@ func TestDecodeAuthFileMetadataPreservesNestedAgentIdentityClientFeatures(t *tes
 	}
 }
 
+func TestDecodeAuthFileMetadataRemovesRemoteCompactionV2FromClientFeatures(t *testing.T) {
+	metadata, err := DecodeAuthFileMetadata([]byte(`{
+		"type": "codex",
+		"client_features": {
+			"headers": {
+				"X-Codex-Beta-Features": "feature-a,remote_compaction_v2"
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeAuthFileMetadata: %v", err)
+	}
+
+	features := metadata["client_features"].(map[string]any)
+	headers := features["headers"].(map[string]any)
+	if got := headers["X-Codex-Beta-Features"]; got != "feature-a" {
+		t.Fatalf("X-Codex-Beta-Features = %#v, want feature-a", got)
+	}
+
+	auth := NewAuthFromAuthFileMetadata(metadata, AuthFileProjectionOptions{ID: "codex.json"})
+	if got := auth.Attributes["header:X-Codex-Beta-Features"]; got != "feature-a" {
+		t.Fatalf("projected beta features = %q, want feature-a", got)
+	}
+}
+
 func TestDecodeAuthFileMetadataUnwrapsSingleSub2APIAgentIdentityExport(t *testing.T) {
 	metadata, err := DecodeAuthFileMetadata([]byte(`{
 		"type": "sub2api-data",
