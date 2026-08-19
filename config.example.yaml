@@ -246,6 +246,10 @@ image-stream-data-interval-timeout-seconds: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     request-scoped-errors: # optional: match upstream status and error body
+#       - status: 400
+#         match: ["context_window_exceeded"]
+#         action: "stop-and-cooldown" # stop, stop-and-cooldown, continue, or continue-and-cooldown
 #     pool-mode: false # optional: retry selected Codex API key errors 3 times before failover
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     headers:
@@ -268,6 +272,10 @@ image-stream-data-interval-timeout-seconds: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     request-scoped-errors: # optional: match upstream status and error body
+#       - status: 400
+#         match: ["maximum_context_length"]
+#         action: "stop"
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -324,6 +332,10 @@ image-stream-data-interval-timeout-seconds: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
+#     request-scoped-errors: # optional: match upstream status and error body
+#       - status: 400
+#         match: ["maximum_context_length"]
+#         action: "continue"
 #     pool-mode: false # optional: retry any selected provider error 3 times before pooled model/auth fallback
 #     headers:
 #       X-Custom-Header: "custom-value"

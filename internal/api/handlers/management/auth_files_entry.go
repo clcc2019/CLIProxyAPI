@@ -58,6 +58,9 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
+	if credits := codexAuthCreditsEntry(auth); credits != nil {
+		entry["credits"] = credits
+	}
 	if !opts.SkipRecentRequests {
 		if opts.RecentRequestSnapshotter != nil {
 			entry["recent_requests"] = opts.RecentRequestSnapshotter.Snapshot(auth)
@@ -205,6 +208,34 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 		entry["disable_cooling"] = disableCooling
 	}
 	return entry
+}
+
+func codexAuthCreditsEntry(auth *coreauth.Auth) gin.H {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || len(auth.RateLimits) == 0 {
+		return nil
+	}
+	snapshot, ok := auth.RateLimits["codex"]
+	if !ok || snapshot.Credits == nil {
+		for _, candidate := range auth.RateLimits {
+			if candidate.Credits != nil {
+				snapshot = candidate
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok || snapshot.Credits == nil {
+		return nil
+	}
+	credits := gin.H{
+		"has_credits": snapshot.Credits.HasCredits,
+		"unlimited":   snapshot.Credits.Unlimited,
+		"balance":     snapshot.Credits.Balance,
+	}
+	if !snapshot.UpdatedAt.IsZero() {
+		credits["updated_at"] = snapshot.UpdatedAt
+	}
+	return credits
 }
 
 func statAuthFileEntryPath(path string, opts authFileEntryBuildOptions) (os.FileInfo, error) {

@@ -149,6 +149,8 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				failed = true
 				streamResult := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false}
 				applyResultError(&streamResult, chunk.Err)
+				action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.runtimeConfigSnapshot())
+				applyRequestScopedActionToResult(action, okAction, &streamResult)
 				m.MarkResult(ctx, streamResult)
 			}
 			if !forward {
@@ -184,12 +186,16 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) directStreamResult(ctx context.Context, authID, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, release func()) *cliproxyexecutor.StreamResult {
+func (m *Manager) directStreamResult(ctx context.Context, authID, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, release func(), scopedAuth ...*Auth) *cliproxyexecutor.StreamResult {
 	var (
 		failed     bool
 		responseID string
 		finishOnce sync.Once
 	)
+	var auth *Auth
+	if len(scopedAuth) > 0 {
+		auth = scopedAuth[0]
+	}
 	observe := func(chunk cliproxyexecutor.StreamChunk) {
 		if len(chunk.Payload) > 0 {
 			if id := responseIDFromProviderPayload(chunk.Payload); id != "" {
@@ -200,6 +206,8 @@ func (m *Manager) directStreamResult(ctx context.Context, authID, provider, resu
 			failed = true
 			streamResult := Result{AuthID: authID, Provider: provider, Model: resultModel, Success: false}
 			applyResultError(&streamResult, chunk.Err)
+			action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.runtimeConfigSnapshot())
+			applyRequestScopedActionToResult(action, okAction, &streamResult)
 			m.MarkResult(ctx, streamResult)
 		}
 	}
@@ -284,7 +292,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					continue
 				}
 				result.RetryAfter = retryAfterFromError(errStream)
+				action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
+				applyRequestScopedActionToResult(action, okAction, &result)
 				m.MarkResult(ctx, result)
+				if okAction {
+					if isRequestScopedStop(action, okAction) {
+						return nil, wrapRequestStopError(errStream)
+					}
+					return nil, wrapRequestContinueError(errStream)
+				}
 				if isClaudeOverloadedFailure(provider, errStream) {
 					return nil, errStream
 				}
@@ -349,7 +365,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					logSameAuthClaudeOverloadRetry(ctx, auth, provider, resultModel, retryAttempt+1, transportRetries, bootstrapErr)
 					continue
 				}
+				action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
+				applyRequestScopedActionToResult(action, okAction, &result)
 				m.MarkResult(ctx, result)
+				if okAction {
+					if isRequestScopedStop(action, okAction) {
+						return nil, wrapRequestStopError(bootstrapErr)
+					}
+					return nil, wrapRequestContinueError(bootstrapErr)
+				}
 				if isClaudeOverloadedFailure(provider, bootstrapErr) {
 					return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 				}
@@ -394,7 +418,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			lease.HandOff()
 			if opts.DirectStream {
-				return m.directStreamResult(ctx, auth.ID, provider, resultModel, streamResult.Headers, buffered, remaining, lease.Finish), nil
+				return m.directStreamResult(ctx, auth.ID, provider, resultModel, streamResult.Headers, buffered, remaining, lease.Finish, auth), nil
 			}
 			authSnapshot := auth.Clone()
 			return m.wrapStreamResult(ctx, authSnapshot, provider, resultModel, streamResult.Headers, buffered, remaining, lease.Finish), nil

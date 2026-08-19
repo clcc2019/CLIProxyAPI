@@ -66,13 +66,15 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		base := strings.TrimSpace(ck.BaseURL)
 		id, token := idGen.Next("claude:apikey", key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:claude[%s]", token),
-			"api_key": key,
+			"source":                      fmt.Sprintf("config:claude[%s]", token),
+			"api_key":                     key,
+			coreauth.AttributeConfigIndex: strconv.Itoa(i),
 		}
 		metadata := map[string]any{}
 		if ck.DisableCooling {
 			metadata["disable_cooling"] = true
 		}
+		addRequestScopedErrorsToMetadata(ck.RequestScopedErrors, metadata)
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
@@ -122,13 +124,15 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		prefix := strings.TrimSpace(ck.Prefix)
 		id, token := idGen.Next("codex:apikey", key, ck.BaseURL)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:codex[%s]", token),
-			"api_key": key,
+			"source":                      fmt.Sprintf("config:codex[%s]", token),
+			"api_key":                     key,
+			coreauth.AttributeConfigIndex: strconv.Itoa(i),
 		}
 		metadata := map[string]any{}
 		if ck.DisableCooling {
 			metadata["disable_cooling"] = true
 		}
+		addRequestScopedErrorsToMetadata(ck.RequestScopedErrors, metadata)
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
@@ -194,15 +198,17 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, key, base, proxyURL)
 			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-				"base_url":     base,
-				"compat_name":  compat.Name,
-				"provider_key": providerName,
+				"source":                      fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":                    base,
+				"compat_name":                 compat.Name,
+				"provider_key":                providerName,
+				coreauth.AttributeConfigIndex: strconv.Itoa(i),
 			}
 			metadata := map[string]any{}
 			if disableCooling {
 				metadata["disable_cooling"] = true
 			}
+			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
@@ -237,15 +243,17 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, base)
 			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-				"base_url":     base,
-				"compat_name":  compat.Name,
-				"provider_key": providerName,
+				"source":                      fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":                    base,
+				"compat_name":                 compat.Name,
+				"provider_key":                providerName,
+				coreauth.AttributeConfigIndex: strconv.Itoa(i),
 			}
 			metadata := map[string]any{}
 			if disableCooling {
 				metadata["disable_cooling"] = true
 			}
+			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}

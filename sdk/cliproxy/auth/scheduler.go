@@ -4,6 +4,7 @@ import (
 	"context"
 	"hash/fnv"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2080,6 +2081,7 @@ func quotaSchedulingScore(auth *Auth, now time.Time) codexQuotaSchedulingScore {
 
 	result := codexQuotaSchedulingScore{rank: codexQuotaSchedulingUnknown}
 	foundWindow := false
+	foundCredits := false
 	_, hasAccountSnapshot := auth.RateLimits["codex"]
 	for limitID, snapshot := range auth.RateLimits {
 		// The background usage poll publishes the account-wide limit as "codex".
@@ -2090,6 +2092,10 @@ func quotaSchedulingScore(auth *Auth, now time.Time) codexQuotaSchedulingScore {
 		}
 		if snapshot.UpdatedAt.IsZero() || snapshot.UpdatedAt.After(now.Add(codexQuotaSchedulingClockSkew)) || now.Sub(snapshot.UpdatedAt) > codexQuotaSchedulingSnapshotTTL {
 			continue
+		}
+		creditsAvailable := codexCreditsUsable(snapshot.Credits)
+		if creditsAvailable {
+			foundCredits = true
 		}
 		for _, window := range []*RateLimitWindow{snapshot.Primary, snapshot.Secondary} {
 			if window == nil || window.ResetsAt == nil || window.UsedPercent < 0 || window.UsedPercent > 100 {
@@ -2102,6 +2108,9 @@ func quotaSchedulingScore(auth *Auth, now time.Time) codexQuotaSchedulingScore {
 			}
 			remainingPercent := 100 - window.UsedPercent
 			if remainingPercent <= 0.01 {
+				if creditsAvailable {
+					continue
+				}
 				return codexQuotaSchedulingScore{rank: codexQuotaSchedulingDepleted}
 			}
 			urgency := remainingPercent / remainingDuration.Hours()
@@ -2113,8 +2122,21 @@ func quotaSchedulingScore(auth *Auth, now time.Time) codexQuotaSchedulingScore {
 	}
 	if foundWindow {
 		result.rank = codexQuotaSchedulingUsable
+	} else if foundCredits {
+		result.rank = codexQuotaSchedulingUsable
 	}
 	return result
+}
+
+func codexCreditsUsable(credits *CreditsSnapshot) bool {
+	if credits == nil {
+		return false
+	}
+	if credits.Unlimited {
+		return true
+	}
+	balance, err := strconv.ParseFloat(strings.TrimSpace(credits.Balance), 64)
+	return err == nil && balance > 0
 }
 
 func quotaSchedulingScoreBetter(candidate, current codexQuotaSchedulingScore) bool {

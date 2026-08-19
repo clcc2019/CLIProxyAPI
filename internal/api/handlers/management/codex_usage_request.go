@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,7 +20,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
+const codexUsageDefaultURL = "https://chatgpt.com/backend-api/wham/usage"
+
+const codexRemainingBalanceDefaultURL = "https://chatgpt.com/backend-api/accounts/%s/remaining_balance"
+
+var codexUsageURL = codexUsageDefaultURL
+var codexRemainingBalanceURL = codexRemainingBalanceDefaultURL
 var codexUsageUserAgent = misc.CodexCLIUserAgent
 
 func (h *Handler) resolveCodexUsageAuth(c *gin.Context) (*coreauth.Auth, int, string) {
@@ -157,7 +163,21 @@ func (h *Handler) fetchCodexUsage(ctx context.Context, auth *coreauth.Auth) (gin
 	for attempt := 0; ; attempt++ {
 		payload, status, err := h.doCodexUsageRequest(requestCtx, client, auth, accessToken, accountID)
 		if err == nil {
+			if codexUsageMainQuotaExhausted(payload, time.Now()) &&
+				!codexUsageCreditsAvailable(payload) &&
+				accountID != "" &&
+				codexUsageRemainingBalanceAllowed(auth, payload) {
+				if balance, balanceStatus, balanceErr := h.fetchCodexRemainingBalance(requestCtx, client, auth, accessToken, accountID); balanceErr == nil {
+					mergeCodexRemainingBalance(payload, balance)
+				} else {
+					log.WithError(balanceErr).WithFields(log.Fields{
+						"auth_id": auth.ID,
+						"status":  balanceStatus,
+					}).Debug("failed to fetch codex remaining balance")
+				}
+			}
 			h.clearCodexUsageOutage(auth)
+			h.updateCodexRateLimitsFromUsage(ctx, auth, payload, time.Now())
 			return payload, status, nil
 		}
 		if ctx.Err() == nil && codexUsageTransientFailure(status, err) {
@@ -217,11 +237,29 @@ func codexUsageQuotaRecoverAt(payload gin.H, now time.Time) (time.Time, bool) {
 	return recoverAt, exhausted
 }
 
-// codexUsageQuotaState reports a main quota state only when at least one
-// applicable rate-limit window contains a numeric used_percent. The observed
+// codexUsageQuotaState reports a main quota state when an applicable rate-limit
+// window or a positive/unlimited credits balance is available. The observed
 // result lets callers distinguish confirmed headroom from an incomplete usage
 // payload, so a failed parse cannot clear a live cooldown.
 func codexUsageQuotaState(payload gin.H, now time.Time) (time.Time, bool, bool) {
+	if len(payload) == 0 {
+		return time.Time{}, false, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if codexUsageCreditsAvailable(payload) {
+		return time.Time{}, false, true
+	}
+	return codexUsageQuotaWindows(payload, now)
+}
+
+func codexUsageMainQuotaExhausted(payload gin.H, now time.Time) bool {
+	_, exhausted, observed := codexUsageQuotaWindows(payload, now)
+	return observed && exhausted
+}
+
+func codexUsageQuotaWindows(payload gin.H, now time.Time) (time.Time, bool, bool) {
 	if len(payload) == 0 {
 		return time.Time{}, false, false
 	}
@@ -272,13 +310,44 @@ func codexUsageQuotaState(payload gin.H, now time.Time) (time.Time, bool, bool) 
 	return time.Time{}, false, observed
 }
 
+func codexUsageCreditsAvailable(payload gin.H) bool {
+	credits, ok := codexUsageWindowMap(payload["credits"])
+	if !ok {
+		return false
+	}
+	if unlimited, ok := boolLikeValue(credits["unlimited"]); ok && unlimited {
+		return true
+	}
+	balance, ok := numberFromAny(credits["balance"])
+	return ok && balance > 0
+}
+
+func codexUsageRemainingBalanceAllowed(auth *coreauth.Auth, payload gin.H) bool {
+	if auth == nil {
+		return false
+	}
+	disableCooling, ok := auth.DisableCoolingOverride()
+	if !ok || !disableCooling {
+		return false
+	}
+	planType := strings.TrimSpace(codexUsagePlanType(auth))
+	if planType == "" {
+		planType = codexUsagePayloadPlanType(payload)
+	}
+	return planType != "" && !strings.EqualFold(planType, "free")
+}
+
 func codexUsagePayloadIsFreePlan(payload gin.H) bool {
+	return strings.EqualFold(codexUsagePayloadPlanType(payload), "free")
+}
+
+func codexUsagePayloadPlanType(payload gin.H) string {
 	for _, key := range []string{"plan_type", "planType", "chatgpt_plan_type", "chatgptPlanType"} {
 		if value := strings.TrimSpace(valueAsString(payload[key])); value != "" {
-			return strings.EqualFold(value, "free")
+			return value
 		}
 	}
-	return false
+	return ""
 }
 
 func codexUsageWindowMap(value any) (map[string]any, bool) {
@@ -375,6 +444,111 @@ func (h *Handler) doCodexUsageRequest(ctx context.Context, client *http.Client, 
 		return nil, resp.StatusCode, fmt.Errorf("failed to decode codex usage response: %w", err)
 	}
 	return payload, resp.StatusCode, nil
+}
+
+func (h *Handler) fetchCodexRemainingBalance(ctx context.Context, client *http.Client, auth *coreauth.Auth, accessToken, accountID string) (gin.H, int, error) {
+	if strings.TrimSpace(accountID) == "" {
+		return nil, 0, fmt.Errorf("codex chatgpt account id missing")
+	}
+	requestURL := codexRemainingBalanceRequestURL(accountID)
+	if requestURL == "" {
+		return nil, 0, fmt.Errorf("codex remaining balance URL missing")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	req.Header.Set("ChatGPT-Account-ID", accountID)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", codexUsageRequestUserAgent(h, auth))
+	if codexUsageFedramp(auth) {
+		req.Header.Set("X-OpenAI-Fedramp", "true")
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+	}
+	var resp *http.Response
+	if codexUsageIsAgentIdentity(auth) {
+		manager := h.authManagerSnapshot()
+		if manager == nil {
+			return nil, 0, fmt.Errorf("codex agent identity requires auth manager")
+		}
+		resp, err = manager.HttpRequest(ctx, auth, req)
+	} else {
+		resp, err = client.Do(req)
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, resp.StatusCode, fmt.Errorf("codex remaining balance request failed with status %d: %s", resp.StatusCode, truncateForLog(string(util.RedactSensitiveLogBytes(body)), 200))
+	}
+	payload := gin.H{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to decode codex remaining balance response: %w", err)
+	}
+	return payload, resp.StatusCode, nil
+}
+
+func codexRemainingBalanceRequestURL(accountID string) string {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return ""
+	}
+	target := strings.TrimSpace(codexRemainingBalanceURL)
+	if target == "" {
+		target = codexRemainingBalanceDefaultURL
+	}
+	if target == codexRemainingBalanceDefaultURL && codexUsageURL != codexUsageDefaultURL {
+		if parsed, err := url.Parse(codexUsageURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+			parsed.Path = "/backend-api/accounts/" + url.PathEscape(accountID) + "/remaining_balance"
+			parsed.RawPath = ""
+			parsed.RawQuery = ""
+			return parsed.String()
+		}
+		return codexUsageURL
+	}
+	accountPath := url.PathEscape(accountID)
+	if strings.Contains(target, "%s") {
+		return fmt.Sprintf(target, accountPath)
+	}
+	return strings.ReplaceAll(target, "{account_id}", accountPath)
+}
+
+func mergeCodexRemainingBalance(payload, balance gin.H) bool {
+	if len(payload) == 0 || len(balance) == 0 {
+		return false
+	}
+	value := strings.TrimSpace(valueAsString(balance["balance"]))
+	parsed, ok := numberFromAny(value)
+	if value == "" || !ok || parsed < 0 {
+		return false
+	}
+	credits, ok := codexUsageWindowMap(payload["credits"])
+	if !ok {
+		credits = gin.H{}
+	}
+	credits["has_credits"] = true
+	credits["unlimited"] = false
+	if unlimited, ok := boolLikeValue(balance["unlimited"]); ok {
+		credits["unlimited"] = unlimited
+	}
+	credits["balance"] = value
+	if details, exists := balance["expiring_balance_details"]; exists {
+		credits["expiring_balance_details"] = details
+		payload["expiring_balance_details"] = details
+	}
+	payload["credits"] = credits
+	payload["remaining_balance"] = value
+	return true
 }
 
 func codexUsageAccessToken(auth *coreauth.Auth) string {

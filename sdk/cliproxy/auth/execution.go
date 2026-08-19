@@ -43,6 +43,9 @@ func executeWithCooldown[T any](ctx context.Context, m *Manager, plan executionR
 		if errExecute == nil {
 			return result, nil
 		}
+		if isRequestStopError(errExecute) {
+			return zero, unwrapRequestStopError(errExecute)
+		}
 		lastErr = errExecute
 		wait, shouldRetry := m.shouldRetryAfterError(errExecute, attempt, plan.providers, model, plan.maxWait)
 		if !shouldRetry {
@@ -261,9 +264,9 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 // before failover moves on, which makes it the one place that sees the whole
 // retry chain. Recording here keeps the per-attempt history complete without
 // scattering bookkeeping across each protocol's error branches.
-func (state *mixedExecutionState) failCredential(credential *preparedMixedCredential, startedAt time.Time, err error) error {
+func (state *mixedExecutionState) failCredential(credential *preparedMixedCredential, startedAt time.Time, err error, forceFailover bool) error {
 	state.recordAttempt(credential, startedAt, err)
-	if isRequestInvalidError(err) {
+	if !forceFailover && isRequestInvalidError(err) {
 		return err
 	}
 	forceNewUpstreamSessionForNextCredential(&state.opts)
@@ -362,6 +365,7 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 		credentialStartedAt := time.Now()
 		poolModeRetries := m.apiKeyPoolModeRetries(credential.auth)
 		transportRetries := m.requestRetryLimitForAuth(credential.auth)
+		requestScopedContinue := false
 		for _, upstreamModel := range credential.models {
 			resultModel := m.stateModelForExecution(credential.auth, state.routeModel, upstreamModel, credential.pooled)
 			execReq := state.req
@@ -403,7 +407,20 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 					if ra := retryAfterFromError(errExec); ra != nil {
 						result.RetryAfter = ra
 					}
+					action, okAction := matchRequestScopedErrorAction(credential.auth, errExec, m.runtimeConfigSnapshot())
+					applyRequestScopedActionToResult(action, okAction, &result)
 					m.MarkResult(credential.ctx, result)
+					if okAction {
+						if isRequestScopedStop(action, okAction) {
+							return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
+						}
+						authErr = errExec
+						requestScopedContinue = true
+						if result.AuthScoped {
+							stopModelLoop = true
+						}
+						break
+					}
 					if isClaudeOverloadedFailure(credential.provider, errExec) {
 						return cliproxyexecutor.Response{}, errExec
 					}
@@ -418,6 +435,7 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 					if result.AuthScoped || isAuthWideResultError(result.Error) {
 						stopModelLoop = true
 					}
+					requestScopedContinue = false
 					break
 				}
 				m.MarkResult(credential.ctx, result)
@@ -429,7 +447,7 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 			}
 		}
 		if authErr != nil {
-			if errFailover := state.failCredential(credential, credentialStartedAt, authErr); errFailover != nil {
+			if errFailover := state.failCredential(credential, credentialStartedAt, authErr, requestScopedContinue); errFailover != nil {
 				return cliproxyexecutor.Response{}, errFailover
 			}
 		}
@@ -468,10 +486,20 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := credential.ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
+			if isRequestStopError(errStream) {
+				return nil, errStream
+			}
+			if isRequestContinueError(errStream) {
+				continueErr := unwrapRequestContinueError(errStream)
+				if errFailover := state.failCredential(credential, credentialStartedAt, continueErr, true); errFailover != nil {
+					return nil, errFailover
+				}
+				continue
+			}
 			if isClaudeOverloadedFailure(credential.provider, errStream) {
 				return nil, errStream
 			}
-			if errFailover := state.failCredential(credential, credentialStartedAt, errStream); errFailover != nil {
+			if errFailover := state.failCredential(credential, credentialStartedAt, errStream, false); errFailover != nil {
 				return nil, errFailover
 			}
 			continue

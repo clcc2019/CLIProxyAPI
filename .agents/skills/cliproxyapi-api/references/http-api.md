@@ -39,6 +39,7 @@ Unauthenticated utility routes are `GET|HEAD /healthz`, `GET|HEAD /readyz`, `GET
 | `POST` | `/v1/images/generations` | JSON image generation |
 | `POST` | `/v1/images/edits` | JSON or multipart edit |
 | `POST` | `/v1/images/variations` | Multipart variation |
+| `GET` | `/backend-api/codex/models` | Codex model catalog; requires `client_version` for the rich shape |
 | `GET`, `POST` | `/backend-api/codex/responses` | Codex CLI direct Responses alias/WebSocket |
 | `POST` | `/backend-api/codex/responses/compact` | Codex CLI direct compact alias |
 
@@ -104,7 +105,7 @@ Codex-compatible direct base URL:
 http://127.0.0.1:8317/backend-api/codex
 ```
 
-That base exposes `/responses` and `/responses/compact`; it is not a general OpenAI `/v1` base.
+That base exposes `/models`, `/responses`, and `/responses/compact`; it is not a general OpenAI `/v1` base.
 
 ## Anthropic Messages
 

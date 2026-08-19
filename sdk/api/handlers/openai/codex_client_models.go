@@ -17,6 +17,8 @@ type codexClientModelsPayload struct {
 	Models []map[string]any `json:"models"`
 }
 
+const codexClientContextWindow = 272000
+
 var (
 	codexClientModelTemplatesOnce sync.Once
 	codexClientModelTemplates     map[string]map[string]any
@@ -113,6 +115,10 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 		sanitizeCodexClientReasoningMetadata(entry)
 		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
+	}
+	for _, model := range result {
+		model["context_window"] = codexClientContextWindow
+		model["max_context_window"] = codexClientContextWindow
 	}
 
 	sort.SliceStable(result, func(i, j int) bool {

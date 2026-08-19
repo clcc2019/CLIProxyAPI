@@ -529,10 +529,7 @@ func (h *Handler) updateCodexRateLimitsFromUsage(ctx context.Context, auth *core
 	if manager == nil {
 		return
 	}
-	rateLimit, ok := codexUsageWindowMap(payload["rate_limit"])
-	if !ok {
-		return
-	}
+	rateLimit, _ := codexUsageWindowMap(payload["rate_limit"])
 	snapshot := coreauth.RateLimitSnapshot{
 		LimitID:   "codex",
 		PlanType:  strings.TrimSpace(valueAsString(payload["plan_type"])),
@@ -547,9 +544,37 @@ func (h *Handler) updateCodexRateLimitsFromUsage(ctx context.Context, auth *core
 	if secondary, ok := codexUsageWindowMap(rateLimit["secondary_window"]); ok {
 		snapshot.Secondary = codexUsageRateLimitWindow(secondary, now)
 	}
-	if snapshot.Primary != nil || snapshot.Secondary != nil {
+	snapshot.Credits = codexUsageCreditsSnapshot(payload)
+	if snapshot.Primary != nil || snapshot.Secondary != nil || snapshot.Credits != nil {
 		manager.UpdateRateLimits(ctx, auth.ID, []coreauth.RateLimitSnapshot{snapshot})
 	}
+}
+
+func codexUsageCreditsSnapshot(payload gin.H) *coreauth.CreditsSnapshot {
+	credits, ok := codexUsageWindowMap(payload["credits"])
+	if !ok {
+		return nil
+	}
+	_, hasCredits := credits["has_credits"]
+	_, hasUnlimited := credits["unlimited"]
+	balance := strings.TrimSpace(valueAsString(credits["balance"]))
+	if !hasCredits && !hasUnlimited && balance == "" {
+		return nil
+	}
+	snapshot := &coreauth.CreditsSnapshot{Balance: balance}
+	if parsed, ok := boolLikeValue(credits["has_credits"]); ok {
+		snapshot.HasCredits = parsed
+	}
+	if parsed, ok := boolLikeValue(credits["unlimited"]); ok {
+		snapshot.Unlimited = parsed
+	}
+	if snapshot.Unlimited {
+		snapshot.HasCredits = true
+	}
+	if parsed, ok := numberFromAny(balance); ok && parsed > 0 {
+		snapshot.HasCredits = true
+	}
+	return snapshot
 }
 
 func codexUsageRateLimitWindow(window map[string]any, now time.Time) *coreauth.RateLimitWindow {

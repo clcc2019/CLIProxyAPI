@@ -17,7 +17,7 @@ const (
 	// CodexCLIVersion is the upstream-compatible Codex CLI version embedded in
 	// the User-Agent and Version header. Keep this at or above the highest
 	// minimal_client_version in the Codex model catalog bundled with the proxy.
-	CodexCLIVersion = "0.144.6"
+	CodexCLIVersion = "0.148.0"
 
 	// CodexDefaultOriginator mirrors codex-rs's DEFAULT_ORIGINATOR. Changing this
 	// value will affect both the "Originator" header and the User-Agent token

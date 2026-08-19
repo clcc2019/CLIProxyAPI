@@ -65,7 +65,7 @@ Use the smallest endpoint matching the caller:
 | Responses WebSocket | `GET /v1/responses` | WebSocket upgrade |
 | Model discovery | `GET /v1/models` | response shape can depend on client headers |
 
-The current `internal/api/server.go` also registers Codex aliases under `/backend-api/codex/responses` and `/backend-api/codex/responses/compact`.
+The current `internal/api/server.go` also registers Codex aliases under `/backend-api/codex/models`, `/backend-api/codex/responses`, and `/backend-api/codex/responses/compact`.
 
 This build does not register `/api/provider/{provider}/...` or Gemini `/v1beta/...` routes. Do not emit those paths; use the registered `/v1/*` surfaces and a model returned by `/v1/models`.
 

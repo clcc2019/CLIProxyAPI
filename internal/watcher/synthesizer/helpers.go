@@ -118,3 +118,10 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 		attrs["header:"+key] = val
 	}
 }
+
+func addRequestScopedErrorsToMetadata(rules []config.RequestScopedErrorRule, metadata map[string]any) {
+	if len(rules) == 0 || metadata == nil {
+		return
+	}
+	metadata["request_scoped_errors"] = rules
+}
