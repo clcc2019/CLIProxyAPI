@@ -1481,7 +1481,9 @@ var (
 )
 
 type defaultAutoRefreshConfig struct {
-	intervalFactory func() time.Duration
+	intervalFactory  func() time.Duration
+	expiryLead       time.Duration
+	fallbackInterval time.Duration
 }
 
 func RegisterRefreshLeadProvider(provider string, factory func() *time.Duration) {
@@ -1505,6 +1507,18 @@ func RegisterDefaultAutoRefreshProviderWithInterval(provider string, intervalFac
 	}
 	defaultAutoRefreshMu.Lock()
 	defaultAutoRefreshProviders[provider] = defaultAutoRefreshConfig{intervalFactory: intervalFactory}
+	defaultAutoRefreshMu.Unlock()
+}
+
+func RegisterDefaultAutoRefreshProviderWithTiming(provider string, expiryLead, fallbackInterval time.Duration) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" || expiryLead <= 0 || fallbackInterval <= 0 {
+		return
+	}
+	defaultAutoRefreshMu.Lock()
+	cfg := defaultAutoRefreshProviders[provider]
+	cfg.expiryLead, cfg.fallbackInterval = expiryLead, fallbackInterval
+	defaultAutoRefreshProviders[provider] = cfg
 	defaultAutoRefreshMu.Unlock()
 }
 
@@ -1579,6 +1593,13 @@ func ProviderDefaultRefreshInterval(provider string) time.Duration {
 		return 0
 	}
 	return interval
+}
+
+func ProviderDefaultRefreshTiming(provider string) (time.Duration, time.Duration, bool) {
+	defaultAutoRefreshMu.RLock()
+	cfg, ok := defaultAutoRefreshProviders[strings.ToLower(strings.TrimSpace(provider))]
+	defaultAutoRefreshMu.RUnlock()
+	return cfg.expiryLead, cfg.fallbackInterval, ok && cfg.expiryLead > 0 && cfg.fallbackInterval > 0
 }
 
 func ProviderDefaultAutoRefresh(provider string) bool {

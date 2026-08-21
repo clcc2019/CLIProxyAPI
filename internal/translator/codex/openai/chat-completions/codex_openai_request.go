@@ -701,7 +701,7 @@ func shortenNameIfNeeded(name string) string {
 	return codexcommon.ShortenNameIfNeeded(name)
 }
 
-// buildShortNameMap generates unique short names (<=64) for the given list of names.
+// buildShortNameMap generates unique short names within the shared Codex limit.
 func buildShortNameMap(names []string) map[string]string {
 	return codexcommon.BuildShortNameMap(names)
 }

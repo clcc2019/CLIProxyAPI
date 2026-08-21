@@ -1427,6 +1427,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	codexApplyForcedUpstreamSessionHeaders(ctx, wsHeaders)
 	codexApplyModelHeaderOverrides(wsHeaders, baseModel)
 	codexApplyResponsesLiteHeader(wsHeaders, baseModel, auth)
+	codexApplyRoutingHintHeader(wsHeaders, auth, body)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(wsHeaders, responsesAPIClientMetadata)
 	turnStateScope := trimHeaderValue(wsHeaders, codexHeaderTurnMetadata)
 	if explicitTurnMetadata != "" {
@@ -2033,6 +2034,9 @@ func codexWebsocketDeltaToolOutputsAnchorable(previousInput [][]byte, responseOu
 		if itemType == "tool_search_output" && codexWebsocketToolSearchOutputCanStandAlone(item) {
 			continue
 		}
+		if itemType == "function_call_output" && strings.TrimSpace(gjson.GetBytes(item, "name").String()) != "" {
+			continue
+		}
 		needsAnchor = true
 		break
 	}
@@ -2067,6 +2071,9 @@ func codexWebsocketDeltaToolOutputsAnchorable(previousInput [][]byte, responseOu
 			continue
 		}
 		if itemType == "tool_search_output" && codexWebsocketToolSearchOutputCanStandAlone(item) {
+			continue
+		}
+		if itemType == "function_call_output" && strings.TrimSpace(gjson.GetBytes(item, "name").String()) != "" {
 			continue
 		}
 		if callID == "" {
@@ -3192,8 +3199,10 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 		turnID:         uuid.NewString(),
 		sandbox:        codexDefaultSandboxTag,
 		windowID:       trimHeaderValue(headers, codexHeaderWindowID),
+		contextID:      codexContextWindowID(trimHeaderValue(headers, codexHeaderWindowID)),
 	})
 	codexEnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
+	codexEnsureHeader(headers, ginHeaders, codexHeaderInferenceCallID, "")
 	codexSetOriginatorHeader(headers, identity.originator)
 	apiKeyAuth := codexIsAPIKeyAuth(auth)
 	if accountID := codexAccountID(auth, apiKeyAuth); accountID != "" {
@@ -3210,6 +3219,7 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	if codexIsAgentIdentityAuth(auth) && authorization != "" {
 		codexSetSingleHeaderValue(headers, "Authorization", authorization)
 	}
+	codexApplyResidencyHeader(headers, profileHeaders, cfg)
 	codexApplyRequestScopedRemoteCompactionV2(headers, requestRemoteCompactionV2)
 	return headers
 }

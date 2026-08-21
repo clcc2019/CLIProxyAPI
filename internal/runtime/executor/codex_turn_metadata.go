@@ -30,22 +30,30 @@ const (
 )
 
 var codexResponsesAPIClientMetadataReservedKeys = map[string]struct{}{
-	"session_id":                 {},
-	"thread_id":                  {},
-	"turn_id":                    {},
-	"installation_id":            {},
-	"turn_started_at_unix_ms":    {},
-	"forked_from_thread_id":      {},
-	"parent_thread_id":           {},
-	"parent_turn_id":             {},
-	"subagent_kind":              {},
-	"thread_source":              {},
-	"sandbox":                    {},
-	"workspaces":                 {},
-	"code_mode_tool_names":       {},
-	codexRequestKindMetadataPath: {},
-	codexCompactionMetadataPath:  {},
-	codexWindowIDMetadataPath:    {},
+	"session_id":                     {},
+	"thread_id":                      {},
+	"agent_name":                     {},
+	"turn_id":                        {},
+	"installation_id":                {},
+	"turn_started_at_unix_ms":        {},
+	"forked_from_thread_id":          {},
+	"parent_thread_id":               {},
+	"parent_turn_id":                 {},
+	"root_turn_id":                   {},
+	"subagent_kind":                  {},
+	"thread_source":                  {},
+	"sandbox":                        {},
+	"sandbox_mode":                   {},
+	"auto_review_enabled":            {},
+	"node_repl_auto_review_required": {},
+	"node_repl_disabled":             {},
+	"workspaces":                     {},
+	"code_mode_tool_names":           {},
+	"tool_namespaces_info":           {},
+	codexRequestKindMetadataPath:     {},
+	codexCompactionMetadataPath:      {},
+	codexWindowIDMetadataPath:        {},
+	"context_window_id":              {},
 }
 
 var codexResponsesAPIClientMetadataTransportKeys = map[string]struct{}{
@@ -71,6 +79,7 @@ type codexTurnMetadata struct {
 	TurnID             string `json:"turn_id,omitempty"`
 	Sandbox            string `json:"sandbox,omitempty"`
 	WindowID           string `json:"window_id,omitempty"`
+	ContextWindowID    string `json:"context_window_id,omitempty"`
 	StartedAtMS        int64  `json:"turn_started_at_unix_ms,omitempty"`
 }
 
@@ -86,6 +95,7 @@ type codexTurnMetadataDefaults struct {
 	turnID                 string
 	sandbox                string
 	windowID               string
+	contextID              string
 	turnStartedAtUnixMilli int64
 }
 
@@ -97,6 +107,7 @@ func codexEnsureTurnMetadataHeader(target http.Header, source http.Header, defau
 	codexFillTurnMetadataRequestKindDefault(target, source, &defaults)
 	if value := firstNonEmptyHeaderValue(target, source, codexHeaderTurnMetadata); value != "" {
 		updated := codexAugmentTurnMetadataHeader(value, defaults)
+		updated = codexSetTurnMetadataString(updated, "context_window_id", defaults.contextID, false)
 		updated = codexApplyInstallationIDToTurnMetadata(updated, defaults.installationID)
 		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 		return
@@ -115,6 +126,7 @@ func codexEnsureTurnMetadataHeader(target http.Header, source http.Header, defau
 		defaults.installationID,
 		defaults.turnStartedAtUnixMilli,
 	)
+	updated = codexSetTurnMetadataString(updated, "context_window_id", defaults.contextID, false)
 	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 }
 
@@ -128,6 +140,7 @@ func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header
 		updated := codexAugmentTurnMetadataHeader(value, defaults)
 		updated = codexSetTurnMetadataString(updated, codexRequestKindMetadataPath, defaults.requestKind, true)
 		updated = codexSetTurnMetadataString(updated, codexWindowIDMetadataPath, defaults.windowID, true)
+		updated = codexSetTurnMetadataString(updated, "context_window_id", defaults.contextID, false)
 		updated = codexApplyInstallationIDToTurnMetadata(updated, defaults.installationID)
 		updated = codexAugmentCompactionMetadata(updated, target, source)
 		codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
@@ -147,6 +160,7 @@ func codexEnsureCompactTurnMetadataHeader(target http.Header, source http.Header
 		defaults.installationID,
 		defaults.turnStartedAtUnixMilli,
 	)
+	updated = codexSetTurnMetadataString(updated, "context_window_id", defaults.contextID, false)
 	updated = codexAugmentCompactionMetadata(updated, target, source)
 	codexSetSingleHeaderValue(target, codexHeaderTurnMetadata, updated)
 }
@@ -194,6 +208,14 @@ func codexDefaultTurnMetadataHeader(sessionID string) string {
 		"",
 		0,
 	)
+}
+
+func codexContextWindowID(windowID string) string {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" {
+		return ""
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(windowID)).String()
 }
 
 func codexBuildTurnMetadataHeader(requestKind string, sessionID string, threadID string, forkedFromThreadID string, parentThreadID string, subagentKind string, threadSource string, turnID string, sandbox string, windowID string, turnStartedAtUnixMilli int64) string {

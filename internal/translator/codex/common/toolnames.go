@@ -11,7 +11,7 @@ import (
 // ShortNameLimit is the maximum length the upstream Codex backend accepts for
 // tool names. It is also exported so translator-specific helpers can derive
 // additional sizing rules from the same constant.
-const ShortNameLimit = 64
+const ShortNameLimit = 128
 
 // ShortenNameIfNeeded applies the tool-name shortening rule for a single name.
 // It preserves the "mcp__" prefix convention when present; otherwise it simply

@@ -149,12 +149,11 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 	)
 }
 
-func (s *Service) syncCoreAutoRefresh() {
+func (s *Service) syncCoreAutoRefresh(ctx context.Context) {
 	if s == nil || s.coreManager == nil {
 		return
 	}
-	s.coreManager.StopAutoRefresh()
-	log.Info("core auth auto-refresh disabled; credentials refresh only from explicit management actions")
+	s.coreManager.StartAutoRefresh(ctx, 0)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -1014,7 +1013,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// Prefer core auth manager auto refresh if available.
-	s.syncCoreAutoRefresh()
+	s.syncCoreAutoRefresh(ctx)
 
 	select {
 	case <-ctx.Done():

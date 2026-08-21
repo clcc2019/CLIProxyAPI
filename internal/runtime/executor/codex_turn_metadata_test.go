@@ -96,6 +96,7 @@ func TestCodexEnsureTurnMetadataHeaderAugmentsClientHeader(t *testing.T) {
 		turnID:                 "turn-generated",
 		sandbox:                codexDefaultSandboxTag,
 		windowID:               "window-1",
+		contextID:              codexContextWindowID("window-1"),
 		turnStartedAtUnixMilli: 1700000000123,
 	})
 
@@ -114,6 +115,7 @@ func TestCodexEnsureTurnMetadataHeaderAugmentsClientHeader(t *testing.T) {
 		"turn_id":               "turn-client",
 		"sandbox":               "danger-full-access",
 		"window_id":             "window-1",
+		"context_window_id":     codexContextWindowID("window-1"),
 	} {
 		if got, _ := parsed[key].(string); got != want {
 			t.Fatalf("%s = %q, want %q in %s", key, got, want, headers.Get(codexHeaderTurnMetadata))
@@ -121,6 +123,16 @@ func TestCodexEnsureTurnMetadataHeaderAugmentsClientHeader(t *testing.T) {
 	}
 	if got, _ := parsed["turn_started_at_unix_ms"].(float64); int64(got) != 1700000000123 {
 		t.Fatalf("turn_started_at_unix_ms = %.0f, want %d", got, int64(1700000000123))
+	}
+}
+
+func TestCodexContextWindowIDIsStablePerWindow(t *testing.T) {
+	first := codexContextWindowID("thread-1:0")
+	if first == "" || first != codexContextWindowID("thread-1:0") {
+		t.Fatalf("context window id is not stable: %q", first)
+	}
+	if first == codexContextWindowID("thread-1:1") {
+		t.Fatal("context window id did not change after window advance")
 	}
 }
 
@@ -196,17 +208,24 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 		"workspace_kind":                          "project",
 		"session_id":                              "client-session",
 		"thread_id":                               "client-thread",
+		"agent_name":                              "client-agent",
 		"turn_id":                                 "client-turn",
 		"installation_id":                         "client-install",
 		"turn_started_at_unix_ms":                 "client-start",
 		"forked_from_thread_id":                   "client-fork",
 		"parent_thread_id":                        "client-parent",
 		"parent_turn_id":                          "client-parent-turn",
+		"root_turn_id":                            "client-root-turn",
 		"subagent_kind":                           "client-subagent",
 		"thread_source":                           "client-source",
 		"sandbox":                                 "client-sandbox",
+		"sandbox_mode":                            "client-sandbox-mode",
+		"auto_review_enabled":                     "client-auto-review",
+		"node_repl_auto_review_required":          "client-node-review",
+		"node_repl_disabled":                      "client-node-disabled",
 		"workspaces":                              "client-workspaces",
 		"code_mode_tool_names":                    "client-tools",
+		"tool_namespaces_info":                    "client-tool-namespaces",
 		codexRequestKindMetadataPath:              "client-kind",
 		codexCompactionMetadataPath:               "client-compaction",
 		codexWindowIDMetadataPath:                 "client-window",
@@ -245,9 +264,16 @@ func TestCodexMergeResponsesAPIClientMetadataKeepsReservedTurnFields(t *testing.
 	for _, key := range []string{
 		codexCompactionMetadataPath,
 		"installation_id",
+		"agent_name",
 		"parent_turn_id",
+		"root_turn_id",
+		"sandbox_mode",
+		"auto_review_enabled",
+		"node_repl_auto_review_required",
+		"node_repl_disabled",
 		"workspaces",
 		"code_mode_tool_names",
+		"tool_namespaces_info",
 		codexClientMetadataInstallationID,
 		codexWSClientMetadataTraceparent,
 		codexWSClientMetadataResponsesLite,

@@ -185,6 +185,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	codexApplyForcedUpstreamSessionHeaders(ctx, prepared.httpReq.Header)
 	codexApplyModelHeaderOverrides(prepared.httpReq.Header, baseModel)
 	codexApplyResponsesLiteHeader(prepared.httpReq.Header, baseModel, auth)
+	codexApplyRoutingHintHeader(prepared.httpReq.Header, auth, prepared.body)
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)
 	if requestKind != codexFinalUpstreamCompact {
 		prepared.body = codexApplyHTTPClientMetadataWithSourceAndPromptCacheKey(prepared.body, prepared.httpReq.Header, profileHeaders, auth, e.cfg, prepared.promptCacheID)

@@ -22,6 +22,11 @@ type CodexAuthenticator struct {
 	CallbackPort int
 }
 
+const (
+	codexRefreshExpiryLead       = 5 * time.Minute
+	codexRefreshFallbackInterval = 8 * 24 * time.Hour
+)
+
 // NewCodexAuthenticator constructs a Codex authenticator with default settings.
 func NewCodexAuthenticator() *CodexAuthenticator {
 	return &CodexAuthenticator{CallbackPort: 1455}
@@ -32,7 +37,7 @@ func (a *CodexAuthenticator) Provider() string {
 }
 
 func (a *CodexAuthenticator) RefreshLead() *time.Duration {
-	return new(5 * 24 * time.Hour)
+	return new(codexRefreshExpiryLead)
 }
 
 func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {

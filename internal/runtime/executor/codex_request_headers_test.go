@@ -44,6 +44,43 @@ func TestApplyCodexHeadersOmitsEmptyAuthorizationToken(t *testing.T) {
 	}
 }
 
+func TestCodexHeadersForwardInferenceCallID(t *testing.T) {
+	const callID = "6cab5691-b69d-46f6-b7b1-2fef9309d795"
+	ctx := contextWithGinHeaders(map[string]string{codexHeaderInferenceCallID: callID})
+	if got := codexGinHeadersFromContext(ctx).Get(codexHeaderInferenceCallID); got != callID {
+		t.Fatalf("inbound inference call ID = %q, want %q", got, callID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, nil, "", true, nil)
+	if got := req.Header.Get(codexHeaderInferenceCallID); got != callID {
+		t.Fatalf("HTTP inference call ID = %q, want %q", got, callID)
+	}
+
+	wsHeaders := applyCodexWebsocketHeaders(ctx, nil, nil, "", nil)
+	if got := wsHeaders.Get(codexHeaderInferenceCallID); got != callID {
+		t.Fatalf("WebSocket inference call ID = %q, want %q", got, callID)
+	}
+}
+
+func TestCodexApplyRoutingHintHeader(t *testing.T) {
+	oauth := &cliproxyauth.Auth{Attributes: map[string]string{"auth_kind": "oauth"}}
+	headers := http.Header{}
+	codexApplyRoutingHintHeader(headers, oauth, []byte(`{"model":"gpt-5.6-sol","service_tier":"priority"}`))
+	if got := headers.Get(codexHeaderRoutingHint); got != "model=gpt-5.6-sol;tier=priority" {
+		t.Fatalf("routing hint = %q", got)
+	}
+
+	headers = http.Header{}
+	codexApplyRoutingHintHeader(headers, &cliproxyauth.Auth{Attributes: map[string]string{"auth_kind": "apikey", "api_key": "sk-test"}}, []byte(`{"model":"gpt-5.6-sol"}`))
+	if got := headers.Get(codexHeaderRoutingHint); got != "" {
+		t.Fatalf("API-key routing hint = %q, want empty", got)
+	}
+}
+
 func TestApplyCodexHeadersAllowsCustomAuthorizationWithoutToken(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {

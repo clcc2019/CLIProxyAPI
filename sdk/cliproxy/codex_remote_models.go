@@ -55,7 +55,8 @@ func (s *Service) refreshCodexRemoteCatalogWithETag(ctx context.Context, auth *c
 	}
 	responseETag = strings.TrimSpace(responseETag)
 	baseURL := codexServiceBaseURL(auth)
-	sourceKey := codexRemoteCatalogSourceKey(auth, baseURL)
+	residency := s.codexRemoteCatalogResidency(auth)
+	sourceKey := codexRemoteCatalogSourceKey(auth, baseURL, residency)
 	now := time.Now()
 	if cached, ok := s.codexRemoteCatalogs.Load(auth.ID); ok {
 		if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) && (responseETag == "" || entry.etag == responseETag) {
@@ -95,6 +96,9 @@ func (s *Service) refreshCodexRemoteCatalogWithETag(ctx context.Context, auth *c
 		req.Header.Set("User-Agent", misc.CodexCLIUserAgent)
 		req.Header.Set("Version", misc.CodexCLIVersion)
 		req.Header.Set("Originator", misc.CodexCLIOriginator)
+		if residency != "" {
+			req.Header.Set(misc.CodexResidencyHeader, residency)
+		}
 		if accountID := codexServiceAccountID(auth); accountID != "" {
 			req.Header.Set("ChatGPT-Account-ID", accountID)
 		}
@@ -151,7 +155,7 @@ func (s *Service) observeCodexResponseMetadata(_ context.Context, auth *coreauth
 	}
 
 	baseURL := codexServiceBaseURL(auth)
-	sourceKey := codexRemoteCatalogSourceKey(auth, baseURL)
+	sourceKey := codexRemoteCatalogSourceKey(auth, baseURL, s.codexRemoteCatalogResidency(auth))
 	if cached, ok := s.codexRemoteCatalogs.Load(auth.ID); ok {
 		if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(time.Now(), sourceKey) && entry.etag == etag {
 			entry.fetchedAt = time.Now()
@@ -201,7 +205,7 @@ func (s *Service) codexModelsFromRemoteCatalog(auth *coreauth.Auth, fallback []*
 		return fallback
 	}
 	entry, ok := cached.(codexRemoteCatalogCacheEntry)
-	sourceKey := codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth))
+	sourceKey := codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), s.codexRemoteCatalogResidency(auth))
 	if !ok || !entry.fresh(time.Now(), sourceKey) {
 		return fallback
 	}
@@ -222,23 +226,45 @@ func codexServiceBaseURL(auth *coreauth.Auth) string {
 	return "https://chatgpt.com/backend-api/codex"
 }
 
-func codexRemoteCatalogSourceKey(auth *coreauth.Auth, baseURL string) string {
+func codexRemoteCatalogSourceKey(auth *coreauth.Auth, baseURL, residency string) string {
+	baseURL = strings.TrimSpace(baseURL) + "\x00residency:" + strings.TrimSpace(residency)
 	accountID := codexServiceAccountID(auth)
 	if accountID != "" {
-		return strings.TrimSpace(baseURL) + "\x00account:" + accountID
+		return baseURL + "\x00account:" + accountID
 	}
 	if codexServiceAuthIsAgentIdentity(auth) {
 		runtimeID := codexServiceMetadataString(auth, "agent_runtime_id", "agentRuntimeId", "agentRuntimeID")
 		taskID := codexServiceMetadataString(auth, "task_id", "taskId")
 		digest := sha256.Sum256([]byte(runtimeID + "\x00" + taskID))
-		return strings.TrimSpace(baseURL) + "\x00agent:" + fmt.Sprintf("%x", digest)
+		return baseURL + "\x00agent:" + fmt.Sprintf("%x", digest)
 	}
 	token := codexServiceAccessToken(auth)
 	if token == "" {
-		return strings.TrimSpace(baseURL)
+		return baseURL
 	}
 	digest := sha256.Sum256([]byte(token))
-	return strings.TrimSpace(baseURL) + "\x00token:" + fmt.Sprintf("%x", digest)
+	return baseURL + "\x00token:" + fmt.Sprintf("%x", digest)
+}
+
+func (s *Service) codexRemoteCatalogResidency(auth *coreauth.Auth) string {
+	s.cfgMu.RLock()
+	configured := ""
+	if s.cfg != nil {
+		configured = s.cfg.CodexHeaderDefaults.Residency
+	}
+	s.cfgMu.RUnlock()
+	if residency := misc.ResolveCodexResidency(configured); residency != "" {
+		return residency
+	}
+	if auth == nil {
+		return ""
+	}
+	for name, value := range coreauth.ExtractCustomHeadersFromMetadata(auth.Metadata) {
+		if strings.EqualFold(name, misc.CodexResidencyHeader) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func appendCodexLocalAliases(models, fallback []*ModelInfo) []*ModelInfo {

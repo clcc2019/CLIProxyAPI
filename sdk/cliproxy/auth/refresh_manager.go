@@ -190,6 +190,9 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	}
 
 	provider := strings.ToLower(a.Provider)
+	if dueAt, ok := providerRefreshDueAt(provider, now, lastRefresh, expiry, hasExpiry); ok {
+		return !now.Before(dueAt)
+	}
 	lead := ProviderRefreshLead(provider, a.Runtime)
 	if lead == nil {
 		return false
@@ -207,6 +210,20 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return now.Sub(lastRefresh) >= *lead
 	}
 	return true
+}
+
+func providerRefreshDueAt(provider string, now, lastRefresh, expiry time.Time, hasExpiry bool) (time.Time, bool) {
+	expiryLead, fallbackInterval, ok := ProviderDefaultRefreshTiming(provider)
+	if !ok {
+		return time.Time{}, false
+	}
+	if hasExpiry && !expiry.IsZero() {
+		return expiry.Add(-expiryLead), true
+	}
+	if lastRefresh.IsZero() {
+		return now, true
+	}
+	return lastRefresh.Add(fallbackInterval), true
 }
 
 func authRefreshSuppressed(auth *Auth) bool {

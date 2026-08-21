@@ -1269,6 +1269,18 @@ func TestNormalizeResponsesWebsocketRequestAppend(t *testing.T) {
 	}
 }
 
+func TestRepairResponsesToolCallsPreservesStandaloneNamedFunctionOutput(t *testing.T) {
+	raw := `[{"type":"function_call_output","name":"notifications","namespace":"slack","output":"mentioned"}]`
+
+	got, err := repairResponsesToolCallsArray(nil, nil, "", raw, false)
+	if err != nil {
+		t.Fatalf("repairResponsesToolCallsArray() error = %v", err)
+	}
+	if gotName := gjson.Get(got, "0.name").String(); gotName != "notifications" {
+		t.Fatalf("name = %q, want notifications; output=%s", gotName, got)
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestAppendWithoutCreate(t *testing.T) {
 	raw := []byte(`{"type":"response.append","input":[]}`)
 

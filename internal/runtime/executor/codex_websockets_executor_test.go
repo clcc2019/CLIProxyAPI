@@ -1518,6 +1518,13 @@ func TestBuildCodexIncrementalWebsocketRequestBodySkipsUnanchoredToolOutput(t *t
 	}
 }
 
+func TestCodexWebsocketDeltaAllowsStandaloneNamedFunctionOutput(t *testing.T) {
+	named := []byte(`{"type":"function_call_output","name":"notifications","namespace":"slack","output":"mentioned"}`)
+	if !codexWebsocketDeltaToolOutputsAnchorable(nil, nil, [][]byte{named}) {
+		t.Fatal("standalone named function output should not require a call anchor")
+	}
+}
+
 func TestBuildCodexIncrementalWebsocketRequestBodyAllowsToolOutputAnchoredInPreviousResponse(t *testing.T) {
 	const (
 		userItem1  = `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`

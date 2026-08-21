@@ -419,6 +419,7 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 	type repairItemMeta struct {
 		raw       string
 		callID    string
+		name      string
 		itemType  string
 		execution string
 		isCall    bool
@@ -440,6 +441,7 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		meta := repairItemMeta{
 			raw:       itemRaw,
 			callID:    strings.TrimSpace(item.Get("call_id").String()),
+			name:      strings.TrimSpace(item.Get("name").String()),
 			itemType:  itemType,
 			execution: strings.TrimSpace(item.Get("execution").String()),
 			isCall:    isResponsesToolCallType(itemType),
@@ -491,9 +493,10 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 				continue
 			}
 			if callID == "" {
-				// Upstream rejects ordinary client-side outputs without a call_id;
-				// tool-search outputs were handled above because Codex allows
-				// call_id-less search results to stand alone.
+				if meta.itemType == "function_call_output" && meta.name != "" {
+					appendFiltered(meta, item)
+					continue
+				}
 				changed = true
 				continue
 			}

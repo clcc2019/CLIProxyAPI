@@ -23,6 +23,8 @@ const (
 	codexHeaderCompactionImpl                   = "X-Codex-Compaction-Implementation"
 	codexHeaderCompactionPhase                  = "X-Codex-Compaction-Phase"
 	codexHeaderCompactionStrategy               = "X-Codex-Compaction-Strategy"
+	codexHeaderInferenceCallID                  = "X-Codex-Inference-Call-Id"
+	codexHeaderRoutingHint                      = "X-Codex-Routing-Hint"
 	codexHeaderTurnState                        = "X-Codex-Turn-State"
 	codexHeaderTurnMetadata                     = "X-Codex-Turn-Metadata"
 	codexHeaderOAIAttestation                   = "X-OAI-Attestation"
@@ -124,6 +126,7 @@ func codexKnownCanonicalHeaderKey(key string) string {
 		codexHeaderCompactionReason,
 		codexHeaderCompactionStrategy,
 		codexHeaderCompactionTrigger,
+		codexHeaderRoutingHint,
 		codexHeaderInstallationID,
 		codexHeaderOfficialSessionID,
 		codexHeaderOfficialThreadID,

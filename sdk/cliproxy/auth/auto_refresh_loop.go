@@ -431,6 +431,12 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	}
 
 	provider := strings.ToLower(auth.Provider)
+	if dueAt, ok := providerRefreshDueAt(provider, now, lastRefresh, expiry, hasExpiry); ok {
+		if !dueAt.After(now) {
+			return now, true
+		}
+		return dueAt, true
+	}
 	lead := ProviderRefreshLead(provider, auth.Runtime)
 	if lead == nil {
 		return time.Time{}, false

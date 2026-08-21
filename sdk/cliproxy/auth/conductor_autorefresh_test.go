@@ -261,6 +261,18 @@ func TestManager_Register_DefaultProviderAppliesMissingRefreshIntervalWithoutDel
 	}
 }
 
+func TestProviderRefreshDueAtUsesSeparateExpiryAndFallbackTiming(t *testing.T) {
+	RegisterDefaultAutoRefreshProviderWithTiming("timed-provider", 5*time.Minute, 8*24*time.Hour)
+	now := time.Now()
+
+	if dueAt, ok := providerRefreshDueAt("timed-provider", now, now.Add(-7*24*time.Hour), time.Time{}, false); !ok || !dueAt.Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("fallback dueAt = %s, ok=%t", dueAt, ok)
+	}
+	if dueAt, ok := providerRefreshDueAt("timed-provider", now, time.Time{}, now.Add(6*time.Minute), true); !ok || !dueAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("expiry dueAt = %s, ok=%t", dueAt, ok)
+	}
+}
+
 func TestManager_RefreshAuth_PreservesExecutorNextRefreshAfter(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	next := time.Now().UTC().Add(7 * time.Minute).Truncate(time.Second)

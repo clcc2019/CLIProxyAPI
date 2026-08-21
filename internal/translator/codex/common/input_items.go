@@ -36,6 +36,7 @@ type normalizedResponseInputItem struct {
 	raw       []byte
 	itemType  string
 	callID    string
+	name      string
 	execution string
 }
 
@@ -146,6 +147,7 @@ func normalizeFullTranscriptResponseInputItems(rawJSON []byte, preserveCompactio
 			raw:       itemRaw,
 			itemType:  strings.TrimSpace(normalized.Get("type").String()),
 			callID:    strings.TrimSpace(normalized.Get("call_id").String()),
+			name:      strings.TrimSpace(normalized.Get("name").String()),
 			execution: strings.TrimSpace(normalized.Get("execution").String()),
 		})
 	}
@@ -274,7 +276,7 @@ func isOrphanResponseInputOutput(
 	switch item.itemType {
 	case "function_call_output":
 		if item.callID == "" {
-			return true
+			return item.name == ""
 		}
 		if _, ok := functionCallIDs[item.callID]; ok {
 			return false
@@ -359,6 +361,15 @@ func normalizeMCPToolCallOutput(itemRaw []byte) ([]byte, bool) {
 		return itemRaw, false
 	}
 	wallTimeHeader := mcpToolOutputWallTimeHeader(itemRaw, output)
+	content := output.Get("content")
+	if mcpContentHasEncryptedText(content) {
+		contentItems, ok := mcpContentArrayToFunctionOutputItems(content, wallTimeHeader)
+		if !ok {
+			return itemRaw, false
+		}
+		updated, err := sjson.SetRawBytes(itemRaw, "output", contentItems)
+		return updated, err == nil
+	}
 
 	if structured := firstExisting(output, "structuredContent", "structured_content"); structured.Exists() && structured.Type != gjson.Null {
 		text, ok := compactJSONStringFromResult(structured)
@@ -368,7 +379,6 @@ func normalizeMCPToolCallOutput(itemRaw []byte) ([]byte, bool) {
 		return setFunctionCallOutputText(itemRaw, mcpToolOutputTextWithHeader(wallTimeHeader, text))
 	}
 
-	content := output.Get("content")
 	if !content.IsArray() {
 		text, ok := compactJSONStringFromResult(output)
 		if !ok {
@@ -396,21 +406,27 @@ func setFunctionCallOutputText(itemRaw []byte, text string) ([]byte, bool) {
 
 func mcpContentArrayToFunctionOutputItems(content gjson.Result, wallTimeHeader string) ([]byte, bool) {
 	type outputItem struct {
-		Type     string `json:"type"`
-		Text     string `json:"text,omitempty"`
-		ImageURL string `json:"image_url,omitempty"`
-		Detail   string `json:"detail,omitempty"`
+		Type             string `json:"type"`
+		Text             string `json:"text,omitempty"`
+		EncryptedContent string `json:"encrypted_content,omitempty"`
+		ImageURL         string `json:"image_url,omitempty"`
+		Detail           string `json:"detail,omitempty"`
 	}
 
 	items := make([]outputItem, 0, len(content.Array())+1)
 	items = append(items, outputItem{Type: "input_text", Text: wallTimeHeader})
-	sawImage := false
+	sawContentItem := false
 	content.ForEach(func(_, item gjson.Result) bool {
 		switch item.Get("type").String() {
 		case "text":
-			items = append(items, outputItem{Type: "input_text", Text: item.Get("text").String()})
+			if item.Get("_meta.codex/encryptedContent").Bool() {
+				sawContentItem = true
+				items = append(items, outputItem{Type: "encrypted_content", EncryptedContent: item.Get("text").String()})
+			} else {
+				items = append(items, outputItem{Type: "input_text", Text: item.Get("text").String()})
+			}
 		case "image":
-			sawImage = true
+			sawContentItem = true
 			data := item.Get("data").String()
 			imageURL := data
 			if !strings.HasPrefix(data, "data:") {
@@ -435,11 +451,23 @@ func mcpContentArrayToFunctionOutputItems(content gjson.Result, wallTimeHeader s
 		return true
 	})
 
-	if !sawImage {
+	if !sawContentItem {
 		return nil, false
 	}
 	rawItems, err := json.Marshal(items)
 	return rawItems, err == nil
+}
+
+func mcpContentHasEncryptedText(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	found := false
+	content.ForEach(func(_, item gjson.Result) bool {
+		found = item.Get("type").String() == "text" && item.Get("_meta.codex/encryptedContent").Bool()
+		return !found
+	})
+	return found
 }
 
 func mcpToolOutputTextWithHeader(header, text string) string {

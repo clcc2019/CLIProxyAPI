@@ -8,6 +8,7 @@ import (
 
 func init() {
 	registerRefreshLead("codex", func() Authenticator { return NewCodexAuthenticator() })
+	cliproxyauth.RegisterDefaultAutoRefreshProviderWithTiming("codex", codexRefreshExpiryLead, codexRefreshFallbackInterval)
 	registerRefreshLead("claude", func() Authenticator { return NewClaudeAuthenticator() })
 	registerRefreshLeadDuration("kimi", 5*time.Minute)
 	registerRefreshLead("xai", func() Authenticator { return NewXAIAuthenticator() })

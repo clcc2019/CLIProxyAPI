@@ -9,9 +9,25 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 const codexRemoteCompactionV2Feature = cliproxyauth.CodexRemoteCompactionV2Feature
+
+func codexApplyRoutingHintHeader(headers http.Header, auth *cliproxyauth.Auth, body []byte) {
+	if headers == nil || auth == nil || codexIsAPIKeyAuth(auth) {
+		return
+	}
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if model == "" {
+		return
+	}
+	hint := "model=" + model
+	if tier := strings.TrimSpace(gjson.GetBytes(body, "service_tier").String()); tier != "" {
+		hint += ";tier=" + tier
+	}
+	codexSetSingleHeaderValue(headers, codexHeaderRoutingHint, hint)
+}
 
 func codexRemoteCompactionV2Enabled(auth *cliproxyauth.Auth, cfg *config.Config, requestHeaders ...http.Header) bool {
 	for _, headers := range requestHeaders {
@@ -89,6 +105,7 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 			turnID:         uuid.NewString(),
 			sandbox:        codexDefaultSandboxTag,
 			windowID:       trimHeaderValue(headers, codexHeaderWindowID),
+			contextID:      codexContextWindowID(trimHeaderValue(headers, codexHeaderWindowID)),
 		})
 		codexEnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
 	} else {
@@ -100,8 +117,10 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 			turnID:         uuid.NewString(),
 			sandbox:        codexDefaultSandboxTag,
 			windowID:       trimHeaderValue(headers, codexHeaderWindowID),
+			contextID:      codexContextWindowID(trimHeaderValue(headers, codexHeaderWindowID)),
 		})
 		codexEnsureHeader(headers, ginHeaders, codexHeaderTurnState, "")
+		codexEnsureHeader(headers, ginHeaders, codexHeaderInferenceCallID, "")
 	}
 
 	accept := "application/json"
@@ -114,15 +133,6 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 		headers.Del("Originator")
 	} else {
 		codexSetTripleSingleHeaderValues(headers, "User-Agent", identity.userAgent, "Accept", accept, "Originator", originator)
-	}
-	// Residency precedence: inbound gin header > cfg default. Avoid the
-	// unnecessary target re-check from the previous implementation; we always
-	// enter this block with a freshly applied `Originator` and never set the
-	// residency header earlier, so target.Get is guaranteed empty here.
-	if residency := trimHeaderValue(profileHeaders, misc.CodexResidencyHeader); residency != "" {
-		codexSetSingleHeaderValue(headers, misc.CodexResidencyHeader, residency)
-	} else if residency := codexResidencyFor(cfg); residency != "" {
-		codexSetSingleHeaderValue(headers, misc.CodexResidencyHeader, residency)
 	}
 	if accountID := codexAccountID(auth, apiKeyAuth); accountID != "" {
 		codexSetHeaderCasePreserved(headers, codexHeaderChatGPTAccountID, accountID)
@@ -137,6 +147,7 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 	if codexIsAgentIdentityAuth(auth) && authorization != "" {
 		codexSetSingleHeaderValue(headers, "Authorization", authorization)
 	}
+	codexApplyResidencyHeader(headers, profileHeaders, cfg)
 	codexApplyRequestScopedRemoteCompactionV2(headers, requestRemoteCompactionV2)
 	return profileHeaders
 }
@@ -487,6 +498,14 @@ func codexResidencyFor(cfg *config.Config) string {
 		configured = cfg.CodexHeaderDefaults.Residency
 	}
 	return misc.ResolveCodexResidency(configured)
+}
+
+func codexApplyResidencyHeader(headers http.Header, profileHeaders http.Header, cfg *config.Config) {
+	if residency := codexResidencyFor(cfg); residency != "" {
+		codexSetSingleHeaderValue(headers, misc.CodexResidencyHeader, residency)
+	} else if residency := trimHeaderValue(profileHeaders, misc.CodexResidencyHeader); residency != "" {
+		codexSetSingleHeaderValue(headers, misc.CodexResidencyHeader, residency)
+	}
 }
 
 func codexAuthUserAgent(auth *cliproxyauth.Auth) string {

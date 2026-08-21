@@ -11,13 +11,13 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-func TestCodexAuthenticatorRefreshLeadIsFiveDays(t *testing.T) {
+func TestCodexAuthenticatorRefreshLeadIsFiveMinutes(t *testing.T) {
 	authenticator := NewCodexAuthenticator()
 	lead := authenticator.RefreshLead()
 	if lead == nil {
-		t.Fatal("RefreshLead() = nil, want 5 days")
+		t.Fatal("RefreshLead() = nil, want 5 minutes")
 	}
-	if got, want := *lead, 5*24*time.Hour; got != want {
+	if got, want := *lead, 5*time.Minute; got != want {
 		t.Fatalf("RefreshLead() = %s, want %s", got, want)
 	}
 }

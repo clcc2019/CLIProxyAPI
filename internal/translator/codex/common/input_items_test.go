@@ -111,6 +111,25 @@ func TestNormalizeResponseInputItemsConvertsMCPPureTextContentToSerializedConten
 	}
 }
 
+func TestNormalizeResponseInputItemsPreservesMCPEncryptedContent(t *testing.T) {
+	body := []byte(`{"input":[
+		{"type":"function_call","call_id":"call_mcp_1","name":"tool","arguments":"{}"},
+		{"type":"mcp_tool_call_output","call_id":"call_mcp_1","output":{
+			"content":[{"type":"text","text":"ciphertext","_meta":{"codex/encryptedContent":true}}],
+			"structuredContent":{"must_not":"replace ciphertext"}
+		}}
+	]}`)
+
+	got := NormalizeFullTranscriptResponseInputItems(body)
+
+	if gotType := gjson.GetBytes(got, "input.1.output.1.type").String(); gotType != "encrypted_content" {
+		t.Fatalf("output.1.type = %q, want encrypted_content; body=%s", gotType, got)
+	}
+	if gotContent := gjson.GetBytes(got, "input.1.output.1.encrypted_content").String(); gotContent != "ciphertext" {
+		t.Fatalf("encrypted_content = %q, want ciphertext; body=%s", gotContent, got)
+	}
+}
+
 func TestNormalizeResponseInputItemsPreservesToolPairingForIncrementalCallers(t *testing.T) {
 	body := []byte(`{"input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`)
 
@@ -121,6 +140,19 @@ func TestNormalizeResponseInputItemsPreservesToolPairingForIncrementalCallers(t 
 	}
 	if gotOutput := gjson.GetBytes(got, "input.0.output").String(); gotOutput != "ok" {
 		t.Fatalf("output = %q, want ok; body=%s", gotOutput, got)
+	}
+}
+
+func TestNormalizeFullTranscriptPreservesStandaloneNamedFunctionOutput(t *testing.T) {
+	body := []byte(`{"input":[{"type":"function_call_output","name":"notifications","namespace":"slack","output":"mentioned"}]}`)
+
+	got := NormalizeFullTranscriptResponseInputItems(body)
+
+	if gotName := gjson.GetBytes(got, "input.0.name").String(); gotName != "notifications" {
+		t.Fatalf("name = %q, want notifications; body=%s", gotName, got)
+	}
+	if gotNamespace := gjson.GetBytes(got, "input.0.namespace").String(); gotNamespace != "slack" {
+		t.Fatalf("namespace = %q, want slack; body=%s", gotNamespace, got)
 	}
 }
 

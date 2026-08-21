@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
@@ -62,6 +63,9 @@ func TestRefreshCodexRemoteCatalogUsesAccountScopedModels(t *testing.T) {
 		if got := req.Header.Get("Authorization"); got != "Bearer access-test" {
 			t.Errorf("Authorization = %q", got)
 		}
+		if got := req.Header.Get(misc.CodexResidencyHeader); got != "us" {
+			t.Errorf("residency = %q, want us", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.6-sol","display_name":"Account Sol","supports_parallel_tool_calls":false,"use_responses_lite":false}]}`))
 	}))
@@ -69,7 +73,7 @@ func TestRefreshCodexRemoteCatalogUsesAccountScopedModels(t *testing.T) {
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(codexRemoteModelsTestExecutor{})
-	service := &Service{coreManager: manager}
+	service := &Service{coreManager: manager, cfg: &config.Config{CodexHeaderDefaults: config.CodexHeaderDefaults{Residency: "us"}}}
 	auth := &coreauth.Auth{
 		ID:       "auth-remote-catalog",
 		Provider: "codex",
@@ -78,7 +82,10 @@ func TestRefreshCodexRemoteCatalogUsesAccountScopedModels(t *testing.T) {
 			"base_url":   server.URL,
 			"account_id": "acct-test",
 		},
-		Metadata: map[string]any{"access_token": "access-test"},
+		Metadata: map[string]any{
+			"access_token": "access-test",
+			"headers":      map[string]any{misc.CodexResidencyHeader: "eu"},
+		},
 	}
 	if err := service.refreshCodexRemoteCatalog(context.Background(), auth); err != nil {
 		t.Fatalf("refreshCodexRemoteCatalog: %v", err)
@@ -237,7 +244,7 @@ func TestCodexModelsFromRemoteCatalogRejectsExpiredEntry(t *testing.T) {
 			"account_id": "acct-expired-read",
 		},
 	}
-	sourceKey := codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth))
+	sourceKey := codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), "")
 	service.codexRemoteCatalogs.Store(auth.ID, codexRemoteCatalogCacheEntry{
 		payload:   []byte(`{"models":[{"slug":"stale-remote-model"}]}`),
 		fetchedAt: time.Now().Add(-codexRemoteCatalogTTL),

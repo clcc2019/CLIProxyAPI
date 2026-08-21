@@ -52,8 +52,12 @@ func TestCodexStaticModelsIncludeGPT56Family(t *testing.T) {
 				if info == nil {
 					t.Fatalf("%s not found", id)
 				}
-				if info.ContextLength != 372000 {
-					t.Fatalf("%s context length = %d, want 372000", id, info.ContextLength)
+				wantContextLength := 272000
+				if id == "gpt-5.6" {
+					wantContextLength = 372000
+				}
+				if info.ContextLength != wantContextLength {
+					t.Fatalf("%s context length = %d, want %d", id, info.ContextLength, wantContextLength)
 				}
 			}
 		})
@@ -63,8 +67,8 @@ func TestCodexStaticModelsIncludeGPT56Family(t *testing.T) {
 	if info == nil {
 		t.Fatal("LookupStaticModelInfo did not find gpt-5.6-sol")
 	}
-	if info.ContextLength != 372000 {
-		t.Fatalf("lookup context length = %d, want 372000", info.ContextLength)
+	if info.ContextLength != 272000 {
+		t.Fatalf("lookup context length = %d, want 272000", info.ContextLength)
 	}
 
 	luna := findModelInfo(GetCodexFreeModels(), "gpt-5.6-luna")
@@ -208,6 +212,9 @@ func TestCodexClientModelCapabilitiesIncludeGPT56(t *testing.T) {
 	}
 	if capabilities.DefaultReasoningLevel != "low" {
 		t.Fatalf("default reasoning level = %q, want low", capabilities.DefaultReasoningLevel)
+	}
+	if len(capabilities.ServiceTiers) != 2 || capabilities.ServiceTiers[0] != "priority" || capabilities.ServiceTiers[1] != "ultrafast" {
+		t.Fatalf("service tiers = %#v, want [priority ultrafast]", capabilities.ServiceTiers)
 	}
 }
 
