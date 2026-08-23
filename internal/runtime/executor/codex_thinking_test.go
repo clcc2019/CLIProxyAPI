@@ -143,6 +143,41 @@ func TestApplyCodexThinking_DefaultsMissingClientEffortToLow(t *testing.T) {
 	}
 }
 
+func TestApplyCodexThinkingDeferredPreservesPayloadOverride(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "test-codex-model",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}
+	translated := []byte(`{"reasoning":{"effort":"medium"},"input":[],"instructions":""}`)
+
+	body, deferred, err := applyCodexThinkingWithInstructionsDeferred(translated, req, "openai", "codex", "codex")
+	if err != nil {
+		t.Fatalf("applyCodexThinkingWithInstructionsDeferred() error = %v", err)
+	}
+	if deferred.effort != "low" {
+		t.Fatalf("deferred effort = %q, want low", deferred.effort)
+	}
+	if got := gjson.GetBytes(body, "reasoning.effort").String(); got != "medium" {
+		t.Fatalf("intermediate reasoning.effort = %q, want medium", got)
+	}
+
+	opts := codexFinalUpstreamBodyOptions{
+		requestKind:             codexFinalUpstreamResponses,
+		streamMode:              codexStreamFieldTrue,
+		deferredReasoningEffort: deferred,
+	}
+	finalBody := normalizeCodexFinalUpstreamBody(body, req.Model, nil, opts)
+	if got := gjson.GetBytes(finalBody, "reasoning.effort").String(); got != "low" {
+		t.Fatalf("final reasoning.effort = %q, want low; body=%s", got, finalBody)
+	}
+
+	overridden := bytes.Replace(body, []byte(`"medium"`), []byte(`"high"`), 1)
+	finalOverride := normalizeCodexFinalUpstreamBody(overridden, req.Model, nil, opts)
+	if got := gjson.GetBytes(finalOverride, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("payload override reasoning.effort = %q, want high; body=%s", got, finalOverride)
+	}
+}
+
 func TestApplyCodexThinking_PreservesExplicitClientEffort(t *testing.T) {
 	req := cliproxyexecutor.Request{
 		Model:   "test-codex-model",

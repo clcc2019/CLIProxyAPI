@@ -220,11 +220,6 @@ type BatchPlugin interface {
 	HandleUsageBatch(items []Item)
 }
 
-type queueItem struct {
-	ctx    context.Context
-	record Record
-}
-
 const maxDispatchBatch = 64
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
@@ -235,7 +230,9 @@ type Manager struct {
 
 	mu         sync.Mutex
 	cond       *sync.Cond
-	queue      []queueItem
+	queue      []Item
+	queueHead  int
+	queueCount int
 	maxQueue   int
 	processing int
 	closed     bool
@@ -247,7 +244,11 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{maxQueue: buffer}
+	capacity := buffer
+	if capacity <= 0 {
+		capacity = maxDispatchBatch
+	}
+	m := &Manager{queue: make([]Item, capacity), maxQueue: buffer}
 	m.cond = sync.NewCond(&m.mu)
 	m.snapshot.Store([]Plugin{})
 	return m
@@ -306,11 +307,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 		m.mu.Unlock()
 		return
 	}
-	if m.maxQueue > 0 && len(m.queue) >= m.maxQueue {
-		clearQueueItem(&m.queue[0])
-		m.queue = m.queue[1:]
-	}
-	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
+	m.enqueueLocked(Item{Context: ctx, Record: record})
 	m.mu.Unlock()
 	m.cond.Signal()
 }
@@ -338,7 +335,7 @@ func (m *Manager) Flush(ctx context.Context) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for len(m.queue) > 0 || m.processing > 0 {
+	for m.queueCount > 0 || m.processing > 0 {
 		if m.closed {
 			return nil
 		}
@@ -364,13 +361,13 @@ func (m *Manager) run(ctx context.Context) {
 	}()
 	defer close(contextDone)
 
-	var batchScratch [maxDispatchBatch]queueItem
+	var batchScratch [maxDispatchBatch]Item
 	for {
 		m.mu.Lock()
-		for !m.closed && len(m.queue) == 0 {
+		for !m.closed && m.queueCount == 0 {
 			m.cond.Wait()
 		}
-		if len(m.queue) == 0 && m.closed {
+		if m.queueCount == 0 && m.closed {
 			m.mu.Unlock()
 			return
 		}
@@ -386,27 +383,74 @@ func (m *Manager) run(ctx context.Context) {
 		if m.processing < 0 {
 			m.processing = 0
 		}
-		if len(m.queue) == 0 && m.processing == 0 {
+		if m.queueCount == 0 && m.processing == 0 {
 			m.cond.Broadcast()
 		}
 		m.mu.Unlock()
 	}
 }
 
-func (m *Manager) takeBatchLocked(dst []queueItem) []queueItem {
+func (m *Manager) enqueueLocked(item Item) {
+	if len(m.queue) == 0 {
+		m.queue = make([]Item, maxDispatchBatch)
+	}
+	if m.queueCount == len(m.queue) {
+		if m.maxQueue > 0 {
+			clearQueueItem(&m.queue[m.queueHead])
+			m.queueHead = (m.queueHead + 1) % len(m.queue)
+			m.queueCount--
+		} else {
+			m.growQueueLocked()
+		}
+	}
+	tail := (m.queueHead + m.queueCount) % len(m.queue)
+	m.queue[tail] = item
+	m.queueCount++
+}
+
+func (m *Manager) growQueueLocked() {
+	nextCapacity := len(m.queue) * 2
+	if nextCapacity < maxDispatchBatch {
+		nextCapacity = maxDispatchBatch
+	}
+	grown := make([]Item, nextCapacity)
+	m.copyQueuePrefixLocked(grown, m.queueCount)
+	m.queue = grown
+	m.queueHead = 0
+}
+
+func (m *Manager) copyQueuePrefixLocked(dst []Item, count int) {
+	if count <= 0 || len(m.queue) == 0 {
+		return
+	}
+	first := count
+	if available := len(m.queue) - m.queueHead; first > available {
+		first = available
+	}
+	copy(dst, m.queue[m.queueHead:m.queueHead+first])
+	if first < count {
+		copy(dst[first:], m.queue[:count-first])
+	}
+}
+
+func (m *Manager) takeBatchLocked(dst []Item) []Item {
 	limit := len(dst)
 	if limit <= 0 {
 		limit = maxDispatchBatch
 	}
-	if len(m.queue) < limit {
-		limit = len(m.queue)
+	if m.queueCount < limit {
+		limit = m.queueCount
 	}
 	batch := dst[:limit]
-	copy(batch, m.queue[:limit])
+	m.copyQueuePrefixLocked(batch, limit)
 	for i := 0; i < limit; i++ {
-		clearQueueItem(&m.queue[i])
+		clearQueueItem(&m.queue[(m.queueHead+i)%len(m.queue)])
 	}
-	m.queue = m.queue[limit:]
+	m.queueHead = (m.queueHead + limit) % len(m.queue)
+	m.queueCount -= limit
+	if m.queueCount == 0 {
+		m.queueHead = 0
+	}
 	return batch
 }
 
@@ -419,41 +463,34 @@ func (m *Manager) close() {
 	m.mu.Unlock()
 }
 
-func clearQueueItem(item *queueItem) {
+func clearQueueItem(item *Item) {
 	if item == nil {
 		return
 	}
-	*item = queueItem{}
+	*item = Item{}
 }
 
-func clearQueueItems(items []queueItem) {
+func clearQueueItems(items []Item) {
 	for i := range items {
 		clearQueueItem(&items[i])
 	}
 }
 
-func (m *Manager) dispatchBatch(batch []queueItem) {
+func (m *Manager) dispatchBatch(batch []Item) {
 	plugins, _ := m.snapshot.Load().([]Plugin)
 	if len(plugins) == 0 || len(batch) == 0 {
 		return
 	}
-	var items []Item
 	for _, plugin := range plugins {
 		if plugin == nil {
 			continue
 		}
 		if batchPlugin, ok := plugin.(BatchPlugin); ok && batchPlugin != nil {
-			if items == nil {
-				items = make([]Item, len(batch))
-				for i, item := range batch {
-					items[i] = Item{Context: item.ctx, Record: item.record}
-				}
-			}
-			safeInvokeBatch(batchPlugin, items)
+			safeInvokeBatch(batchPlugin, batch)
 			continue
 		}
 		for _, item := range batch {
-			safeInvoke(plugin, item.ctx, item.record)
+			safeInvoke(plugin, item.Context, item.Record)
 		}
 	}
 }

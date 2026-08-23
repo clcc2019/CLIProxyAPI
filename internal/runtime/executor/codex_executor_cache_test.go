@@ -219,6 +219,12 @@ func TestHashCodexFinalUpstreamBodyMemoKeyIsDeterministicAndDistinguishing(t *te
 	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", otherOpts, payload); otherKey == key {
 		t.Fatalf("different suppressDefaultInstructions option produced same memo key")
 	}
+
+	otherOpts = opts
+	otherOpts.deferredReasoningEffort = codexDeferredReasoningEffort{effort: "low", originalRaw: `"medium"`, originalExists: true}
+	if otherKey := hashCodexFinalUpstreamBodyMemoKey("gpt-5", "codex", otherOpts, payload); otherKey == key {
+		t.Fatalf("different deferred reasoning option produced same memo key")
+	}
 }
 
 func BenchmarkHashCodexFinalUpstreamBodyMemoKeyLargePayload(b *testing.B) {

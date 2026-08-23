@@ -5,6 +5,7 @@ import "net/http"
 const (
 	codexRequestHeaderInitialCapacity     = 24
 	codexHTTPRequestHeaderInitialCapacity = 14
+	codexHTTPRequestHeaderValueCapacity   = 12
 	codexWebsocketHeaderValueCapacity     = 12
 	codexHeaderValueArenaKey              = "\x00codex-header-values"
 

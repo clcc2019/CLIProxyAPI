@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -8,6 +9,32 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+type codexDeferredReasoningEffort struct {
+	effort         string
+	originalRaw    string
+	originalExists bool
+}
+
+type codexDeferredReasoningEffortContextKey struct{}
+
+func contextWithCodexDeferredReasoningEffort(ctx context.Context, deferred codexDeferredReasoningEffort) context.Context {
+	if deferred.effort == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, codexDeferredReasoningEffortContextKey{}, deferred)
+}
+
+func codexDeferredReasoningEffortFromContext(ctx context.Context) codexDeferredReasoningEffort {
+	if ctx == nil {
+		return codexDeferredReasoningEffort{}
+	}
+	deferred, _ := ctx.Value(codexDeferredReasoningEffortContextKey{}).(codexDeferredReasoningEffort)
+	return deferred
+}
 
 // applyCodexThinking applies the normal thinking configuration, then applies a
 // routing-owned effort override when one is present. The override is carried in
@@ -25,21 +52,35 @@ func applyCodexThinkingWithInstructions(body []byte, req cliproxyexecutor.Reques
 	return applyCodexThinkingInternal(body, req, fromFormat, toFormat, provider, true)
 }
 
+func applyCodexThinkingWithInstructionsDeferred(body []byte, req cliproxyexecutor.Request, fromFormat, toFormat, provider string) ([]byte, codexDeferredReasoningEffort, error) {
+	body, err := thinking.ApplyThinking(body, req.Model, fromFormat, toFormat, provider)
+	if err != nil {
+		return nil, codexDeferredReasoningEffort{}, err
+	}
+	effort, apply := codexUpstreamReasoningEffort(req, fromFormat)
+	if !apply {
+		return normalizeCodexInstructions(body), codexDeferredReasoningEffort{}, nil
+	}
+	current := codexGJSONGetImmutableBytes(body, "reasoning.effort")
+	return normalizeCodexInstructions(body), codexDeferredReasoningEffort{
+		effort:         effort,
+		originalRaw:    current.Raw,
+		originalExists: current.Exists(),
+	}, nil
+}
+
 func applyCodexThinkingInternal(body []byte, req cliproxyexecutor.Request, fromFormat, toFormat, provider string, normalizeInstructions bool) ([]byte, error) {
 	body, err := thinking.ApplyThinking(body, req.Model, fromFormat, toFormat, provider)
 	if err != nil {
 		return nil, err
 	}
 
-	effort := upstreamReasoningEffortOverride(req)
-	if effort == "" {
-		if thinking.ExtractReasoningEffort(req.Payload, fromFormat, req.Model) != "" {
-			if normalizeInstructions {
-				body = normalizeCodexInstructions(body)
-			}
-			return body, nil
+	effort, apply := codexUpstreamReasoningEffort(req, fromFormat)
+	if !apply {
+		if normalizeInstructions {
+			body = normalizeCodexInstructions(body)
 		}
-		effort = string(thinking.LevelLow)
+		return body, nil
 	}
 	var result []byte
 	if normalizeInstructions {
@@ -51,6 +92,16 @@ func applyCodexThinkingInternal(body []byte, req cliproxyexecutor.Request, fromF
 		return nil, err
 	}
 	return result, nil
+}
+
+func codexUpstreamReasoningEffort(req cliproxyexecutor.Request, fromFormat string) (string, bool) {
+	if effort := upstreamReasoningEffortOverride(req); effort != "" {
+		return effort, true
+	}
+	if thinking.ExtractReasoningEffort(req.Payload, fromFormat, req.Model) != "" {
+		return "", false
+	}
+	return string(thinking.LevelLow), true
 }
 
 func codexSetReasoningEffort(body []byte, effort string) ([]byte, error) {

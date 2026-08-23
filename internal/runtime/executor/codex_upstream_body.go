@@ -67,6 +67,7 @@ type codexFinalUpstreamBodyOptions struct {
 	store                       bool
 	omitServiceTier             bool
 	suppressDefaultInstructions bool
+	deferredReasoningEffort     codexDeferredReasoningEffort
 }
 
 // codexFinalUpstreamRequestKindForURL classifies the request kind from the
@@ -139,9 +140,9 @@ var codexAllowedCompactFinalUpstreamFields = map[string]struct{}{
 	"text":                {},
 }
 
-func codexEnsureFinalUpstreamBodyDefaults(body []byte, capabilities registry.CodexClientModelCapabilities, capabilitiesKnown bool, opts codexFinalUpstreamBodyOptions) []byte {
-	appendFields := make([]codexTopLevelRawField, 0, 4)
-	edits := make([]helps.JSONEdit, 0, 4)
+func codexEnsureFinalUpstreamBodyDefaults(body []byte, baseModel string, capabilities registry.CodexClientModelCapabilities, capabilitiesKnown bool, opts codexFinalUpstreamBodyOptions) []byte {
+	appendFields := make([]codexTopLevelRawField, 0, 8)
+	edits := make([]helps.JSONEdit, 0, 8)
 	addDefault := func(field string, rawValue []byte) {
 		current := gjson.GetBytes(body, field)
 		if !current.Exists() {
@@ -202,6 +203,81 @@ func codexEnsureFinalUpstreamBodyDefaults(body []byte, capabilities registry.Cod
 		addBoolDefault("parallel_tool_calls", parallelToolCallsDefault)
 		addDefault("include", []byte("[]"))
 	}
+
+	model := gjson.GetBytes(body, "model")
+	modelRaw := strconv.AppendQuote(nil, baseModel)
+	if !model.Exists() {
+		appendFields = append(appendFields, codexTopLevelRawField{field: "model", rawValue: modelRaw})
+	} else if model.Type != gjson.String || model.String() != baseModel {
+		edits = append(edits, helps.SetRawJSONEdit("model", modelRaw))
+	}
+
+	if opts.requestKind == codexFinalUpstreamResponses {
+		storeValue := []byte("false")
+		if opts.store {
+			storeValue = []byte("true")
+		}
+		store := gjson.GetBytes(body, "store")
+		if !store.Exists() {
+			appendFields = append(appendFields, codexTopLevelRawField{field: "store", rawValue: storeValue})
+		} else if (!opts.store && store.Type != gjson.False) || (opts.store && store.Type != gjson.True) {
+			edits = append(edits, helps.SetRawJSONEdit("store", storeValue))
+		}
+	}
+
+	instructions := gjson.GetBytes(body, "instructions")
+	if !opts.suppressDefaultInstructions && (!instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) == "")) {
+		instructionRaw := strconv.AppendQuote(nil, codexDefaultInstructionsFromBody(body))
+		if !instructions.Exists() {
+			appendFields = append(appendFields, codexTopLevelRawField{field: "instructions", rawValue: instructionRaw})
+		} else {
+			edits = append(edits, helps.SetRawJSONEdit("instructions", instructionRaw))
+		}
+	}
+
+	stream := gjson.GetBytes(body, "stream")
+	switch opts.streamMode {
+	case codexStreamFieldTrue:
+		if !stream.Exists() {
+			appendFields = append(appendFields, codexTopLevelRawField{field: "stream", rawValue: []byte("true")})
+		} else if stream.Type != gjson.True {
+			edits = append(edits, helps.SetRawJSONEdit("stream", []byte("true")))
+		}
+	case codexStreamFieldFalse:
+		if !stream.Exists() {
+			appendFields = append(appendFields, codexTopLevelRawField{field: "stream", rawValue: []byte("false")})
+		} else if stream.Type != gjson.False {
+			edits = append(edits, helps.SetRawJSONEdit("stream", []byte("false")))
+		}
+	case codexStreamFieldDelete:
+		if stream.Exists() {
+			edits = append(edits, helps.DeleteJSONEdit("stream"))
+		}
+	}
+
+	deferred := opts.deferredReasoningEffort
+	if deferred.effort != "" {
+		current := gjson.GetBytes(body, "reasoning.effort")
+		unchanged := (!deferred.originalExists && !current.Exists()) ||
+			(deferred.originalExists && current.Exists() && current.Raw == deferred.originalRaw)
+		if unchanged {
+			effortRaw := strconv.AppendQuote(nil, deferred.effort)
+			reasoningRaw := make([]byte, 0, len(effortRaw)+12)
+			reasoningRaw = append(reasoningRaw, `{"effort":`...)
+			reasoningRaw = append(reasoningRaw, effortRaw...)
+			reasoningRaw = append(reasoningRaw, '}')
+			reasoning := gjson.GetBytes(body, "reasoning")
+			switch {
+			case !reasoning.Exists():
+				appendFields = append(appendFields, codexTopLevelRawField{field: "reasoning", rawValue: reasoningRaw})
+			case !reasoning.IsObject():
+				edits = append(edits, helps.SetRawJSONEdit("reasoning", reasoningRaw))
+			default:
+				edits = append(edits, helps.SetRawJSONEdit("reasoning.effort", effortRaw))
+			}
+		}
+	}
+
 	if len(appendFields) > 0 {
 		if updated, ok := codexAppendTopLevelRawFields(body, appendFields); ok {
 			body = updated
@@ -304,17 +380,6 @@ func normalizeCodexFinalUpstreamStreamOptions(body []byte, opts codexFinalUpstre
 	return body
 }
 
-// codexFinalUpstreamScanFields lists the fields read by
-// normalizeCodexFinalUpstreamBodyUncached after tools have been normalized, in
-// the precise order consumed below. Batching them through GetManyBytes costs
-// one payload parse instead of four sequential scans.
-var codexFinalUpstreamScanFields = []string{
-	"model",        // idx 0
-	"store",        // idx 1 (only inspected on the /responses kind)
-	"instructions", // idx 2
-	"stream",       // idx 3
-}
-
 func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth *cliproxyauth.Auth, opts codexFinalUpstreamBodyOptions) []byte {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
@@ -326,7 +391,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 		capabilities.SupportsReasoningSummaryParameter = true
 	}
 
-	body = codexEnsureFinalUpstreamBodyDefaults(body, capabilities, capabilitiesKnown, opts)
+	body = codexEnsureFinalUpstreamBodyDefaults(body, baseModel, capabilities, capabilitiesKnown, opts)
 	body = normalizeCodexFinalUpstreamTools(body)
 	body = normalizeCodexFinalUpstreamText(body, &capabilities)
 	body = normalizeCodexFinalUpstreamInputShape(body)
@@ -338,74 +403,6 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	body = normalizeCodexFinalUpstreamToolOutputImageDetail(body, &capabilities, capabilitiesKnown)
 	body = normalizeCodexFinalUpstreamServiceTier(body, &capabilities, capabilitiesKnown, opts)
 
-	// Resolve all four inspected fields in a single payload traversal so
-	// downstream branches can reuse the decoded Result values rather than
-	// re-parsing the body once per field.
-	scanned := codexGJSONGetManyImmutableBytes(body, codexFinalUpstreamScanFields...)
-	model := scanned[0]
-	store := scanned[1]
-	instructions := scanned[2]
-	stream := scanned[3]
-
-	edits := make([]helps.JSONEdit, 0, 3)
-	if !model.Exists() || model.Type != gjson.String || model.String() != baseModel {
-		edits = append(edits, helps.SetJSONEdit("model", baseModel))
-	}
-	if opts.requestKind == codexFinalUpstreamResponses {
-		storeValue := []byte("false")
-		if opts.store {
-			storeValue = []byte("true")
-		}
-		if !store.Exists() {
-			if updated, ok := codexAppendTopLevelRawField(body, "store", storeValue); ok {
-				body = updated
-			} else {
-				edits = append(edits, helps.SetRawJSONEdit("store", storeValue))
-			}
-		} else if (!opts.store && store.Type != gjson.False) || (opts.store && store.Type != gjson.True) {
-			edits = append(edits, helps.SetRawJSONEdit("store", storeValue))
-		}
-	}
-	if !opts.suppressDefaultInstructions && (!instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) == "")) {
-		instructionText := codexDefaultInstructionsFromBody(body)
-		if !instructions.Exists() {
-			if updated, ok := codexAppendTopLevelStringField(body, "instructions", instructionText); ok {
-				body = updated
-			} else {
-				edits = append(edits, helps.SetJSONEdit("instructions", instructionText))
-			}
-		} else {
-			edits = append(edits, helps.SetJSONEdit("instructions", instructionText))
-		}
-	}
-	switch opts.streamMode {
-	case codexStreamFieldTrue:
-		if !stream.Exists() {
-			if updated, ok := codexAppendTopLevelRawField(body, "stream", []byte("true")); ok {
-				body = updated
-			} else {
-				edits = append(edits, helps.SetRawJSONEdit("stream", []byte("true")))
-			}
-		} else if stream.Type != gjson.True {
-			edits = append(edits, helps.SetRawJSONEdit("stream", []byte("true")))
-		}
-	case codexStreamFieldFalse:
-		if !stream.Exists() {
-			if updated, ok := codexAppendTopLevelRawField(body, "stream", []byte("false")); ok {
-				body = updated
-			} else {
-				edits = append(edits, helps.SetRawJSONEdit("stream", []byte("false")))
-			}
-		} else if stream.Type != gjson.False {
-			edits = append(edits, helps.SetRawJSONEdit("stream", []byte("false")))
-		}
-	case codexStreamFieldDelete:
-		edits = append(edits, helps.DeleteJSONEdit("stream"))
-	}
-
-	if len(edits) > 0 {
-		body = helps.EditJSONBytes(body, edits...)
-	}
 	if capabilitiesKnown {
 		body = normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, capabilities)
 	}
@@ -1758,20 +1755,27 @@ func codexDefaultInstructionsFromBody(body []byte) string {
 }
 
 func collectCodexInputInstructionText(input gjson.Result) string {
-	if !input.IsArray() {
+	if !input.IsArray() && !input.IsObject() {
 		return ""
 	}
 
 	var parts []string
-	input.ForEach(func(_, item gjson.Result) bool {
+	appendItem := func(item gjson.Result) {
 		if item.Get("type").String() != "message" {
-			return true
+			return
 		}
 		role := item.Get("role").String()
 		if role != "developer" && role != "system" {
-			return true
+			return
 		}
 		appendCodexInstructionContentText(&parts, item.Get("content"))
+	}
+	if input.IsObject() {
+		appendItem(input)
+		return strings.Join(parts, "\n\n")
+	}
+	input.ForEach(func(_, item gjson.Result) bool {
+		appendItem(item)
 		return true
 	})
 	return strings.Join(parts, "\n\n")

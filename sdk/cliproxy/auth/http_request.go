@@ -113,9 +113,6 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 	}
-	execCtx = WithRefreshUpdateCallback(execCtx, m.handleExecutionRefreshUpdate)
-	execCtx = WithAuthUpdateCallback(execCtx, m.handleExecutionAuthUpdate)
-	execCtx = WithRateLimitUpdateCallback(execCtx, m.handleExecutionRateLimitUpdate)
-	execCtx = WithRefreshCoordinator(execCtx, m.coordinatedRefreshForRequest)
+	execCtx = withExecutionCallbacks(execCtx, m.handleExecutionRefreshUpdate, m.handleExecutionAuthUpdate, m.handleExecutionRateLimitUpdate, m.coordinatedRefreshForRequest)
 	return exec.HttpRequest(execCtx, auth, req)
 }

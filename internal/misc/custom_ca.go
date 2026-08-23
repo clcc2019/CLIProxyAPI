@@ -58,6 +58,17 @@ func CustomRootCAsEnvFingerprint() string {
 }
 
 func customRootCAsSourceFingerprint(values ...string) string {
+	hasSource := false
+	for _, raw := range values {
+		if strings.TrimSpace(raw) != "" {
+			hasSource = true
+			break
+		}
+	}
+	if !hasSource {
+		return ""
+	}
+
 	hasher := sha256.New()
 	for _, raw := range values {
 		value := strings.TrimSpace(raw)

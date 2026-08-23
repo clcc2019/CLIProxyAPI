@@ -1198,6 +1198,12 @@ func TestPrepareCodexWebsocketRequestMergesResponsesAPIClientMetadataIntoTurnMet
 	}
 	defer prepared.unlockSession()
 
+	if got := gjson.GetBytes(prepared.wsReqBody, "prompt_cache_key").String(); got != "thread-1" {
+		t.Fatalf("prompt_cache_key = %q, want thread-1; body=%s", got, prepared.wsReqBody)
+	}
+	if got := gjson.GetBytes(prepared.wsReqBody, "type").String(); got != "response.create" {
+		t.Fatalf("type = %q, want response.create; body=%s", got, prepared.wsReqBody)
+	}
 	turnMetadata := gjson.GetBytes(prepared.wsReqBody, "client_metadata."+codexClientMetadataTurnMetadata).String()
 	assertCodexTurnMetadataString(t, turnMetadata, "fiber_run_id", "fiber-123")
 	if got := gjson.Get(turnMetadata, "session_id").String(); got == "" || got == "client-session" {

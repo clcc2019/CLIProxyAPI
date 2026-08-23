@@ -123,14 +123,18 @@ func codexApplyWebsocketClientMetadata(ctx context.Context, body []byte, headers
 }
 
 func codexApplyWebsocketClientMetadataWithStreamStartMS(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config, streamStartMS string) []byte {
-	return codexApplyWebsocketClientMetadataWithOptions(ctx, body, headers, auth, cfg, streamStartMS, false)
+	return codexApplyWebsocketClientMetadataWithOptions(ctx, body, headers, auth, cfg, streamStartMS, false, "")
 }
 
 func codexApplyWebsocketClientMetadataWithResponseCreateType(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config, streamStartMS string) []byte {
-	return codexApplyWebsocketClientMetadataWithOptions(ctx, body, headers, auth, cfg, streamStartMS, true)
+	return codexApplyWebsocketClientMetadataWithOptions(ctx, body, headers, auth, cfg, streamStartMS, true, "")
 }
 
-func codexApplyWebsocketClientMetadataWithOptions(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config, streamStartMS string, appendResponseCreateType bool) []byte {
+func codexApplyWebsocketClientMetadataWithResponseCreateTypeAndPromptCacheKey(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config, streamStartMS string, promptCacheKey string) []byte {
+	return codexApplyWebsocketClientMetadataWithOptions(ctx, body, headers, auth, cfg, streamStartMS, true, promptCacheKey)
+}
+
+func codexApplyWebsocketClientMetadataWithOptions(ctx context.Context, body []byte, headers http.Header, auth *cliproxyauth.Auth, cfg *config.Config, streamStartMS string, appendResponseCreateType bool, promptCacheKey string) []byte {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
@@ -151,11 +155,25 @@ func codexApplyWebsocketClientMetadataWithOptions(ctx context.Context, body []by
 	var entries [12]codexClientMetadataEntry
 	metadataEntries := codexCompactClientMetadataEntries(codexResponsesClientMetadataEntries(entries[:0], headers, source, auth, cfg, true, streamStartMS))
 	if appendResponseCreateType {
-		body = codexSetClientMetadataAndResponseCreateTypeNormalized(body, metadataEntries)
+		body = codexSetClientMetadataPromptCacheKeyAndResponseCreateTypeNormalized(body, metadataEntries, promptCacheKey)
 	} else {
 		body = codexSetClientMetadataNormalized(body, metadataEntries, true)
 	}
 	return body
+}
+
+func codexSetClientMetadataPromptCacheKeyAndResponseCreateTypeNormalized(body []byte, entries []codexClientMetadataEntry, promptCacheKey string) []byte {
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	metadata := codexGJSONGetImmutableBytes(body, "client_metadata")
+	requestType := codexGJSONGetImmutableBytes(body, "type")
+	existingPromptCacheKey := codexGJSONGetImmutableBytes(body, "prompt_cache_key")
+	if promptCacheKey != "" && !metadata.Exists() && !requestType.Exists() && !existingPromptCacheKey.Exists() {
+		if updated, ok := codexAppendTopLevelPromptCacheKeyClientMetadataObjectAndResponseCreateType(body, promptCacheKey, entries); ok {
+			return updated
+		}
+	}
+	body = codexSetClientMetadataAndResponseCreateTypeNormalized(body, entries)
+	return codexSetPromptCacheKey(body, promptCacheKey)
 }
 
 func codexResponsesClientMetadataEntries(dst []codexClientMetadataEntry, target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config, websocket bool, streamStartMS string) []codexClientMetadataEntry {
@@ -508,6 +526,10 @@ func codexAppendTopLevelPromptCacheKeyAndClientMetadataObject(body []byte, promp
 }
 
 func codexAppendTopLevelClientMetadataObjectAndResponseCreateType(body []byte, entries []codexClientMetadataEntry) ([]byte, bool) {
+	return codexAppendTopLevelPromptCacheKeyClientMetadataObjectAndResponseCreateType(body, "", entries)
+}
+
+func codexAppendTopLevelPromptCacheKeyClientMetadataObjectAndResponseCreateType(body []byte, promptCacheKey string, entries []codexClientMetadataEntry) ([]byte, bool) {
 	fieldCount, fieldsCap := codexClientMetadataOverrideFieldsCapacity(entries)
 	if fieldCount == 0 {
 		return nil, false
@@ -519,12 +541,21 @@ func codexAppendTopLevelClientMetadataObjectAndResponseCreateType(body []byte, e
 
 	extra := codexJSONStringCapacity("client_metadata") + fieldsCap + 3
 	extra += codexJSONStringCapacity("type") + codexJSONStringCapacity("response.create") + 2
+	if promptCacheKey != "" {
+		extra += codexJSONStringCapacity("prompt_cache_key") + codexJSONStringCapacity(promptCacheKey) + 2
+	}
 	if hasFields {
 		extra++
 	}
 	updated := make([]byte, 0, len(body)+extra)
 	updated = append(updated, trimmed[:len(trimmed)-1]...)
 	if hasFields {
+		updated = append(updated, ',')
+	}
+	if promptCacheKey != "" {
+		updated = codexAppendJSONString(updated, "prompt_cache_key")
+		updated = append(updated, ':')
+		updated = codexAppendJSONString(updated, promptCacheKey)
 		updated = append(updated, ',')
 	}
 	updated = codexAppendJSONString(updated, "client_metadata")

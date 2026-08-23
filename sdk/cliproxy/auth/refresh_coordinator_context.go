@@ -2,10 +2,6 @@ package auth
 
 import "context"
 
-// refreshCoordinatorContextKey carries a function that serializes concurrent
-// refreshes for the same auth ID through the Manager's singleflight group.
-type refreshCoordinatorContextKey struct{}
-
 // RefreshCoordinator refreshes credentials for the given auth under the
 // Manager's singleflight, ensuring that concurrent callers (request-time
 // refresh from the executor AND the background auto-refresh loop) never
@@ -29,7 +25,9 @@ func WithRefreshCoordinator(ctx context.Context, coord RefreshCoordinator) conte
 	if coord == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, refreshCoordinatorContextKey{}, coord)
+	state := executionStateFromContext(ctx)
+	state.refreshCoordinator = coord
+	return withExecutionState(ctx, state)
 }
 
 // RefreshCoordinatorFrom returns the coordinator installed in ctx, or nil
@@ -39,8 +37,7 @@ func RefreshCoordinatorFrom(ctx context.Context) RefreshCoordinator {
 	if ctx == nil {
 		return nil
 	}
-	coord, _ := ctx.Value(refreshCoordinatorContextKey{}).(RefreshCoordinator)
-	return coord
+	return executionStateFromContext(ctx).refreshCoordinator
 }
 
 // CoordinatedRefresh runs the fallback refresh function through the

@@ -729,10 +729,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	originalPayload := originalPayloadSource
 	body, originalTranslated, _ := codexTranslateRequestWithOriginalBorrowed(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, false, opts.Headers)
 
-	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
+	var deferredReasoning codexDeferredReasoningEffort
+	body, deferredReasoning, err = applyCodexThinkingWithInstructionsDeferred(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
+	ctx = contextWithCodexDeferredReasoningEffort(ctx, deferredReasoning)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -1023,10 +1025,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	originalPayload := originalPayloadSource
 	body, originalTranslated, _ := codexTranslateRequestWithOriginalBorrowed(e.cfg, ctx, from, to, baseModel, req.Payload, originalPayload, true, opts.Headers)
 
-	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
+	var deferredReasoning codexDeferredReasoningEffort
+	body, deferredReasoning, err = applyCodexThinkingWithInstructionsDeferred(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
+	ctx = contextWithCodexDeferredReasoningEffort(ctx, deferredReasoning)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -1399,8 +1403,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		preserveCompactionTrigger:  codexRemoteCompactionV2Enabled(auth, e.cfg, opts.Headers, ginHeaders),
 		preserveNativeFields: codexNativeClientRequest(opts.SourceFormat, opts.Headers, body) ||
 			codexNativeClientRequest(opts.SourceFormat, ginHeaders, body),
-		store:           codexShouldStoreResponses(auth, httpURL),
-		omitServiceTier: auth == nil || !auth.ServiceTierPassthrough(),
+		store:                   codexShouldStoreResponses(auth, httpURL),
+		omitServiceTier:         auth == nil || !auth.ServiceTierPassthrough(),
+		deferredReasoningEffort: codexDeferredReasoningEffortFromContext(ctx),
 	})
 
 	executionSessionID := executionSessionIDFromOptions(opts)
@@ -1433,7 +1438,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	if explicitTurnMetadata != "" {
 		turnStateScope = explicitTurnMetadata
 	}
-	body = codexApplyWebsocketClientMetadataWithResponseCreateType(ctx, body, wsHeaders, auth, e.cfg, strconv.FormatInt(time.Now().UnixMilli(), 10))
+	body = codexApplyWebsocketClientMetadataWithResponseCreateTypeAndPromptCacheKey(ctx, body, wsHeaders, auth, e.cfg, strconv.FormatInt(time.Now().UnixMilli(), 10), promptCacheID)
 	wsHeaders.Del("Traceparent")
 	wsHeaders.Del("Tracestate")
 
@@ -3112,7 +3117,6 @@ func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Conte
 	}
 
 	if resolution.cache.ID != "" {
-		rawJSON = codexSetPromptCacheKey(rawJSON, resolution.cache.ID)
 		fallbackHeaderValue := resolution.cache.ID
 		if resolution.headerEligibleID != "" {
 			fallbackHeaderValue = resolution.headerEligibleID

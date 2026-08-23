@@ -109,9 +109,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 }
 
 type mixedExecutionPolicy struct {
-	retryLabel                       string
-	usePreviousResponseAffinity      bool
-	decoratePreparedExecutionContext func(context.Context) context.Context
+	retryLabel                  string
+	usePreviousResponseAffinity bool
+	responseMode                responseExecutionMode
+	prepareResponseContext      bool
 }
 
 type mixedExecutionState struct {
@@ -137,14 +138,14 @@ type preparedMixedCredential struct {
 	pooled   bool
 }
 
-func newMixedExecutionState(ctx context.Context, m *Manager, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (*mixedExecutionState, error) {
+func newMixedExecutionState(ctx context.Context, m *Manager, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (mixedExecutionState, error) {
 	if len(providers) == 0 {
-		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+		return mixedExecutionState{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	ensureOptionsMetadata(&opts)
-	return &mixedExecutionState{
+	return mixedExecutionState{
 		ctx:                 ctx,
 		providers:           providers,
 		req:                 req,
@@ -224,8 +225,9 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		if policy.decoratePreparedExecutionContext != nil {
-			execCtx = policy.decoratePreparedExecutionContext(execCtx)
+		if policy.prepareResponseContext {
+			execCtx = contextWithRequestedModelAlias(execCtx, state.opts, state.routeModel)
+			execCtx = policy.responseMode.withExecutionCallbacks(execCtx, m)
 		}
 		models, pooled := m.preparedExecutionModels(auth, state.routeModel)
 		if len(models) == 0 {
@@ -320,10 +322,7 @@ func (mode responseExecutionMode) withExecutionCallbacks(ctx context.Context, m 
 	if mode != responseExecutionModeExecute {
 		return ctx
 	}
-	ctx = WithRefreshUpdateCallback(ctx, m.handleExecutionRefreshUpdate)
-	ctx = WithAuthUpdateCallback(ctx, m.handleExecutionAuthUpdate)
-	ctx = WithRateLimitUpdateCallback(ctx, m.handleExecutionRateLimitUpdate)
-	return WithRefreshCoordinator(ctx, m.coordinatedRefreshForRequest)
+	return withExecutionCallbacks(ctx, m.handleExecutionRefreshUpdate, m.handleExecutionAuthUpdate, m.handleExecutionRateLimitUpdate, m.coordinatedRefreshForRequest)
 }
 
 func (mode responseExecutionMode) execute(ctx context.Context, executor ProviderExecutor, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -349,10 +348,8 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 	policy := mixedExecutionPolicy{
 		retryLabel:                  mode.retryLabel(),
 		usePreviousResponseAffinity: mode.usesPreviousResponseAffinity(),
-		decoratePreparedExecutionContext: func(execCtx context.Context) context.Context {
-			execCtx = contextWithRequestedModelAlias(execCtx, state.opts, state.routeModel)
-			return mode.withExecutionCallbacks(execCtx, m)
-		},
+		responseMode:                mode,
+		prepareResponseContext:      true,
 	}
 	for {
 		credential, errCredential := state.nextCredential(m, policy)

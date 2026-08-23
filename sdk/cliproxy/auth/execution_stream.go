@@ -248,10 +248,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	}
 	ctx = withExecutionAuthPrincipal(ctx, auth)
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
-	ctx = WithRefreshUpdateCallback(ctx, m.handleExecutionRefreshUpdate)
-	ctx = WithAuthUpdateCallback(ctx, m.handleExecutionAuthUpdate)
-	ctx = WithRateLimitUpdateCallback(ctx, m.handleExecutionRateLimitUpdate)
-	ctx = WithRefreshCoordinator(ctx, m.coordinatedRefreshForRequest)
+	ctx = withExecutionCallbacks(ctx, m.handleExecutionRefreshUpdate, m.handleExecutionAuthUpdate, m.handleExecutionRateLimitUpdate, m.coordinatedRefreshForRequest)
 	var lastErr error
 	poolModeRetries := m.apiKeyPoolModeRetries(auth)
 	transportRetries := m.requestRetryLimitForAuth(auth)

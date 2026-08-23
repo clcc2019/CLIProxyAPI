@@ -531,6 +531,9 @@ func (s *codexStreamCompletionState) recordEventWithType(eventType string, event
 			return
 		}
 		itemBytes := []byte(itemResult.Raw)
+		if start, end, ok := codexJSONResultRawRange(eventData, itemResult); ok {
+			itemBytes = eventData[start:end]
+		}
 		outputIndexResult := codexGJSONGetImmutableBytes(eventData, "output_index")
 		if outputIndexResult.Exists() {
 			if s.outputItemsByIndex == nil {

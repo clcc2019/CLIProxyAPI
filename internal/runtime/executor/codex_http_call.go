@@ -159,6 +159,9 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	// shares a single context lookup instead of re-deriving the gin request on
 	// every call.
 	ctx = contextWithCachedCodexGinHeaders(ctx)
+	if finalOpts.deferredReasoningEffort.effort == "" {
+		finalOpts.deferredReasoningEffort = codexDeferredReasoningEffortFromContext(ctx)
+	}
 	requestKind := finalOpts.requestKind
 	ginHeaders := codexGinHeadersFromContext(ctx)
 	finalOpts.preserveNativeFields = codexNativeClientRequestFromContext(ctx) || codexNativeClientRequest(from, ginHeaders, body)
@@ -202,6 +205,7 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 			return codexPreparedHTTPCall{}, fmt.Errorf("codex executor: request compression failed: %w", err)
 		}
 	}
+	codexFinalizeRequestHeaders(prepared.httpReq.Header)
 	logCodexFinalUpstreamRequestDiagnostics(ctx, requestKind, from, req.Model, baseModel, prepared.body, prepared.httpReq.Header.Get("Content-Encoding"))
 	return codexPreparedHTTPCall{
 		url:      url,

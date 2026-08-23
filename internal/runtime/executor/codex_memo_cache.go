@@ -424,7 +424,12 @@ func hashCodexFinalUpstreamBodyMemoKey(baseModel string, authProvider string, op
 		boolToByte(opts.store),
 		boolToByte(opts.omitServiceTier),
 		boolToByte(opts.suppressDefaultInstructions),
+		boolToByte(opts.deferredReasoningEffort.originalExists),
 	})
+	_, _ = h.WriteString(opts.deferredReasoningEffort.effort)
+	_, _ = h.Write([]byte{0})
+	_, _ = h.WriteString(opts.deferredReasoningEffort.originalRaw)
+	_, _ = h.Write([]byte{0})
 	_, _ = h.Write(input)
 	return h.Sum64()
 }

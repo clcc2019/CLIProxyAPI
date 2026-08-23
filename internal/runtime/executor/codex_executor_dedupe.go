@@ -111,10 +111,9 @@ func (e *CodexExecutor) prepareCodexRequestWithKindBodyOptions(ctx context.Conte
 	if err != nil {
 		return codexPreparedRequest{}, err
 	}
-	// NewRequestWithContext starts with a zero-capacity Header map. Reserve the
-	// common HTTP header count so identity/profile insertion avoids map growth
-	// without paying for the larger websocket header set.
-	httpReq.Header = make(http.Header, codexHTTPRequestHeaderInitialCapacity)
+	// Reserve the common HTTP header count and one request-owned backing array
+	// for single-value headers. The private arena is removed before transport.
+	httpReq.Header = codexNewRequestHeader(codexHTTPRequestHeaderInitialCapacity, codexHTTPRequestHeaderValueCapacity)
 	if cache.ID != "" && (!isCompact || resolution.headerEligibleID != "") {
 		fallbackHeaderValue := cache.ID
 		if resolution.headerEligibleID != "" {

@@ -30,6 +30,18 @@ func TestCustomRootCAsFromEnvLoadsInlinePEM(t *testing.T) {
 	}
 }
 
+func TestCustomRootCAsEnvFingerprintEmpty(t *testing.T) {
+	t.Setenv("CODEX_CA_CERTIFICATE", "")
+	t.Setenv("SSL_CERT_FILE", "")
+	if got := CustomRootCAsEnvFingerprint(); got != "" {
+		t.Fatalf("CustomRootCAsEnvFingerprint() = %q, want empty", got)
+	}
+	pool, err := CustomRootCAsFromEnv()
+	if err != nil || pool != nil {
+		t.Fatalf("CustomRootCAsFromEnv() = (%v, %v), want (nil, nil)", pool, err)
+	}
+}
+
 func TestCustomRootCAsFromEnvLoadsPEMFile(t *testing.T) {
 	certPEM := mustCreateTestCertificatePEM(t)
 	dir := t.TempDir()

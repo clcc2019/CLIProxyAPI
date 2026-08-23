@@ -140,10 +140,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		ctx = contextWithCodexNativeClientRequest(ctx)
 	}
 
-	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
+	var deferredReasoning codexDeferredReasoningEffort
+	body, deferredReasoning, err = applyCodexThinkingWithInstructionsDeferred(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
+	ctx = contextWithCodexDeferredReasoningEffort(ctx, deferredReasoning)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -276,10 +278,12 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		ctx = contextWithCodexNativeClientRequest(ctx)
 	}
 
-	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
+	var deferredReasoning codexDeferredReasoningEffort
+	body, deferredReasoning, err = applyCodexThinkingWithInstructionsDeferred(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
+	ctx = contextWithCodexDeferredReasoningEffort(ctx, deferredReasoning)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -437,10 +441,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		upstreamCtx = contextWithCodexNativeClientRequest(upstreamCtx)
 	}
 
-	body, err = applyCodexThinkingWithInstructions(body, req, from.String(), to.String(), e.Identifier())
+	var deferredReasoning codexDeferredReasoningEffort
+	body, deferredReasoning, err = applyCodexThinkingWithInstructionsDeferred(body, req, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
+	upstreamCtx = contextWithCodexDeferredReasoningEffort(upstreamCtx, deferredReasoning)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)

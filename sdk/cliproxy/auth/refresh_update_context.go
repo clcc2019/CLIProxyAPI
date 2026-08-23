@@ -5,14 +5,51 @@ import (
 	"strings"
 )
 
-type refreshUpdateContextKey struct{}
-type authUpdateContextKey struct{}
-type rateLimitUpdateContextKey struct{}
-type executionAuthPrincipalContextKey struct{}
+type executionContextStateKey struct{}
 
 type RefreshUpdateCallback func(context.Context, *Auth)
 type AuthUpdateCallback func(context.Context, *Auth)
 type RateLimitUpdateCallback func(context.Context, string, []RateLimitSnapshot)
+
+type executionContextState struct {
+	principal          string
+	refreshUpdate      RefreshUpdateCallback
+	authUpdate         AuthUpdateCallback
+	rateLimitUpdate    RateLimitUpdateCallback
+	refreshCoordinator RefreshCoordinator
+}
+
+func executionStateFromContext(ctx context.Context) executionContextState {
+	if ctx == nil {
+		return executionContextState{}
+	}
+	state, _ := ctx.Value(executionContextStateKey{}).(executionContextState)
+	return state
+}
+
+func withExecutionState(ctx context.Context, state executionContextState) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, executionContextStateKey{}, state)
+}
+
+func withExecutionCallbacks(ctx context.Context, refresh RefreshUpdateCallback, authUpdate AuthUpdateCallback, rateLimit RateLimitUpdateCallback, coordinator RefreshCoordinator) context.Context {
+	state := executionStateFromContext(ctx)
+	if refresh != nil {
+		state.refreshUpdate = refresh
+	}
+	if authUpdate != nil {
+		state.authUpdate = authUpdate
+	}
+	if rateLimit != nil {
+		state.rateLimitUpdate = rateLimit
+	}
+	if coordinator != nil {
+		state.refreshCoordinator = coordinator
+	}
+	return withExecutionState(ctx, state)
+}
 
 func withExecutionAuthPrincipal(ctx context.Context, auth *Auth) context.Context {
 	if ctx == nil {
@@ -22,14 +59,20 @@ func withExecutionAuthPrincipal(ctx context.Context, auth *Auth) context.Context
 	if kind == "" || principal == "" {
 		return ctx
 	}
-	return context.WithValue(ctx, executionAuthPrincipalContextKey{}, kind+"\x00"+principal)
+	value := kind + "\x00" + principal
+	state := executionStateFromContext(ctx)
+	if state.principal == value {
+		return ctx
+	}
+	state.principal = value
+	return withExecutionState(ctx, state)
 }
 
 func executionAuthPrincipalMatches(ctx context.Context, auth *Auth) bool {
 	if ctx == nil {
 		return true
 	}
-	expected, _ := ctx.Value(executionAuthPrincipalContextKey{}).(string)
+	expected := executionStateFromContext(ctx).principal
 	if expected == "" {
 		return true
 	}
@@ -44,11 +87,16 @@ func withExecutionAuthPrincipalSnapshot(ctx, source context.Context) context.Con
 	if source == nil {
 		return ctx
 	}
-	principal, _ := source.Value(executionAuthPrincipalContextKey{}).(string)
+	principal := executionStateFromContext(source).principal
 	if principal == "" {
 		return ctx
 	}
-	return context.WithValue(ctx, executionAuthPrincipalContextKey{}, principal)
+	state := executionStateFromContext(ctx)
+	if state.principal == principal {
+		return ctx
+	}
+	state.principal = principal
+	return withExecutionState(ctx, state)
 }
 
 func WithRefreshUpdateCallback(ctx context.Context, cb RefreshUpdateCallback) context.Context {
@@ -58,7 +106,9 @@ func WithRefreshUpdateCallback(ctx context.Context, cb RefreshUpdateCallback) co
 	if cb == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, refreshUpdateContextKey{}, cb)
+	state := executionStateFromContext(ctx)
+	state.refreshUpdate = cb
+	return withExecutionState(ctx, state)
 }
 
 func WithAuthUpdateCallback(ctx context.Context, cb AuthUpdateCallback) context.Context {
@@ -68,7 +118,9 @@ func WithAuthUpdateCallback(ctx context.Context, cb AuthUpdateCallback) context.
 	if cb == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, authUpdateContextKey{}, cb)
+	state := executionStateFromContext(ctx)
+	state.authUpdate = cb
+	return withExecutionState(ctx, state)
 }
 
 func WithRateLimitUpdateCallback(ctx context.Context, cb RateLimitUpdateCallback) context.Context {
@@ -78,14 +130,16 @@ func WithRateLimitUpdateCallback(ctx context.Context, cb RateLimitUpdateCallback
 	if cb == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, rateLimitUpdateContextKey{}, cb)
+	state := executionStateFromContext(ctx)
+	state.rateLimitUpdate = cb
+	return withExecutionState(ctx, state)
 }
 
 func PublishRefreshUpdate(ctx context.Context, auth *Auth) {
 	if ctx == nil || auth == nil {
 		return
 	}
-	cb, _ := ctx.Value(refreshUpdateContextKey{}).(RefreshUpdateCallback)
+	cb := executionStateFromContext(ctx).refreshUpdate
 	if cb == nil {
 		return
 	}
@@ -96,7 +150,7 @@ func PublishAuthUpdate(ctx context.Context, auth *Auth) {
 	if ctx == nil || auth == nil {
 		return
 	}
-	cb, _ := ctx.Value(authUpdateContextKey{}).(AuthUpdateCallback)
+	cb := executionStateFromContext(ctx).authUpdate
 	if cb == nil {
 		return
 	}
@@ -110,7 +164,7 @@ func PublishAuthProfileUpdate(ctx context.Context, auth *Auth) {
 	if ctx == nil || auth == nil {
 		return
 	}
-	cb, _ := ctx.Value(authUpdateContextKey{}).(AuthUpdateCallback)
+	cb := executionStateFromContext(ctx).authUpdate
 	if cb == nil {
 		return
 	}
@@ -121,7 +175,7 @@ func PublishRateLimitUpdate(ctx context.Context, authID string, snapshots []Rate
 	if ctx == nil || strings.TrimSpace(authID) == "" || len(snapshots) == 0 {
 		return
 	}
-	cb, _ := ctx.Value(rateLimitUpdateContextKey{}).(RateLimitUpdateCallback)
+	cb := executionStateFromContext(ctx).rateLimitUpdate
 	if cb == nil {
 		return
 	}
