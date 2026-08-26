@@ -6,7 +6,6 @@ func PrepareAuthFileMetadataForSave(auth *Auth) map[string]any {
 	if auth == nil {
 		return nil
 	}
-	StripNonPersistentCodexFeatures(auth)
 	PrepareCodexInstallationIDForSave(auth, nil)
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)

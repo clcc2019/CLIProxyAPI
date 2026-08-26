@@ -3,13 +3,10 @@ package auth
 import "strings"
 
 // NormalizeImportedAuthMetadata converts supported external auth exports into
-// native auth-file metadata used by the proxy and removes request-scoped Codex
-// features. It returns the normalized metadata plus a flag indicating whether
-// any conversion or cleanup occurred.
+// native auth-file metadata. It returns the normalized metadata plus a flag
+// indicating whether a conversion occurred.
 func NormalizeImportedAuthMetadata(metadata map[string]any) (map[string]any, bool) {
-	normalized, changed := normalizeImportedAuthMetadata(metadata)
-	sanitized, sanitizedChanged := SanitizeCodexAuthMetadata(normalized)
-	return sanitized, changed || sanitizedChanged
+	return normalizeImportedAuthMetadata(metadata)
 }
 
 func normalizeImportedAuthMetadata(metadata map[string]any) (map[string]any, bool) {

@@ -2423,7 +2423,13 @@ func responsesWebsocketPayloadShouldRetryFullTranscript(payload []byte) bool {
 
 func responsesWebsocketPreviousResponseNotFoundText(text string) bool {
 	text = strings.TrimSpace(text)
-	if text == "" || !responsesContainsASCIIFold(text, "not found") {
+	if text == "" {
+		return false
+	}
+	if responsesContainsASCIIFold(text, "previous_response_id") && responsesContainsASCIIFold(text, "invalid") {
+		return true
+	}
+	if !responsesContainsASCIIFold(text, "not found") {
 		return false
 	}
 	if responsesContainsASCIIFold(text, "previous_response_id") {

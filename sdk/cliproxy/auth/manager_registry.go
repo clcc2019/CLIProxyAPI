@@ -51,7 +51,6 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {
 		return nil, nil
 	}
-	StripNonPersistentCodexFeatures(auth)
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
@@ -113,7 +112,6 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
-	StripNonPersistentCodexFeatures(auth)
 	applyDefaultRefreshInterval(auth)
 	m.applyProxyPoolLease(ctx, auth)
 	m.mu.Lock()

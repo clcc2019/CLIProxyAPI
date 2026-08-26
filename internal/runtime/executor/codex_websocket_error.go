@@ -117,7 +117,13 @@ func codexWebsocketPreviousResponseNotFound(payload []byte) bool {
 
 func codexPreviousResponseNotFoundText(text string) bool {
 	text = strings.TrimSpace(text)
-	if text == "" || !asciifold.Contains(text, "not found") {
+	if text == "" {
+		return false
+	}
+	if asciifold.Contains(text, "previous_response_id") && asciifold.Contains(text, "invalid") {
+		return true
+	}
+	if !asciifold.Contains(text, "not found") {
 		return false
 	}
 	if asciifold.Contains(text, "previous_response_id") {

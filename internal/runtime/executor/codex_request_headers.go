@@ -36,12 +36,12 @@ func codexRemoteCompactionV2Enabled(auth *cliproxyauth.Auth, cfg *config.Config,
 		}
 	}
 	if value := codexAuthHeaderValue(auth, codexPinnedBetaFeaturesHeader); value != "" {
-		return false
+		return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
 	}
 	if profile, ok := codexPinnedClientProfileViewForAuth(auth); ok {
-		value := cliproxyauth.FilterCodexBetaFeaturesForPersistence(trimHeaderValue(profile.headers, codexPinnedBetaFeaturesHeader))
+		value := trimHeaderValue(profile.headers, codexPinnedBetaFeaturesHeader)
 		if value != "" {
-			return false
+			return codexBetaFeaturesContain(value, codexRemoteCompactionV2Feature)
 		}
 	}
 	_, configured := codexHeaderDefaults(cfg, auth)

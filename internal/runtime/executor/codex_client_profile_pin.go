@@ -122,7 +122,6 @@ func codexAuthWithPinnedClientProfile(auth *cliproxyauth.Auth, profile codexClie
 			candidate.Attributes["originator"] = value
 		}
 	}
-	cliproxyauth.StripNonPersistentCodexFeatures(candidate)
 	return candidate
 }
 
@@ -150,9 +149,6 @@ func codexNewClientProfileFromRequest(auth *cliproxyauth.Auth, target http.Heade
 			continue
 		}
 		value := firstNonEmptyHeaderValue(target, source, headerName)
-		if strings.EqualFold(headerName, codexPinnedBetaFeaturesHeader) {
-			value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
-		}
 		if value != "" && strings.EqualFold(headerName, "Version") && !codexVersionAtLeast(value, codexDefaultVersionHeader()) {
 			value = codexDefaultVersionHeader()
 		}
@@ -430,9 +426,6 @@ func codexApplyCustomHeadersFromAuth(req *http.Request, auth *cliproxyauth.Auth)
 		}
 		headerName = strings.TrimSpace(headerName)
 		value := strings.TrimSpace(rawValue)
-		if strings.EqualFold(headerName, codexPinnedBetaFeaturesHeader) {
-			value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
-		}
 		if headerName == "" || value == "" {
 			continue
 		}
@@ -489,9 +482,6 @@ func codexAuthHeaderFixed(auth *cliproxyauth.Auth, name string) bool {
 				continue
 			}
 			value = strings.TrimSpace(value)
-			if strings.EqualFold(name, codexPinnedBetaFeaturesHeader) {
-				value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
-			}
 			if value != "" {
 				return true
 			}
@@ -501,9 +491,6 @@ func codexAuthHeaderFixed(auth *cliproxyauth.Auth, name string) bool {
 		return false
 	}
 	value := codexMetadataHeaderValue(auth.Metadata, name)
-	if strings.EqualFold(name, codexPinnedBetaFeaturesHeader) {
-		value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
-	}
 	return value != ""
 }
 
@@ -520,9 +507,6 @@ func codexAuthHeaderValue(auth *cliproxyauth.Auth, name string) string {
 			}
 			if strings.EqualFold(strings.TrimSpace(headerName), name) && strings.TrimSpace(value) != "" {
 				value = strings.TrimSpace(value)
-				if strings.EqualFold(name, codexPinnedBetaFeaturesHeader) {
-					value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
-				}
 				if value != "" {
 					return value
 				}
@@ -533,9 +517,6 @@ func codexAuthHeaderValue(auth *cliproxyauth.Auth, name string) string {
 		return ""
 	}
 	value := codexMetadataHeaderValue(auth.Metadata, name)
-	if strings.EqualFold(name, codexPinnedBetaFeaturesHeader) {
-		value = cliproxyauth.FilterCodexBetaFeaturesForPersistence(value)
-	}
 	return value
 }
 

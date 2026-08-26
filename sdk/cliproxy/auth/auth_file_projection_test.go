@@ -208,7 +208,7 @@ func TestDecodeAuthFileMetadataPreservesNestedAgentIdentityClientFeatures(t *tes
 	}
 }
 
-func TestDecodeAuthFileMetadataRemovesRemoteCompactionV2FromClientFeatures(t *testing.T) {
+func TestDecodeAuthFileMetadataPreservesRemoteCompactionV2FromClientFeatures(t *testing.T) {
 	metadata, err := DecodeAuthFileMetadata([]byte(`{
 		"type": "codex",
 		"client_features": {
@@ -223,13 +223,13 @@ func TestDecodeAuthFileMetadataRemovesRemoteCompactionV2FromClientFeatures(t *te
 
 	features := metadata["client_features"].(map[string]any)
 	headers := features["headers"].(map[string]any)
-	if got := headers["X-Codex-Beta-Features"]; got != "feature-a" {
-		t.Fatalf("X-Codex-Beta-Features = %#v, want feature-a", got)
+	if got := headers["X-Codex-Beta-Features"]; got != "feature-a,remote_compaction_v2" {
+		t.Fatalf("X-Codex-Beta-Features = %#v, want original features", got)
 	}
 
 	auth := NewAuthFromAuthFileMetadata(metadata, AuthFileProjectionOptions{ID: "codex.json"})
-	if got := auth.Attributes["header:X-Codex-Beta-Features"]; got != "feature-a" {
-		t.Fatalf("projected beta features = %q, want feature-a", got)
+	if got := auth.Attributes["header:X-Codex-Beta-Features"]; got != "feature-a,remote_compaction_v2" {
+		t.Fatalf("projected beta features = %q, want original features", got)
 	}
 }
 

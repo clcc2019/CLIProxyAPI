@@ -3432,6 +3432,11 @@ func TestResponsesWebsocketPayloadShouldRetryFullTranscript(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "invalid previous response id",
+			payload: []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"Invalid ` + "`previous_response_id`" + `."}}`),
+			want:    true,
+		},
+		{
 			name:    "response failed previous response not found",
 			payload: []byte(`{"type":"response.failed","response":{"id":"resp-rejected","status":"failed","error":{"code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id","type":"invalid_request_error","status":400}}}`),
 			want:    true,
@@ -4329,7 +4334,7 @@ func TestResponsesWebsocketContinuesIncrementalAfterSuccessfulFullTranscriptRetr
 	gin.SetMode(gin.TestMode)
 
 	executor := &websocketRetryFullTranscriptExecutor{
-		secondCallPayload: []byte(`{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id","type":"invalid_request_error"}}`),
+		secondCallPayload: []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"Invalid ` + "`previous_response_id`" + `."}}`),
 	}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)

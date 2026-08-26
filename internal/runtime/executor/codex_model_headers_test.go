@@ -68,9 +68,13 @@ func TestRemoteCompactionV2RequestFeaturesOverrideConfigDefault(t *testing.T) {
 	if got := codexRemoteCompactionV2Enabled(auth, cfg, nil); got {
 		t.Fatal("persisted non-compaction beta features should continue to override the configured default")
 	}
+	auth.Attributes["header:X-Codex-Beta-Features"] = "remote_compaction_v2"
+	if got := codexRemoteCompactionV2Enabled(auth, &config.Config{}, nil); !got {
+		t.Fatal("persisted remote_compaction_v2 should enable compaction trigger preservation")
+	}
 }
 
-func TestRemoteCompactionV2FromWebsocketOptionsIsRequestScoped(t *testing.T) {
+func TestRemoteCompactionV2FromWebsocketOptionsIsPersisted(t *testing.T) {
 	codexResetClientProfilesForTest()
 	t.Cleanup(codexResetClientProfilesForTest)
 
@@ -116,12 +120,12 @@ func TestRemoteCompactionV2FromWebsocketOptionsIsRequestScoped(t *testing.T) {
 	if published == nil {
 		t.Fatal("expected profile update")
 	}
-	if got := published.Attributes["header:X-Codex-Beta-Features"]; got != "" {
-		t.Fatalf("published beta features = %q, want empty", got)
+	if got := published.Attributes["header:X-Codex-Beta-Features"]; got != "remote_compaction_v2" {
+		t.Fatalf("published beta features = %q, want remote_compaction_v2", got)
 	}
 	if headers, ok := published.Metadata["headers"].(map[string]any); ok {
-		if got := headers["X-Codex-Beta-Features"]; got != nil {
-			t.Fatalf("published metadata beta features = %#v, want absent", got)
+		if got := headers["X-Codex-Beta-Features"]; got != "remote_compaction_v2" {
+			t.Fatalf("published metadata beta features = %#v, want remote_compaction_v2", got)
 		}
 	}
 }

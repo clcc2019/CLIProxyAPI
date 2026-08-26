@@ -125,7 +125,7 @@ func TestApplyCodexHeadersUsesAuthFileClientProfileAttributes(t *testing.T) {
 	}
 }
 
-func TestApplyCodexHeadersDoesNotPersistRemoteCompactionV2(t *testing.T) {
+func TestApplyCodexHeadersPersistsRemoteCompactionV2(t *testing.T) {
 	codexResetClientProfilesForTest()
 	t.Cleanup(codexResetClientProfilesForTest)
 
@@ -158,16 +158,16 @@ func TestApplyCodexHeadersDoesNotPersistRemoteCompactionV2(t *testing.T) {
 	if published == nil {
 		t.Fatal("expected client profile update")
 	}
-	if got := published.Attributes["header:X-Codex-Beta-Features"]; got != "feature-a" {
-		t.Fatalf("published beta features = %q, want feature-a", got)
+	if got := published.Attributes["header:X-Codex-Beta-Features"]; got != "feature-a,remote_compaction_v2" {
+		t.Fatalf("published beta features = %q, want original features", got)
 	}
 	headers := published.Metadata["headers"].(map[string]any)
-	if got := headers["X-Codex-Beta-Features"]; got != "feature-a" {
-		t.Fatalf("published metadata beta features = %#v, want feature-a", got)
+	if got := headers["X-Codex-Beta-Features"]; got != "feature-a,remote_compaction_v2" {
+		t.Fatalf("published metadata beta features = %#v, want original features", got)
 	}
 }
 
-func TestCodexAuthHeaderValueFallsBackPastRequestScopedAttribute(t *testing.T) {
+func TestCodexAuthHeaderValueUsesPersistedRemoteCompactionV2(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{
 			"header:X-Codex-Beta-Features": "remote_compaction_v2",
@@ -177,8 +177,8 @@ func TestCodexAuthHeaderValueFallsBackPastRequestScopedAttribute(t *testing.T) {
 		},
 	}
 
-	if got := codexAuthHeaderValue(auth, "X-Codex-Beta-Features"); got != "feature-a" {
-		t.Fatalf("codexAuthHeaderValue() = %q, want metadata fallback feature-a", got)
+	if got := codexAuthHeaderValue(auth, "X-Codex-Beta-Features"); got != "remote_compaction_v2" {
+		t.Fatalf("codexAuthHeaderValue() = %q, want persisted remote_compaction_v2", got)
 	}
 }
 
