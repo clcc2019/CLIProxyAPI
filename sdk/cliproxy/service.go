@@ -246,6 +246,25 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 	}
 }
 
+// startupAuthGroups excludes disabled auths and keeps free Codex auths out of
+// the readiness-critical path. Free auths are returned separately so they can
+// be registered after the server is ready.
+func startupAuthGroups(auths []*coreauth.Auth) (priority, deferred []*coreauth.Auth) {
+	for _, auth := range auths {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" || auth.IsDisabled() {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") &&
+			auth.Attributes != nil &&
+			strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free") {
+			deferred = append(deferred, auth)
+			continue
+		}
+		priority = append(priority, auth)
+	}
+	return priority, deferred
+}
+
 func (s *Service) ensureWebsocketGateway() {
 	if s == nil {
 		return
@@ -847,6 +866,7 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}()
 
+	var deferredStartupAuths []*coreauth.Auth
 	if !homeEnabled {
 		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
@@ -982,10 +1002,6 @@ func (s *Service) Run(ctx context.Context) error {
 			return fmt.Errorf("cliproxy: failed to create watcher: %w", errCreate)
 		}
 		s.watcher = watcherWrapper
-		s.ensureAuthUpdateQueue(ctx)
-		if s.authUpdates != nil {
-			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
-		}
 		watcherWrapper.SetConfig(s.cfg)
 
 		watcherCtx, watcherCancel := context.WithCancel(context.Background())
@@ -995,16 +1011,39 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 
 		loadCtx := coreauth.WithSkipPersist(ctx)
-		for _, auth := range watcherWrapper.CurrentAuths() {
+		priorityAuths, deferredAuths := startupAuthGroups(watcherWrapper.CurrentAuths())
+		log.Infof("startup auth load: %d priority auth(s), %d free Codex auth(s) deferred, disabled auth(s) skipped", len(priorityAuths), len(deferredAuths))
+		for _, auth := range priorityAuths {
 			s.applyCoreAuthAddOrUpdate(loadCtx, auth)
+		}
+		deferredStartupAuths = deferredAuths
+
+		// Start dispatching changes only after the priority snapshot is applied;
+		// the initial watcher snapshot was intentionally collected without a queue.
+		s.ensureAuthUpdateQueue(ctx)
+		if s.authUpdates != nil {
+			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 		}
 	}
 
-	// Bootstrap is complete: auth manager loaded, executors rebound, server
-	// goroutine launched, and watcher auths registered. Mark the proxy ready so /readyz starts returning 200.
+	// Bootstrap is complete: priority auths are registered and the server
+	// goroutine is running. Mark the proxy ready while free auths finish in the
+	// background so /readyz is not blocked by slow auth initialization.
 	// /healthz has been answering 200 since the listener bound, so liveness
 	// probes were never blocked by the auth load.
 	s.server.SetReady(true)
+	if len(deferredStartupAuths) > 0 {
+		go func(auths []*coreauth.Auth) {
+			for _, auth := range auths {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				s.applyCoreAuthAddOrUpdate(coreauth.WithSkipPersist(ctx), auth)
+			}
+		}(deferredStartupAuths)
+	}
 
 	s.applyPprofConfig(s.cfg)
 

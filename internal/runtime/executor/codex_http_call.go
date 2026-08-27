@@ -227,21 +227,23 @@ func logCodexFinalUpstreamRequestDiagnostics(ctx context.Context, requestKind co
 	}
 	root := gjson.ParseBytes(body)
 	fields := log.Fields{
-		"endpoint":              codexFinalUpstreamRequestKindLogName(requestKind),
-		"source_format":         from.String(),
-		"requested_model":       strings.TrimSpace(requestedModel),
-		"base_model":            strings.TrimSpace(baseModel),
-		"body_bytes":            len(body),
-		"content_encoding":      strings.TrimSpace(contentEncoding),
-		"json_object":           root.IsObject(),
-		"top_level_fields":      codexTopLevelFieldCount(root),
-		"input_items":           codexJSONArrayLen(root.Get("input")),
-		"tools":                 codexJSONArrayLen(root.Get("tools")),
-		"has_instructions":      codexJSONNonNullExists(root.Get("instructions")),
-		"has_reasoning":         codexJSONNonNullExists(root.Get("reasoning")),
-		"has_text_format":       codexJSONNonNullExists(root.Get("text.format")),
-		"has_previous_response": codexJSONStringPresent(root.Get("previous_response_id")),
-		"has_prompt_cache_key":  codexJSONStringPresent(root.Get("prompt_cache_key")),
+		"endpoint":                  codexFinalUpstreamRequestKindLogName(requestKind),
+		"source_format":             from.String(),
+		"requested_model":           strings.TrimSpace(requestedModel),
+		"base_model":                strings.TrimSpace(baseModel),
+		"upstream_model":            strings.TrimSpace(root.Get("model").String()),
+		"upstream_reasoning_effort": strings.TrimSpace(root.Get("reasoning.effort").String()),
+		"body_bytes":                len(body),
+		"content_encoding":          strings.TrimSpace(contentEncoding),
+		"json_object":               root.IsObject(),
+		"top_level_fields":          codexTopLevelFieldCount(root),
+		"input_items":               codexJSONArrayLen(root.Get("input")),
+		"tools":                     codexJSONArrayLen(root.Get("tools")),
+		"has_instructions":          codexJSONNonNullExists(root.Get("instructions")),
+		"has_reasoning":             codexJSONNonNullExists(root.Get("reasoning")),
+		"has_text_format":           codexJSONNonNullExists(root.Get("text.format")),
+		"has_previous_response":     codexJSONStringPresent(root.Get("previous_response_id")),
+		"has_prompt_cache_key":      codexJSONStringPresent(root.Get("prompt_cache_key")),
 	}
 	if enc, err := tokenizerForCodexModel(baseModel); err != nil {
 		fields["estimated_input_tokens_error"] = err.Error()

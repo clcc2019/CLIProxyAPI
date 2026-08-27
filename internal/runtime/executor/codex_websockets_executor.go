@@ -1497,6 +1497,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		}
 	}
 	codexFinalizeRequestHeaders(wsHeaders)
+	if !prepared.httpFallback {
+		logCodexFinalUpstreamRequestDiagnostics(ctx, codexFinalUpstreamResponses, opts.SourceFormat, req.Model, baseModel, prepared.wsReqBody, "")
+	}
 	prepared.wsReqLog = helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
