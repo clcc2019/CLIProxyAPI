@@ -3,9 +3,12 @@ package executor
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
@@ -683,6 +686,7 @@ func TestNormalizeCodexFinalUpstreamResponsesLiteWithCapabilities(t *testing.T) 
 		"instructions":"test instructions",
 		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
 		"tools":[{"type":"function","name":"tool","parameters":{"type":"object"}}],
+		"tool_choice":{"type":"function","name":"tool"},
 		"parallel_tool_calls":true,
 		"reasoning":{"effort":"medium"}
 	}`)
@@ -700,6 +704,9 @@ func TestNormalizeCodexFinalUpstreamResponsesLiteWithCapabilities(t *testing.T) 
 	if got := gjson.GetBytes(gotBody, "parallel_tool_calls"); got.Type != gjson.False {
 		t.Fatalf("parallel_tool_calls = %s, want false; body=%s", got.Raw, gotBody)
 	}
+	if got := gjson.GetBytes(gotBody, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want auto; body=%s", got, gotBody)
+	}
 	if got := gjson.GetBytes(gotBody, "reasoning.context").String(); got != "all_turns" {
 		t.Fatalf("reasoning.context = %q, want all_turns; body=%s", got, gotBody)
 	}
@@ -709,14 +716,29 @@ func TestNormalizeCodexFinalUpstreamResponsesLiteWithCapabilities(t *testing.T) 
 	if got := gjson.GetBytes(gotBody, "input.0.role").String(); got != "developer" {
 		t.Fatalf("input.0.role = %q, want developer; body=%s", got, gotBody)
 	}
-	if got := gjson.GetBytes(gotBody, "input.0.tools.0.name").String(); got != "tool" {
-		t.Fatalf("input.0.tools.0.name = %q, want tool; body=%s", got, gotBody)
+	if got := gjson.GetBytes(gotBody, "input.0.id").String(); !strings.HasPrefix(got, "at_") {
+		t.Fatalf("input.0.id = %q, want at_ prefix; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.tools.0.type").String(); got != "namespace" {
+		t.Fatalf("input.0.tools.0.type = %q, want namespace; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.tools.0.name").String(); got != "functions" {
+		t.Fatalf("input.0.tools.0.name = %q, want functions; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.tools.0.tools.0.name").String(); got != "tool" {
+		t.Fatalf("input.0.tools.0.tools.0.name = %q, want tool; body=%s", got, gotBody)
 	}
 	if got := gjson.GetBytes(gotBody, "input.1.role").String(); got != "developer" {
 		t.Fatalf("input.1.role = %q, want developer instruction message; body=%s", got, gotBody)
 	}
+	if got := gjson.GetBytes(gotBody, "input.1.id").String(); !strings.HasPrefix(got, "msg_") {
+		t.Fatalf("input.1.id = %q, want msg_ prefix; body=%s", got, gotBody)
+	}
 	if got := gjson.GetBytes(gotBody, "input.1.content.0.text").String(); got != "test instructions" {
 		t.Fatalf("instruction text = %q, want test instructions; body=%s", got, gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "input.1.internal_chat_message_metadata_passthrough.content_item_kinds.0").String(); got != "model.base_instructions" {
+		t.Fatalf("instruction metadata kind = %q, want model.base_instructions; body=%s", got, gotBody)
 	}
 	if got := gjson.GetBytes(gotBody, "input.2.role").String(); got != "user" {
 		t.Fatalf("input.2.role = %q, want original user message; body=%s", got, gotBody)
@@ -735,9 +757,86 @@ func TestNormalizeCodexFinalUpstreamResponsesLiteOmitsHostedTools(t *testing.T) 
 	}`)
 
 	gotBody := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, registry.CodexClientModelCapabilities{UseResponsesLite: true})
-	tools := gjson.GetBytes(gotBody, "input.0.tools").Array()
+	tools := gjson.GetBytes(gotBody, "input.0.tools.0.tools").Array()
 	if len(tools) != 1 || tools[0].Get("name").String() != "local_tool" {
-		t.Fatalf("responses_lite additional tools = %s, want only local_tool; body=%s", gjson.GetBytes(gotBody, "input.0.tools").Raw, gotBody)
+		t.Fatalf("responses_lite functions namespace tools = %s, want only local_tool; body=%s", gjson.GetBytes(gotBody, "input.0.tools").Raw, gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamResponsesLitePrefixIDsAreStable(t *testing.T) {
+	body := []byte(`{"prompt_cache_key":"cache-1","client_metadata":{"thread_id":"thread-1"},"instructions":"same","input":[],"tools":[{"type":"function","name":"tool","parameters":{"type":"object"}}]}`)
+	caps := registry.CodexClientModelCapabilities{UseResponsesLite: true}
+	first := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, caps)
+	secondBody, err := helps.SetJSONBytes(body, "prompt_cache_key", "cache-2")
+	if err != nil {
+		t.Fatalf("set changed prompt cache key: %v", err)
+	}
+	second := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(secondBody, caps)
+	if got, want := gjson.GetBytes(first, "input.0.id").String(), gjson.GetBytes(second, "input.0.id").String(); got != want {
+		t.Fatalf("additional_tools ID changed: first=%q second=%q", got, want)
+	}
+	if got, want := gjson.GetBytes(first, "input.1.id").String(), gjson.GetBytes(second, "input.1.id").String(); got != want {
+		t.Fatalf("developer message ID changed: first=%q second=%q", got, want)
+	}
+	prefixNamespace := uuid.NewSHA1(uuid.NameSpaceOID, []byte("thread-1"))
+	toolsPayload := `[{"type":"namespace","name":"functions","description":"","tools":[{"type":"function","name":"tool","parameters":{"type":"object"}}]}]`
+	if got, want := gjson.GetBytes(first, "input.0.id").String(), "at_"+uuid.NewSHA1(prefixNamespace, []byte(toolsPayload)).String(); got != want {
+		t.Fatalf("additional_tools ID = %q, want official UUIDv5 ID %q", got, want)
+	}
+	if got, want := gjson.GetBytes(first, "input.1.id").String(), "msg_"+uuid.NewSHA1(prefixNamespace, []byte("same")).String(); got != want {
+		t.Fatalf("developer message ID = %q, want official UUIDv5 ID %q", got, want)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamResponsesLiteReplacesStaleAdditionalTools(t *testing.T) {
+	body := []byte(`{
+		"input":[
+			{"id":"at_stale","type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","description":"","tools":[{"type":"function","name":"old_tool","parameters":{"type":"object"}}]}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
+		],
+		"tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]
+	}`)
+	got := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, registry.CodexClientModelCapabilities{UseResponsesLite: true})
+	count := 0
+	gjson.GetBytes(got, "input").ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "additional_tools" {
+			count++
+		}
+		return true
+	})
+	if count != 1 {
+		t.Fatalf("additional_tools count = %d, want 1; body=%s", count, got)
+	}
+	if name := gjson.GetBytes(got, "input.0.tools.0.tools.0.name").String(); name != "apply_patch" {
+		t.Fatalf("current tool name = %q, want apply_patch; body=%s", name, got)
+	}
+	if strings.Contains(string(got), "old_tool") {
+		t.Fatalf("stale additional tools were retained: %s", got)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamResponsesLitePreservesOfficialPrefixes(t *testing.T) {
+	body := []byte(`{
+		"instructions":"defaulted instructions must not be duplicated",
+		"input":[
+			{"id":"at_existing","type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","description":"","tools":[]}]},
+			{"id":"msg_existing","type":"message","role":"developer","content":[{"type":"input_text","text":"official instructions"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]}},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
+		],
+		"tools":[]
+	}`)
+	got := normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, registry.CodexClientModelCapabilities{UseResponsesLite: true})
+	if count := gjson.GetBytes(got, "input.#").Int(); count != 3 {
+		t.Fatalf("input count = %d, want original 3 items; body=%s", count, got)
+	}
+	if id := gjson.GetBytes(got, "input.0.id").String(); id != "at_existing" {
+		t.Fatalf("additional_tools id = %q, want at_existing; body=%s", id, got)
+	}
+	if id := gjson.GetBytes(got, "input.1.id").String(); id != "msg_existing" {
+		t.Fatalf("base instructions id = %q, want msg_existing; body=%s", id, got)
+	}
+	if gjson.GetBytes(got, "tools").Exists() || gjson.GetBytes(got, "instructions").Exists() {
+		t.Fatalf("official Lite request retained top-level tools/instructions: %s", got)
 	}
 }
 

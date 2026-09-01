@@ -355,14 +355,11 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, ErrorMessage: usageErrorMessage(err)}
 	}
-	actualModel := strings.TrimSpace(model)
-	if r.serverModel != "" {
-		actualModel = r.serverModel
-	}
+	sentModel := strings.TrimSpace(model)
 	return usage.Record{
 		Provider:             r.provider,
 		ExecutorType:         r.executorType,
-		Model:                actualModel,
+		Model:                sentModel,
 		Alias:                r.alias,
 		RequestedModel:       r.alias,
 		ResponseModel:        r.serverModel,

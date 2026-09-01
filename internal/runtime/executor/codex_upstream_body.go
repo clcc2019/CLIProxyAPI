@@ -3,10 +3,10 @@ package executor
 import (
 	"bytes"
 	"encoding/json"
-	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/asciifold"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -52,6 +52,9 @@ func codexClientModelCapabilitiesForAuth(auth *cliproxyauth.Auth, modelID string
 }
 
 func codexDefaultNamespaceDescription(namespaceName string) string {
+	if namespaceName == "functions" {
+		return ""
+	}
 	return "Tools in the " + namespaceName + " namespace."
 }
 
@@ -397,7 +400,6 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	body = normalizeCodexFinalUpstreamInputShape(body)
 	body = normalizeCodexFinalUpstreamInputItems(body, opts)
 	body = normalizeCodexFinalUpstreamInputItemIDs(body, opts)
-	body = normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body, auth)
 	body = normalizeCodexFinalUpstreamModelControls(body, baseModel, &capabilities)
 	body = normalizeCodexFinalUpstreamStreamOptions(body, opts)
 	body = normalizeCodexFinalUpstreamToolOutputImageDetail(body, &capabilities, capabilitiesKnown)
@@ -406,6 +408,7 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 	if capabilitiesKnown {
 		body = normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, capabilities)
 	}
+	body = normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body, auth)
 	body = pruneCodexFinalUpstreamBody(body, opts)
 	body = codexEnsureResponsesContextField(body, opts.requestKind)
 	body = codexEnsureReasoningEncryptedContentInclude(body, opts)
@@ -842,14 +845,19 @@ func normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body []byte, capab
 	}
 	body = normalizeCodexFinalUpstreamResponsesLiteInputImages(body, input)
 	input = gjson.GetBytes(body, "input")
+	hasAdditionalTools, hasBaseInstructions := codexResponsesLiteInputPrefixes(input)
+	topLevelTools := gjson.GetBytes(body, "tools")
+	replaceAdditionalTools := hasAdditionalTools && topLevelTools.IsArray() && len(topLevelTools.Array()) > 0
 
 	prefixItems := make([][]byte, 0, 2)
-	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
+	if tools := topLevelTools; tools.IsArray() && (!hasAdditionalTools || replaceAdditionalTools) {
 		tools = codexResponsesLiteClientTools(tools)
-		prefixItems = append(prefixItems, []byte(`{"type":"additional_tools","role":"developer","tools":`+tools.Raw+`}`))
+		id := codexResponsesLitePrefixID(body, "at", tools.Raw)
+		prefixItems = append(prefixItems, []byte(`{"id":`+strconv.Quote(id)+`,"type":"additional_tools","role":"developer","tools":`+tools.Raw+`}`))
 	}
-	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) != "" {
-		prefixItems = append(prefixItems, []byte(`{"type":"message","role":"developer","content":[{"type":"input_text","text":`+strconv.Quote(instructions.String())+`}]}`))
+	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) != "" && !hasBaseInstructions {
+		id := codexResponsesLitePrefixID(body, "msg", instructions.String())
+		prefixItems = append(prefixItems, []byte(`{"id":`+strconv.Quote(id)+`,"type":"message","role":"developer","content":[{"type":"input_text","text":`+strconv.Quote(instructions.String())+`}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]}}`))
 	}
 
 	edits := make([]helps.JSONEdit, 0, 4)
@@ -857,6 +865,9 @@ func normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body []byte, capab
 		items := make([][]byte, 0, len(prefixItems)+len(input.Array()))
 		items = append(items, prefixItems...)
 		input.ForEach(func(_, item gjson.Result) bool {
+			if replaceAdditionalTools && item.Get("type").String() == "additional_tools" {
+				return true
+			}
 			items = append(items, []byte(item.Raw))
 			return true
 		})
@@ -877,10 +888,50 @@ func normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body []byte, capab
 			edits = append(edits, helps.SetJSONEdit("reasoning.context", "all_turns"))
 		}
 	}
+	if toolChoice := gjson.GetBytes(body, "tool_choice"); toolChoice.Exists() && (toolChoice.Type != gjson.String || toolChoice.String() != "auto") {
+		edits = append(edits, helps.SetJSONEdit("tool_choice", "auto"))
+	}
 	if len(edits) == 0 {
 		return body
 	}
 	return helps.EditJSONBytes(body, edits...)
+}
+
+func codexResponsesLiteInputPrefixes(input gjson.Result) (hasAdditionalTools, hasBaseInstructions bool) {
+	if !input.IsArray() {
+		return false, false
+	}
+	sawUserMessage := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "additional_tools":
+			hasAdditionalTools = true
+		case "message":
+			if item.Get("role").String() == "user" {
+				sawUserMessage = true
+				break
+			}
+			if item.Get("role").String() != "developer" {
+				break
+			}
+			if strings.HasPrefix(item.Get("id").String(), "msg_") || (hasAdditionalTools && !sawUserMessage) {
+				hasBaseInstructions = true
+				break
+			}
+			kinds := item.Get("internal_chat_message_metadata_passthrough.content_item_kinds")
+			if kinds.IsArray() {
+				kinds.ForEach(func(_, kind gjson.Result) bool {
+					if kind.String() == "model.base_instructions" {
+						hasBaseInstructions = true
+						return false
+					}
+					return true
+				})
+			}
+		}
+		return !(hasAdditionalTools && hasBaseInstructions)
+	})
+	return hasAdditionalTools, hasBaseInstructions
 }
 
 func codexResponsesLiteClientTools(tools gjson.Result) gjson.Result {
@@ -888,20 +939,73 @@ func codexResponsesLiteClientTools(tools gjson.Result) gjson.Result {
 		return tools
 	}
 	items := make([][]byte, 0, len(tools.Array()))
+	functions := make([][]byte, 0)
+	functionsIndex := -1
+	functionsDescription := ""
 	changed := false
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		switch strings.TrimSpace(tool.Get("type").String()) {
 		case "web_search", "web_search_preview", "image_generation":
 			changed = true
+		case "function", "custom":
+			if functionsIndex < 0 {
+				functionsIndex = len(items)
+			}
+			functions = append(functions, []byte(tool.Raw))
+			changed = true
+		case "namespace":
+			if strings.TrimSpace(tool.Get("name").String()) == "functions" {
+				if functionsIndex < 0 {
+					functionsIndex = len(items)
+				}
+				if description := tool.Get("description"); description.Type == gjson.String && strings.TrimSpace(description.String()) != "" {
+					functionsDescription = description.String()
+				}
+				if nested := tool.Get("tools"); nested.IsArray() {
+					nested.ForEach(func(_, child gjson.Result) bool {
+						if child.IsObject() {
+							functions = append(functions, []byte(child.Raw))
+						}
+						return true
+					})
+				}
+				changed = true
+				return true
+			}
+			items = append(items, []byte(tool.Raw))
 		default:
 			items = append(items, []byte(tool.Raw))
 		}
 		return true
 	})
+	if len(functions) > 0 {
+		namespace := []byte(`{"type":"namespace","name":"functions","description":` + strconv.Quote(functionsDescription) + `,"tools":` + string(codexRawJSONArray(functions)) + `}`)
+		if functionsIndex < 0 || functionsIndex > len(items) {
+			functionsIndex = len(items)
+		}
+		items = append(items, nil)
+		copy(items[functionsIndex+1:], items[functionsIndex:])
+		items[functionsIndex] = namespace
+	}
 	if !changed {
 		return tools
 	}
 	return gjson.ParseBytes(codexRawJSONArray(items))
+}
+
+// codexResponsesLitePrefixID mirrors codex-rs' stable prefix IDs. The proxy
+// does not always own the client's UUID thread ID, so prefer the request's
+// thread identity and fall back to its cache/session identity.
+func codexResponsesLitePrefixID(body []byte, prefix, payload string) string {
+	identity := gjson.GetBytes(body, "client_metadata.thread_id").String()
+	if strings.TrimSpace(identity) == "" {
+		identity = gjson.GetBytes(body, "prompt_cache_key").String()
+	}
+	if strings.TrimSpace(identity) == "" {
+		identity = gjson.GetBytes(body, "client_metadata.session_id").String()
+	}
+	prefixNamespace := uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity))
+	return prefix + "_" + uuid.NewSHA1(prefixNamespace, []byte(payload)).String()
 }
 
 func normalizeCodexFinalUpstreamResponsesLiteInputImages(body []byte, input gjson.Result) []byte {
@@ -1146,18 +1250,6 @@ func coalesceCodexFinalUpstreamNamespaceTools(items [][]byte) ([][]byte, bool) {
 			updated = codexSetJSONStringIfDifferent(updated, description, "description", codexDefaultNamespaceDescription(name))
 		}
 
-		childTools := codexFinalUpstreamNamespaceToolItems(gjson.GetBytes(updated, "tools"))
-		if len(childTools) > 1 {
-			before := codexRawJSONArray(childTools)
-			sort.SliceStable(childTools, func(i, j int) bool {
-				return strings.Compare(codexFinalUpstreamToolName(childTools[i]), codexFinalUpstreamToolName(childTools[j])) < 0
-			})
-			after := codexRawJSONArray(childTools)
-			if !codexRawJSONEqual(before, after) {
-				updated, _ = helps.SetRawJSONBytes(updated, "tools", after)
-			}
-		}
-
 		if !codexRawJSONEqual(updated, rawItem) {
 			merged[index] = updated
 			changed = true
@@ -1177,10 +1269,6 @@ func codexFinalUpstreamNamespaceToolItems(tools gjson.Result) [][]byte {
 		return true
 	})
 	return items
-}
-
-func codexFinalUpstreamToolName(rawTool []byte) string {
-	return strings.TrimSpace(gjson.GetBytes(rawTool, "name").String())
 }
 
 func normalizeCodexFinalUpstreamTool(tool gjson.Result) ([]byte, bool) {
@@ -1289,11 +1377,17 @@ func normalizeCodexFinalUpstreamNamespaceToolsArray(tools gjson.Result) ([]byte,
 			}
 			toolType = "function"
 		}
-		if toolType != "function" {
+		var rawTool []byte
+		var keep bool
+		switch toolType {
+		case "function":
+			rawTool, keep = normalizeCodexFinalUpstreamFunctionTool(tool)
+		case "custom":
+			rawTool, keep = normalizeCodexFinalUpstreamCustomTool(tool)
+		default:
 			changed = true
 			return true
 		}
-		rawTool, keep := normalizeCodexFinalUpstreamFunctionTool(tool)
 		if !keep {
 			changed = true
 			return true
@@ -1424,7 +1518,7 @@ func normalizeCodexFinalUpstreamCustomTool(tool gjson.Result) ([]byte, bool) {
 	raw = codexDeleteJSONIfExists(raw, gjson.GetBytes(raw, "output_schema"), "output_schema")
 	raw = codexDeleteJSONIfExists(raw, gjson.GetBytes(raw, "parameters"), "parameters")
 	raw = codexDeleteJSONIfExists(raw, gjson.GetBytes(raw, "strict"), "strict")
-	raw = codexDeleteJSONIfExists(raw, gjson.GetBytes(raw, "defer_loading"), "defer_loading")
+	raw = codexNormalizeFunctionToolDeferLoading(raw)
 	raw = codexDeleteJSONIfExists(raw, gjson.GetBytes(raw, "cache_control"), "cache_control")
 	return raw, true
 }

@@ -206,6 +206,22 @@ func TestBuildHTTPTransportSOCKS5HProxy(t *testing.T) {
 	}
 }
 
+func TestBuildHTTPTransportHTTPSProxyConfiguresTLSDialer(t *testing.T) {
+	transport, mode, errBuild := BuildHTTPTransport("https://proxy.example.com:8443")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy || transport == nil {
+		t.Fatalf("mode/transport = %d/%v, want proxy/non-nil", mode, transport)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("expected HTTPS proxy URL")
+	}
+	if transport.DialTLSContext == nil {
+		t.Fatal("expected custom TLS dialer for HTTPS proxy")
+	}
+}
+
 func TestBuildHTTPTransportSOCKS5DialContextHonorsCanceledContext(t *testing.T) {
 	t.Parallel()
 

@@ -190,11 +190,56 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			}
 			return ApplyHTTPTransportPoolSettings(transport), setting.Mode, nil
 		}
+		if setting.URL.Scheme == "https" {
+			transport := cloneDefaultTransport()
+			transport.Proxy = http.ProxyURL(setting.URL)
+			transport.DialTLSContext = buildHTTPSProxyDialTLSContext(setting.URL, nil, transport.TLSHandshakeTimeout, transport.DialContext)
+			return ApplyHTTPTransportPoolSettings(transport), setting.Mode, nil
+		}
 		transport := cloneDefaultTransport()
 		transport.Proxy = http.ProxyURL(setting.URL)
 		return ApplyHTTPTransportPoolSettings(transport), setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
+	}
+}
+
+func buildHTTPSProxyDialTLSContext(
+	proxyURL *url.URL,
+	baseTLS *tls.Config,
+	handshakeTimeout time.Duration,
+	baseDialContext func(ctx context.Context, network, addr string) (net.Conn, error),
+) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	proxyHostname := proxyURL.Hostname()
+	dialContext := baseDialContext
+	if dialContext == nil {
+		dialContext = newProxyForwardDialer().DialContext
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		rawConn, errDial := dialContext(ctx, network, addr)
+		if errDial != nil {
+			return nil, errDial
+		}
+		tlsConfig := &tls.Config{}
+		if baseTLS != nil {
+			tlsConfig = baseTLS.Clone()
+		}
+		if tlsConfig.ServerName == "" {
+			tlsConfig.ServerName = proxyHostname
+		}
+		tlsConfig.NextProtos = []string{"http/1.1"}
+		tlsConn := tls.Client(rawConn, tlsConfig)
+		handshakeCtx := ctx
+		if handshakeTimeout > 0 {
+			var cancelHandshake context.CancelFunc
+			handshakeCtx, cancelHandshake = context.WithTimeout(ctx, handshakeTimeout)
+			defer cancelHandshake()
+		}
+		if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w", errHandshake)
+		}
+		return tlsConn, nil
 	}
 }
 
@@ -249,7 +294,10 @@ func (d *connectProxyDialer) DialContext(ctx context.Context, network, addr stri
 		var rawConn net.Conn
 		rawConn, err = baseDialer.DialContext(ctx, network, d.proxyURL.Host)
 		if err == nil {
-			tlsConn := tls.Client(rawConn, &tls.Config{ServerName: d.proxyURL.Hostname()})
+			tlsConn := tls.Client(rawConn, &tls.Config{
+				ServerName: d.proxyURL.Hostname(),
+				NextProtos: []string{"http/1.1"},
+			})
 			err = tlsConn.HandshakeContext(ctx)
 			if err != nil {
 				rawConn.Close()

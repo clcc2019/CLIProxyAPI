@@ -37,13 +37,13 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	}
 }
 
-func TestUsageReporterCodexResponseMetadataUsesActualModel(t *testing.T) {
+func TestUsageReporterCodexResponseMetadataKeepsSentModel(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5-requested", nil)
 	reporter.SetCodexResponseMetadata("gpt-5-safe", true)
 	record := reporter.buildRecordWithFailure(usage.Detail{InputTokens: 1, OutputTokens: 2}, false, usage.Failure{}, nil)
 
-	if record.Model != "gpt-5-safe" {
-		t.Fatalf("usage model = %q, want gpt-5-safe", record.Model)
+	if record.Model != "gpt-5-requested" {
+		t.Fatalf("usage model = %q, want gpt-5-requested", record.Model)
 	}
 	if record.RequestedModel != "gpt-5-requested" || record.Alias != "gpt-5-requested" {
 		t.Fatalf("requested model fields = (%q, %q), want gpt-5-requested", record.RequestedModel, record.Alias)

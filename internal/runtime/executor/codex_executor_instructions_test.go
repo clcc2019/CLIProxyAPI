@@ -483,7 +483,7 @@ func TestNormalizeCodexFinalUpstreamBodyCoalescesNamespaceToolsLikeOfficialCodex
 	if gotDescription := gjson.GetBytes(got, "tools.0.description").String(); gotDescription != "Sample tools." {
 		t.Fatalf("merged namespace description = %q; body=%s", gotDescription, got)
 	}
-	for index, wantName := range []string{"a_first", "middle", "z_last"} {
+	for index, wantName := range []string{"z_last", "a_first", "middle"} {
 		path := "tools.0.tools." + strconv.Itoa(index) + ".name"
 		if gotName := gjson.GetBytes(got, path).String(); gotName != wantName {
 			t.Fatalf("%s = %q, want %q; body=%s", path, gotName, wantName, got)
@@ -534,7 +534,7 @@ func TestNormalizeCodexFinalUpstreamBodyPreservesExplicitWebSearchModeAndConfig(
 	}
 }
 
-func TestNormalizeCodexFinalUpstreamBodyDropsNonFunctionNamespaceChildren(t *testing.T) {
+func TestNormalizeCodexFinalUpstreamBodyKeepsOfficialNamespaceChildren(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-5.4",
 		"instructions":"Be helpful.",
@@ -545,7 +545,7 @@ func TestNormalizeCodexFinalUpstreamBodyDropsNonFunctionNamespaceChildren(t *tes
 			"description":"Sample namespace.",
 			"tools":[
 				{"type":"function","name":"keep_me","parameters":{"type":"object","properties":{}}},
-				{"type":"custom","name":"drop_custom","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},
+				{"type":"custom","name":"keep_custom","defer_loading":true,"format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},
 				{"type":"web_search","filters":{"allowed_domains":["example.com"]}}
 			]
 		}]
@@ -556,14 +556,23 @@ func TestNormalizeCodexFinalUpstreamBodyDropsNonFunctionNamespaceChildren(t *tes
 		streamMode:  codexStreamFieldTrue,
 	})
 
-	if gotCount := gjson.GetBytes(got, "tools.0.tools.#").Int(); gotCount != 1 {
-		t.Fatalf("namespace child count = %d, want 1; body=%s", gotCount, got)
+	if gotCount := gjson.GetBytes(got, "tools.0.tools.#").Int(); gotCount != 2 {
+		t.Fatalf("namespace child count = %d, want function and custom; body=%s", gotCount, got)
 	}
 	if gotName := gjson.GetBytes(got, "tools.0.tools.0.name").String(); gotName != "keep_me" {
 		t.Fatalf("namespace child name = %q, want keep_me; body=%s", gotName, got)
 	}
 	if gotType := gjson.GetBytes(got, "tools.0.tools.0.type").String(); gotType != "function" {
 		t.Fatalf("namespace child type = %q, want function; body=%s", gotType, got)
+	}
+	if gotName := gjson.GetBytes(got, "tools.0.tools.1.name").String(); gotName != "keep_custom" {
+		t.Fatalf("custom namespace child name = %q, want keep_custom; body=%s", gotName, got)
+	}
+	if gotType := gjson.GetBytes(got, "tools.0.tools.1.type").String(); gotType != "custom" {
+		t.Fatalf("custom namespace child type = %q, want custom; body=%s", gotType, got)
+	}
+	if gotDeferred := gjson.GetBytes(got, "tools.0.tools.1.defer_loading"); gotDeferred.Type != gjson.True {
+		t.Fatalf("custom namespace child defer_loading = %s, want true; body=%s", gotDeferred.Raw, got)
 	}
 }
 

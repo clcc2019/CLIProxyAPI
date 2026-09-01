@@ -185,6 +185,7 @@ func TestCodexAuthHeaderValueUsesPersistedRemoteCompactionV2(t *testing.T) {
 func TestApplyCodexHeadersPinsAgentIdentityAuthFileClientFeatures(t *testing.T) {
 	codexResetClientProfilesForTest()
 	t.Cleanup(codexResetClientProfilesForTest)
+	const clientUA = "codex_vscode/" + misc.CodexCLIVersion + " (linux; x64)"
 
 	auth := cliproxyauth.NewAuthFromAuthFileMetadata(map[string]any{
 		"agentIdentity": map[string]any{
@@ -192,11 +193,11 @@ func TestApplyCodexHeadersPinsAgentIdentityAuthFileClientFeatures(t *testing.T) 
 			"agentRuntimeId":  "runtime-fixed-client",
 			"agentPrivateKey": "private-key-fixed-client",
 			"clientFeatures": map[string]any{
-				"userAgent":      "codex_vscode/0.144.6 (linux; x64)",
+				"userAgent":      clientUA,
 				"originator":     "codex_vscode",
 				"installationId": "fixed-installation",
 				"headers": map[string]any{
-					"Version":               "0.144.6",
+					"Version":               misc.CodexCLIVersion,
 					"X-Codex-Beta-Features": "fixed-beta",
 					"X-OpenAI-Subagent":     "fixed-subagent",
 					"X-OAI-Attestation":     "fixed-attestation",
@@ -226,9 +227,9 @@ func TestApplyCodexHeadersPinsAgentIdentityAuthFileClientFeatures(t *testing.T) 
 
 	for header, want := range map[string]string{
 		"Authorization":           "AgentAssertion agent-assertion",
-		"User-Agent":              "codex_vscode/0.144.6 (linux; x64)",
+		"User-Agent":              clientUA,
 		"Originator":              "codex_vscode",
-		"Version":                 "0.144.6",
+		"Version":                 misc.CodexCLIVersion,
 		"X-Codex-Beta-Features":   "fixed-beta",
 		"X-Codex-Installation-Id": "fixed-installation",
 		"X-OpenAI-Subagent":       "fixed-subagent",
@@ -948,7 +949,7 @@ func TestApplyCodexHeadersReplacesLegacyDefaultUnpinnedClientProfile(t *testing.
 
 func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
 	codexResetClientProfilesForTest()
-	const explicitUA = "codex_cli_rs/0.144.6 (Linux; x86_64) custom-terminal/1.0"
+	const explicitUA = "codex_cli_rs/" + misc.CodexCLIVersion + " (Linux; x86_64) custom-terminal/1.0"
 
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-auth-explicit-current-cli-profile",
@@ -962,7 +963,7 @@ func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
 			"headers": map[string]any{
 				"User-Agent": explicitUA,
 				"Originator": "codex_cli_rs",
-				"Version":    "0.144.6",
+				"Version":    misc.CodexCLIVersion,
 			},
 		},
 		Attributes: map[string]string{
@@ -970,7 +971,7 @@ func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
 			"header:User-Agent": explicitUA,
 			"originator":        "codex_cli_rs",
 			"header:Originator": "codex_cli_rs",
-			"header:Version":    "0.144.6",
+			"header:Version":    misc.CodexCLIVersion,
 		},
 	}
 	ctx := contextWithGinHeaders(map[string]string{
@@ -991,7 +992,7 @@ func TestApplyCodexHeadersKeepsExplicitCurrentCodexCLIProfile(t *testing.T) {
 	if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
 		t.Fatalf("request Originator = %q, want codex_cli_rs", got)
 	}
-	if got := req.Header.Get("Version"); got != "0.144.6" {
-		t.Fatalf("request Version = %q, want 0.144.6", got)
+	if got := req.Header.Get("Version"); got != misc.CodexCLIVersion {
+		t.Fatalf("request Version = %q, want %s", got, misc.CodexCLIVersion)
 	}
 }
