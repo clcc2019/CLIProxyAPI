@@ -60,6 +60,8 @@ The proxy includes one built-in access provider:
 - `config-api-key`: Validates API keys declared under top-level `api-keys`.
   - Credential sources: `Authorization: Bearer`, `X-Goog-Api-Key`, `X-Api-Key`, `?key=`, `?auth_token=`
   - Metadata: `Result.Metadata["source"]` is set to the matched source label.
+  - Structured entries may set `auth-files` (or the `auth-file` shorthand) to
+    restrict execution to auth-dir-relative credential files.
 
 In the CLI server and `sdk/cliproxy`, this provider is registered automatically based on the loaded configuration.
 
@@ -69,6 +71,7 @@ api-keys:
   - sk-prod-456
   - api-key: sk-limited-789
     allowed-models: ["gpt-*"]
+    auth-files: ["codex-primary.json", "codex-backup.json"]
     quota:
       daily-requests: 1000
       monthly-requests: 30000

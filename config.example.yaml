@@ -59,6 +59,10 @@ auth-dir: "~/.cli-proxy-api"
 #     disabled: false
 #     allowed-models: ["gpt-*", "claude-*"]
 #     excluded-models: ["gpt-image-*"]
+#     # Restrict this client key to the listed auth files. The files are
+#     # relative to auth-dir and may be rotated within this pool.
+#     auth-files: ["codex-primary.json", "codex-backup.json"]
+#     # A single file may also use: auth-file: "codex-primary.json"
 #     quota:
 #       daily-requests: 1000
 #       monthly-requests: 30000

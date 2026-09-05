@@ -2,11 +2,13 @@ package configaccess
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -131,6 +133,11 @@ func (p *provider) authenticateValue(value, source string) (*sdkaccess.Result, *
 		meta["excluded_models"] = strings.Join(entry.ExcludedModels, ",")
 	}
 	internalconfig.AddClientAPIKeyQuotaMetadata(meta, entry.Quota)
+	if len(entry.AuthFiles) > 0 {
+		if encoded, err := json.Marshal(entry.AuthFiles); err == nil {
+			meta[coreexecutor.ClientAuthFilesMetadataKey] = string(encoded)
+		}
+	}
 	return &sdkaccess.Result{
 		Provider:  p.Identifier(),
 		Principal: value,

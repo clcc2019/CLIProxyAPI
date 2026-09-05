@@ -159,6 +159,46 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_HonorsAllowedAuthIDs(t *testing.T) {
+	t.Parallel()
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "bound", Provider: "codex"},
+		&Auth{ID: "unbound", Provider: "codex"},
+	)
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.AllowedAuthIDsMetadataKey: []string{"bound"},
+	}}
+	for index := 0; index < 3; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "codex", "", opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != "bound" {
+			t.Fatalf("pickSingle() #%d auth = %#v, want bound", index, got)
+		}
+	}
+}
+
+func TestSchedulerPickStable_HonorsAllowedAuthIDs(t *testing.T) {
+	t.Parallel()
+	scheduler := newSchedulerForTest(
+		&SessionAffinitySelector{fallback: &RoundRobinSelector{}},
+		&Auth{ID: "bound", Provider: "codex"},
+		&Auth{ID: "unbound", Provider: "codex"},
+	)
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.AllowedAuthIDsMetadataKey: []string{"bound"},
+	}}
+	got, errPick := scheduler.pickSingleStable(context.Background(), "codex", "", opts, nil, "client-session")
+	if errPick != nil {
+		t.Fatalf("pickSingleStable() error = %v", errPick)
+	}
+	if got == nil || got.ID != "bound" {
+		t.Fatalf("pickSingleStable() auth = %#v, want bound", got)
+	}
+}
+
 func TestSchedulerPick_RoundRobinPrefersLeastInFlightWithinPriority(t *testing.T) {
 	t.Parallel()
 

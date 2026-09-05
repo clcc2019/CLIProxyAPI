@@ -59,7 +59,7 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	modelRegistry := registry.GetGlobalRegistry()
-	models := handlers.FilterOpenAIModelSummariesForClient(c, modelRegistry.GetAvailableOpenAIModelSummaries())
+	models := handlers.FilterOpenAIModelSummariesForClientWithAuthManager(c, h.AuthManager, modelRegistry.GetAvailableOpenAIModelSummaries())
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",

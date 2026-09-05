@@ -425,6 +425,7 @@ func hashCodexFinalUpstreamBodyMemoKey(baseModel string, authProvider string, op
 		boolToByte(opts.omitServiceTier),
 		boolToByte(opts.suppressDefaultInstructions),
 		boolToByte(opts.deferredReasoningEffort.originalExists),
+		boolToByte(opts.deferredReasoningEffort.force),
 	})
 	_, _ = h.WriteString(opts.deferredReasoningEffort.effort)
 	_, _ = h.Write([]byte{0})

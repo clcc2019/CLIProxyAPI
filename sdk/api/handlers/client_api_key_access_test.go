@@ -2,11 +2,14 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestClientModelAllowedForContext(t *testing.T) {
@@ -31,6 +34,28 @@ func TestClientModelAllowedForContext(t *testing.T) {
 	}
 	if clientModelAllowedForContext(ctx, "gpt-4o") {
 		t.Fatalf("expected non-allowed model to be denied")
+	}
+}
+
+func TestResolveClientAuthFileIDs(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	_, err := manager.Register(context.Background(), &coreauth.Auth{ID: "codex-a.json", FileName: "codex-a.json", Provider: "codex"})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	ids, missing := resolveClientAuthFileIDs(manager, []string{"./codex-a.json", "missing.json"})
+	if len(ids) != 1 || ids[0] != "codex-a.json" || len(missing) != 1 || missing[0] != "missing.json" {
+		t.Fatalf("resolved ids=%v missing=%v", ids, missing)
+	}
+}
+
+func TestClientAuthFilesFromGin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	encoded, _ := json.Marshal([]string{"a.json", "b.json"})
+	c.Set("accessMetadata", map[string]string{coreexecutor.ClientAuthFilesMetadataKey: string(encoded)})
+	if got := clientAuthFilesFromGin(c); len(got) != 2 || got[0] != "a.json" || got[1] != "b.json" {
+		t.Fatalf("auth files = %#v", got)
 	}
 }
 

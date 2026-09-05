@@ -711,8 +711,8 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["description"].(string); got != "Custom model from registry" {
 		t.Fatalf("custom description = %q, want Custom model from registry", got)
 	}
-	if got, _ := custom["context_window"].(float64); got != 123456 {
-		t.Fatalf("custom context_window = %v, want 123456", custom["context_window"])
+	if got, _ := custom["context_window"].(float64); got != 272000 {
+		t.Fatalf("custom context_window = %v, want 272000", custom["context_window"])
 	}
 	assertCodexSupportedReasoningLevels(t, custom, []string{"none", "minimal", "low", "medium", "unsupported", "high", "xhigh"})
 	if custom["base_instructions"] != gpt55["base_instructions"] {

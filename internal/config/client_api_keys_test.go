@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -47,6 +48,39 @@ api-keys:
 	}
 	if !reflect.DeepEqual(parsed.APIKeys, want) {
 		t.Fatalf("unexpected api keys: %#v", parsed.APIKeys)
+	}
+}
+
+func TestClientAPIKeysAuthFilesCompatibility(t *testing.T) {
+	var parsed struct {
+		APIKeys ClientAPIKeys `yaml:"api-keys"`
+	}
+	if err := yaml.Unmarshal([]byte("api-keys:\n  - api-key: client\n    auth-file: ./team\\\\codex.json\n    auth-files: [codex.json, ../ignored.json, codex.json]\n"), &parsed); err != nil {
+		t.Fatalf("unmarshal auth file binding: %v", err)
+	}
+	if len(parsed.APIKeys) != 1 || !reflect.DeepEqual(parsed.APIKeys[0].AuthFiles, []string{"codex.json", "team/codex.json"}) {
+		t.Fatalf("unexpected auth file bindings: %#v", parsed.APIKeys)
+	}
+	data, err := json.Marshal(parsed.APIKeys)
+	if err != nil {
+		t.Fatalf("marshal auth file binding: %v", err)
+	}
+	if !strings.Contains(string(data), "auth-files") || strings.Contains(string(data), "ignored.json") {
+		t.Fatalf("unexpected serialized auth file binding: %s", data)
+	}
+}
+
+func TestClientAPIKeysAuthFilesAliasesAndAbsolutePaths(t *testing.T) {
+	var parsed struct {
+		APIKeys ClientAPIKeys `yaml:"api-keys"`
+	}
+	input := "api-keys:\n  - api-key: client\n    authFile: team/a.json\n    authFiles: [team/b.json, C:\\\\secrets\\\\auth.json, /tmp/auth.json]\n"
+	if err := yaml.Unmarshal([]byte(input), &parsed); err != nil {
+		t.Fatalf("unmarshal auth file aliases: %v", err)
+	}
+	want := []string{"team/b.json", "team/a.json"}
+	if len(parsed.APIKeys) != 1 || !reflect.DeepEqual(parsed.APIKeys[0].AuthFiles, want) {
+		t.Fatalf("auth files = %#v, want %#v", parsed.APIKeys, want)
 	}
 }
 

@@ -2,11 +2,14 @@ package configaccess
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestAuthenticateIncludesClientAPIKeyQuotaMetadata(t *testing.T) {
@@ -36,6 +39,26 @@ func TestAuthenticateIncludesClientAPIKeyQuotaMetadata(t *testing.T) {
 	got := internalconfig.ClientAPIKeyQuotaFromMetadata(result.Metadata)
 	if !reflect.DeepEqual(got, quota) {
 		t.Fatalf("quota metadata = %#v, want %#v", got, quota)
+	}
+}
+
+func TestAuthenticateIncludesBoundAuthFiles(t *testing.T) {
+	provider := newProvider("test", internalconfig.ClientAPIKeys{{
+		APIKey:    "bound-key",
+		AuthFiles: []string{"codex-a.json", "codex-b.json"},
+	}})
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer bound-key")
+	result, authErr := provider.Authenticate(context.Background(), req)
+	if authErr != nil || result == nil {
+		t.Fatalf("authenticate failed: result=%#v err=%v", result, authErr)
+	}
+	var files []string
+	if err := json.Unmarshal([]byte(result.Metadata[coreexecutor.ClientAuthFilesMetadataKey]), &files); err != nil {
+		t.Fatalf("decode auth files metadata: %v", err)
+	}
+	if !reflect.DeepEqual(files, []string{"codex-a.json", "codex-b.json"}) {
+		t.Fatalf("auth files metadata = %#v", files)
 	}
 }
 

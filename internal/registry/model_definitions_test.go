@@ -33,6 +33,30 @@ func TestCodexStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
 	}
 }
 
+func TestCodexStaticModelsIncludeGPT6Astra(t *testing.T) {
+	tests := []struct {
+		name   string
+		models []*ModelInfo
+	}{
+		{name: "free", models: GetCodexFreeModels()},
+		{name: "team", models: GetCodexTeamModels()},
+		{name: "plus", models: GetCodexPlusModels()},
+		{name: "pro", models: GetCodexProModels()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := findModelInfo(tt.models, "gpt-6-astra")
+			if info == nil {
+				t.Fatal("gpt-6-astra not found")
+			}
+			if info.ContextLength != 272000 {
+				t.Fatalf("context length = %d, want 272000", info.ContextLength)
+			}
+		})
+	}
+}
+
 func TestCodexStaticModelsIncludeGPT56Family(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -215,6 +239,40 @@ func TestCodexClientModelCapabilitiesIncludeGPT56(t *testing.T) {
 	}
 	if len(capabilities.ServiceTiers) != 2 || capabilities.ServiceTiers[0] != "priority" || capabilities.ServiceTiers[1] != "ultrafast" {
 		t.Fatalf("service tiers = %#v, want [priority ultrafast]", capabilities.ServiceTiers)
+	}
+}
+
+func TestCodexClientModelCapabilitiesIncludeGPT6Astra(t *testing.T) {
+	capabilities, ok := CodexClientModelCapabilitiesForModel("gpt-6-astra")
+	if !ok {
+		t.Fatal("expected gpt-6-astra in embedded Codex client model catalog")
+	}
+	if !capabilities.SupportsParallelToolCalls {
+		t.Fatal("gpt-6-astra should support parallel tool calls")
+	}
+	if !capabilities.SupportsVerbosity || capabilities.DefaultVerbosity != "low" {
+		t.Fatalf("verbosity capabilities = supported:%v default:%q, want true/low", capabilities.SupportsVerbosity, capabilities.DefaultVerbosity)
+	}
+	if !capabilities.UseResponsesLite {
+		t.Fatal("gpt-6-astra should use responses_lite")
+	}
+	if !capabilities.SupportsImageDetailOriginal {
+		t.Fatal("gpt-6-astra should support original image detail")
+	}
+	if capabilities.DefaultReasoningLevel != "low" {
+		t.Fatalf("default reasoning level = %q, want low", capabilities.DefaultReasoningLevel)
+	}
+	wantLevels := []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+	if len(capabilities.SupportedReasoningLevels) != len(wantLevels) {
+		t.Fatalf("reasoning levels = %#v, want %#v", capabilities.SupportedReasoningLevels, wantLevels)
+	}
+	for i, want := range wantLevels {
+		if capabilities.SupportedReasoningLevels[i] != want {
+			t.Fatalf("reasoning levels = %#v, want %#v", capabilities.SupportedReasoningLevels, wantLevels)
+		}
+	}
+	if len(capabilities.ServiceTiers) != 1 || capabilities.ServiceTiers[0] != "priority" {
+		t.Fatalf("service tiers = %#v, want [priority]", capabilities.ServiceTiers)
 	}
 }
 

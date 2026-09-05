@@ -248,6 +248,32 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 	}
 }
 
+func authIDAllowedByMetadata(meta map[string]any, authID string) bool {
+	if len(meta) == 0 {
+		return true
+	}
+	raw, ok := meta[cliproxyexecutor.AllowedAuthIDsMetadataKey]
+	if !ok || raw == nil {
+		return true
+	}
+	authID = strings.TrimSpace(authID)
+	switch typed := raw.(type) {
+	case []string:
+		for _, id := range typed {
+			if strings.TrimSpace(id) == authID {
+				return true
+			}
+		}
+	case []any:
+		for _, value := range typed {
+			if id, ok := value.(string); ok && strings.TrimSpace(id) == authID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func withPinnedAuthMetadata(opts cliproxyexecutor.Options, authID string) cliproxyexecutor.Options {
 	authID = strings.TrimSpace(authID)
 	if authID == "" || pinnedAuthIDFromMetadata(opts.Metadata) == authID {

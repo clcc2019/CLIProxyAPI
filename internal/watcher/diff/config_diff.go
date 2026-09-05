@@ -285,6 +285,9 @@ func redactedClientAPIKeys(in config.ClientAPIKeys) []string {
 		if len(entry.ExcludedModels) > 0 {
 			parts = append(parts, "excluded="+strings.Join(entry.ExcludedModels, ","))
 		}
+		if len(entry.AuthFiles) > 0 {
+			parts = append(parts, "auth-files="+strings.Join(entry.AuthFiles, ","))
+		}
 		out = append(out, strings.Join(parts, "|"))
 	}
 	return out

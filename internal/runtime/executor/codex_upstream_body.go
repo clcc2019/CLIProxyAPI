@@ -263,7 +263,7 @@ func codexEnsureFinalUpstreamBodyDefaults(body []byte, baseModel string, capabil
 		current := gjson.GetBytes(body, "reasoning.effort")
 		unchanged := (!deferred.originalExists && !current.Exists()) ||
 			(deferred.originalExists && current.Exists() && current.Raw == deferred.originalRaw)
-		if unchanged {
+		if deferred.force || unchanged {
 			effortRaw := strconv.AppendQuote(nil, deferred.effort)
 			reasoningRaw := make([]byte, 0, len(effortRaw)+12)
 			reasoningRaw = append(reasoningRaw, `{"effort":`...)

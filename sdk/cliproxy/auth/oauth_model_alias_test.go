@@ -5,6 +5,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
@@ -265,6 +266,71 @@ func TestWithOAuthModelAliasReasoningEffort(t *testing.T) {
 			}
 			if _, exists := req.Metadata[cliproxyexecutor.UpstreamReasoningEffortOverrideMetadataKey]; exists {
 				t.Fatalf("input request metadata was mutated: %#v", req.Metadata)
+			}
+		})
+	}
+}
+
+func TestWithOAuthModelAliasReasoningEffort_OfficialRequestFields(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{
+			Name:  "gpt-5.6-sol",
+			Alias: "gpt-5.6-sol",
+			ReasoningEffort: map[string]string{
+				"max":   "high",
+				"xhigh": "high",
+			},
+		}},
+	})
+	auth := createAuthForChannel("codex")
+
+	tests := []struct {
+		name       string
+		source     string
+		payload    string
+		wantEffort string
+	}{
+		{
+			name:       "responses max",
+			source:     "openai-response",
+			payload:    `{"reasoning":{"effort":"max"}}`,
+			wantEffort: "high",
+		},
+		{
+			name:       "responses xhigh",
+			source:     "openai-response",
+			payload:    `{"reasoning":{"effort":"xhigh"}}`,
+			wantEffort: "high",
+		},
+		{
+			name:       "chat max",
+			source:     "openai",
+			payload:    `{"reasoning_effort":"max"}`,
+			wantEffort: "high",
+		},
+		{
+			name:       "chat xhigh",
+			source:     "openai",
+			payload:    `{"reasoning_effort":"xhigh"}`,
+			wantEffort: "high",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-5.6-sol",
+				Payload: []byte(tt.payload),
+			}
+			got := mgr.withOAuthModelAliasReasoningEffort(req, auth, "gpt-5.6-sol", cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString(tt.source),
+			})
+			if actual, _ := got.Metadata[cliproxyexecutor.UpstreamReasoningEffortOverrideMetadataKey].(string); actual != tt.wantEffort {
+				t.Fatalf("upstream override = %q, want %q; metadata=%#v", actual, tt.wantEffort, got.Metadata)
 			}
 		})
 	}

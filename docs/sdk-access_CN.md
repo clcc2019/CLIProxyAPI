@@ -60,6 +60,8 @@ default:
 - `config-api-key`：校验 `config.yaml` 顶层的 `api-keys`。
   - 凭证来源：`Authorization: Bearer`、`X-Goog-Api-Key`、`X-Api-Key`、`?key=`、`?auth_token=`
   - 元数据：`Result.Metadata["source"]` 会写入匹配到的来源标识
+  - 对象格式可通过 `auth-files`（或单文件简写 `auth-file`）限制到
+    `auth-dir` 下的认证文件池
 
 在 CLI 服务端与 `sdk/cliproxy` 中，该 provider 会根据加载到的配置自动注册。
 
@@ -69,6 +71,7 @@ api-keys:
   - sk-prod-456
   - api-key: sk-limited-789
     allowed-models: ["gpt-*"]
+    auth-files: ["codex-primary.json", "codex-backup.json"]
     quota:
       daily-requests: 1000
       monthly-requests: 30000

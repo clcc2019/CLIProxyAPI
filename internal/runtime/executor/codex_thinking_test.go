@@ -178,6 +178,33 @@ func TestApplyCodexThinkingDeferredPreservesPayloadOverride(t *testing.T) {
 	}
 }
 
+func TestApplyCodexThinkingDeferredForcesOAuthAliasOverride(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"reasoning":{"effort":"max"},"messages":[{"role":"user","content":"hi"}]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.UpstreamReasoningEffortOverrideMetadataKey: "high",
+		},
+	}
+	translated := []byte(`{"reasoning":{"effort":"max"},"input":[]}`)
+
+	body, deferred, err := applyCodexThinkingWithInstructionsDeferred(translated, req, "openai-response", "codex", "codex")
+	if err != nil {
+		t.Fatalf("applyCodexThinkingWithInstructionsDeferred() error = %v", err)
+	}
+	if !deferred.force {
+		t.Fatal("OAuth alias override should be marked as forced")
+	}
+
+	// Simulate a later payload/model normalization pass changing the effort.
+	updated := bytes.Replace(body, []byte(`"max"`), []byte(`"xhigh"`), 1)
+	opts := codexFinalUpstreamBodyOptions{deferredReasoningEffort: deferred}
+	finalBody := normalizeCodexFinalUpstreamBody(updated, req.Model, nil, opts)
+	if got := gjson.GetBytes(finalBody, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("final reasoning.effort = %q, want high; body=%s", got, finalBody)
+	}
+}
+
 func TestApplyCodexThinking_PreservesExplicitClientEffort(t *testing.T) {
 	req := cliproxyexecutor.Request{
 		Model:   "test-codex-model",

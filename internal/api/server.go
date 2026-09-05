@@ -823,7 +823,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 				s.handleHomeCodexClientModels(c)
 				return
 			}
-			models := handlers.FilterModelMapsForClient(c, openaiHandler.Models())
+			models := handlers.FilterModelMapsForClientWithAuthManager(c, openaiHandler.AuthManager, openaiHandler.Models())
 			openai.WriteCodexClientModelsResponse(c, models)
 			return
 		}

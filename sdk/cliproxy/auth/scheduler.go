@@ -137,11 +137,13 @@ type scheduledAuth struct {
 
 // authFilter carries request-scoped auth constraints without allocating closures.
 type authFilter struct {
-	pinnedAuthID string
-	tried        map[string]struct{}
-	hasPinned    bool
-	hasTried     bool
-	positiveOnly bool
+	pinnedAuthID   string
+	allowedAuthIDs map[string]struct{}
+	tried          map[string]struct{}
+	hasPinned      bool
+	hasAllowed     bool
+	hasTried       bool
+	positiveOnly   bool
 }
 
 func newAuthFilter(pinnedAuthID string, tried map[string]struct{}) authFilter {
@@ -153,11 +155,47 @@ func newAuthFilter(pinnedAuthID string, tried map[string]struct{}) authFilter {
 	}
 }
 
+func newAuthFilterForOptions(opts cliproxyexecutor.Options, pinnedAuthID string, tried map[string]struct{}) authFilter {
+	filter := newAuthFilter(pinnedAuthID, tried)
+	if len(opts.Metadata) == 0 {
+		return filter
+	}
+	raw, exists := opts.Metadata[cliproxyexecutor.AllowedAuthIDsMetadataKey]
+	if !exists {
+		return filter
+	}
+	allowed := make(map[string]struct{})
+	switch typed := raw.(type) {
+	case []string:
+		for _, id := range typed {
+			if id = strings.TrimSpace(id); id != "" {
+				allowed[id] = struct{}{}
+			}
+		}
+	case []any:
+		for _, value := range typed {
+			if id, ok := value.(string); ok {
+				if id = strings.TrimSpace(id); id != "" {
+					allowed[id] = struct{}{}
+				}
+			}
+		}
+	}
+	filter.allowedAuthIDs = allowed
+	filter.hasAllowed = true
+	return filter
+}
+
 func (f authFilter) empty() bool {
-	return !f.hasPinned && !f.hasTried && !f.positiveOnly
+	return !f.hasPinned && !f.hasAllowed && !f.hasTried && !f.positiveOnly
 }
 
 func (f authFilter) matchesAuthID(authID string) bool {
+	if f.hasAllowed {
+		if _, ok := f.allowedAuthIDs[authID]; !ok {
+			return false
+		}
+	}
 	if f.hasPinned && authID != f.pinnedAuthID {
 		return false
 	}
@@ -366,7 +404,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	providerState := s.providers[providerKey]
-	filter := newAuthFilter(pinnedAuthID, tried)
+	filter := newAuthFilterForOptions(opts, pinnedAuthID, tried)
 	filter.positiveOnly = s.strategy == schedulerStrategyWeightedRoundRobin
 	if providerState == nil {
 		return nil, authNotFoundErrorForFilter(filter)
@@ -404,7 +442,7 @@ func (s *authScheduler) pickSingleStable(ctx context.Context, provider, model st
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	providerState := s.providers[providerKey]
-	filter := newAuthFilter(pinnedAuthID, tried)
+	filter := newAuthFilterForOptions(opts, pinnedAuthID, tried)
 	if s.strategy == schedulerStrategyWeightedRoundRobin {
 		filter.positiveOnly = true
 	}
@@ -455,7 +493,7 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if pinnedAuthID != "" {
-		filter := newAuthFilter(pinnedAuthID, tried)
+		filter := newAuthFilterForOptions(opts, pinnedAuthID, tried)
 		filter.positiveOnly = s.strategy == schedulerStrategyWeightedRoundRobin
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
@@ -472,7 +510,7 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 		return nil, "", shard.unavailableError("mixed", model, filter)
 	}
 
-	filter := newAuthFilter("", tried)
+	filter := newAuthFilterForOptions(opts, "", tried)
 	filter.positiveOnly = s.strategy == schedulerStrategyWeightedRoundRobin
 	var smallCandidates [4]mixedProviderCandidate
 	var candidates []mixedProviderCandidate
@@ -664,7 +702,7 @@ func (s *authScheduler) pickMixedStableNormalized(ctx context.Context, normalize
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if pinnedAuthID != "" {
-		filter := newAuthFilter(pinnedAuthID, tried)
+		filter := newAuthFilterForOptions(opts, pinnedAuthID, tried)
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
 			return nil, "", authNotFoundErrorForFilter(filter)
@@ -680,7 +718,7 @@ func (s *authScheduler) pickMixedStableNormalized(ctx context.Context, normalize
 		return nil, "", shard.unavailableError("mixed", model, filter)
 	}
 
-	filter := newAuthFilter("", tried)
+	filter := newAuthFilterForOptions(opts, "", tried)
 	bestPriority := 0
 	hasCandidate := false
 	now := time.Now()

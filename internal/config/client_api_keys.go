@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"path"
 	"strconv"
 	"strings"
 
@@ -11,14 +12,15 @@ import (
 )
 
 // ClientAPIKeyEntry describes one client-facing API key that can authenticate
-// requests sent to CLIProxyAPI. The key may optionally be disabled or restricted
-// to a subset of client-visible model IDs and usage quotas.
+// requests sent to CLIProxyAPI. The key may optionally be disabled, restricted
+// to client-visible models, assigned usage quotas, or bound to an auth-file pool.
 type ClientAPIKeyEntry struct {
 	APIKey         string            `yaml:"api-key" json:"api-key"`
 	Note           string            `yaml:"note,omitempty" json:"note,omitempty"`
 	Disabled       bool              `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	AllowedModels  []string          `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
 	ExcludedModels []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+	AuthFiles      []string          `yaml:"auth-files,omitempty" json:"auth-files,omitempty"`
 	Quota          ClientAPIKeyQuota `yaml:"quota,omitempty" json:"quota,omitempty"`
 }
 
@@ -194,7 +196,7 @@ func (keys ClientAPIKeys) MarshalYAML() (any, error) {
 		if entry.APIKey == "" {
 			continue
 		}
-		if entry.Note == "" && !entry.Disabled && len(entry.AllowedModels) == 0 && len(entry.ExcludedModels) == 0 && !entry.Quota.HasLimits() {
+		if entry.Note == "" && !entry.Disabled && len(entry.AllowedModels) == 0 && len(entry.ExcludedModels) == 0 && len(entry.AuthFiles) == 0 && !entry.Quota.HasLimits() {
 			out = append(out, entry.APIKey)
 			continue
 		}
@@ -212,6 +214,9 @@ func (keys ClientAPIKeys) MarshalYAML() (any, error) {
 		}
 		if len(entry.ExcludedModels) > 0 {
 			item["excluded-models"] = entry.ExcludedModels
+		}
+		if len(entry.AuthFiles) > 0 {
+			item["auth-files"] = entry.AuthFiles
 		}
 		if entry.Quota.HasLimits() {
 			item["quota"] = entry.Quota
@@ -242,11 +247,24 @@ func (keys *ClientAPIKeys) UnmarshalYAML(value *yaml.Node) error {
 		case yaml.ScalarNode:
 			parsed = append(parsed, ClientAPIKeyEntry{APIKey: strings.TrimSpace(item.Value)})
 		case yaml.MappingNode:
-			var entry ClientAPIKeyEntry
-			if err := item.Decode(&entry); err != nil {
+			var raw struct {
+				APIKey         string            `yaml:"api-key"`
+				Note           string            `yaml:"note"`
+				Disabled       bool              `yaml:"disabled"`
+				AllowedModels  []string          `yaml:"allowed-models"`
+				ExcludedModels []string          `yaml:"excluded-models"`
+				AuthFiles      []string          `yaml:"auth-files"`
+				AuthFile       string            `yaml:"auth-file"`
+				AuthFilesCamel []string          `yaml:"authFiles"`
+				AuthFileCamel  string            `yaml:"authFile"`
+				Quota          ClientAPIKeyQuota `yaml:"quota"`
+			}
+			if err := item.Decode(&raw); err != nil {
 				return err
 			}
-			parsed = append(parsed, entry)
+			raw.AuthFiles = append(raw.AuthFiles, raw.AuthFilesCamel...)
+			raw.AuthFiles = append(raw.AuthFiles, raw.AuthFile, raw.AuthFileCamel)
+			parsed = append(parsed, ClientAPIKeyEntry{APIKey: raw.APIKey, Note: raw.Note, Disabled: raw.Disabled, AllowedModels: raw.AllowedModels, ExcludedModels: raw.ExcludedModels, AuthFiles: raw.AuthFiles, Quota: raw.Quota})
 		default:
 			return fmt.Errorf("api-keys entries must be strings or objects")
 		}
@@ -291,6 +309,7 @@ func (keys *ClientAPIKeys) UnmarshalJSON(data []byte) error {
 			entry.Disabled = extractClientAPIKeyDisabled(typed)
 			entry.AllowedModels = extractClientAPIKeyModels(typed, "allowed-models", "allowedModels")
 			entry.ExcludedModels = extractClientAPIKeyModels(typed, "excluded-models", "excludedModels")
+			entry.AuthFiles = extractClientAPIKeyAuthFiles(typed)
 			entry.Quota = extractClientAPIKeyQuota(typed)
 			parsed = append(parsed, entry)
 		default:
@@ -389,6 +408,39 @@ func extractClientAPIKeyModels(record map[string]any, names ...string) []string 
 		}
 	}
 	return nil
+}
+
+func extractClientAPIKeyAuthFiles(record map[string]any) []string {
+	if len(record) == 0 {
+		return nil
+	}
+	files := make([]string, 0)
+	for _, name := range []string{"auth-files", "authFiles"} {
+		raw, ok := record[name]
+		if !ok || raw == nil {
+			continue
+		}
+		switch value := raw.(type) {
+		case string:
+			files = append(files, value)
+		case []any:
+			for _, item := range value {
+				if text, ok := item.(string); ok {
+					files = append(files, text)
+				}
+			}
+		case []string:
+			files = append(files, value...)
+		}
+	}
+	for _, name := range []string{"auth-file", "authFile"} {
+		if raw, ok := record[name]; ok {
+			if value, ok := raw.(string); ok {
+				files = append(files, value)
+			}
+		}
+	}
+	return NormalizeClientAPIKeyAuthFiles(files)
 }
 
 func extractClientAPIKeyNote(record map[string]any) string {
@@ -637,6 +689,7 @@ func normalizeClientAPIKeyEntry(entry ClientAPIKeyEntry) ClientAPIKeyEntry {
 	entry.Note = strings.TrimSpace(entry.Note)
 	entry.AllowedModels = NormalizeModelPatternList(entry.AllowedModels)
 	entry.ExcludedModels = NormalizeModelPatternList(entry.ExcludedModels)
+	entry.AuthFiles = NormalizeClientAPIKeyAuthFiles(entry.AuthFiles)
 	entry.Quota = NormalizeClientAPIKeyQuota(entry.Quota)
 	return entry
 }
@@ -670,6 +723,7 @@ func NormalizeClientAPIKeys(entries ClientAPIKeys) ClientAPIKeys {
 			current.Disabled = current.Disabled || entry.Disabled
 			current.AllowedModels = mergeModelPatternLists(current.AllowedModels, entry.AllowedModels)
 			current.ExcludedModels = mergeModelPatternLists(current.ExcludedModels, entry.ExcludedModels)
+			current.AuthFiles = mergeClientAPIKeyAuthFiles(current.AuthFiles, entry.AuthFiles)
 			current.Quota = mergeClientAPIKeyQuota(current.Quota, entry.Quota)
 			out[index] = current
 			continue
@@ -681,6 +735,49 @@ func NormalizeClientAPIKeys(entries ClientAPIKeys) ClientAPIKeys {
 		return nil
 	}
 	return out
+}
+
+func normalizeClientAPIKeyAuthFile(raw string) string {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if raw == "" || strings.HasPrefix(raw, "/") || strings.Contains(raw, "://") || hasWindowsVolumePrefix(raw) {
+		return ""
+	}
+	cleaned := path.Clean(raw)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return ""
+	}
+	return strings.TrimPrefix(cleaned, "./")
+}
+
+func hasWindowsVolumePrefix(value string) bool {
+	return len(value) >= 2 && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) && value[1] == ':'
+}
+
+func NormalizeClientAPIKeyAuthFiles(files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(files))
+	seen := make(map[string]struct{}, len(files))
+	for _, raw := range files {
+		file := normalizeClientAPIKeyAuthFile(raw)
+		if file == "" {
+			continue
+		}
+		if _, exists := seen[file]; exists {
+			continue
+		}
+		seen[file] = struct{}{}
+		out = append(out, file)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mergeClientAPIKeyAuthFiles(base, extra []string) []string {
+	return NormalizeClientAPIKeyAuthFiles(append(append([]string{}, base...), extra...))
 }
 
 func mergeModelPatternLists(base, extra []string) []string {

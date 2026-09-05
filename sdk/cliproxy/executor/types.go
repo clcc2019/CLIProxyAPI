@@ -33,6 +33,11 @@ const UpstreamReasoningEffortOverrideMetadataKey = "upstream_reasoning_effort_ov
 const ServiceTierMetadataKey = "service_tier"
 
 const (
+	// ClientAuthFilesMetadataKey stores the JSON-encoded auth-file pool bound to
+	// the authenticated client API key.
+	ClientAuthFilesMetadataKey = "auth_files"
+	// AllowedAuthIDsMetadataKey stores the resolved auth IDs permitted for one execution.
+	AllowedAuthIDsMetadataKey = "allowed_auth_ids"
 	// StreamChunkBufferSize is the default buffer depth for proxy-internal
 	// streaming hops. It absorbs short producer/consumer scheduling gaps without
 	// allowing a slow downstream client to accumulate unbounded data.

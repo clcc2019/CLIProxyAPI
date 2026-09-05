@@ -14,6 +14,7 @@ type codexDeferredReasoningEffort struct {
 	effort         string
 	originalRaw    string
 	originalExists bool
+	force          bool
 }
 
 type codexDeferredReasoningEffortContextKey struct{}
@@ -57,7 +58,7 @@ func applyCodexThinkingWithInstructionsDeferred(body []byte, req cliproxyexecuto
 	if err != nil {
 		return nil, codexDeferredReasoningEffort{}, err
 	}
-	effort, apply := codexUpstreamReasoningEffort(req, fromFormat)
+	effort, apply, force := codexUpstreamReasoningEffort(req, fromFormat)
 	if !apply {
 		return normalizeCodexInstructions(body), codexDeferredReasoningEffort{}, nil
 	}
@@ -66,6 +67,7 @@ func applyCodexThinkingWithInstructionsDeferred(body []byte, req cliproxyexecuto
 		effort:         effort,
 		originalRaw:    current.Raw,
 		originalExists: current.Exists(),
+		force:          force,
 	}, nil
 }
 
@@ -75,7 +77,7 @@ func applyCodexThinkingInternal(body []byte, req cliproxyexecutor.Request, fromF
 		return nil, err
 	}
 
-	effort, apply := codexUpstreamReasoningEffort(req, fromFormat)
+	effort, apply, _ := codexUpstreamReasoningEffort(req, fromFormat)
 	if !apply {
 		if normalizeInstructions {
 			body = normalizeCodexInstructions(body)
@@ -94,14 +96,14 @@ func applyCodexThinkingInternal(body []byte, req cliproxyexecutor.Request, fromF
 	return result, nil
 }
 
-func codexUpstreamReasoningEffort(req cliproxyexecutor.Request, fromFormat string) (string, bool) {
+func codexUpstreamReasoningEffort(req cliproxyexecutor.Request, fromFormat string) (string, bool, bool) {
 	if effort := upstreamReasoningEffortOverride(req); effort != "" {
-		return effort, true
+		return effort, true, true
 	}
 	if thinking.ExtractReasoningEffort(req.Payload, fromFormat, req.Model) != "" {
-		return "", false
+		return "", false, false
 	}
-	return string(thinking.LevelLow), true
+	return string(thinking.LevelLow), true, false
 }
 
 func codexSetReasoningEffort(body []byte, effort string) ([]byte, error) {

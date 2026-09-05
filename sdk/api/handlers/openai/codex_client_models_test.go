@@ -63,6 +63,30 @@ func TestCodexClientModelsResponsePreservesOfficialServiceTiers(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsResponseUsesOfficialGPT6AstraTemplate(t *testing.T) {
+	response := CodexClientModelsResponse([]map[string]any{{"id": "gpt-6-astra"}})
+	models, ok := response["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", response["models"])
+	}
+	model := models[0]
+	if got := stringModelValue(model, "slug"); got != "gpt-6-astra" {
+		t.Fatalf("slug = %q, want gpt-6-astra", got)
+	}
+	if got := stringModelValue(model, "shell_type"); got != "unified_exec" {
+		t.Fatalf("shell_type = %q, want unified_exec", got)
+	}
+	if got := stringModelValue(model, "visibility"); got != "list" {
+		t.Fatalf("visibility = %q, want list", got)
+	}
+	if enabled, ok := model["prefer_websockets"].(bool); !ok || !enabled {
+		t.Fatalf("prefer_websockets = %#v, want true", model["prefer_websockets"])
+	}
+	if enabled, ok := model["use_responses_lite"].(bool); !ok || !enabled {
+		t.Fatalf("use_responses_lite = %#v, want true", model["use_responses_lite"])
+	}
+}
+
 func TestCodexClientModelsResponseDoesNotLeakDefaultServiceTiersToCustomModels(t *testing.T) {
 	response := CodexClientModelsResponse([]map[string]any{{"id": "custom-model"}})
 	models, ok := response["models"].([]map[string]any)
