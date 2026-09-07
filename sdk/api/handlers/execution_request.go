@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -88,6 +90,11 @@ func (h *BaseAPIHandler) prepareExecutionRequest(ctx context.Context, handlerTyp
 		Stream:          mode.stream,
 	}
 	requestMetadata.ExecutionSessionID = metadataString(metadata, coreexecutor.ExecutionSessionMetadataKey)
+	parentSessionID := metadataString(metadata, coreexecutor.ParentSessionMetadataKey)
+	if parentSessionID == "" {
+		parentSessionID = extractParentSessionID(rawJSON)
+	}
+	ctx = coreusage.WithSessionHierarchy(ctx, requestMetadata.ExecutionSessionID, parentSessionID)
 
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -112,6 +119,45 @@ func (h *BaseAPIHandler) prepareExecutionRequest(ctx context.Context, handlerTyp
 		},
 		passthroughHeaders: passthroughHeaders,
 	}, nil
+}
+
+func extractParentSessionID(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	var find func(any) string
+	find = func(v any) string {
+		if arr, ok := v.([]any); ok {
+			for _, child := range arr {
+				if got := find(child); got != "" {
+					return got
+				}
+			}
+			return ""
+		}
+		m, ok := v.(map[string]any)
+		if !ok {
+			return ""
+		}
+		for _, key := range []string{"parent_session_id", "parentSessionId", "parent_session", "parentSessionId"} {
+			if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+		for _, key := range []string{"metadata", "client_metadata", "conversation", "input"} {
+			if child, ok := m[key]; ok {
+				if got := find(child); got != "" {
+					return got
+				}
+			}
+		}
+		return ""
+	}
+	return find(value)
 }
 
 func metadataString(metadata map[string]any, key string) string {

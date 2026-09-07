@@ -55,6 +55,7 @@ const (
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	ParentSessionMetadataKey    = "parent_session_id"
 	// ForcedUpstreamSessionMetadataKey carries a proxy-owned upstream session ID
 	// used after auth failover so the next credential does not inherit stale
 	// provider-scoped conversation state.

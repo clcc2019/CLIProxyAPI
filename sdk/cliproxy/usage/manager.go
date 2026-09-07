@@ -24,6 +24,10 @@ type Record struct {
 	// RequestedModel preserves the client-visible requested model even when
 	// Model is updated to the server-selected model from an upstream response.
 	RequestedModel string
+	// SessionID identifies the downstream conversation or execution session.
+	// ParentSessionID links branched or delegated executions to their parent.
+	SessionID       string
+	ParentSessionID string
 	// ResponseModel is the model explicitly reported by the upstream server.
 	// It is empty when the upstream did not provide one.
 	ResponseModel string
@@ -107,6 +111,43 @@ type Detail struct {
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
+type sessionIDContextKey struct{}
+type parentSessionIDContextKey struct{}
+
+func WithSessionHierarchy(ctx context.Context, sessionID, parentSessionID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if sessionID != "" {
+		ctx = context.WithValue(ctx, sessionIDContextKey{}, sessionID)
+	}
+	if parentSessionID != "" {
+		ctx = context.WithValue(ctx, parentSessionIDContextKey{}, parentSessionID)
+	}
+	return ctx
+}
+
+func SessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(sessionIDContextKey{}).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func ParentSessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(parentSessionIDContextKey{}).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {

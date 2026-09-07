@@ -537,6 +537,15 @@ func TestNewExecutorUsageReporterIncludesExecutorType(t *testing.T) {
 	}
 }
 
+func TestNewUsageReporterIncludesSessionHierarchy(t *testing.T) {
+	ctx := usage.WithSessionHierarchy(context.Background(), "session-1", "parent-1")
+	reporter := NewUsageReporter(ctx, "codex", "gpt-5", nil)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if record.SessionID != "session-1" || record.ParentSessionID != "parent-1" {
+		t.Fatalf("session hierarchy = (%q, %q), want (session-1, parent-1)", record.SessionID, record.ParentSessionID)
+	}
+}
+
 func TestUsageProviderReportsReasoningAsOutputDetail(t *testing.T) {
 	tests := []struct {
 		name     string

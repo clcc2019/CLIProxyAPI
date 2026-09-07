@@ -36,6 +36,8 @@ type UsageReporter struct {
 	modelReasoningEffort string
 	reasoning            string
 	serviceTier          string
+	sessionID            string
+	parentSessionID      string
 	requestedAt          time.Time
 	ttftMu               sync.RWMutex
 	ttft                 time.Duration
@@ -65,15 +67,17 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias = model
 	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      resolveUsageAPIKey(auth, ctxAPIKey),
-		source:      resolveUsageSource(auth, ctxAPIKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
+		provider:        provider,
+		model:           model,
+		alias:           strings.TrimSpace(alias),
+		requestedAt:     time.Now(),
+		apiKey:          resolveUsageAPIKey(auth, ctxAPIKey),
+		source:          resolveUsageSource(auth, ctxAPIKey),
+		authType:        resolveUsageAuthType(auth),
+		reasoning:       usage.ReasoningEffortFromContext(ctx),
+		serviceTier:     usage.ServiceTierFromContext(ctx),
+		sessionID:       usage.SessionIDFromContext(ctx),
+		parentSessionID: usage.ParentSessionIDFromContext(ctx),
 	}
 	if suffix := strings.TrimSpace(thinking.ParseSuffix(model).RawSuffix); suffix != "" {
 		reporter.modelReasoningEffort = normalizeReasoningEffortValue(suffix)
@@ -362,6 +366,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Model:                sentModel,
 		Alias:                r.alias,
 		RequestedModel:       r.alias,
+		SessionID:            r.sessionID,
+		ParentSessionID:      r.parentSessionID,
 		ResponseModel:        r.serverModel,
 		ReasoningIncluded:    r.reasoningIncluded,
 		ModelReasoningEffort: r.modelReasoningEffort,
