@@ -1442,6 +1442,31 @@ func TestWebsocketPayloadEventTypeValueFastAndFallback(t *testing.T) {
 			payload: []byte(`{"item":{"type":"wrong"}}`),
 			want:    "",
 		},
+		{
+			name:    "unescaped surrounding spaces",
+			payload: []byte(`{"type":" response.create "}`),
+			want:    "response.create",
+		},
+		{
+			name:    "literal unicode whitespace",
+			payload: []byte(`{"type":"　response.completed　"}`),
+			want:    wsEventTypeCompleted,
+		},
+		{
+			name:    "whitespace only",
+			payload: []byte(`{"type":"   "}`),
+			want:    "",
+		},
+		{
+			name:    "escaped whitespace",
+			payload: []byte(`{"type":"\tresponse.create\n"}`),
+			want:    "response.create",
+		},
+		{
+			name:    "escaped key precedes literal duplicate",
+			payload: []byte(`{"ty\u0070e":"response.create","type":"response.append"}`),
+			want:    "response.create",
+		},
 	}
 
 	for _, tt := range tests {

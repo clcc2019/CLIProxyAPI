@@ -781,7 +781,7 @@ func normalizeResponsesWebsocketRequestWithState(
 	allowIncrementalInputWithPreviousResponseID bool,
 	allowCompactionReplayBypass bool,
 ) ([]byte, []byte, *interfaces.ErrorMessage) {
-	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
+	requestType := websocketPayloadEventTypeValue(rawJSON)
 	switch requestType {
 	case wsRequestTypeCreate:
 		// log.Infof("responses websocket: response.create request")
@@ -1035,7 +1035,7 @@ func inputSatisfiesPendingToolCalls(input gjson.Result, pendingCallIDs []string)
 }
 
 func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bool {
-	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
+	requestType := websocketPayloadEventTypeValue(rawJSON)
 	if requestType != wsRequestTypeCreate && requestType != wsRequestTypeAppend {
 		return false
 	}
@@ -1438,7 +1438,7 @@ func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []
 	if allowIncrementalInputWithPreviousResponseID || len(lastRequest) != 0 {
 		return false
 	}
-	if strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) != wsRequestTypeCreate {
+	if websocketPayloadEventTypeValue(rawJSON) != wsRequestTypeCreate {
 		return false
 	}
 	generateResult := gjson.GetBytes(rawJSON, "generate")
@@ -2151,7 +2151,7 @@ func responseCompletedOutputFromPayload(payload []byte) []byte {
 }
 
 func collectResponsesWebsocketOutputItem(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
-	if gjson.GetBytes(payload, "type").String() != "response.output_item.done" {
+	if websocketPayloadEventTypeValue(payload) != "response.output_item.done" {
 		return
 	}
 	item := gjson.GetBytes(payload, "item")
@@ -2628,7 +2628,7 @@ func websocketPayloadEventTypeName(eventType string) string {
 
 func websocketPayloadEventTypeValue(payload []byte) string {
 	if eventType, ok := websocketPayloadTopLevelType(payload); ok {
-		return strings.TrimSpace(eventType)
+		return eventType
 	}
 	return strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 }
@@ -2662,7 +2662,12 @@ func websocketPayloadTopLevelType(payload []byte) (string, bool) {
 			}
 			next := websocketSkipJSONSpaces(payload, keyEnd+1)
 			if depth == 1 && next < len(payload) && payload[next] == ':' {
-				if !keyEscaped && bytes.Equal(payload[keyStart:keyEnd], wsTypeKeyBytes) {
+				// An escaped key can decode to "type". Let gjson preserve
+				// first-match semantics before considering any later literal key.
+				if keyEscaped {
+					return "", false
+				}
+				if bytes.Equal(payload[keyStart:keyEnd], wsTypeKeyBytes) {
 					valueStart := websocketSkipJSONSpaces(payload, next+1)
 					if valueStart >= len(payload) || payload[valueStart] != '"' {
 						return "", false
@@ -2675,7 +2680,9 @@ func websocketPayloadTopLevelType(payload []byte) (string, bool) {
 					if eventType, ok := websocketKnownPayloadEventType(value); ok {
 						return eventType, true
 					}
-					return string(value), true
+					// Known event constants are already normalized; arbitrary
+					// values still need the same trimming as the fallback path.
+					return strings.TrimSpace(string(value)), true
 				}
 			}
 			i = keyEnd + 1

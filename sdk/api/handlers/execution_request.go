@@ -143,7 +143,7 @@ func extractParentSessionID(raw []byte) string {
 		if !ok {
 			return ""
 		}
-		for _, key := range []string{"parent_session_id", "parentSessionId", "parent_session", "parentSessionId"} {
+		for _, key := range []string{"parent_session_id", "parentSessionId", "parent_session"} {
 			if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
 				return strings.TrimSpace(s)
 			}
