@@ -6161,3 +6161,21 @@ func BenchmarkWebsocketPayloadEventTypeGJSON(b *testing.B) {
 		b.Fatalf("event type = %s", eventType)
 	}
 }
+
+func TestResponsesWebsocketModelRoutePrefersExactEffortAlias(t *testing.T) {
+	r := registry.GetGlobalRegistry()
+	base, exact := t.Name()+"-base", t.Name()+"-exact"
+	model := "test-websocket-astra"
+	r.RegisterClient(base, "base-provider", []*registry.ModelInfo{{ID: model}})
+	r.RegisterClient(exact, "alias-provider", []*registry.ModelInfo{{ID: model + "(high)"}})
+	t.Cleanup(func() { r.UnregisterClient(base); r.UnregisterClient(exact) })
+	providers, _ := responsesWebsocketModelRoute(model + "(high)")
+	if len(providers) != 1 || providers[0] != "alias-provider" {
+		t.Fatalf("exact alias routed to %v", providers)
+	}
+	r.UnregisterClient(exact)
+	providers, _ = responsesWebsocketModelRoute(model + "(high)")
+	if len(providers) != 1 || providers[0] != "base-provider" {
+		t.Fatalf("base fallback routed to %v", providers)
+	}
+}

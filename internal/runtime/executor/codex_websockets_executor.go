@@ -822,6 +822,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	streamState := newCodexStreamCompletionState()
 	usageWarningFilter := newCodexUsageWarningStreamFilter()
 	previousResponseRetryUsed := false
+	encryptedContentRetryUsed := false
+	emittedPayload := false
 	readRetryUsed := false
 readLoop:
 	for {
@@ -892,6 +894,26 @@ readLoop:
 				streamState = newCodexStreamCompletionState()
 				continue
 			}
+			if !encryptedContentRetryUsed && !emittedPayload {
+				if retryBody, okRetry := codexRetryBodyWithoutClientReasoningEncryptedContent(ctx, wsReqBody, payload); okRetry {
+					encryptedContentRetryUsed = true
+					connRetry, retryBody, errRetry := e.retryCodexWebsocketWithoutEncryptedContent(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, &wsReqLog, retryBody, wsErr)
+					if errRetry != nil {
+						if sess != nil {
+							sess.clearIncrementalState()
+							e.invalidateUpstreamConn(sess, conn, "encrypted_content_retry", errRetry)
+						}
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "encrypted_content_retry", errRetry)
+						return resp, errRetry
+					}
+					conn = connRetry
+					// Keep full history available for a later stale-response fallback.
+					body, _ = codexRetryBodyWithoutClientReasoningEncryptedContent(ctx, body, payload)
+					wsReqBody = retryBody
+					streamState = newCodexStreamCompletionState()
+					continue readLoop
+				}
+			}
 			if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, payload) {
 				previousResponseRetryUsed = true
 				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: retrying without previous_response_id after upstream rejected incremental context")
@@ -927,6 +949,9 @@ readLoop:
 		for _, event := range events {
 			payload := event.payload
 			eventType := event.eventType
+			if codexWebsocketEventEmitsOutput(eventType) {
+				emittedPayload = true
+			}
 			if eventType == "response.incomplete" {
 				terminalErr := codexResponseIncompleteEventErr(payload)
 				codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
@@ -942,6 +967,26 @@ readLoop:
 				retryErrorPayload := payload
 				if eventType == "response.failed" {
 					retryErrorPayload = normalizeCodexResponseFailedErrorBody(payload)
+				}
+				if !encryptedContentRetryUsed && !emittedPayload {
+					if retryBody, okRetry := codexRetryBodyWithoutClientReasoningEncryptedContent(ctx, wsReqBody, retryErrorPayload); okRetry {
+						encryptedContentRetryUsed = true
+						connRetry, retryBody, errRetry := e.retryCodexWebsocketWithoutEncryptedContent(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, &wsReqLog, retryBody, terminalErr)
+						if errRetry != nil {
+							if sess != nil {
+								sess.clearIncrementalState()
+								e.invalidateUpstreamConn(sess, conn, "encrypted_content_retry", errRetry)
+							}
+							helps.RecordAPIWebsocketError(ctx, e.cfg, "encrypted_content_retry", errRetry)
+							return resp, errRetry
+						}
+						conn = connRetry
+						// Keep full history available for a later stale-response fallback.
+						body, _ = codexRetryBodyWithoutClientReasoningEncryptedContent(ctx, body, retryErrorPayload)
+						wsReqBody = retryBody
+						streamState = newCodexStreamCompletionState()
+						continue readLoop
+					}
 				}
 				if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, retryErrorPayload) {
 					previousResponseRetryUsed = true
@@ -1147,6 +1192,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		usageWarningFilter := newCodexUsageWarningStreamFilter()
 		emittedPayload := false
 		previousResponseRetryUsed := false
+		encryptedContentRetryUsed := false
 		readRetryUsed := false
 	streamReadLoop:
 		for {
@@ -1240,6 +1286,26 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
 					return
 				}
+				if !encryptedContentRetryUsed && !emittedPayload {
+					if retryBody, okRetry := codexRetryBodyWithoutClientReasoningEncryptedContent(ctx, wsReqBody, payload); okRetry {
+						encryptedContentRetryUsed = true
+						connRetry, retryBody, errRetry := e.retryCodexWebsocketWithoutEncryptedContent(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, &wsReqLog, retryBody, wsErr)
+						if errRetry != nil {
+							terminateReason = "encrypted_content_retry_error"
+							terminateErr = errRetry
+							helps.RecordAPIWebsocketError(ctx, e.cfg, "encrypted_content_retry", errRetry)
+							reporter.PublishFailureWithError(ctx, errRetry)
+							_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
+							return
+						}
+						conn = connRetry
+						// Keep full history available for a later stale-response fallback.
+						body, _ = codexRetryBodyWithoutClientReasoningEncryptedContent(ctx, body, payload)
+						wsReqBody = retryBody
+						streamState = newCodexStreamCompletionState()
+						continue streamReadLoop
+					}
+				}
 				if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, payload) {
 					previousResponseRetryUsed = true
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: retrying without previous_response_id after upstream rejected incremental context")
@@ -1282,6 +1348,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			for _, event := range events {
 				payload := event.payload
 				eventType := event.eventType
+				if codexWebsocketEventEmitsOutput(eventType) {
+					emittedPayload = true
+				}
 				if eventType == "response.incomplete" {
 					terminalErr := codexResponseIncompleteEventErr(payload)
 					codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
@@ -1300,6 +1369,26 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					retryErrorPayload := payload
 					if eventType == "response.failed" {
 						retryErrorPayload = normalizeCodexResponseFailedErrorBody(payload)
+					}
+					if !encryptedContentRetryUsed && !emittedPayload {
+						if retryBody, okRetry := codexRetryBodyWithoutClientReasoningEncryptedContent(ctx, wsReqBody, retryErrorPayload); okRetry {
+							encryptedContentRetryUsed = true
+							connRetry, retryBody, errRetry := e.retryCodexWebsocketWithoutEncryptedContent(ctx, auth, sess, conn, &readCh, authID, wsURL, wsHeaders, &wsReqLog, retryBody, terminalErr)
+							if errRetry != nil {
+								terminateReason = "encrypted_content_retry_error"
+								terminateErr = errRetry
+								helps.RecordAPIWebsocketError(ctx, e.cfg, "encrypted_content_retry", errRetry)
+								reporter.PublishFailureWithError(ctx, errRetry)
+								_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
+								return
+							}
+							conn = connRetry
+							// Keep full history available for a later stale-response fallback.
+							body, _ = codexRetryBodyWithoutClientReasoningEncryptedContent(ctx, body, retryErrorPayload)
+							wsReqBody = retryBody
+							streamState = newCodexStreamCompletionState()
+							continue streamReadLoop
+						}
 					}
 					if !previousResponseRetryUsed && codexShouldRetryWithoutPreviousResponse(body, wsReqBody, retryErrorPayload) {
 						previousResponseRetryUsed = true
@@ -1396,11 +1485,12 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 	ginHeaders := codexGinHeadersFromContext(ctx)
 	requestRemoteCompactionV2 := codexRequestRemoteCompactionV2Enabled(opts.Headers, ginHeaders)
 	body = normalizeCodexFinalUpstreamBodyBorrowed(body, baseModel, auth, codexFinalUpstreamBodyOptions{
-		requestKind:                codexFinalUpstreamResponses,
-		streamMode:                 codexStreamFieldTrue,
-		preservePreviousResponseID: true,
-		preserveGenerate:           true,
-		preserveCompactionTrigger:  codexRemoteCompactionV2Enabled(auth, e.cfg, opts.Headers, ginHeaders),
+		requestKind:                  codexFinalUpstreamResponses,
+		streamMode:                   codexStreamFieldTrue,
+		preservePreviousResponseID:   true,
+		preserveGenerate:             true,
+		preserveCompactionTrigger:    codexRemoteCompactionV2Enabled(auth, e.cfg, opts.Headers, ginHeaders),
+		preserveExplicitInstructions: codexShouldStoreResponses(auth, httpURL),
 		preserveNativeFields: codexNativeClientRequest(opts.SourceFormat, opts.Headers, body) ||
 			codexNativeClientRequest(opts.SourceFormat, ginHeaders, body),
 		store:                   codexShouldStoreResponses(auth, httpURL),
@@ -1611,6 +1701,70 @@ func (e *CodexWebsocketsExecutor) retryCodexWebsocketWithoutPreviousResponse(
 		"previous_response_not_found",
 		errSend,
 	)
+}
+
+// retryCodexWebsocketWithoutEncryptedContent replays the current request once
+// after an upstream rejects provider-bound reasoning or tool-output ciphertext.
+// The existing connection is intentionally reused when possible: an error
+// event does not necessarily terminate a Responses websocket, and reusing it
+// avoids losing the session's transport state. If a session write fails, the
+// normal reconnect path is used for session-backed executions.
+func (e *CodexWebsocketsExecutor) retryCodexWebsocketWithoutEncryptedContent(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	sess *codexWebsocketSession,
+	conn *websocket.Conn,
+	readCh *chan codexWebsocketRead,
+	authID string,
+	wsURL string,
+	wsHeaders http.Header,
+	wsReqLog *helps.UpstreamRequestLog,
+	retryBody []byte,
+	cause error,
+) (*websocket.Conn, []byte, error) {
+	if len(bytes.TrimSpace(retryBody)) == 0 {
+		return nil, nil, fmt.Errorf("codex websockets executor: encrypted-content retry body is empty: %w", cause)
+	}
+	if wsReqLog != nil {
+		wsReqLog.Body = bytes.Clone(retryBody)
+		recordCtx := ctx
+		if recordCtx == nil {
+			recordCtx = context.Background()
+		}
+		helps.RecordAPIWebsocketRequest(recordCtx, e.cfg, *wsReqLog)
+	}
+	if errSend := writeCodexWebsocketMessage(sess, conn, retryBody); errSend == nil {
+		return conn, retryBody, nil
+	} else if sess == nil {
+		return nil, nil, errSend
+	} else {
+		requestLog := helps.UpstreamRequestLog{}
+		if wsReqLog != nil {
+			requestLog = *wsReqLog
+		}
+		connRetry, bodyRetry, errRetry := e.retrySessionWebsocketRequestWithReason(
+			ctx,
+			auth,
+			sess,
+			conn,
+			readCh,
+			authID,
+			wsURL,
+			wsHeaders,
+			requestLog,
+			retryBody,
+			"encrypted_content_retry",
+			errSend,
+		)
+		if errRetry != nil {
+			return nil, nil, errRetry
+		}
+		return connRetry, bodyRetry, nil
+	}
+}
+
+func codexWebsocketEventEmitsOutput(eventType string) bool {
+	return strings.HasPrefix(strings.TrimSpace(eventType), "response.output")
 }
 
 func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequest(

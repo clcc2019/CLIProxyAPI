@@ -372,3 +372,52 @@ func TestManagerRefreshUpdatePreservesLatestCodexPinnedProfile(t *testing.T) {
 		t.Fatalf("user_agent = %v, want pinned profile", got)
 	}
 }
+
+func TestManagerRefreshPreservesReloadedUpstreamAddress(t *testing.T) {
+	for _, key := range []string{"base_url", "base-url", "baseUrl"} {
+		for _, removed := range []bool{false, true} {
+			name := key
+			if removed {
+				name += "/removed"
+			}
+			t.Run(name, func(t *testing.T) {
+				store := &refreshUpdateCaptureStore{}
+				manager := NewManager(store, nil, nil)
+				metadata := map[string]any{"type": "codex", "account_id": "account-1", "access_token": "old-token", key: "https://old.example/v1"}
+				initial := NewAuthFromAuthFileMetadata(metadata, AuthFileProjectionOptions{ID: "codex-upstream.json"})
+				registered, err := manager.Register(context.Background(), initial)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stale := registered.Clone()
+				stale.Metadata["access_token"] = "fresh-token"
+				want := "https://new.example/v1"
+				if removed {
+					delete(metadata, key)
+					want = ""
+				} else {
+					metadata[key] = want
+				}
+				reloaded := NewAuthFromAuthFileMetadata(metadata, AuthFileProjectionOptions{ID: initial.ID})
+				if _, err := manager.Update(context.Background(), reloaded); err != nil {
+					t.Fatal(err)
+				}
+				updated, err := manager.Update(WithRefreshUpdate(context.Background()), stale)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if updated.Attributes["base_url"] != want {
+					t.Fatalf("refresh restored stale URL: got %q, want %q", updated.Attributes["base_url"], want)
+				}
+				if updated.Metadata["access_token"] != "fresh-token" {
+					t.Fatal("refresh lost the new access token")
+				}
+				persisted := store.snapshot()
+				projected := NewAuthFromAuthFileMetadata(persisted.Metadata, AuthFileProjectionOptions{ID: initial.ID})
+				if projected.Attributes["base_url"] != want {
+					t.Fatalf("persisted URL = %q, want %q", projected.Attributes["base_url"], want)
+				}
+			})
+		}
+	}
+}

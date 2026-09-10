@@ -499,7 +499,9 @@ func codexReasoningReplayInvalidSignatureError(body []byte) bool {
 	return asciifold.ContainsBytes(body, "invalid signature in thinking block") ||
 		asciifold.ContainsBytes(body, "invalid_encrypted_content") ||
 		asciifold.ContainsBytes(body, "encrypted content") && asciifold.ContainsBytes(body, "could not be verified") ||
-		asciifold.ContainsBytes(body, "encrypted content could not be decrypted or parsed")
+		asciifold.ContainsBytes(body, "encrypted content could not be decrypted or parsed") ||
+		asciifold.ContainsBytes(body, "encrypted content could not be decrypted or decoded") ||
+		asciifold.ContainsBytes(body, "encrypted function output content could not be decrypted or decoded")
 }
 
 func headerValueCaseInsensitive(headers http.Header, key string) string {

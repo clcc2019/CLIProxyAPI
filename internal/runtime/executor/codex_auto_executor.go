@@ -133,7 +133,35 @@ func codexUseWebsocketTransport(ctx context.Context, auth *cliproxyauth.Auth) bo
 	if !codexWebsocketsEnabled(auth) {
 		return false
 	}
+	if !codexWebsocketUpstreamSupported(auth) {
+		return false
+	}
 	return cliproxyexecutor.PreferUpstreamWebsocket(ctx)
+}
+
+// codexWebsocketUpstreamSupported reports whether the resolved upstream base URL
+// supports the official ChatGPT Codex websocket transport. Custom Responses
+// backends such as Azure only accept HTTP/SSE and reject websocket upgrades
+// with redirects.
+func codexWebsocketUpstreamSupported(auth *cliproxyauth.Auth) bool {
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "azure") {
+		return false
+	}
+	_, baseURL := codexCreds(auth)
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return true
+	}
+	if codexMatchesAzureResponsesBaseURL(baseURL) {
+		return false
+	}
+	const chatGPTCodexBackend = "https://chatgpt.com/backend-api/codex"
+	if strings.EqualFold(baseURL, chatGPTCodexBackend) {
+		return true
+	}
+	// API-key entries with a non-ChatGPT base URL must stay on HTTP even when
+	// config explicitly sets websockets=true.
+	return !codexIsAPIKeyAuth(auth)
 }
 
 // codexWebsocketsEnabled reads the "websockets" (or legacy "websocket") flag

@@ -1350,9 +1350,9 @@ func responsesWebsocketModelRoute(modelName string) ([]string, string) {
 
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	modelKey := strings.TrimSpace(parsed.ModelName)
-	providers := util.GetProviderName(modelKey)
+	providers := util.GetProviderName(resolvedModelName)
 	if len(providers) == 0 && modelKey != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+		providers = util.GetProviderName(modelKey)
 	}
 	if modelKey == "" {
 		modelKey = strings.TrimSpace(resolvedModelName)

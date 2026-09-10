@@ -175,6 +175,7 @@ func TestCodexMatchesAzureResponsesBaseURL(t *testing.T) {
 		{name: "openai azure", url: " https://Example.OpenAI.Azure.com/openai/responses ", want: true},
 		{name: "cognitive services", url: "https://example.CognitiveServices.Azure.com/openai/responses", want: true},
 		{name: "windows openai path", url: "https://example.Windows.net/OpenAI/responses", want: true},
+		{name: "ai foundry", url: "https://example.services.ai.azure.com/openai/v1", want: true},
 		{name: "non azure", url: "https://api.openai.com/v1/responses", want: false},
 		{name: "empty", url: "  ", want: false},
 	}
@@ -329,6 +330,143 @@ func TestNormalizeCodexFinalUpstreamBody_StripsItemPassthroughMetadataForNonOpen
 	}
 	if got := gjson.GetBytes(gotAzureBody, "input.0.internal_chat_message_metadata_passthrough"); got.Exists() {
 		t.Fatalf("azure provider should strip item passthrough metadata; body=%s", gotAzureBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBody_DropsInstructionsForStoredPreviousResponseID(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"previous_response_id":"resp_1",
+		"instructions":"system prompt",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]
+	}`)
+
+	gotBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"base_url": "https://example.openai.azure.com/openai/v1"},
+	}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       true,
+		preservePreviousResponseID:  true,
+		suppressDefaultInstructions: true,
+	})
+
+	if got := gjson.GetBytes(gotBody, "instructions"); got.Exists() {
+		t.Fatalf("instructions should be omitted when store=true and previous_response_id is set; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "store").Bool(); !got {
+		t.Fatalf("store = false, want true; body=%s", gotBody)
+	}
+	if got := gjson.GetBytes(gotBody, "previous_response_id").String(); got != "resp_1" {
+		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, gotBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBody_StripsFunctionOutputEncryptedContentForAzureFoundry(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.6-terra",
+		"input":[
+			{"type":"function_call","call_id":"call_1","name":"tool","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":{"content":[{"type":"text","text":"secret","_meta":{"codex/encryptedContent":true}}]}}
+		]
+	}`)
+
+	gotAzureBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.6-terra", &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"base_url": "https://example.services.ai.azure.com/openai/v1"},
+	}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       true,
+		suppressDefaultInstructions: true,
+	})
+	gotType := gjson.GetBytes(gotAzureBody, `input.#(type=="function_call_output").output.content.0.type`).String()
+	if gotType != "input_text" {
+		t.Fatalf("Azure Foundry should strip MCP object encrypted output, got %q; body=%s", gotType, gotAzureBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBody_StripsFunctionOutputEncryptedContentForAzure(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"function_call","call_id":"call_1","name":"tool","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":[
+				{"type":"input_text","text":"Wall time: 0.0000 seconds\nOutput:"},
+				{"type":"encrypted_content","encrypted_content":"gAAAA-secret"}
+			]}
+		]
+	}`)
+
+	gotAzureBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"base_url": "https://example.openai.azure.com/openai/v1"},
+	}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       true,
+		suppressDefaultInstructions: true,
+	})
+	if got := gjson.GetBytes(gotAzureBody, "input.1.output.1.type").String(); got != "input_text" {
+		t.Fatalf("encrypted function output should be replaced with input_text, got %q; body=%s", got, gotAzureBody)
+	}
+	if got := gjson.GetBytes(gotAzureBody, "input.1.output.1.text").String(); got != openAIResponsesFunctionOutputEncryptedContentPlaceholder {
+		t.Fatalf("placeholder text = %q, want %q; body=%s", got, openAIResponsesFunctionOutputEncryptedContentPlaceholder, gotAzureBody)
+	}
+
+	gotCodexBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"base_url": "https://chatgpt.com/backend-api/codex"},
+	}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+	if got := gjson.GetBytes(gotCodexBody, "input.1.output.1.type").String(); got != "encrypted_content" {
+		t.Fatalf("official codex upstream should preserve encrypted function output, got %q; body=%s", got, gotCodexBody)
+	}
+}
+
+func TestNormalizeCodexFinalUpstreamBody_StripsReasoningEncryptedContentForAzure(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"store":true,
+		"previous_response_id":"resp_1",
+		"input":[
+			{"type":"reasoning","id":"rs_085c0a1b5c43b77f016aa26384eb1c819792e1332330c8dc57","summary":[],"encrypted_content":"gAAAA-secret"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}
+		]
+	}`)
+
+	gotAzureBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"base_url": "https://example.openai.azure.com/openai/v1"},
+	}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       true,
+		suppressDefaultInstructions: true,
+	})
+	if gjson.GetBytes(gotAzureBody, "input.0.encrypted_content").Exists() {
+		t.Fatalf("reasoning encrypted_content should be stripped for Azure; body=%s", gotAzureBody)
+	}
+	if got := gjson.GetBytes(gotAzureBody, "input.0.id").String(); got != "rs_085c0a1b5c43b77f016aa26384eb1c819792e1332330c8dc57" {
+		t.Fatalf("reasoning id should be preserved when store=true; got %q; body=%s", got, gotAzureBody)
+	}
+
+	gotCodexBody := normalizeCodexFinalUpstreamBody(body, "gpt-5.4", &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"base_url": "https://chatgpt.com/backend-api/codex"},
+	}, codexFinalUpstreamBodyOptions{
+		requestKind:                 codexFinalUpstreamResponses,
+		streamMode:                  codexStreamFieldTrue,
+		store:                       false,
+		suppressDefaultInstructions: true,
+	})
+	if got := gjson.GetBytes(gotCodexBody, "input.0.encrypted_content").String(); got != "gAAAA-secret" {
+		t.Fatalf("official codex upstream should preserve reasoning encrypted_content, got %q; body=%s", got, gotCodexBody)
 	}
 }
 

@@ -69,6 +69,9 @@ func (e *CodexExecutor) rememberCodexHTTPTurnState(auth *cliproxyauth.Auth, prep
 	if e == nil || e.httpTurnState == nil || prepared.httpReq == nil || responseHeaders == nil {
 		return
 	}
+	if codexGJSONGetImmutableBytes(prepared.body, "store").Bool() {
+		return
+	}
 	if prepared.httpReq.URL == nil || codexFinalUpstreamRequestKindForURL(prepared.httpReq.URL.String()) != codexFinalUpstreamResponses {
 		return
 	}

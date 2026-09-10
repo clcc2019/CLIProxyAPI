@@ -1713,6 +1713,27 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		return models
 	}
 
+	// Reserve only aliases whose upstream model is actually present after the
+	// upstream exclusion pass. If an alias points at an unavailable model, a
+	// native model with the same public ID should remain usable.
+	reservedAliases := make(map[string]struct{}, len(aliases))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		entries := forward[strings.ToLower(strings.TrimSpace(model.ID))]
+		if len(entries) == 0 {
+			if providerName := strings.TrimSpace(model.Name); providerName != "" {
+				entries = forward[strings.ToLower(providerName)]
+			}
+		}
+		for _, entry := range entries {
+			if alias := strings.ToLower(strings.TrimSpace(entry.alias)); alias != "" {
+				reservedAliases[alias] = struct{}{}
+			}
+		}
+	}
+
 	out := make([]*ModelInfo, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
@@ -1732,6 +1753,12 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 			}
 		}
 		if len(entries) == 0 {
+			// A native model whose ID is a configured alias is shadowed by the
+			// alias clone. Keeping it would make request routing depend on the
+			// provider catalog order and could bypass the configured upstream.
+			if _, reserved := reservedAliases[key]; reserved {
+				continue
+			}
 			if _, exists := seen[key]; exists {
 				continue
 			}

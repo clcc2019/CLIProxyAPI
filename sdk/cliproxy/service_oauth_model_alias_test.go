@@ -3,6 +3,8 @@ package cliproxy
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -135,5 +137,57 @@ func TestApplyOAuthModelAlias_EffortOnlyRuleKeepsSingleModel(t *testing.T) {
 	}
 	if out[0].ID != "gpt-5.6-sol" || out[0].Name != "models/gpt-5.6-sol" {
 		t.Fatalf("effort-only rule changed listed model: %#v", out[0])
+	}
+}
+
+func TestApplyOAuthModelAlias_OverridesNativeAliasID(t *testing.T) {
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "gpt-6-astra"}},
+	}}
+	native := &ModelInfo{ID: "gpt-6-astra", DisplayName: "native Astra"}
+	upstream := &ModelInfo{ID: "gpt-5.6-luna", DisplayName: "Luna"}
+
+	for _, models := range [][]*ModelInfo{
+		{native, upstream},
+		{upstream, native},
+	} {
+		out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+		if len(out) != 1 || out[0].ID != "gpt-6-astra" {
+			t.Fatalf("alias output = %#v, want only configured alias", out)
+		}
+		if out[0].DisplayName != "Luna" {
+			t.Fatalf("alias metadata came from native model: %#v", out[0])
+		}
+	}
+	withoutSource := applyOAuthModelAlias(cfg, "codex", "oauth", []*ModelInfo{native})
+	if len(withoutSource) != 1 || withoutSource[0] != native {
+		t.Fatalf("native model disappeared without an available alias source: %#v", withoutSource)
+	}
+}
+
+func TestRegisterModelsForAuthOAuthAliasSurvivesUpstreamExclusion(t *testing.T) {
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "gpt-6-astra"}},
+	}, OAuthExcludedModels: map[string][]string{"codex": {"gpt-6-astra"}}}
+	s := &Service{cfg: cfg}
+	a := &coreauth.Auth{ID: t.Name(), Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
+	r := registry.GetGlobalRegistry()
+	t.Cleanup(func() { r.UnregisterClient(a.ID) })
+	s.registerModelsForAuth(a)
+	models := r.GetModelsForClient(a.ID)
+	if len(models) == 0 {
+		t.Fatal("upstream exclusion removed all models")
+	}
+	seen := make(map[string]*ModelInfo, len(models))
+	for _, model := range models {
+		if model != nil {
+			seen[model.ID] = model
+		}
+	}
+	if model := seen["gpt-6-astra"]; model == nil || model.DisplayName != "GPT 5.6 Luna" {
+		t.Fatalf("configured alias was not retained with upstream metadata: %#v", model)
+	}
+	if _, native := seen["gpt-5.6-luna"]; native {
+		t.Fatal("rename alias unexpectedly kept the upstream model")
 	}
 }

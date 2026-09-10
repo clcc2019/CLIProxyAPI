@@ -565,6 +565,62 @@ func TestDoCodexHTTPRequestRetriesPreviousResponseNotFoundWithoutTurnState(t *te
 	}
 }
 
+func TestDoCodexHTTPRequestRetriesStoredPreviousResponseNotFoundWithoutPreviousResponseID(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","store":true,"previous_response_id":"resp_1","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+	bodyWithoutPrevious := []byte(`{"model":"gpt-5.4","store":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+	errBody := `{"error":{"code":"previous_response_not_found","message":"Previous response with id 'resp_1' not found.","param":"previous_response_id","type":"invalid_request_error"}}`
+
+	var attempts int
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(codexRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		gotBody, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatalf("ReadAll(request body) error = %v", errRead)
+		}
+		switch attempts {
+		case 1:
+			if !bytes.Equal(gotBody, body) {
+				t.Fatalf("first body = %s, want %s", gotBody, body)
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(errBody)),
+			}, nil
+		case 2:
+			if !bytes.Equal(gotBody, bodyWithoutPrevious) {
+				t.Fatalf("retry body = %s, want %s", gotBody, bodyWithoutPrevious)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		default:
+			t.Fatalf("unexpected attempt %d", attempts)
+			return nil, nil
+		}
+	})))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.openai.azure.com/openai/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	prepared := codexPreparedRequest{httpReq: req, body: body}
+	resp, err := (&CodexExecutor{}).doCodexHTTPRequest(ctx, nil, prepared)
+	if err != nil {
+		t.Fatalf("doCodexHTTPRequest() error = %v", err)
+	}
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("response = %#v, want 200", resp)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
 func TestDoCodexHTTPRequestRebuildsBodyAcrossSeparateCalls(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{

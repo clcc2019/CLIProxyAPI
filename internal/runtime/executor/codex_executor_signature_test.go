@@ -335,3 +335,55 @@ func TestCodexExecutorCompactRetriesWithoutClientReasoningEncryptedContentAfterH
 		t.Fatalf("retry compact request reasoning encrypted_content exists, want removed; body=%s", string(bodies[1]))
 	}
 }
+
+func TestDropOpenAIResponsesFunctionOutputEncryptedContent(t *testing.T) {
+	body := []byte(`{"input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"header"},{"type":"encrypted_content","encrypted_content":"secret"}]}]}`)
+	got, ok := dropOpenAIResponsesFunctionOutputEncryptedContent(context.Background(), "test", body, "test")
+	if !ok {
+		t.Fatalf("expected function output encrypted_content to be dropped")
+	}
+	if gotType := gjson.GetBytes(got, "input.0.output.1.type").String(); gotType != "input_text" {
+		t.Fatalf("output.1.type = %q, want input_text; body=%s", gotType, got)
+	}
+}
+
+func TestDropOpenAIResponsesFunctionOutputEncryptedContentStripsMCPObjectOutput(t *testing.T) {
+	body := []byte(`{"input":[{"type":"function_call_output","call_id":"call_1","output":{"content":[{"type":"text","text":"secret","_meta":{"codex/encryptedContent":true}}]}}]}`)
+	got, ok := dropOpenAIResponsesFunctionOutputEncryptedContent(context.Background(), "test", body, "test")
+	if !ok {
+		t.Fatalf("expected MCP object function output encrypted_content to be dropped")
+	}
+	if got := gjson.GetBytes(got, "input.0.output.content.0.type").String(); got != "input_text" {
+		t.Fatalf("output.content.0.type = %q, want input_text; body=%s", got, string(got))
+	}
+}
+
+func TestDropOpenAIResponsesFunctionOutputEncryptedContentStripsMCPToolCallOutput(t *testing.T) {
+	body := []byte(`{"input":[{"type":"mcp_tool_call_output","call_id":"call_1","output":[{"type":"encrypted_content","encrypted_content":"secret"}]}]}`)
+	got, ok := dropOpenAIResponsesFunctionOutputEncryptedContent(context.Background(), "test", body, "test")
+	if !ok {
+		t.Fatalf("expected mcp_tool_call_output encrypted_content to be dropped")
+	}
+	if got := gjson.GetBytes(got, "input.0.output.0.type").String(); got != "input_text" {
+		t.Fatalf("output.0.type = %q, want input_text; body=%s", got, string(got))
+	}
+}
+
+func TestCodexReasoningReplayInvalidSignatureErrorMatchesFunctionOutputMessage(t *testing.T) {
+	errBody := []byte(`{"error":{"message":"Encrypted function output content could not be decrypted or decoded."}}`)
+	if !codexReasoningReplayInvalidSignatureError(errBody) {
+		t.Fatal("expected function output encrypted_content error to be retryable")
+	}
+}
+
+func TestCodexRetryBodyWithoutClientReasoningEncryptedContentStripsFunctionOutput(t *testing.T) {
+	preparedBody := []byte(`{"model":"gpt-5.4","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"encrypted_content","encrypted_content":"secret"}]}]}`)
+	errBody := []byte(`{"error":{"message":"Encrypted function output content could not be decrypted or decoded."}}`)
+	got, ok := codexRetryBodyWithoutClientReasoningEncryptedContent(context.Background(), preparedBody, errBody)
+	if !ok {
+		t.Fatal("expected retry body rewrite")
+	}
+	if gotType := gjson.GetBytes(got, "input.0.output.0.type").String(); gotType != "input_text" {
+		t.Fatalf("retry body output type = %q, want input_text; body=%s", gotType, got)
+	}
+}

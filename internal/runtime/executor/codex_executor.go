@@ -60,7 +60,17 @@ func codexRetryBodyWithoutClientReasoningEncryptedContent(ctx context.Context, p
 	if !codexReasoningReplayInvalidSignatureError(errorBody) {
 		return preparedBody, false
 	}
-	return dropOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", preparedBody, "upstream encrypted_content verification failure")
+	body := preparedBody
+	changed := false
+	if next, ok := dropOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body, "upstream encrypted_content verification failure"); ok {
+		body = next
+		changed = true
+	}
+	if next, ok := dropOpenAIResponsesFunctionOutputEncryptedContent(ctx, "codex executor", body, "upstream function output encrypted_content verification failure"); ok {
+		body = next
+		changed = true
+	}
+	return body, changed
 }
 
 func codexEncryptedContentErrorBody(result codexNonStreamHTTPResult) []byte {
@@ -759,7 +769,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if !turnStateRetryUsed && !emittedPayload && !completedStreamObserved && pendingTerminalErr == nil && codexShouldRetryHTTPWithoutTurnState(call.prepared, codexErrorBodyForTurnStateRetry(errRead)) {
 				turnStateRetryUsed = true
 				statusCode := statusCodeFromCodexError(errRead)
-				e.dropCodexHTTPTurnStateForRetry(upstreamCtx, auth, call.prepared, "stream terminal error", statusCode)
+				call.prepared = e.dropCodexHTTPTurnStateForRetry(upstreamCtx, auth, call.prepared, "stream terminal error", statusCode)
 				continue
 			}
 			if !emittedPayload && !completedStreamObserved && pendingTerminalErr == nil {

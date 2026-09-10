@@ -1306,6 +1306,37 @@ func TestPrepareCodexHTTPCallUsesStoreForAzureResponsesEndpoint(t *testing.T) {
 	}
 }
 
+func TestPrepareCodexHTTPCallPreservesPreviousResponseIDForAzureResponsesEndpoint(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","previous_response_id":"resp_1","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`),
+	}
+	rawJSON := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_1","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`)
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"",
+		"https://example.openai.azure.com/openai/responses",
+		req,
+		rawJSON,
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+	if got := gjson.GetBytes(call.prepared.body, "previous_response_id").String(); got != "resp_1" {
+		t.Fatalf("previous_response_id = %q, want resp_1; body=%s", got, call.prepared.body)
+	}
+	if gotLen := gjson.GetBytes(call.prepared.body, "input.#").Int(); gotLen != 1 {
+		t.Fatalf("input length = %d, want 1 incremental item; body=%s", gotLen, call.prepared.body)
+	}
+}
+
 func TestPrepareCodexHTTPCallDoesNotCompressCompactRequests(t *testing.T) {
 	t.Setenv(codexCompressionEnv, "1")
 

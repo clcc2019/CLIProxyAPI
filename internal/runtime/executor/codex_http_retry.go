@@ -15,6 +15,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -75,8 +76,15 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 					log.Errorf("codex executor: close stale turn state response body: %v", errClose)
 				}
 			}
-			e.dropCodexHTTPTurnStateForRetry(ctx, auth, prepared, "HTTP status", statusCode)
+			prepared = e.dropCodexHTTPTurnStateForRetry(ctx, auth, prepared, "HTTP status", statusCode)
 			continue
+		}
+		// Encrypted-content failures are deterministic request-shape errors. Let
+		// the higher-level recovery path read the body and issue one sanitized
+		// retry instead of spending the generic 5xx retry budget on the same
+		// rejected payload.
+		if err == nil && codexShouldDeferHTTPEncryptedContentRecovery(httpResp) {
+			return httpResp, nil
 		}
 		if err == nil && !codexShouldRetryHTTPStatus(httpResp) {
 			codexPublishRateLimitsFromHeaders(ctx, auth, httpResp.Header)
@@ -124,6 +132,17 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 	}
 }
 
+func codexShouldDeferHTTPEncryptedContentRecovery(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode < 500 || resp.StatusCode >= 600 || resp.Body == nil {
+		return false
+	}
+	data, err := codexReadHTTPResponseBodyPrefix(resp, helps.MaxErrorResponseBodyBytes)
+	if err != nil {
+		return false
+	}
+	return codexReasoningReplayInvalidSignatureError(data)
+}
+
 // codexDrainAndCloseRetryResponse consumes small retry/error bodies before
 // closing them. Reaching EOF lets net/http reuse HTTP/1.1 connections while
 // the limit prevents an unexpectedly large or endless body from delaying a
@@ -155,23 +174,37 @@ func codexShouldRetryHTTPWithoutTurnState(prepared codexPreparedRequest, errorBo
 	if prepared.httpReq == nil || len(errorBody) == 0 {
 		return false
 	}
-	if strings.TrimSpace(prepared.httpReq.Header.Get(codexHeaderTurnState)) == "" {
-		return false
-	}
 	if !codexWebsocketPreviousResponseNotFound(errorBody) &&
 		!codexWebsocketNoToolCallFoundForFunctionOutput(errorBody) {
+		return false
+	}
+	if codexGJSONGetImmutableBytes(prepared.body, "store").Bool() &&
+		strings.TrimSpace(gjson.GetBytes(prepared.body, "previous_response_id").String()) != "" {
+		return codexHTTPBodyHasReplayableContext(prepared.body)
+	}
+	if strings.TrimSpace(prepared.httpReq.Header.Get(codexHeaderTurnState)) == "" {
 		return false
 	}
 	return codexHTTPBodyHasReplayableContext(prepared.body)
 }
 
-func (e *CodexExecutor) dropCodexHTTPTurnStateForRetry(ctx context.Context, auth *cliproxyauth.Auth, prepared codexPreparedRequest, reason string, statusCode int) {
+func (e *CodexExecutor) dropCodexHTTPTurnStateForRetry(ctx context.Context, auth *cliproxyauth.Auth, prepared codexPreparedRequest, reason string, statusCode int) codexPreparedRequest {
 	if prepared.httpReq == nil {
-		return
+		return prepared
+	}
+	if codexGJSONGetImmutableBytes(prepared.body, "store").Bool() &&
+		strings.TrimSpace(gjson.GetBytes(prepared.body, "previous_response_id").String()) != "" {
+		if next, err := sjson.DeleteBytes(prepared.body, "previous_response_id"); err == nil {
+			prepared.body = next
+			codexResetRequestBody(prepared.httpReq, prepared.body)
+		}
+		helps.LogWithRequestID(ctx).Debugf("codex executor: retrying stored Responses request without previous_response_id after %s (status=%d)", reason, statusCode)
+		return prepared
 	}
 	e.forgetCodexHTTPTurnState(auth, prepared)
 	prepared.httpReq.Header.Del(codexHeaderTurnState)
 	helps.LogWithRequestID(ctx).Debugf("codex executor: retrying without stale HTTP turn state after %s (status=%d)", reason, statusCode)
+	return prepared
 }
 
 func codexErrorBodyForTurnStateRetry(err error) []byte {

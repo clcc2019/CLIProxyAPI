@@ -72,7 +72,7 @@ func codexAuthKind(authKind string) string {
 		return "apikey"
 	case strings.EqualFold(authKind, "api_key"):
 		return "api_key"
-	case strings.EqualFold(authKind, "oauth"):
+	case strings.EqualFold(authKind, "oauth"), strings.EqualFold(authKind, "access_token"), strings.EqualFold(authKind, "accessToken"):
 		return "oauth"
 	case strings.EqualFold(authKind, "chatgpt"):
 		return "chatgpt"

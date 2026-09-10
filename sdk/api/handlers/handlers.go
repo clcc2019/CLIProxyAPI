@@ -1094,18 +1094,15 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		return []string{"home"}, resolvedModelName, nil
 	}
 
-	providers = util.GetProviderName(baseModel)
-	// Fallback: if baseModel has no provider but differs from resolvedModelName,
-	// try using the full model name. This handles edge cases where custom models
-	// may be registered with their full suffixed name (e.g., "my-model(8192)").
-	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
-	// custom model registrations that include thinking suffixes.
+	// Exact effort-qualified aliases can belong to a different provider than
+	// their base model. Match the requested alias before the generic fallback.
+	providers = util.GetProviderName(resolvedModelName)
 	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+		providers = util.GetProviderName(baseModel)
 	}
 
 	if len(providers) == 0 {
-		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusNotFound, Error: fmt.Errorf("model %q is not available; it may be disabled or its alias may have changed. Check /v1/models for available models", modelName)}
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no

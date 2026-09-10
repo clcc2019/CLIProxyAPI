@@ -70,6 +70,9 @@ func preserveRuntimeState(existing, auth *Auth) {
 }
 
 var refreshPreservedMetadataKeys = []string{
+	"base_url",
+	"base-url",
+	"baseUrl",
 	"prefix",
 	"proxy_url",
 	"proxy-url",
@@ -99,6 +102,7 @@ var refreshPreservedMetadataKeys = []string{
 }
 
 var refreshPreservedAttributeKeys = []string{
+	"base_url",
 	"path",
 	"source",
 	"priority",

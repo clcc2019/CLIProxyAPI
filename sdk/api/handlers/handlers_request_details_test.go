@@ -198,3 +198,40 @@ func BenchmarkIsOpenAIImageOnlyModel(b *testing.B) {
 		}
 	}
 }
+
+func TestGetRequestDetailsRemovedAliasReturnsModelNotFound(t *testing.T) {
+	r := registry.GetGlobalRegistry()
+	id := t.Name()
+	model := "test-removed-astra"
+	r.RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { r.UnregisterClient(id) })
+	h := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	if _, _, err := h.getRequestDetails(model + "(high)"); err != nil {
+		t.Fatal(err)
+	}
+	r.UnregisterClient(id)
+	for _, name := range []string{model, model + "(high)", "test-unconfigured-astra"} {
+		_, _, err := h.getRequestDetails(name)
+		if err == nil || err.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: error = %#v, want 404", name, err)
+		}
+		body := BuildErrorResponseBody(err.StatusCode, err.Error.Error())
+		if !strings.Contains(string(body), `"code":"model_not_found"`) {
+			t.Fatalf("error body = %s", body)
+		}
+	}
+}
+
+func TestGetRequestDetailsPrefersExactEffortAlias(t *testing.T) {
+	r := registry.GetGlobalRegistry()
+	base, exact := t.Name()+"-base", t.Name()+"-exact"
+	model := "test-effort-astra"
+	r.RegisterClient(base, "base-provider", []*registry.ModelInfo{{ID: model}})
+	r.RegisterClient(exact, "alias-provider", []*registry.ModelInfo{{ID: model + "(high)"}})
+	t.Cleanup(func() { r.UnregisterClient(base); r.UnregisterClient(exact) })
+	h := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	providers, normalized, err := h.getRequestDetails(model + "(high)")
+	if err != nil || normalized != model+"(high)" || !reflect.DeepEqual(providers, []string{"alias-provider"}) {
+		t.Fatalf("providers=%v model=%s err=%v", providers, normalized, err)
+	}
+}

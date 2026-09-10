@@ -384,7 +384,13 @@ func codexFinalUpstreamBodyMemoAuthProvider(auth *cliproxyauth.Auth, baseModel s
 	if auth == nil {
 		return ""
 	}
-	scope := strings.ToLower(strings.TrimSpace(auth.Provider)) + "\x00" + strings.TrimSpace(auth.ID)
+	_, baseURL := codexCreds(auth)
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	// Normalization depends on whether the resolved upstream is the official
+	// ChatGPT Codex backend or a stored/foreign Responses endpoint (for example
+	// Azure). Include the resolved base URL in the memo scope so a reused auth ID
+	// cannot return a body normalized for a different provider policy.
+	scope := strings.ToLower(strings.TrimSpace(auth.Provider)) + "\x00" + strings.TrimSpace(auth.ID) + "\x00" + strings.ToLower(baseURL)
 	capabilities, ok := registry.GetGlobalRegistry().GetCodexClientModelCapabilities(auth.ID, baseModel)
 	if !ok {
 		return scope
@@ -421,6 +427,7 @@ func hashCodexFinalUpstreamBodyMemoKey(baseModel string, authProvider string, op
 		boolToByte(opts.preserveGenerate),
 		boolToByte(opts.preserveNativeFields),
 		boolToByte(opts.preserveCompactionTrigger),
+		boolToByte(opts.preserveExplicitInstructions),
 		boolToByte(opts.store),
 		boolToByte(opts.omitServiceTier),
 		boolToByte(opts.suppressDefaultInstructions),

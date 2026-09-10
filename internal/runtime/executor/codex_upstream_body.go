@@ -2,7 +2,9 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -61,16 +63,17 @@ func codexDefaultNamespaceDescription(namespaceName string) string {
 var codexDefaultToolSearchParametersRaw = []byte(`{"type":"object","properties":{"query":{"type":"string","description":"Search query for deferred tools."},"limit":{"type":"number","description":"Maximum number of tools to return (defaults to 8)."}},"required":["query"],"additionalProperties":false}`)
 
 type codexFinalUpstreamBodyOptions struct {
-	requestKind                 codexFinalUpstreamRequestKind
-	streamMode                  codexStreamFieldMode
-	preservePreviousResponseID  bool
-	preserveGenerate            bool
-	preserveNativeFields        bool
-	preserveCompactionTrigger   bool
-	store                       bool
-	omitServiceTier             bool
-	suppressDefaultInstructions bool
-	deferredReasoningEffort     codexDeferredReasoningEffort
+	requestKind                  codexFinalUpstreamRequestKind
+	streamMode                   codexStreamFieldMode
+	preservePreviousResponseID   bool
+	preserveGenerate             bool
+	preserveNativeFields         bool
+	preserveCompactionTrigger    bool
+	preserveExplicitInstructions bool
+	store                        bool
+	omitServiceTier              bool
+	suppressDefaultInstructions  bool
+	deferredReasoningEffort      codexDeferredReasoningEffort
 }
 
 // codexFinalUpstreamRequestKindForURL classifies the request kind from the
@@ -105,12 +108,40 @@ func codexMatchesAzureResponsesBaseURL(rawURL string) bool {
 	if rawURL == "" {
 		return false
 	}
-	return asciifold.Contains(rawURL, "openai.azure.") ||
-		asciifold.Contains(rawURL, "cognitiveservices.azure.") ||
-		asciifold.Contains(rawURL, "aoai.azure.") ||
-		asciifold.Contains(rawURL, "azure-api.") ||
-		asciifold.Contains(rawURL, "azurefd.") ||
-		asciifold.Contains(rawURL, "windows.net/openai")
+	u, err := url.Parse(rawURL)
+	if err != nil || u == nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return false
+	}
+	// Azure OpenAI deployments use a small set of service host suffixes. Match
+	// complete DNS suffixes so a path/query containing "openai.azure" or a
+	// lookalike host such as "resource.openai.azure.com.attacker.test" cannot
+	// change request semantics.
+	for _, suffix := range []string{
+		".openai.azure.com",
+		".openai.azure.us",
+		".openai.azure.cn",
+		".aoai.azure.com",
+		".aoai.azure.us",
+		".aoai.azure.cn",
+		".cognitiveservices.azure.com",
+		".cognitiveservices.azure.us",
+		".cognitiveservices.azure.cn",
+		".services.ai.azure.com",
+		".azure-api.net",
+		".azurefd.net",
+	} {
+		if strings.HasSuffix(host, suffix) && len(host) > len(suffix) {
+			return true
+		}
+	}
+	// The legacy Windows endpoint embeds the OpenAI service in the path.
+	// Inspect the path only after constraining the authority to windows.net.
+	return strings.HasSuffix(host, ".windows.net") &&
+		asciifold.Contains(u.EscapedPath(), "/openai")
 }
 
 var codexAllowedResponsesFinalUpstreamFields = map[string]struct{}{
@@ -229,7 +260,9 @@ func codexEnsureFinalUpstreamBodyDefaults(body []byte, baseModel string, capabil
 	}
 
 	instructions := gjson.GetBytes(body, "instructions")
-	if !opts.suppressDefaultInstructions && (!instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) == "")) {
+	hasStoredPreviousResponseID := opts.store &&
+		strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != ""
+	if !opts.suppressDefaultInstructions && !hasStoredPreviousResponseID && (!instructions.Exists() || instructions.Type == gjson.Null || (instructions.Type == gjson.String && strings.TrimSpace(instructions.String()) == "")) {
 		instructionRaw := strconv.AppendQuote(nil, codexDefaultInstructionsFromBody(body))
 		if !instructions.Exists() {
 			appendFields = append(appendFields, codexTopLevelRawField{field: "instructions", rawValue: instructionRaw})
@@ -409,10 +442,54 @@ func normalizeCodexFinalUpstreamBodyUncached(body []byte, baseModel string, auth
 		body = normalizeCodexFinalUpstreamResponsesLiteWithCapabilities(body, capabilities)
 	}
 	body = normalizeCodexFinalUpstreamInputItemPassthroughMetadata(body, auth)
+	body = codexStripForeignEncryptedContent(body, auth)
+	body = normalizeCodexFinalUpstreamStoredResponseContinuity(body, opts)
 	body = pruneCodexFinalUpstreamBody(body, opts)
 	body = codexEnsureResponsesContextField(body, opts.requestKind)
 	body = codexEnsureReasoningEncryptedContentInclude(body, opts)
 	return body
+}
+
+func normalizeCodexFinalUpstreamStoredResponseContinuity(body []byte, opts codexFinalUpstreamBodyOptions) []byte {
+	if opts.requestKind != codexFinalUpstreamResponses || !opts.store {
+		return body
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) == "" {
+		return body
+	}
+	if opts.preserveExplicitInstructions || !gjson.GetBytes(body, "instructions").Exists() {
+		return body
+	}
+	return helps.EditJSONBytes(body, helps.DeleteJSONEdit("instructions"))
+}
+
+func codexStripForeignEncryptedContent(body []byte, auth *cliproxyauth.Auth) []byte {
+	if codexShouldStripForeignFunctionOutputEncryptedContent(auth) {
+		body, _ = dropOpenAIResponsesFunctionOutputEncryptedContent(context.Background(), "codex executor", body, "foreign upstream cannot decrypt provider-bound tool output")
+	}
+	if codexShouldStripForeignReasoningEncryptedContent(auth) {
+		body, _ = dropOpenAIResponsesReasoningEncryptedContent(context.Background(), "codex executor", body, "foreign upstream cannot decrypt provider-bound reasoning")
+	}
+	return body
+}
+
+func codexShouldStripForeignFunctionOutputEncryptedContent(auth *cliproxyauth.Auth) bool {
+	_, baseURL := codexCreds(auth)
+	if codexMatchesAzureResponsesBaseURL(baseURL) {
+		return true
+	}
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "azure") {
+		return true
+	}
+	return auth != nil && !codexPreservesInputItemPassthroughMetadata(auth)
+}
+
+func codexShouldStripForeignReasoningEncryptedContent(auth *cliproxyauth.Auth) bool {
+	_, baseURL := codexCreds(auth)
+	if codexMatchesAzureResponsesBaseURL(baseURL) {
+		return true
+	}
+	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "azure")
 }
 
 func codexEnsureResponsesContextField(body []byte, requestKind codexFinalUpstreamRequestKind) []byte {

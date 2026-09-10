@@ -133,11 +133,17 @@ func codexDefaultFinalUpstreamBodyOptions(auth *cliproxyauth.Auth, url string) c
 	if requestKind == codexFinalUpstreamCompact {
 		streamMode = codexStreamFieldDelete
 	}
+	store := codexShouldStoreResponses(auth, url)
 	return codexFinalUpstreamBodyOptions{
-		requestKind:     requestKind,
-		streamMode:      streamMode,
-		store:           codexShouldStoreResponses(auth, url),
-		omitServiceTier: auth == nil || !auth.ServiceTierPassthrough(),
+		requestKind:                  requestKind,
+		streamMode:                   streamMode,
+		store:                        store,
+		preserveExplicitInstructions: store,
+		// Azure and other stored Responses endpoints rely on previous_response_id
+		// for multi-turn continuity. Codex HTTP turn-state headers are not
+		// available there, unlike the official ChatGPT Codex backend.
+		preservePreviousResponseID: store,
+		omitServiceTier:            auth == nil || !auth.ServiceTierPassthrough(),
 	}
 }
 
@@ -192,8 +198,18 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 	codexMergeResponsesAPIClientMetadataIntoTurnMetadataHeader(prepared.httpReq.Header, responsesAPIClientMetadata)
 	if requestKind != codexFinalUpstreamCompact {
 		prepared.body = codexApplyHTTPClientMetadataWithSourceAndPromptCacheKey(prepared.body, prepared.httpReq.Header, profileHeaders, auth, e.cfg, prepared.promptCacheID)
+		prepared.body = codexStripForeignEncryptedContent(prepared.body, auth)
 		codexResetRequestBody(prepared.httpReq, prepared.body)
-		e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
+		// Stored Responses backends such as Azure rely on store +
+		// previous_response_id rather than ChatGPT Codex turn-state headers.
+		if !finalOpts.store {
+			e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
+		}
+	}
+	// Apply this to compact requests as well: stored Responses providers do
+	// not accept caller-provided or locally cached ChatGPT Codex turn-state.
+	if finalOpts.store {
+		prepared.httpReq.Header.Del(codexHeaderTurnState)
 	}
 	if requestKind == codexFinalUpstreamCompact {
 		if installationID := codexResolvedInstallationID(prepared.httpReq.Header, ginHeaders, auth, e.cfg); installationID != "" {

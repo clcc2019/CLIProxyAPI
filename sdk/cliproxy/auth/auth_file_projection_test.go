@@ -510,3 +510,31 @@ func TestPrepareAuthFileMetadataForSaveCreatesMetadata(t *testing.T) {
 		t.Fatalf("disabled = %#v, want false", metadata["disabled"])
 	}
 }
+
+func TestAuthFileProjectsTransportCredentials(t *testing.T) {
+	for _, keys := range [][2]string{{"api_key", "base_url"}, {"api-key", "base-url"}, {"apiKey", "baseUrl"}} {
+		t.Run(keys[0], func(t *testing.T) {
+			auth := NewAuthFromAuthFileMetadata(map[string]any{
+				"type": "codex", keys[0]: " test-key ", keys[1]: " https://resource.openai.azure.com/openai/v1 ", "access_token": "oauth-token",
+			}, AuthFileProjectionOptions{})
+			if auth.Attributes["api_key"] != "test-key" || auth.Attributes["base_url"] != "https://resource.openai.azure.com/openai/v1" {
+				t.Fatalf("credentials not projected: %#v", auth.Attributes)
+			}
+			if auth.Metadata["access_token"] != "oauth-token" || auth.Attributes["access_token"] != "" {
+				t.Fatal("OAuth tokens must remain in mutable metadata")
+			}
+		})
+	}
+	t.Run("extra_attributes_override", func(t *testing.T) {
+		auth := NewAuthFromAuthFileMetadata(map[string]any{"type": "codex", "api_key": "file-key", "base_url": "https://file.test"}, AuthFileProjectionOptions{ExtraAttributes: map[string]string{"api_key": "override-key", "base_url": ""}})
+		if auth.Attributes["api_key"] != "override-key" || auth.Attributes["base_url"] != "" {
+			t.Fatalf("explicit overrides lost: %#v", auth.Attributes)
+		}
+	})
+	t.Run("invalid_types", func(t *testing.T) {
+		auth := NewAuthFromAuthFileMetadata(map[string]any{"type": "codex", "api_key": 123, "base_url": true}, AuthFileProjectionOptions{})
+		if auth.Attributes["api_key"] != "" || auth.Attributes["base_url"] != "" {
+			t.Fatal("non-string transport credentials must not be projected")
+		}
+	})
+}

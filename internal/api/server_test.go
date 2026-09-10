@@ -358,6 +358,11 @@ func TestPublicCORSOptions_UsesExplicitHeaders(t *testing.T) {
 
 func TestClaudeMessagesBetaQueryIsAllowed(t *testing.T) {
 	server := newTestServer(t)
+	// Exercise beta query routing with a registered model. An unavailable
+	// model now correctly returns 404 independently of query routing.
+	r := registry.GetGlobalRegistry()
+	r.RegisterClient(t.Name(), "claude", []*registry.ModelInfo{{ID: "claude-opus-4.7"}})
+	t.Cleanup(func() { r.UnregisterClient(t.Name()) })
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", strings.NewReader(`{"model":"claude-opus-4.7","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`))
 	req.Header.Set("Authorization", "Bearer test-key")

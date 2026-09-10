@@ -96,6 +96,20 @@ func NewAuthFromAuthFileMetadata(metadata map[string]any, opts AuthFileProjectio
 	if email := strings.TrimSpace(authFileProjectionString(metadata, "email")); email != "" {
 		attrs["email"] = email
 	}
+	// API-key compatible auth files keep transport credentials in the runtime
+	// attribute bag consumed by executors. Preserve common snake/camel aliases
+	// while leaving OAuth access tokens in Metadata so refreshed tokens remain authoritative.
+	for attrKey, metadataKeys := range map[string][]string{
+		"api_key":  {"api_key", "api-key", "apiKey"},
+		"base_url": {"base_url", "base-url", "baseUrl"},
+	} {
+		for _, key := range metadataKeys {
+			if value := strings.TrimSpace(authFileProjectionString(metadata, key)); value != "" {
+				attrs[attrKey] = value
+				break
+			}
+		}
+	}
 	for key, value := range opts.ExtraAttributes {
 		key = strings.TrimSpace(key)
 		if key == "" {

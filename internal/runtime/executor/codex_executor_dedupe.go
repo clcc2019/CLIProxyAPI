@@ -217,7 +217,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 				}
 				if !turnStateRetryUsed && codexShouldRetryHTTPWithoutTurnState(prepared, data) {
 					turnStateRetryUsed = true
-					e.dropCodexHTTPTurnStateForRetry(ctx, auth, prepared, "aggregate HTTP status", httpResp.StatusCode)
+					prepared = e.dropCodexHTTPTurnStateForRetry(ctx, auth, prepared, "aggregate HTTP status", httpResp.StatusCode)
 					continue
 				}
 				return codexNonStreamHTTPResult{
@@ -238,7 +238,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 			aggregate.headers = httpResp.Header
 			if !turnStateRetryUsed && len(aggregate.errorBody) > 0 && codexShouldRetryHTTPWithoutTurnState(prepared, aggregate.errorBody) {
 				turnStateRetryUsed = true
-				e.dropCodexHTTPTurnStateForRetry(ctx, auth, prepared, "aggregate stream error", aggregate.errorStatus)
+				prepared = e.dropCodexHTTPTurnStateForRetry(ctx, auth, prepared, "aggregate stream error", aggregate.errorStatus)
 				continue
 			}
 			return aggregate, nil
