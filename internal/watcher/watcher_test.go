@@ -329,6 +329,9 @@ func TestDispatchRuntimeAuthUpdateEnqueuesAndUpdatesState(t *testing.T) {
 		if update.Action != AuthUpdateActionAdd || update.Auth.ID != "auth-1" {
 			t.Fatalf("unexpected update: %+v", update)
 		}
+		if update.Revision() != 1 {
+			t.Fatalf("add revision = %d, want 1", update.Revision())
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for auth update")
 	}
@@ -340,6 +343,9 @@ func TestDispatchRuntimeAuthUpdateEnqueuesAndUpdatesState(t *testing.T) {
 	case update := <-queue:
 		if update.Action != AuthUpdateActionDelete || update.ID != "auth-1" {
 			t.Fatalf("unexpected delete update: %+v", update)
+		}
+		if update.Revision() != 2 {
+			t.Fatalf("delete revision = %d, want 2", update.Revision())
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for delete update")

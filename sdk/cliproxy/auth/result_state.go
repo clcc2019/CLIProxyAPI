@@ -215,7 +215,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		m.enqueuePersistAuthID(ctx, persistAuthID)
 	}
 	if m.scheduler != nil && schedulerSnapshot != nil {
-		m.scheduler.upsertAuth(schedulerSnapshot)
+		m.scheduler.upsertAuthResult(schedulerSnapshot, result)
 	}
 	if invalidateAuthAffinity {
 		m.invalidateSessionAffinityForAuth(result.AuthID)

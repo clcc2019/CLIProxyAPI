@@ -698,7 +698,7 @@ func jsonFieldValue(result gjson.Result) any {
 // Delegates to the shared codex translator helper so all four translators
 // stay in sync.
 func shortenNameIfNeeded(name string) string {
-	return codexcommon.ShortenNameIfNeeded(name)
+	return codexcommon.ShortenNameIfNeededLimit(name, 64)
 }
 
 // buildShortNameMap generates unique short names within the shared Codex limit.

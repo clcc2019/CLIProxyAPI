@@ -85,6 +85,8 @@ type Service struct {
 
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
+	authUpdateMu  sync.Mutex
+	authRevisions map[string]uint64
 
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
@@ -220,11 +222,27 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 	if s == nil {
 		return
 	}
+	id := strings.TrimSpace(update.ID)
+	if id == "" && update.Auth != nil {
+		id = strings.TrimSpace(update.Auth.ID)
+	}
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	if cfg == nil || s.coreManager == nil {
 		return
+	}
+	s.authUpdateMu.Lock()
+	defer s.authUpdateMu.Unlock()
+	if id != "" && update.Revision() > 0 {
+		if s.authRevisions == nil {
+			s.authRevisions = make(map[string]uint64)
+		}
+		if previous := s.authRevisions[id]; update.Revision() <= previous {
+			log.Debugf("skipping stale auth update for %s: revision %d <= processed %d", id, update.Revision(), previous)
+			return
+		}
+		s.authRevisions[id] = update.Revision()
 	}
 	switch update.Action {
 	case watcher.AuthUpdateActionAdd, watcher.AuthUpdateActionModify:
@@ -233,10 +251,6 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 		}
 		s.applyCoreAuthAddOrUpdate(ctx, update.Auth)
 	case watcher.AuthUpdateActionDelete:
-		id := update.ID
-		if id == "" && update.Auth != nil {
-			id = update.Auth.ID
-		}
 		if id == "" {
 			return
 		}

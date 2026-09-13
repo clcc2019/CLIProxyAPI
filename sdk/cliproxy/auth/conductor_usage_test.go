@@ -10,6 +10,7 @@ import (
 
 func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
+		Stream: true,
 		Metadata: map[string]any{
 			cliproxyexecutor.RequestedModelMetadataKey:  "client-model",
 			cliproxyexecutor.ReasoningEffortMetadataKey: "medium",
@@ -26,5 +27,8 @@ func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 	gotServiceTier := coreusage.ServiceTierFromContext(ctx)
 	if gotServiceTier != "priority" {
 		t.Fatalf("service tier = %q, want %q", gotServiceTier, "priority")
+	}
+	if !coreusage.StreamFromContext(ctx) {
+		t.Fatal("stream flag was not propagated")
 	}
 }

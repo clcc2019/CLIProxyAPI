@@ -37,6 +37,24 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	}
 }
 
+func TestUsageReporterObserveResponsesText(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5", nil)
+	reporter.ObserveResponsesText("response.created", []byte(`{"delta":"created"}`))
+	if reporter.ttftDuration() != 0 {
+		t.Fatal("control event must not set TTFT")
+	}
+	time.Sleep(time.Millisecond)
+	reporter.ObserveResponsesText("response.output_text.delta", []byte(`{"delta":"hello"}`))
+	if reporter.ttftDuration() <= 0 {
+		t.Fatal("text delta must set TTFT")
+	}
+	first := reporter.ttftDuration()
+	reporter.ObserveResponsesText("response.output_text.delta", []byte(`{"delta":"later"}`))
+	if reporter.ttftDuration() != first {
+		t.Fatal("TTFT must be recorded once")
+	}
+}
+
 func TestUsageReporterCodexResponseMetadataKeepsSentModel(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5-requested", nil)
 	reporter.SetCodexResponseMetadata("gpt-5-safe", true)

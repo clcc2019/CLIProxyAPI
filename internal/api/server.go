@@ -438,8 +438,8 @@ func (s *Server) setupRoutes() {
 
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	s.engine.GET("/healthz", healthzHandler)
-	s.engine.HEAD("/healthz", healthzHandler)
+	s.engine.GET("/healthz", logging.SkipGinRequestLogging, healthzHandler)
+	s.engine.HEAD("/healthz", logging.SkipGinRequestLogging, healthzHandler)
 
 	// /readyz reflects bootstrap state. Distinct from /healthz so orchestrators
 	// can hold traffic until dependencies are confirmed reachable, while still
@@ -462,7 +462,6 @@ func (s *Server) setupRoutes() {
 	}
 	s.engine.GET("/readyz", readyzHandler)
 	s.engine.HEAD("/readyz", readyzHandler)
-
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)

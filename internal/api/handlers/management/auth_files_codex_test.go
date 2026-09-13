@@ -67,6 +67,16 @@ func TestCodexLoginRequestUserAgentSkipsWebUIBrowserHeader(t *testing.T) {
 	}
 }
 
+func TestCodexLoginRequestUserAgentRejectsBrowserHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-url", nil)
+	ctx.Request.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+	if got := codexLoginRequestUserAgent(ctx); got != "" {
+		t.Fatalf("codexLoginRequestUserAgent() = %q, want empty", got)
+	}
+}
+
 func TestCodexUsageDefaultUserAgentUsesCurrentCodexFingerprint(t *testing.T) {
 	if got := codexUsageUserAgent; got != misc.CodexCLIUserAgent {
 		t.Fatalf("codexUsageUserAgent = %q, want %q", got, misc.CodexCLIUserAgent)

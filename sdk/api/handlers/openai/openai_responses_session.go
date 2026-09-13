@@ -3,6 +3,7 @@ package openai
 import (
 	"net/http"
 	"strings"
+	"unsafe"
 
 	"github.com/tidwall/gjson"
 )
@@ -10,6 +11,15 @@ import (
 var responseExecutionThreadHeaderKeys = []string{"Thread_id", "thread_id", "Thread-Id", "thread-id", "X-Thread-ID"}
 var responseExecutionConversationHeaderKeys = []string{"Conversation_id", "conversation_id", "Conversation-Id", "conversation-id", "X-Conversation-ID"}
 var responseExecutionSessionHeaderKeys = []string{"Session_id", "session_id", "Session-Id", "session-id", "X-Session-ID"}
+var responseExecutionBodyPaths = []string{
+	"client_metadata.x-codex-turn-metadata.thread_id", "metadata.thread_id", "metadata.threadId",
+	"thread_id", "threadId", "metadata.conversation_id", "metadata.conversationId",
+	"conversation_id", "conversationId", "client_metadata.x-codex-turn-metadata.session_id",
+	"metadata.session_id", "metadata.sessionId", "session_id", "sessionId",
+	"prompt_cache_key", "metadata.prompt_cache_key",
+}
+
+const responseExecutionBodyPathCount = 16
 
 func responsesExplicitExecutionSessionID(req *http.Request, rawJSON []byte) string {
 	if req != nil {
@@ -41,36 +51,102 @@ func responsesExplicitExecutionSessionID(req *http.Request, rawJSON []byte) stri
 	if len(rawJSON) == 0 {
 		return ""
 	}
-	for _, path := range []string{
-		"client_metadata.x-codex-turn-metadata.thread_id",
-		"metadata.thread_id",
-		"metadata.threadId",
-		"thread_id",
-		"threadId",
-		"metadata.conversation_id",
-		"metadata.conversationId",
-		"conversation_id",
-		"conversationId",
-		"client_metadata.x-codex-turn-metadata.session_id",
-		"metadata.session_id",
-		"metadata.sessionId",
-		"session_id",
-		"sessionId",
-		"prompt_cache_key",
-		"metadata.prompt_cache_key",
-	} {
-		if sessionID := strings.TrimSpace(gjson.GetBytes(rawJSON, path).String()); sessionID != "" {
-			return sessionID
-		}
-	}
-	if raw := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); raw != "" {
-		if threadID := strings.TrimSpace(gjson.Get(raw, "thread_id").String()); threadID != "" {
-			return threadID
-		}
-		if sessionID := strings.TrimSpace(gjson.Get(raw, "session_id").String()); sessionID != "" {
-			return sessionID
-		}
-	}
+	return responsesBodyExecutionSessionID(rawJSON)
 
+}
+
+// responsesBodyExecutionSessionID scans the request object once. Nested
+// metadata is parsed only after the top-level scan identifies its container,
+// avoiding a full-body scan for each candidate path.
+func responsesBodyExecutionSessionID(rawJSON []byte) string {
+	if len(rawJSON) == 0 {
+		return ""
+	}
+	var fields [responseExecutionBodyPathCount]gjson.Result
+	var found [responseExecutionBodyPathCount]bool
+	var clientMetadata, metadata gjson.Result
+	jsonText := unsafe.String(unsafe.SliceData(rawJSON), len(rawJSON))
+	gjson.Parse(jsonText).ForEach(func(key, value gjson.Result) bool {
+		if key.Type != gjson.String {
+			return true
+		}
+		name := key.String()
+		if name == "client_metadata" && !clientMetadata.Exists() {
+			clientMetadata = value
+		}
+		if name == "metadata" && !metadata.Exists() {
+			metadata = value
+		}
+		for index, path := range responseExecutionBodyPaths {
+			if path == name && !found[index] {
+				fields[index], found[index] = value, true
+			}
+		}
+		return true
+	})
+
+	turn := clientMetadata.Get("x-codex-turn-metadata")
+	if turn.Type == gjson.JSON {
+		if value := turnMetadataField(turn, "thread_id"); value != "" {
+			return value
+		}
+	}
+	for _, path := range []string{"thread_id", "threadId"} {
+		if value := ownedSessionValue(metadata.Get(path).String()); value != "" {
+			return value
+		}
+	}
+	for _, index := range []int{3, 4} {
+		if value := ownedSessionValue(fields[index].String()); value != "" {
+			return value
+		}
+	}
+	for _, path := range []string{"conversation_id", "conversationId"} {
+		if value := ownedSessionValue(metadata.Get(path).String()); value != "" {
+			return value
+		}
+	}
+	for _, index := range []int{7, 8} {
+		if value := ownedSessionValue(fields[index].String()); value != "" {
+			return value
+		}
+	}
+	for _, path := range []string{"session_id", "sessionId"} {
+		if value := ownedSessionValue(metadata.Get(path).String()); value != "" {
+			return value
+		}
+	}
+	for _, index := range []int{12, 13, 14} {
+		if value := ownedSessionValue(fields[index].String()); value != "" {
+			return value
+		}
+	}
+	if value := ownedSessionValue(metadata.Get("prompt_cache_key").String()); value != "" {
+		return value
+	}
+	if turn.Exists() {
+		if turn.Type != gjson.JSON {
+			if value := turnMetadataField(turn, "thread_id"); value != "" {
+				return value
+			}
+		}
+		if value := turnMetadataField(turn, "session_id"); value != "" {
+			return value
+		}
+	}
 	return ""
+}
+
+func turnMetadataField(value gjson.Result, field string) string {
+	if value.Type == gjson.JSON {
+		return ownedSessionValue(value.Get(field).String())
+	}
+	if raw := strings.TrimSpace(value.String()); raw != "" {
+		return ownedSessionValue(gjson.Get(raw, field).String())
+	}
+	return ""
+}
+
+func ownedSessionValue(value string) string {
+	return strings.Clone(strings.TrimSpace(value))
 }

@@ -36,6 +36,7 @@ type UsageReporter struct {
 	modelReasoningEffort string
 	reasoning            string
 	serviceTier          string
+	stream               bool
 	sessionID            string
 	parentSessionID      string
 	requestedAt          time.Time
@@ -76,6 +77,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		authType:        resolveUsageAuthType(auth),
 		reasoning:       usage.ReasoningEffortFromContext(ctx),
 		serviceTier:     usage.ServiceTierFromContext(ctx),
+		stream:          usage.StreamFromContext(ctx),
 		sessionID:       usage.SessionIDFromContext(ctx),
 		parentSessionID: usage.ParentSessionIDFromContext(ctx),
 	}
@@ -223,6 +225,25 @@ func (r *UsageReporter) MarkFirstResponseByte() {
 		return
 	}
 	r.setTTFT(time.Since(start))
+}
+
+// ObserveResponsesText records the first non-empty text delta, not a created,
+// metadata, reasoning, or tool event. The clock includes preparation and retries
+// within this executor call; it does not include client network latency.
+func (r *UsageReporter) ObserveResponsesText(eventType string, payload []byte) {
+	if r == nil || eventType != "response.output_text.delta" || r.requestedAt.IsZero() {
+		return
+	}
+	r.ttftMu.RLock()
+	observed := r.ttftSet
+	r.ttftMu.RUnlock()
+	if observed {
+		return
+	}
+	delta := gjson.GetBytes(payload, "delta")
+	if delta.Type == gjson.String && delta.String() != "" {
+		r.setTTFT(time.Since(r.requestedAt))
+	}
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -380,6 +401,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ServiceTier:          r.serviceTier,
 		RequestServiceTier:   r.serviceTier,
 		ResponseServiceTier:  strings.TrimSpace(detail.ResponseServiceTier),
+		Stream:               r.stream,
 		RequestedAt:          r.requestedAt,
 		Latency:              r.latency(),
 		TTFT:                 r.ttftDuration(),

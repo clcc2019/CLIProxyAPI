@@ -11,7 +11,7 @@
 //	--auths-dir       <path>  Directory containing auth JSON files (default: config auth-dir)
 //	--config          <path>  Config file path                 (default: "config.yaml")
 //	--output          <path>  Output JSON file path             (default: "codex_models.json")
-//	--client-version <ver>   Codex client_version query value  (default: "0.133.0")
+//	--client-version <ver>   Codex client_version query value  (default: "0.153.4")
 //	--pretty                 Pretty-print the output JSON      (default: true)
 package main
 

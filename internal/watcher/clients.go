@@ -62,10 +62,12 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	var authFileCount int
 	var scannedFileAuths []*coreauth.Auth
+	var previous authSnapshotRevisions
 	if rescanAuth {
 		scan := w.scanFileClients(cfg)
 		authFileCount = scan.fileCount
 		scannedFileAuths = scan.auths
+		previous = scan.revisions
 
 		// Publish the completed snapshot in one short critical section. The old
 		// startup path read every file once for counting, then read and parsed all
@@ -73,6 +75,25 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		// third directory scan. Besides the repeated I/O, holding the mutex across
 		// the scan blocked fsnotify updates on large auth directories.
 		w.clientsMutex.Lock()
+		// A file event may have refreshed these caches while the directory was
+		// being read. Keep that newer cache entry (or deletion) with its auth state.
+		for path, revision := range w.fileRevisions {
+			if revision == scan.revisions.files[path] {
+				continue
+			}
+			delete(scan.hashes, path)
+			delete(scan.contents, path)
+			delete(scan.authsByPath, path)
+			if hash, ok := w.lastAuthHashes[path]; ok {
+				scan.hashes[path] = hash
+			}
+			if auth := w.lastAuthContents[path]; auth != nil && scan.contents != nil {
+				scan.contents[path] = auth
+			}
+			if auths, ok := w.fileAuthsByPath[path]; ok {
+				scan.authsByPath[path] = auths
+			}
+		}
 		w.lastAuthHashes = scan.hashes
 		w.lastAuthContents = scan.contents
 		w.fileAuthsByPath = scan.authsByPath
@@ -93,13 +114,16 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	}
 
 	if rescanAuth {
-		w.refreshAuthStateFromFileAuths(forceAuthRefresh, scannedFileAuths)
+		w.refreshAuthStateFromFileAuths(forceAuthRefresh, scannedFileAuths, previous)
 	} else if len(affectedOAuthProviders) == 0 && !forceAuthRefresh {
 		// Ordinary config changes (for example, port or logging settings) do not
 		// alter synthesized OAuth-file auths. Reuse the snapshots already tracked
 		// by the watcher and only rebuild config-backed API-key auths.
+		w.clientsMutex.RLock()
+		previous = w.snapshotRevisionsLocked()
+		w.clientsMutex.RUnlock()
 		if cachedFileAuths, ok := w.cachedFileAuths(); ok {
-			w.refreshAuthStateFromFileAuths(false, cachedFileAuths)
+			w.refreshAuthStateFromFileAuths(false, cachedFileAuths, previous)
 		} else {
 			w.refreshAuthState(false)
 		}
@@ -149,6 +173,10 @@ func (w *Watcher) cachedFileAuths() ([]*coreauth.Auth, bool) {
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {
+	normalized := w.normalizeAuthPath(path)
+	w.clientsMutex.RLock()
+	previousRevision := w.fileRevisions[normalized]
+	w.clientsMutex.RUnlock()
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
@@ -160,7 +188,6 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 	sum := sha256.Sum256(data)
 	curHash := hex.EncodeToString(sum[:])
-	normalized := w.normalizeAuthPath(path)
 
 	// Parse new auth content for diff comparison
 	var newAuth coreauth.Auth
@@ -170,6 +197,10 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	w.clientsMutex.Lock()
+	if w.fileRevisions[normalized] != previousRevision {
+		w.clientsMutex.Unlock()
+		return
+	}
 	if w.config == nil {
 		log.Error("config is nil, cannot add or update client")
 		w.clientsMutex.Unlock()
@@ -202,6 +233,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	// Update caches
+	w.recordFileObservationLocked(normalized)
 	w.lastAuthHashes[normalized] = curHash
 	if cacheAuthContents {
 		if w.lastAuthContents == nil {
@@ -240,6 +272,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 func (w *Watcher) removeClient(path string) {
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
+	w.recordFileObservationLocked(normalized)
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
 	for id, a := range w.fileAuthsByPath[normalized] {
 		oldByID[id] = a
@@ -280,7 +313,15 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 		delete(w.currentAuths, id)
 		updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})
 	}
+	w.stampAuthUpdatesLocked(updates)
 	return updates
+}
+
+func (w *Watcher) recordFileObservationLocked(path string) {
+	if w.fileRevisions == nil {
+		w.fileRevisions = make(map[string]uint64)
+	}
+	w.fileRevisions[path]++
 }
 
 func authSliceToMap(auths []*coreauth.Auth) map[string]*coreauth.Auth {
@@ -303,6 +344,7 @@ func authIDSet(auths map[string]*coreauth.Auth) map[string]*coreauth.Auth {
 }
 
 type fileClientScan struct {
+	revisions   authSnapshotRevisions
 	fileCount   int
 	readable    int
 	auths       []*coreauth.Auth
@@ -312,7 +354,11 @@ type fileClientScan struct {
 }
 
 func (w *Watcher) scanFileClients(cfg *config.Config) fileClientScan {
+	w.clientsMutex.RLock()
+	previous := w.snapshotRevisionsLocked()
+	w.clientsMutex.RUnlock()
 	scan := fileClientScan{
+		revisions:   previous,
 		hashes:      make(map[string]string),
 		authsByPath: make(map[string]map[string]*coreauth.Auth),
 	}

@@ -377,6 +377,62 @@ func (s *authScheduler) upsertAuth(auth *Auth) {
 	s.upsertAuthLocked(auth, time.Now())
 }
 
+// upsertAuthResult incrementally synchronizes an auth after a request result.
+// Model-scoped results only need to rebuild the affected model shard; lifecycle
+// and credential-scoped updates continue to use the full synchronization path.
+func (s *authScheduler) upsertAuthResult(auth *Auth, result Result) {
+	if s == nil {
+		return
+	}
+	targetModels := make([]string, 0, 1)
+	if !result.AuthScoped {
+		if modelKey := canonicalModelKey(result.Model); modelKey != "" {
+			targetModels = append(targetModels, modelKey)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upsertAuthResultLocked(auth, targetModels, result.AuthScoped, time.Now())
+}
+
+func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string, credentialScoped bool, now time.Time) {
+	if auth == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if authID == "" || providerKey == "" || auth.IsDisabled() {
+		s.removeAuthLocked(authID)
+		return
+	}
+	if previousProvider := s.authProviders[authID]; previousProvider != "" && previousProvider != providerKey {
+		if previousState := s.providers[previousProvider]; previousState != nil {
+			previousState.removeAuthLocked(authID)
+		}
+	}
+	providerState := s.ensureProviderLocked(providerKey)
+	meta := buildScheduledAuthMeta(auth)
+	existing := providerState.currentMeta(authID)
+	modelSetChanged := existing == nil || !sameModelSet(existing.supportedModelSet, meta.supportedModelSet)
+	credentialAvailabilityChanged := existing != nil && schedulerCredentialBlocked(existing.auth, now) != schedulerCredentialBlocked(auth, now)
+	s.authProviders[authID] = providerKey
+	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 {
+		providerState.upsertAuth(meta, nil, true, now)
+		return
+	}
+	providerState.upsertAuth(meta, targetModels, false, now)
+}
+
+func schedulerCredentialBlocked(auth *Auth, now time.Time) bool {
+	if auth == nil || auth.IsDisabled() {
+		return true
+	}
+	if authScopedCooldownActive(auth, now) {
+		return true
+	}
+	return auth.Unavailable && auth.NextRetryAfter.After(now)
+}
+
 // removeAuth deletes one auth from every scheduler shard that references it.
 func (s *authScheduler) removeAuth(authID string) {
 	if s == nil {
@@ -1083,13 +1139,46 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 	return set
 }
 
+func sameModelSet(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key := range a {
+		if _, ok := b[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // upsertAuthLocked updates every existing model shard that can reference the auth metadata.
 func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.Time) {
+	p.upsertAuth(meta, nil, true, now)
+}
+
+func (p *providerScheduler) currentMeta(authID string) *scheduledAuthMeta {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	meta := p.auths[authID]
+	p.mu.RUnlock()
+	return meta
+}
+
+func (p *providerScheduler) upsertAuth(meta *scheduledAuthMeta, targetModels []string, credentialScoped bool, now time.Time) {
 	if p == nil || meta == nil || meta.auth == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.upsertAuthForModelsLocked(meta, targetModels, credentialScoped, now)
+}
+
+func (p *providerScheduler) upsertAuthForModelsLocked(meta *scheduledAuthMeta, targetModels []string, credentialScoped bool, now time.Time) {
+	if p == nil || meta == nil || meta.auth == nil {
+		return
+	}
 	if p.auths == nil {
 		p.auths = make(map[string]*scheduledAuthMeta)
 	}
@@ -1098,6 +1187,33 @@ func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.T
 	}
 	p.evictExpiredModelShardsLocked(now)
 	p.auths[meta.auth.ID] = meta
+	if !credentialScoped && len(targetModels) > 0 {
+		if emptyShard := p.modelShards[""]; emptyShard != nil {
+			if meta.supportsModel("") {
+				emptyShard.upsertEntry(meta, now)
+			} else {
+				emptyShard.removeEntry(meta.auth.ID)
+			}
+		}
+		seen := make(map[string]struct{}, len(targetModels))
+		for _, model := range targetModels {
+			modelKey := canonicalModelKey(model)
+			if _, ok := seen[modelKey]; ok {
+				continue
+			}
+			seen[modelKey] = struct{}{}
+			shard := p.modelShards[modelKey]
+			if shard == nil {
+				continue
+			}
+			if !meta.supportsModel(modelKey) {
+				shard.removeEntry(meta.auth.ID)
+			} else {
+				shard.upsertEntry(meta, now)
+			}
+		}
+		return
+	}
 	for modelKey, shard := range p.modelShards {
 		if shard == nil {
 			continue

@@ -166,6 +166,7 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 	if serviceTier != "" {
 		ctx = coreusage.WithServiceTier(ctx, serviceTier)
 	}
+	ctx = coreusage.WithStream(ctx, opts.Stream)
 	return ctx
 }
 

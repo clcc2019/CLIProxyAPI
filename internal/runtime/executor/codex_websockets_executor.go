@@ -52,6 +52,7 @@ const (
 	codexResponsesWebsocketMaxParked      = 16
 	codexWebsocketHeaderInitialCapacity   = 12
 	codexWebsocketSSEFrameInitialCapacity = 512
+	codexWebsocketWriteChunkSize          = 32 * 1024
 	codexDefaultResponsesHTTPURL          = "https://chatgpt.com/backend-api/codex/responses"
 	codexDefaultResponsesWebsocketURL     = "wss://chatgpt.com/backend-api/codex/responses"
 )
@@ -491,8 +492,28 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 	defer s.writeMu.Unlock()
 	now := time.Now()
 	_ = conn.SetWriteDeadline(now.Add(codexResponsesWebsocketWriteTO))
-	if err := conn.WriteMessage(msgType, payload); err != nil {
-		return err
+	if len(payload) <= codexWebsocketWriteChunkSize {
+		if err := conn.WriteMessage(msgType, payload); err != nil {
+			return err
+		}
+	} else {
+		writer, errWriter := conn.NextWriter(msgType)
+		if errWriter != nil {
+			return errWriter
+		}
+		for offset := 0; offset < len(payload); offset += codexWebsocketWriteChunkSize {
+			end := offset + codexWebsocketWriteChunkSize
+			if end > len(payload) {
+				end = len(payload)
+			}
+			if _, errWrite := writer.Write(payload[offset:end]); errWrite != nil {
+				_ = writer.Close()
+				return errWrite
+			}
+		}
+		if errClose := writer.Close(); errClose != nil {
+			return errClose
+		}
 	}
 	s.touchActivityAt(now)
 	return nil
@@ -510,9 +531,8 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 	s.touchActivity()
 	conn.SetPingHandler(func(appData string) error {
 		s.touchActivity()
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
-		// Reply pongs from the same write lock to avoid concurrent writes.
+		// Gorilla permits WriteControl to run concurrently with data writes. Do not
+		// wait behind a large payload or upstream keepalive can time out.
 		if err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second)); err != nil {
 			return err
 		}
@@ -952,6 +972,7 @@ readLoop:
 			if codexWebsocketEventEmitsOutput(eventType) {
 				emittedPayload = true
 			}
+			reporter.ObserveResponsesText(eventType, payload)
 			if eventType == "response.incomplete" {
 				terminalErr := codexResponseIncompleteEventErr(payload)
 				codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
@@ -1351,6 +1372,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if codexWebsocketEventEmitsOutput(eventType) {
 					emittedPayload = true
 				}
+				reporter.ObserveResponsesText(eventType, payload)
 				if eventType == "response.incomplete" {
 					terminalErr := codexResponseIncompleteEventErr(payload)
 					codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
@@ -1925,7 +1947,24 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 		return fmt.Errorf("codex websockets executor: websocket conn is nil")
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(codexResponsesWebsocketWriteTO))
-	return conn.WriteMessage(websocket.TextMessage, payload)
+	if len(payload) <= codexWebsocketWriteChunkSize {
+		return conn.WriteMessage(websocket.TextMessage, payload)
+	}
+	writer, errWriter := conn.NextWriter(websocket.TextMessage)
+	if errWriter != nil {
+		return errWriter
+	}
+	for offset := 0; offset < len(payload); offset += codexWebsocketWriteChunkSize {
+		end := offset + codexWebsocketWriteChunkSize
+		if end > len(payload) {
+			end = len(payload)
+		}
+		if _, errWrite := writer.Write(payload[offset:end]); errWrite != nil {
+			_ = writer.Close()
+			return errWrite
+		}
+	}
+	return writer.Close()
 }
 
 func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []byte {

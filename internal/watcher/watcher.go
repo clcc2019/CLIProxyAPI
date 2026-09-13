@@ -50,6 +50,8 @@ type Watcher struct {
 	lastConfigHash    string
 	authQueue         chan<- AuthUpdate
 	currentAuths      map[string]*coreauth.Auth
+	authRevisions     map[string]uint64 // Includes deletion tombstones; guarded by clientsMutex.
+	fileRevisions     map[string]uint64 // File observations, including paths with no synthesized auth.
 	runtimeAuths      map[string]*coreauth.Auth
 	dispatchMu        sync.Mutex
 	dispatchCond      *sync.Cond
@@ -72,9 +74,21 @@ const (
 
 // AuthUpdate describes an incremental change to auth configuration.
 type AuthUpdate struct {
-	Action AuthUpdateAction
-	ID     string
-	Auth   *coreauth.Auth
+	Action   AuthUpdateAction
+	ID       string
+	Auth     *coreauth.Auth
+	revision uint64
+}
+
+// Revision returns the watcher observation order for this auth ID.
+// Zero denotes an update from a source without revision tracking.
+func (u AuthUpdate) Revision() uint64 { return u.revision }
+
+// SetRevision preserves watcher ordering when forwarding an update.
+func (u *AuthUpdate) SetRevision(revision uint64) {
+	if u != nil {
+		u.revision = revision
+	}
 }
 
 const (

@@ -63,6 +63,12 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 		publishProfile   bool
 	)
 	codexClientProfilesMu.Lock()
+	// An auth-file edit can remove a previously collected User-Agent. In that
+	// case the cached profile is stale and must be discarded so the next
+	// request can collect the client features again.
+	if authFileAuthWithoutUserAgent(auth) {
+		delete(codexClientProfiles, key)
+	}
 	if profile, exists := codexClientProfiles[key]; exists && len(profile.headers) > 0 {
 		if updated, ok := codexPinnedClientVersionUpdate(profile, target, source); ok {
 			codexClientProfiles[key] = updated
@@ -71,7 +77,7 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 		}
 	} else {
 		delete(codexClientProfiles, key)
-		if profile, exists := codexLegacyClientProfileFromAuth(auth); exists {
+		if profile, exists := codexLegacyClientProfileFromAuth(auth); exists && !authFileAuthWithoutUserAgent(auth) {
 			if updated, ok := codexPinnedClientVersionUpdate(profile, target, source); ok {
 				profile = updated
 				profileToPublish = updated
@@ -96,6 +102,24 @@ func codexPinClientProfileFromFirstRequest(ctx context.Context, auth *cliproxyau
 	// manager-owned record. Publish a detached candidate instead of mutating it
 	// in place, so the manager can merge and persist only this profile update.
 	cliproxyauth.PublishAuthProfileUpdate(ctx, codexAuthWithPinnedClientProfile(auth, profileToPublish))
+}
+
+func authFileAuthWithoutUserAgent(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil || strings.TrimSpace(auth.Attributes["path"]) == "" || strings.TrimSpace(codexAuthUserAgent(auth)) != "" {
+		return false
+	}
+	if pinned, _ := auth.Metadata[codexClientProfilePinnedMetadataKey].(bool); pinned {
+		return true
+	}
+	if _, exists := auth.Metadata["user_agent"]; exists {
+		return true
+	}
+	for key := range auth.Attributes {
+		if strings.EqualFold(key, "header:User-Agent") {
+			return true
+		}
+	}
+	return false
 }
 
 func codexAuthWithPinnedClientProfile(auth *cliproxyauth.Auth, profile codexClientProfile) *cliproxyauth.Auth {

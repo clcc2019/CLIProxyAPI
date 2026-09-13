@@ -49,7 +49,13 @@ func codexLoginRequestUserAgent(c *gin.Context) string {
 	if c == nil || isWebUIRequest(c) {
 		return ""
 	}
-	return strings.TrimSpace(c.GetHeader("User-Agent"))
+	userAgent := strings.TrimSpace(c.GetHeader("User-Agent"))
+	// A browser often starts the management OAuth flow; it is not the client
+	// identity that should be persisted in the resulting Codex auth file.
+	if !strings.Contains(strings.ToLower(userAgent), "codex") {
+		return ""
+	}
+	return userAgent
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {

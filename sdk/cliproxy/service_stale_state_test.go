@@ -6,9 +6,35 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+func TestServiceSkipsStaleWatcherAuthUpdate(t *testing.T) {
+	authID := "watcher-revision-auth"
+	service := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
+	if _, err := service.coreManager.Register(context.Background(), &coreauth.Auth{ID: authID, Provider: "test", Status: coreauth.StatusActive}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	newer := &coreauth.Auth{ID: authID, Provider: "test", Status: coreauth.StatusActive}
+	newerUpdate := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authID, Auth: newer}
+	newerUpdate.SetRevision(2)
+	service.handleAuthUpdate(context.Background(), newerUpdate)
+
+	stale := &coreauth.Auth{ID: authID, Provider: "test", Status: coreauth.StatusDisabled, Disabled: true}
+	staleUpdate := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authID, Auth: stale}
+	staleUpdate.SetRevision(1)
+	service.handleAuthUpdate(context.Background(), staleUpdate)
+	got, ok := service.coreManager.GetByID(authID)
+	if !ok || got == nil {
+		t.Fatal("expected auth to remain registered")
+	}
+	if got.IsDisabled() {
+		t.Fatal("stale revision incorrectly disabled the auth")
+	}
+}
 
 func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeState(t *testing.T) {
 	service := &Service{

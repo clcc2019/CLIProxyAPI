@@ -159,6 +159,51 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	}
 }
 
+func TestSchedulerUpsertAuthResultTargetsModelShard(t *testing.T) {
+	now := time.Now()
+	oldAuth := &Auth{ID: "targeted", Provider: "codex"}
+	provider := &providerScheduler{
+		providerKey: "codex",
+		auths:       make(map[string]*scheduledAuthMeta),
+		modelShards: make(map[string]*modelScheduler),
+	}
+	oldMeta := &scheduledAuthMeta{
+		auth:              oldAuth,
+		providerKey:       "codex",
+		supportedModelSet: map[string]struct{}{"model-a": {}, "model-b": {}},
+	}
+	provider.upsertAuth(oldMeta, nil, true, now)
+	shardA := provider.ensureModel("model-a", now)
+	shardB := provider.ensureModel("model-b", now)
+	if shardA == nil || shardB == nil {
+		t.Fatal("expected model shards to be created")
+	}
+
+	updatedAuth := oldAuth.Clone()
+	updatedAuth.ModelStates = map[string]*ModelState{
+		"model-a": {Unavailable: true, NextRetryAfter: now.Add(time.Hour)},
+	}
+	updatedMeta := &scheduledAuthMeta{
+		auth:              updatedAuth,
+		providerKey:       "codex",
+		supportedModelSet: map[string]struct{}{"model-a": {}, "model-b": {}},
+	}
+	provider.upsertAuth(updatedMeta, []string{"model-a"}, false, now)
+
+	shardA.mu.RLock()
+	entryA := shardA.entries[oldAuth.ID]
+	shardA.mu.RUnlock()
+	shardB.mu.RLock()
+	entryB := shardB.entries[oldAuth.ID]
+	shardB.mu.RUnlock()
+	if entryA == nil || entryA.auth != updatedAuth {
+		t.Fatalf("target shard was not updated: %#v", entryA)
+	}
+	if entryB == nil || entryB.auth != oldAuth {
+		t.Fatalf("untargeted shard was unexpectedly rebuilt: %#v", entryB)
+	}
+}
+
 func TestSchedulerPick_HonorsAllowedAuthIDs(t *testing.T) {
 	t.Parallel()
 	scheduler := newSchedulerForTest(

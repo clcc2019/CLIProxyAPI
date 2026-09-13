@@ -96,6 +96,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Fail:            fail,
 		ErrorMessage:    normalizeUsageQueueErrorMessage(record.ErrorMessage, failed),
 		ResponseHeaders: record.ResponseHeaders,
+		Stream:          record.Stream,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
@@ -146,6 +147,7 @@ type requestDetail struct {
 	Fail            failDetail  `json:"fail"`
 	ErrorMessage    string      `json:"error_message,omitempty"`
 	ResponseHeaders http.Header `json:"response_headers,omitempty"`
+	Stream          bool        `json:"stream"`
 }
 
 type tokenStats struct {

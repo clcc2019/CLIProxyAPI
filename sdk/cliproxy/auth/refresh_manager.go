@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -35,10 +36,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	}
 
 	ctx, cancelCtx := context.WithCancel(parent)
-	workers := refreshMaxConcurrency
-	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
-		workers = cfg.AuthAutoRefreshWorkers
-	}
+	workers := m.refreshWorkers()
 	loop := newAuthAutoRefreshLoop(m, interval, workers)
 
 	m.mu.Lock()
@@ -54,6 +52,82 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	loop.rebuild(initialRebuildAt)
 	go loop.run(ctx)
 	return true
+}
+
+func (m *Manager) refreshWorkers() int {
+	workers := refreshMaxConcurrency
+	if m != nil {
+		if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
+			workers = cfg.AuthAutoRefreshWorkers
+		}
+	}
+	return workers
+}
+
+// ForceRefreshResult reports the outcome of refreshing one credential.
+type ForceRefreshResult struct {
+	ID      string `json:"id"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ForceRefreshAll refreshes all currently registered credentials with a bounded
+// worker pool, preserving result order and honoring context cancellation.
+func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.auths))
+	for id := range m.auths {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	sort.Strings(ids)
+	results := make([]ForceRefreshResult, len(ids))
+	if len(ids) == 0 {
+		return results
+	}
+	workers := m.refreshWorkers()
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(ids) {
+		workers = len(ids)
+	}
+	type refreshJob struct {
+		index int
+		id    string
+	}
+	jobs := make(chan refreshJob, len(ids))
+	for i, id := range ids {
+		jobs <- refreshJob{index: i, id: id}
+	}
+	close(jobs)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if err := ctx.Err(); err != nil {
+					results[job.index] = ForceRefreshResult{ID: job.id, Error: err.Error()}
+					continue
+				}
+				_, err := m.refreshAuthShared(ctx, job.id, true)
+				result := ForceRefreshResult{ID: job.id, Success: err == nil}
+				if err != nil {
+					result.Error = err.Error()
+				}
+				results[job.index] = result
+			}
+		}()
+	}
+	wg.Wait()
+	return results
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.

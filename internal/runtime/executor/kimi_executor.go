@@ -330,7 +330,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		return body, nil
 	}
 
-	messages := gjson.GetBytes(body, "messages")
+	messages := util.GetGJSONBytesNoCopy(body, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return body, nil
 	}
@@ -488,7 +488,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 }
 
 func dropEmptyKimiAssistantMessages(body []byte) ([]byte, error) {
-	messages := gjson.GetBytes(body, "messages")
+	messages := util.GetGJSONBytesNoCopy(body, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return body, nil
 	}

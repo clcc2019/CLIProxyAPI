@@ -15,7 +15,7 @@ const (
 	writeTimeout          = 10 * time.Second
 	maxInboundMessageLen  = 64 << 20 // 64 MiB
 	heartbeatInterval     = 30 * time.Second
-	pendingResponseBuffer = 32
+	pendingResponseBuffer = 64
 )
 
 var errClosed = errors.New("websocket session closed")
@@ -60,6 +60,31 @@ func (pr *pendingRequest) send(msg Message) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// sendUntilClosed preserves stream messages when the consumer is briefly slower
+// than the upstream. The session close channel prevents a stalled request from
+// blocking shutdown forever.
+func (pr *pendingRequest) sendUntilClosed(closed <-chan struct{}, msg Message) bool {
+	if pr == nil {
+		return false
+	}
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if pr.closed {
+		return false
+	}
+	select {
+	case pr.ch <- msg:
+		return true
+	default:
+	}
+	select {
+	case <-closed:
+		return false
+	case pr.ch <- msg:
+		return true
 	}
 }
 
@@ -167,7 +192,7 @@ func (s *session) dispatch(msg Message) {
 				actual.(*pendingRequest).close()
 			}
 		} else {
-			req.send(msg)
+			req.sendUntilClosed(s.closed, msg)
 		}
 		return
 	}

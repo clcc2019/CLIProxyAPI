@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
@@ -13,24 +14,39 @@ type sessionEntry struct {
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
 type SessionCache struct {
-	mu       sync.RWMutex
-	entries  map[string]sessionEntry
-	forceNew map[string]time.Time
-	ttl      time.Duration
-	stopCh   chan struct{}
+	mu         sync.RWMutex
+	entries    map[string]sessionEntry
+	forceNew   map[string]time.Time
+	ttl        time.Duration
+	stopCh     chan struct{}
+	maxEntries int
+	order      *list.List
+	orderIndex map[string]*list.Element
 }
 
 // NewSessionCache creates a cache with the specified TTL.
 // A background goroutine periodically cleans expired entries.
 func NewSessionCache(ttl time.Duration) *SessionCache {
+	return NewSessionCacheWithCapacity(ttl, 65536)
+}
+
+// NewSessionCacheWithCapacity bounds retained session aliases to prevent
+// untrusted clients from growing the process indefinitely.
+func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCache {
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
+	if maxEntries <= 0 {
+		maxEntries = 65536
+	}
 	c := &SessionCache{
-		entries:  make(map[string]sessionEntry),
-		forceNew: make(map[string]time.Time),
-		ttl:      ttl,
-		stopCh:   make(chan struct{}),
+		entries:    make(map[string]sessionEntry),
+		forceNew:   make(map[string]time.Time),
+		ttl:        ttl,
+		stopCh:     make(chan struct{}),
+		maxEntries: maxEntries,
+		order:      list.New(),
+		orderIndex: make(map[string]*list.Element),
 	}
 	go c.cleanupLoop()
 	return c
@@ -70,6 +86,10 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	}
 	if now.After(entry.expiresAt) {
 		delete(c.entries, sessionID)
+		if elem := c.orderIndex[sessionID]; elem != nil {
+			c.order.Remove(elem)
+			delete(c.orderIndex, sessionID)
+		}
 		c.mu.Unlock()
 		return "", false
 	}
@@ -90,6 +110,27 @@ func (c *SessionCache) Set(sessionID, authID string) {
 		authID:    authID,
 		expiresAt: time.Now().Add(c.ttl),
 	}
+	if c.order == nil {
+		c.order = list.New()
+	}
+	if c.orderIndex == nil {
+		c.orderIndex = make(map[string]*list.Element)
+	}
+	if elem := c.orderIndex[sessionID]; elem != nil {
+		c.order.MoveToBack(elem)
+	} else {
+		c.orderIndex[sessionID] = c.order.PushBack(sessionID)
+	}
+	for len(c.entries) > c.maxEntries {
+		oldest := c.order.Front()
+		if oldest == nil {
+			break
+		}
+		oldestID, _ := oldest.Value.(string)
+		delete(c.entries, oldestID)
+		delete(c.orderIndex, oldestID)
+		c.order.Remove(oldest)
+	}
 	c.mu.Unlock()
 }
 
@@ -99,7 +140,13 @@ func (c *SessionCache) Invalidate(sessionID string) {
 		return
 	}
 	c.mu.Lock()
-	delete(c.entries, sessionID)
+	if _, ok := c.entries[sessionID]; ok {
+		delete(c.entries, sessionID)
+		if elem := c.orderIndex[sessionID]; elem != nil {
+			c.order.Remove(elem)
+			delete(c.orderIndex, sessionID)
+		}
+	}
 	c.mu.Unlock()
 }
 
@@ -117,6 +164,10 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	for sid, entry := range c.entries {
 		if entry.authID == authID {
 			delete(c.entries, sid)
+			if elem := c.orderIndex[sid]; elem != nil {
+				c.order.Remove(elem)
+				delete(c.orderIndex, sid)
+			}
 			if entry.expiresAt.After(now) {
 				c.forceNew[sid] = entry.expiresAt
 			}
@@ -176,7 +227,11 @@ func (c *SessionCache) Stop() {
 }
 
 func (c *SessionCache) cleanupLoop() {
-	ticker := time.NewTicker(c.ttl / 2)
+	interval := c.ttl / 2
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -194,6 +249,10 @@ func (c *SessionCache) cleanup() {
 	for sid, entry := range c.entries {
 		if now.After(entry.expiresAt) {
 			delete(c.entries, sid)
+			if elem := c.orderIndex[sid]; elem != nil {
+				c.order.Remove(elem)
+				delete(c.orderIndex, sid)
+			}
 		}
 	}
 	for sid, expiresAt := range c.forceNew {

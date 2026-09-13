@@ -171,6 +171,7 @@ type RequestDetail struct {
 	Endpoint             string     `json:"endpoint,omitempty"`
 	ClientIP             string     `json:"client_ip,omitempty"`
 	LatencyMs            int64      `json:"latency_ms"`
+	TTFTMs               float64    `json:"ttft_ms,omitempty"`
 	Source               string     `json:"source"`
 	AuthIndex            string     `json:"auth_index"`
 	ModelReasoningEffort string     `json:"model_reasoning_effort,omitempty"`
@@ -323,6 +324,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Endpoint:             strings.TrimSpace(internallogging.GetEndpoint(ctx)),
 		ClientIP:             strings.TrimSpace(internallogging.GetClientIP(ctx)),
 		LatencyMs:            normaliseLatency(record.Latency),
+		TTFTMs:               max(record.TTFT.Seconds()*1000, 0),
 		Source:               record.Source,
 		AuthIndex:            record.AuthIndex,
 		ModelReasoningEffort: strings.TrimSpace(record.ModelReasoningEffort),

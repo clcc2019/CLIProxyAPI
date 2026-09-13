@@ -48,6 +48,7 @@ type Record struct {
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
+	Stream              bool
 	RequestedAt         time.Time
 	Latency             time.Duration
 	TTFT                time.Duration
@@ -113,6 +114,24 @@ type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type sessionIDContextKey struct{}
 type parentSessionIDContextKey struct{}
+type streamContextKey struct{}
+
+// WithStream records whether the request uses streaming execution.
+func WithStream(ctx context.Context, stream bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, streamContextKey{}, stream)
+}
+
+// StreamFromContext returns the streaming flag stored in ctx.
+func StreamFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	value, _ := ctx.Value(streamContextKey{}).(bool)
+	return value
+}
 
 func WithSessionHierarchy(ctx context.Context, sessionID, parentSessionID string) context.Context {
 	if ctx == nil {

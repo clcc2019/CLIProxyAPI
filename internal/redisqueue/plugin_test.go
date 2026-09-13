@@ -26,6 +26,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
 			Provider:            "openai",
+			Stream:              true,
 			ExecutorType:        "KimiExecutor",
 			Model:               "gpt-5.4",
 			Alias:               "client-gpt",
@@ -63,6 +64,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
+		requireBoolField(t, payload, "stream", true)
 		requireFailField(t, payload, http.StatusOK, "")
 	})
 }

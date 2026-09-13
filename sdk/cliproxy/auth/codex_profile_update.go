@@ -45,6 +45,10 @@ func mergeCodexExecutionAuthProfile(existing, candidate *Auth) (*Auth, bool) {
 
 	existingProduct, existingVersion, existingOK := codexProfileUserAgentProductVersion(codexProfileUserAgent(existing))
 	candidateProduct, candidateVersion, candidateOK := codexProfileUserAgentProductVersion(codexProfileUserAgent(candidate))
+	if strings.TrimSpace(codexProfileUserAgent(existing)) == "" {
+		copyCodexProfile(merged, candidate)
+		return merged, true
+	}
 	if !existingOK || !candidateOK || !strings.EqualFold(existingProduct, candidateProduct) {
 		return merged, false
 	}

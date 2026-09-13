@@ -33,7 +33,12 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 type provider struct {
 	name string
-	keys map[string]internalconfig.ClientAPIKeyEntry
+	keys map[string]credential
+}
+
+type credential struct {
+	disabled bool
+	metadata map[string]string
 }
 
 func newProvider(name string, keys internalconfig.ClientAPIKeys) *provider {
@@ -41,10 +46,24 @@ func newProvider(name string, keys internalconfig.ClientAPIKeys) *provider {
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
 	}
-	keySet := make(map[string]internalconfig.ClientAPIKeyEntry, len(keys))
+	keySet := make(map[string]credential, len(keys))
 	for _, key := range keys {
 		if trimmed := strings.TrimSpace(key.APIKey); trimmed != "" {
-			keySet[trimmed] = key
+			// Configuration metadata is immutable for this provider's lifetime.
+			meta := make(map[string]string)
+			if len(key.AllowedModels) > 0 {
+				meta["allowed_models"] = strings.Join(key.AllowedModels, ",")
+			}
+			if len(key.ExcludedModels) > 0 {
+				meta["excluded_models"] = strings.Join(key.ExcludedModels, ",")
+			}
+			internalconfig.AddClientAPIKeyQuotaMetadata(meta, key.Quota)
+			if len(key.AuthFiles) > 0 {
+				if encoded, err := json.Marshal(key.AuthFiles); err == nil {
+					meta[coreexecutor.ClientAuthFilesMetadataKey] = string(encoded)
+				}
+			}
+			keySet[trimmed] = credential{disabled: key.Disabled, metadata: meta}
 		}
 	}
 	return &provider{name: providerName, keys: keySet}
@@ -120,24 +139,15 @@ func (p *provider) authenticateValue(value, source string) (*sdkaccess.Result, *
 	if !ok {
 		return nil, nil, false
 	}
-	if entry.Disabled {
+	if entry.disabled {
 		return nil, sdkaccess.NewDisabledCredentialError(), true
 	}
-	meta := map[string]string{
-		"source": source,
+	// Each request owns its map so downstream changes cannot affect other requests.
+	meta := make(map[string]string, len(entry.metadata)+1)
+	for key, value := range entry.metadata {
+		meta[key] = value
 	}
-	if len(entry.AllowedModels) > 0 {
-		meta["allowed_models"] = strings.Join(entry.AllowedModels, ",")
-	}
-	if len(entry.ExcludedModels) > 0 {
-		meta["excluded_models"] = strings.Join(entry.ExcludedModels, ",")
-	}
-	internalconfig.AddClientAPIKeyQuotaMetadata(meta, entry.Quota)
-	if len(entry.AuthFiles) > 0 {
-		if encoded, err := json.Marshal(entry.AuthFiles); err == nil {
-			meta[coreexecutor.ClientAuthFilesMetadataKey] = string(encoded)
-		}
-	}
+	meta["source"] = source
 	return &sdkaccess.Result{
 		Provider:  p.Identifier(),
 		Principal: value,

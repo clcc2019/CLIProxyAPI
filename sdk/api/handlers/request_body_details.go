@@ -24,12 +24,24 @@ type RequestBodyDetails struct {
 // ParseRequestBodyDetails extracts commonly used request fields in one pass.
 func ParseRequestBodyDetails(rawJSON []byte) RequestBodyDetails {
 	jsonText := immutableRequestBodyString(rawJSON)
-	model := gjson.Get(jsonText, "model")
-	stream := gjson.Get(jsonText, "stream")
 	details := RequestBodyDetails{}
-	details.Model = strings.Clone(model.String())
-	details.HasStream = stream.Exists()
-	details.Stream = stream.Type == gjson.True
+	modelFound, streamFound := false, false
+	forEachTopLevelRequestField(jsonText, func(key string, value gjson.Result) bool {
+		switch key {
+		case "model":
+			if !modelFound {
+				details.Model = strings.Clone(value.String())
+				modelFound = true
+			}
+		case "stream":
+			if !streamFound {
+				details.HasStream = true
+				details.Stream = value.Type == gjson.True
+				streamFound = true
+			}
+		}
+		return !modelFound || !streamFound
+	})
 	return details
 }
 
@@ -44,16 +56,56 @@ type OpenAIChatRequestBodyDetails struct {
 // ParseOpenAIChatRequestBodyDetails extracts OpenAI chat request routing fields in one pass.
 func ParseOpenAIChatRequestBodyDetails(rawJSON []byte) OpenAIChatRequestBodyDetails {
 	jsonText := immutableRequestBodyString(rawJSON)
-	model := gjson.Get(jsonText, "model")
-	stream := gjson.Get(jsonText, "stream")
 	details := OpenAIChatRequestBodyDetails{}
-	details.Model = strings.Clone(model.String())
-	details.HasStream = stream.Exists()
-	details.Stream = stream.Type == gjson.True
-	details.HasMessages = gjson.Get(jsonText, "messages").Exists()
-	details.HasInput = gjson.Get(jsonText, "input").Exists()
-	details.HasInstructions = gjson.Get(jsonText, "instructions").Exists()
+	modelFound, streamFound := false, false
+	messagesFound, inputFound, instructionsFound := false, false, false
+	forEachTopLevelRequestField(jsonText, func(key string, value gjson.Result) bool {
+		switch key {
+		case "model":
+			if !modelFound {
+				details.Model = strings.Clone(value.String())
+				modelFound = true
+			}
+		case "stream":
+			if !streamFound {
+				details.HasStream = true
+				details.Stream = value.Type == gjson.True
+				streamFound = true
+			}
+		case "messages":
+			if !messagesFound {
+				details.HasMessages = true
+				messagesFound = true
+			}
+		case "input":
+			if !inputFound {
+				details.HasInput = true
+				inputFound = true
+			}
+		case "instructions":
+			if !instructionsFound {
+				details.HasInstructions = true
+				instructionsFound = true
+			}
+		}
+		return !modelFound || !streamFound || !messagesFound || !inputFound || !instructionsFound
+	})
 	return details
+}
+
+// forEachTopLevelRequestField keeps routing extraction zero-copy while avoiding
+// a separate JSON scan for every field. The callback can stop once all fields it
+// needs have been observed.
+func forEachTopLevelRequestField(jsonText string, callback func(string, gjson.Result) bool) {
+	if jsonText == "" {
+		return
+	}
+	gjson.Parse(jsonText).ForEach(func(key, value gjson.Result) bool {
+		if key.Type != gjson.String {
+			return true
+		}
+		return callback(key.String(), value)
+	})
 }
 
 // UsesResponsesFormat reports whether the payload looks like an OpenAI Responses request.

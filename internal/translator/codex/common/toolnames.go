@@ -11,26 +11,38 @@ import (
 // ShortNameLimit is the maximum length the upstream Codex backend accepts for
 // tool names. It is also exported so translator-specific helpers can derive
 // additional sizing rules from the same constant.
-const ShortNameLimit = 128
+const (
+	ShortNameLimit = 128
+	// LegacyToolNameLimit is the limit required by legacy Codex tool mappings.
+	LegacyToolNameLimit = 64
+)
 
 // ShortenNameIfNeeded applies the tool-name shortening rule for a single name.
 // It preserves the "mcp__" prefix convention when present; otherwise it simply
 // truncates to ShortNameLimit.
 func ShortenNameIfNeeded(name string) string {
-	if len(name) <= ShortNameLimit {
+	return ShortenNameIfNeededLimit(name, ShortNameLimit)
+}
+
+// ShortenNameIfNeededLimit applies the same shortening rule with a caller-supplied byte limit.
+func ShortenNameIfNeededLimit(name string, limit int) string {
+	if limit <= 0 {
+		limit = ShortNameLimit
+	}
+	if len(name) <= limit {
 		return name
 	}
 	if strings.HasPrefix(name, "mcp__") {
 		idx := strings.LastIndex(name, "__")
 		if idx > 0 {
 			cand := "mcp__" + name[idx+2:]
-			if len(cand) > ShortNameLimit {
-				return cand[:ShortNameLimit]
+			if len(cand) > limit {
+				return cand[:limit]
 			}
 			return cand
 		}
 	}
-	return name[:ShortNameLimit]
+	return name[:limit]
 }
 
 // BuildShortNameMap ensures uniqueness of shortened names within a request.
@@ -38,24 +50,25 @@ func ShortenNameIfNeeded(name string) string {
 // short name. Iteration order of the input slice determines collision
 // resolution order.
 func BuildShortNameMap(names []string) map[string]string {
+	const mapLimit = LegacyToolNameLimit
 	used := make(map[string]struct{}, len(names))
 	m := make(map[string]string, len(names))
 
 	baseCandidate := func(n string) string {
-		if len(n) <= ShortNameLimit {
+		if len(n) <= mapLimit {
 			return n
 		}
 		if strings.HasPrefix(n, "mcp__") {
 			idx := strings.LastIndex(n, "__")
 			if idx > 0 {
 				cand := "mcp__" + n[idx+2:]
-				if len(cand) > ShortNameLimit {
-					cand = cand[:ShortNameLimit]
+				if len(cand) > mapLimit {
+					cand = cand[:mapLimit]
 				}
 				return cand
 			}
 		}
-		return n[:ShortNameLimit]
+		return n[:mapLimit]
 	}
 
 	makeUnique := func(cand string) string {
@@ -65,7 +78,7 @@ func BuildShortNameMap(names []string) map[string]string {
 		base := cand
 		for i := 1; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
-			allowed := ShortNameLimit - len(suffix)
+			allowed := mapLimit - len(suffix)
 			if allowed < 0 {
 				allowed = 0
 			}

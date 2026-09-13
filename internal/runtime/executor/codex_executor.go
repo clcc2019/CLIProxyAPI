@@ -682,6 +682,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				for _, event := range events {
 					eventData := event.payload
 					eventType := event.eventType
+					reporter.ObserveResponsesText(eventType, eventData)
 					line := codexSSEDataLine(eventData)
 					stopAfterForward := false
 					if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {

@@ -659,7 +659,7 @@ func codexDataURL(mediaType, data string) string {
 // Delegates to the shared codex translator helper so all four translators
 // stay in sync.
 func shortenNameIfNeeded(name string) string {
-	return codexcommon.ShortenNameIfNeeded(name)
+	return codexcommon.ShortenNameIfNeededLimit(name, 64)
 }
 
 // buildShortNameMap ensures uniqueness of shortened names within a request.

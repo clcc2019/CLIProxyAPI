@@ -5,6 +5,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"sync"
 	"time"
@@ -56,6 +57,7 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 				w.currentAuths = make(map[string]*coreauth.Auth)
 			}
 			w.currentAuths[clone.ID] = clone.Clone()
+			update.Auth = clone.Clone()
 		}
 	case AuthUpdateActionDelete:
 		id := update.ID
@@ -69,11 +71,13 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 			}
 		}
 	}
+	updates := []AuthUpdate{update}
+	w.stampAuthUpdatesLocked(updates)
 	w.clientsMutex.Unlock()
 	if w.getAuthQueue() == nil {
 		return false
 	}
-	w.dispatchAuthUpdates([]AuthUpdate{update})
+	w.dispatchAuthUpdates(updates)
 	return true
 }
 
@@ -81,27 +85,57 @@ func (w *Watcher) refreshAuthState(force bool) {
 	w.clientsMutex.RLock()
 	cfg := w.config
 	authDir := w.authDir
+	previous := w.snapshotRevisionsLocked()
 	w.clientsMutex.RUnlock()
 	auths := snapshotCoreAuthsFunc(cfg, authDir)
-	w.refreshAuthStateFromSnapshot(force, auths)
+	w.refreshAuthStateFromSnapshot(force, auths, previous)
 }
 
 // refreshAuthStateFromFileAuths combines config-backed auths with a file
 // snapshot already produced by scanFileClients. This keeps a full reload to a
 // single auth-directory pass instead of asking FileSynthesizer to read every
 // file again.
-func (w *Watcher) refreshAuthStateFromFileAuths(force bool, fileAuths []*coreauth.Auth) {
+func (w *Watcher) refreshAuthStateFromFileAuths(force bool, fileAuths []*coreauth.Auth, previous authSnapshotRevisions) {
 	w.clientsMutex.RLock()
 	cfg := w.config
 	authDir := w.authDir
 	w.clientsMutex.RUnlock()
 	auths := snapshotConfigAuths(cfg, authDir)
 	auths = append(auths, fileAuths...)
-	w.refreshAuthStateFromSnapshot(force, auths)
+	w.refreshAuthStateFromSnapshot(force, auths, previous)
 }
 
-func (w *Watcher) refreshAuthStateFromSnapshot(force bool, auths []*coreauth.Auth) {
+type authSnapshotRevisions struct {
+	auths map[string]uint64
+	files map[string]uint64
+}
+
+func (w *Watcher) snapshotRevisionsLocked() authSnapshotRevisions {
+	return authSnapshotRevisions{auths: maps.Clone(w.authRevisions), files: maps.Clone(w.fileRevisions)}
+}
+
+func (w *Watcher) refreshAuthStateFromSnapshot(force bool, auths []*coreauth.Auth, previous authSnapshotRevisions) {
 	w.clientsMutex.Lock()
+	// Reading a directory is intentionally outside clientsMutex. Preserve newer
+	// observations, including deletes and files that had no auth when scanning began.
+	changedDuringScan := func(auth *coreauth.Auth) bool {
+		path := auth.Attributes["path"]
+		if path == "" {
+			path = auth.Attributes["source"]
+		}
+		path = w.normalizeAuthPath(path)
+		return previous.auths[auth.ID] != w.authRevisions[auth.ID] || previous.files[path] != w.fileRevisions[path]
+	}
+	for i, auth := range auths {
+		if auth != nil && changedDuringScan(auth) {
+			auths[i] = nil
+		}
+	}
+	for _, auth := range w.currentAuths {
+		if auth != nil && changedDuringScan(auth) {
+			auths = append(auths, auth.Clone())
+		}
+	}
 	if len(w.runtimeAuths) > 0 {
 		for _, a := range w.runtimeAuths {
 			if a != nil {
@@ -122,21 +156,6 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 		}
 		newState[auth.ID] = auth.Clone()
 	}
-	if w.currentAuths == nil {
-		w.currentAuths = newState
-		if w.authQueue == nil {
-			return nil
-		}
-		updates := make([]AuthUpdate, 0, len(newState))
-		for id, auth := range newState {
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: auth.Clone()})
-		}
-		return updates
-	}
-	if w.authQueue == nil {
-		w.currentAuths = newState
-		return nil
-	}
 	updates := make([]AuthUpdate, 0, len(newState)+len(w.currentAuths))
 	for id, auth := range newState {
 		if existing, ok := w.currentAuths[id]; !ok {
@@ -151,15 +170,42 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 		}
 	}
 	w.currentAuths = newState
+	w.stampAuthUpdatesLocked(updates)
+	if w.authQueue == nil {
+		return nil
+	}
 	return updates
+}
+
+// stampAuthUpdatesLocked assigns revisions while the corresponding state is
+// published, before an update can be delayed on its way to the dispatch queue.
+func (w *Watcher) stampAuthUpdatesLocked(updates []AuthUpdate) {
+	if w.authRevisions == nil {
+		w.authRevisions = make(map[string]uint64)
+	}
+	for i := range updates {
+		update := &updates[i]
+		if update.Auth != nil && update.Action != AuthUpdateActionDelete {
+			update.ID = update.Auth.ID
+		} else if update.ID == "" && update.Auth != nil {
+			update.ID = update.Auth.ID
+		}
+		if update.ID == "" {
+			continue
+		}
+		w.authRevisions[update.ID]++
+		update.revision = w.authRevisions[update.ID]
+	}
 }
 
 func (w *Watcher) dispatchAuthUpdates(updates []AuthUpdate) {
 	if len(updates) == 0 {
 		return
 	}
-	queue := w.getAuthQueue()
-	if queue == nil {
+	// Keep validation and enqueue atomic with respect to newer observations.
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.authQueue == nil {
 		return
 	}
 	baseTS := time.Now().UnixNano()
@@ -168,6 +214,9 @@ func (w *Watcher) dispatchAuthUpdates(updates []AuthUpdate) {
 		w.pendingUpdates = make(map[string]AuthUpdate)
 	}
 	for idx, update := range updates {
+		if update.revision != 0 && update.revision < w.authRevisions[update.ID] {
+			continue
+		}
 		key := w.authUpdateKey(update, baseTS+int64(idx))
 		if _, exists := w.pendingUpdates[key]; !exists {
 			w.pendingOrder = append(w.pendingOrder, key)
