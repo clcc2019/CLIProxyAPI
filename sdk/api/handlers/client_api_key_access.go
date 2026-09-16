@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,40 @@ import (
 type clientModelAccess struct {
 	allowed  []string
 	excluded []string
+}
+
+func clientModelAliasDisabledFromGin(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	raw, exists := c.Get("accessMetadata")
+	if !exists || raw == nil {
+		return false
+	}
+	var value any
+	switch typed := raw.(type) {
+	case map[string]string:
+		value = typed[coreexecutor.DisableModelAliasMetadataKey]
+	case map[string]any:
+		value = typed[coreexecutor.DisableModelAliasMetadataKey]
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		return err == nil && parsed
+	default:
+		return false
+	}
+}
+
+func clientModelAliasDisabledFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	return ok && clientModelAliasDisabledFromGin(ginCtx)
 }
 
 func clientModelAccessFromContext(ctx context.Context) clientModelAccess {

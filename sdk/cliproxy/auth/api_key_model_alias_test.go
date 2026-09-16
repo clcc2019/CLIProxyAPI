@@ -238,3 +238,22 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutionModelCandidatesCanDisableAliases(t *testing.T) {
+	cfg := &internalconfig.Config{ClaudeKey: []internalconfig.ClaudeKey{{
+		APIKey: "k",
+		Models: []internalconfig.ClaudeModel{{Name: "claude-sonnet-4", Alias: "cs4"}},
+	}}}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	auth := &Auth{ID: "no-alias", Provider: "claude", Attributes: map[string]string{"api_key": "k"}}
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	if got := mgr.executionModelCandidates(auth, "cs4", true); len(got) != 1 || got[0] != "cs4" {
+		t.Fatalf("disabled alias candidates = %#v, want [cs4]", got)
+	}
+	if got := mgr.executionModelCandidates(auth, "cs4"); len(got) != 1 || got[0] != "claude-sonnet-4" {
+		t.Fatalf("normal alias candidates = %#v, want [claude-sonnet-4]", got)
+	}
+}

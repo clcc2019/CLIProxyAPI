@@ -57,6 +57,8 @@ auth-dir: "~/.cli-proxy-api"
 #   - "sk-client-unlimited"
 #   - api-key: "sk-client-limited"
 #     disabled: false
+#     # Skip all configured model alias rewrites for requests using this key.
+#     disable-model-alias: false
 #     allowed-models: ["gpt-*", "claude-*"]
 #     excluded-models: ["gpt-image-*"]
 #     # Restrict this client key to the listed auth files. The files are

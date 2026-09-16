@@ -16,8 +16,13 @@ type openAICompatRuntimeSnapshot struct {
 }
 
 type openAICompatRuntimeEntry struct {
-	order      int
-	poolMode   bool
+	order       int
+	poolMode    bool
+	modelRules  openAICompatRuntimeModelRules
+	apiKeyRules map[string]openAICompatRuntimeModelRules
+}
+
+type openAICompatRuntimeModelRules struct {
 	aliasPools map[string][]string
 	nameModels map[string]string
 }
@@ -37,39 +42,30 @@ func buildOpenAICompatRuntimeSnapshot(cfg *internalconfig.Config) *openAICompatR
 		}
 		name := strings.ToLower(strings.TrimSpace(compat.Name))
 
-		aliasPools := make(map[string][]string)
-		nameModels := make(map[string]string)
-		for modelIndex := range compat.Models {
-			model := compat.Models[modelIndex]
-			modelName := strings.TrimSpace(model.Name)
-			modelAlias := strings.TrimSpace(model.Alias)
-			if modelName == "" && modelAlias == "" {
+		apiKeyRules := make(map[string]openAICompatRuntimeModelRules)
+		seenAPIKeys := make(map[string]struct{}, len(compat.APIKeyEntries))
+		for keyIndex := range compat.APIKeyEntries {
+			apiKeyEntry := &compat.APIKeyEntries[keyIndex]
+			apiKey := strings.ToLower(strings.TrimSpace(apiKeyEntry.APIKey))
+			if apiKey == "" {
 				continue
 			}
-
-			if modelName != "" {
-				nameKey := strings.ToLower(modelName)
-				if _, exists := nameModels[nameKey]; !exists {
-					nameModels[nameKey] = modelName
-				}
+			// ResolveOpenAICompatibilityAPIKey uses the first matching entry, so
+			// duplicate credentials must not let a later entry replace it here.
+			if _, seen := seenAPIKeys[apiKey]; seen {
+				continue
 			}
-			if modelAlias != "" {
-				resolved := modelName
-				if resolved == "" {
-					resolved = modelAlias
-				}
-				aliasKey := strings.ToLower(modelAlias)
-				if !containsFolded(aliasPools[aliasKey], resolved) {
-					aliasPools[aliasKey] = append(aliasPools[aliasKey], resolved)
-				}
+			seenAPIKeys[apiKey] = struct{}{}
+			if len(apiKeyEntry.Models) > 0 {
+				apiKeyRules[apiKey] = compileOpenAICompatRuntimeModelRules(apiKeyEntry.Models)
 			}
 		}
 
 		entry := &openAICompatRuntimeEntry{
-			order:      index,
-			poolMode:   compat.PoolMode,
-			aliasPools: nilIfEmptyStringSliceMap(aliasPools),
-			nameModels: nilIfEmptyStringMap(nameModels),
+			order:       index,
+			poolMode:    compat.PoolMode,
+			modelRules:  compileOpenAICompatRuntimeModelRules(compat.Models),
+			apiKeyRules: nilIfEmptyOpenAICompatRuntimeRulesMap(apiKeyRules),
 		}
 		if name != "" {
 			if _, exists := snapshot.entries[name]; !exists {
@@ -119,6 +115,47 @@ func nilIfEmptyStringMap(values map[string]string) map[string]string {
 	return values
 }
 
+func nilIfEmptyOpenAICompatRuntimeRulesMap(values map[string]openAICompatRuntimeModelRules) map[string]openAICompatRuntimeModelRules {
+	if len(values) == 0 {
+		return nil
+	}
+	return values
+}
+
+func compileOpenAICompatRuntimeModelRules(models []internalconfig.OpenAICompatibilityModel) openAICompatRuntimeModelRules {
+	aliasPools := make(map[string][]string)
+	nameModels := make(map[string]string)
+	for modelIndex := range models {
+		model := models[modelIndex]
+		modelName := strings.TrimSpace(model.Name)
+		modelAlias := strings.TrimSpace(model.Alias)
+		if modelName == "" && modelAlias == "" {
+			continue
+		}
+
+		if modelName != "" {
+			nameKey := strings.ToLower(modelName)
+			if _, exists := nameModels[nameKey]; !exists {
+				nameModels[nameKey] = modelName
+			}
+		}
+		if modelAlias != "" {
+			resolved := modelName
+			if resolved == "" {
+				resolved = modelAlias
+			}
+			aliasKey := strings.ToLower(modelAlias)
+			if !containsFolded(aliasPools[aliasKey], resolved) {
+				aliasPools[aliasKey] = append(aliasPools[aliasKey], resolved)
+			}
+		}
+	}
+	return openAICompatRuntimeModelRules{
+		aliasPools: nilIfEmptyStringSliceMap(aliasPools),
+		nameModels: nilIfEmptyStringMap(nameModels),
+	}
+}
+
 func (s *openAICompatRuntimeSnapshot) resolve(providerKey, compatName, authProvider, baseURL string) *openAICompatRuntimeEntry {
 	if s == nil {
 		return nil
@@ -152,13 +189,30 @@ func (e *openAICompatRuntimeEntry) resolveModelPool(requestedModel string) []str
 	if e == nil {
 		return nil
 	}
+	return e.modelRules.resolveModelPool(requestedModel)
+}
+
+func (e *openAICompatRuntimeEntry) resolveModelPoolForAPIKey(apiKey, requestedModel string) []string {
+	if e == nil {
+		return nil
+	}
+	apiKey = strings.ToLower(strings.TrimSpace(apiKey))
+	if apiKey != "" {
+		if rules, exists := e.apiKeyRules[apiKey]; exists {
+			return rules.resolveModelPool(requestedModel)
+		}
+	}
+	return e.modelRules.resolveModelPool(requestedModel)
+}
+
+func (r openAICompatRuntimeModelRules) resolveModelPool(requestedModel string) []string {
 	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
 	for _, candidate := range candidates {
 		key := strings.ToLower(strings.TrimSpace(candidate))
 		if key == "" {
 			continue
 		}
-		if targets := e.aliasPools[key]; len(targets) > 0 {
+		if targets := r.aliasPools[key]; len(targets) > 0 {
 			return preserveRuntimeModelPoolSuffix(targets, requestResult)
 		}
 	}
@@ -168,7 +222,7 @@ func (e *openAICompatRuntimeEntry) resolveModelPool(requestedModel string) []str
 		if key == "" {
 			continue
 		}
-		if name := strings.TrimSpace(e.nameModels[key]); name != "" {
+		if name := strings.TrimSpace(r.nameModels[key]); name != "" {
 			return []string{preserveResolvedModelSuffix(name, requestResult)}
 		}
 	}

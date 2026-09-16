@@ -70,7 +70,14 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			}
 			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider, baseURL); entry != nil {
-					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+					apiKey := ""
+					if auth.Attributes != nil {
+						apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+					}
+					compileAPIKeyModelAliasForModels(
+						byAlias,
+						internalconfig.OpenAICompatibilityModelsForAPIKey(entry, apiKey),
+					)
 				}
 			}
 		}

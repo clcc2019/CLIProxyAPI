@@ -1311,7 +1311,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				if providerKey == "" {
 					providerKey = "openai-compatibility"
 				}
-				models := buildOpenAICompatibilityConfigModels(compat)
+				apiKey := ""
+				if a.Attributes != nil {
+					apiKey = strings.TrimSpace(a.Attributes["api_key"])
+				}
+				models := buildOpenAICompatibilityConfigModelsForAPIKey(compat, apiKey)
 				if len(models) == 0 {
 					GlobalModelRegistry().UnregisterClient(a.ID)
 					return
@@ -1565,17 +1569,31 @@ type modelEntry interface {
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
-	if compat == nil || len(compat.Models) == 0 {
+	if compat == nil {
+		return nil
+	}
+	return buildOpenAICompatibilityModels(strings.TrimSpace(compat.Name), compat.Models)
+}
+
+func buildOpenAICompatibilityConfigModelsForAPIKey(compat *config.OpenAICompatibility, apiKey string) []*ModelInfo {
+	if compat == nil {
+		return nil
+	}
+	models := internalconfig.OpenAICompatibilityModelsForAPIKey(compat, apiKey)
+	return buildOpenAICompatibilityModels(strings.TrimSpace(compat.Name), models)
+}
+
+func buildOpenAICompatibilityModels(ownedBy string, configuredModels []config.OpenAICompatibilityModel) []*ModelInfo {
+	if len(configuredModels) == 0 {
 		return nil
 	}
 	now := time.Now().Unix()
-	ownedBy := strings.TrimSpace(compat.Name)
 	if ownedBy == "" {
 		ownedBy = "openai-compatibility"
 	}
-	models := make([]*ModelInfo, 0, len(compat.Models))
-	for i := range compat.Models {
-		model := compat.Models[i]
+	models := make([]*ModelInfo, 0, len(configuredModels))
+	for i := range configuredModels {
+		model := configuredModels[i]
 		modelID := strings.TrimSpace(model.Alias)
 		if modelID == "" {
 			modelID = strings.TrimSpace(model.Name)

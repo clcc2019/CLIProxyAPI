@@ -482,6 +482,67 @@ func TestOpenAICompatRuntimeSnapshotUsesBaseURLForDuplicateNames(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatRuntimeSnapshotUsesAPIKeyModelRules(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:   "provider",
+			Models: []internalconfig.OpenAICompatibilityModel{{Name: "provider-model", Alias: "shared"}},
+			APIKeyEntries: []internalconfig.OpenAICompatibilityAPIKey{
+				{APIKey: "key-a", Models: []internalconfig.OpenAICompatibilityModel{{Name: "key-a-model", Alias: "shared"}}},
+				{APIKey: "key-b"},
+			},
+		}},
+	})
+
+	newAuth := func(apiKey string) *Auth {
+		return &Auth{
+			Provider: "openai-compatibility",
+			Attributes: map[string]string{
+				"api_key":      apiKey,
+				"compat_name":  "provider",
+				"provider_key": "provider",
+			},
+		}
+	}
+
+	if got := m.resolveOpenAICompatUpstreamModelPool(newAuth("KEY-A"), "shared"); !reflect.DeepEqual(got, []string{"key-a-model"}) {
+		t.Fatalf("key-a model pool = %v, want key-a-model", got)
+	}
+	if got := m.resolveOpenAICompatUpstreamModelPool(newAuth("key-b"), "shared"); !reflect.DeepEqual(got, []string{"provider-model"}) {
+		t.Fatalf("key-b model pool = %v, want provider-model inheritance", got)
+	}
+	if got := m.resolveOpenAICompatUpstreamModelPool(newAuth("unknown"), "shared"); !reflect.DeepEqual(got, []string{"provider-model"}) {
+		t.Fatalf("unknown-key model pool = %v, want provider-model inheritance", got)
+	}
+}
+
+func TestOpenAICompatRuntimeSnapshotEmptyAPIKeyModelRulesInheritProvider(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:   "provider",
+			Models: []internalconfig.OpenAICompatibilityModel{{Name: "provider-model", Alias: "shared"}},
+			APIKeyEntries: []internalconfig.OpenAICompatibilityAPIKey{{
+				APIKey: "key-a",
+				Models: []internalconfig.OpenAICompatibilityModel{},
+			}},
+		}},
+	})
+	auth := &Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key-a",
+			"compat_name":  "provider",
+			"provider_key": "provider",
+		},
+	}
+
+	if got := m.resolveOpenAICompatUpstreamModelPool(auth, "shared"); !reflect.DeepEqual(got, []string{"provider-model"}) {
+		t.Fatalf("empty per-key model pool = %v, want provider-model inheritance", got)
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}

@@ -177,7 +177,12 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 	if entry == nil {
 		return ""
 	}
-	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+	apiKey := ""
+	if auth != nil && auth.Attributes != nil {
+		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+	}
+	models := internalconfig.OpenAICompatibilityModelsForAPIKey(entry, apiKey)
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(models))
 }
 
 type apiKeyModelAliasTable map[string]map[string]string

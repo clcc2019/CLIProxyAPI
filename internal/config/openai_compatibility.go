@@ -54,6 +54,44 @@ func ResolveOpenAICompatibility(
 	return nil
 }
 
+// ResolveOpenAICompatibilityAPIKey returns the configured API-key entry that
+// belongs to a resolved OpenAI-compatible provider. API keys are compared
+// case-insensitively after trimming so the same identity rules are used by
+// configuration loading and request-time routing.
+func ResolveOpenAICompatibilityAPIKey(
+	provider *OpenAICompatibility,
+	apiKey string,
+) *OpenAICompatibilityAPIKey {
+	if provider == nil {
+		return nil
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil
+	}
+	for i := range provider.APIKeyEntries {
+		if strings.EqualFold(strings.TrimSpace(provider.APIKeyEntries[i].APIKey), apiKey) {
+			return &provider.APIKeyEntries[i]
+		}
+	}
+	return nil
+}
+
+// OpenAICompatibilityModelsForAPIKey returns the model rules visible to one
+// API key. A nil or empty per-key Models field inherits provider-level rules.
+func OpenAICompatibilityModelsForAPIKey(
+	provider *OpenAICompatibility,
+	apiKey string,
+) []OpenAICompatibilityModel {
+	if provider == nil {
+		return nil
+	}
+	if entry := ResolveOpenAICompatibilityAPIKey(provider, apiKey); entry != nil && len(entry.Models) > 0 {
+		return entry.Models
+	}
+	return provider.Models
+}
+
 func normalizeOpenAICompatibilityBaseURL(value string) string {
 	return strings.TrimRight(strings.TrimSpace(value), "/")
 }

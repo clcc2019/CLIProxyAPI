@@ -8,7 +8,27 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+func disableModelAliasFromOptions(opts cliproxyexecutor.Options) bool {
+	if opts.Metadata == nil {
+		return false
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.DisableModelAliasMetadataKey]
+	if !ok {
+		return false
+	}
+	switch typed := raw.(type) {
+	case bool:
+		return typed
+	case string:
+		value := strings.TrimSpace(typed)
+		return strings.EqualFold(value, "true") || value == "1"
+	default:
+		return false
+	}
+}
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
 	if m == nil {
@@ -157,7 +177,11 @@ func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedMode
 	if entry == nil {
 		return nil
 	}
-	return entry.resolveModelPool(requestedModel)
+	apiKey := ""
+	if auth.Attributes != nil {
+		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+	}
+	return entry.resolveModelPoolForAPIKey(apiKey, requestedModel)
 }
 
 func (m *Manager) apiKeyPoolModeRetries(auth *Auth) int {
@@ -220,34 +244,46 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
 
-func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
+func (m *Manager) executionModelCandidates(auth *Auth, routeModel string, disableModelAlias ...bool) []string {
+	disableAlias := len(disableModelAlias) > 0 && disableModelAlias[0]
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
 			return []string{homeModel}
 		}
 	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
-	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
-	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
-		if len(pool) == 1 {
-			return pool
-		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
-		return rotateStrings(pool, offset)
+	if !disableAlias {
+		requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	}
-	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
+	if !disableAlias {
+		if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+			if len(pool) == 1 {
+				return pool
+			}
+			offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+			return rotateStrings(pool, offset)
+		}
+	}
+	resolved := requestedModel
+	if !disableAlias {
+		resolved = m.applyAPIKeyModelAlias(auth, requestedModel)
+	}
 	if strings.TrimSpace(resolved) == "" {
 		resolved = requestedModel
 	}
 	return []string{resolved}
 }
 
-func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
+func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string, disableModelAlias ...bool) string {
+	disableAlias := len(disableModelAlias) > 0 && disableModelAlias[0]
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {
 		requestedModel = strings.TrimSpace(routeModel)
 	}
-	resolvedModel := m.applyOAuthModelAlias(auth, requestedModel)
+	resolvedModel := requestedModel
+	if !disableAlias {
+		resolvedModel = m.applyOAuthModelAlias(auth, requestedModel)
+	}
 	if strings.TrimSpace(resolvedModel) == "" {
 		resolvedModel = requestedModel
 	}
@@ -258,7 +294,7 @@ func (m *Manager) selectionModelKeyForAuth(auth *Auth, routeModel string) string
 	return canonicalModelKey(m.selectionModelForAuth(auth, routeModel))
 }
 
-func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel string, pooled bool) string {
+func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel string, pooled bool, disableModelAlias ...bool) string {
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
 			if resolved := strings.TrimSpace(upstreamModel); resolved != "" {
@@ -268,7 +304,7 @@ func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel s
 		}
 	}
 	stateModel := executionResultModel(routeModel, upstreamModel, pooled)
-	selectionModel := m.selectionModelForAuth(auth, routeModel)
+	selectionModel := m.selectionModelForAuth(auth, routeModel, disableModelAlias...)
 	if canonicalModelKey(selectionModel) == canonicalModelKey(upstreamModel) && strings.TrimSpace(selectionModel) != "" {
 		return strings.TrimSpace(upstreamModel)
 	}
@@ -287,14 +323,14 @@ func executionResultModel(routeModel, upstreamModel string, pooled bool) string 
 	return strings.TrimSpace(upstreamModel)
 }
 
-func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidates []string, pooled bool) []string {
+func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidates []string, pooled bool, disableModelAlias ...bool) []string {
 	if len(candidates) == 0 {
 		return nil
 	}
 	now := time.Now()
 	out := make([]string, 0, len(candidates))
 	for _, upstreamModel := range candidates {
-		stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+		stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled, disableModelAlias...)
 		blocked, _, _ := isAuthBlockedForModel(auth, stateModel, now)
 		if blocked {
 			continue
@@ -304,10 +340,10 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 	return out
 }
 
-func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]string, bool) {
-	candidates := m.executionModelCandidates(auth, routeModel)
+func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string, disableModelAlias ...bool) ([]string, bool) {
+	candidates := m.executionModelCandidates(auth, routeModel, disableModelAlias...)
 	pooled := len(candidates) > 1
-	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
+	return m.filterExecutionModels(auth, routeModel, candidates, pooled, disableModelAlias...), pooled
 }
 
 func cloneAuthForExecution(provider string, auth *Auth) *Auth {

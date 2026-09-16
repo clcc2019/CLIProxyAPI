@@ -70,6 +70,33 @@ func TestClientAPIKeysAuthFilesCompatibility(t *testing.T) {
 	}
 }
 
+func TestClientAPIKeysDisableModelAliasCompatibility(t *testing.T) {
+	type configFile struct {
+		APIKeys ClientAPIKeys `yaml:"api-keys"`
+	}
+	var parsed configFile
+	if err := yaml.Unmarshal([]byte("api-keys:\n  - api-key: client\n    disable-model-alias: true\n"), &parsed); err != nil {
+		t.Fatalf("yaml unmarshal: %v", err)
+	}
+	if len(parsed.APIKeys) != 1 || !parsed.APIKeys[0].DisableModelAlias {
+		t.Fatalf("parsed API key = %#v", parsed.APIKeys)
+	}
+	encoded, err := yaml.Marshal(parsed)
+	if err != nil {
+		t.Fatalf("yaml marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), "disable-model-alias: true") {
+		t.Fatalf("encoded API key omitted disable-model-alias: %s", encoded)
+	}
+	var merged ClientAPIKeys
+	if err := json.Unmarshal([]byte(`[{"api-key":"client","disableModelAlias":true},{"api-key":"client"}]`), &merged); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+	if len(merged) != 1 || !merged[0].DisableModelAlias {
+		t.Fatalf("merged API key = %#v", merged)
+	}
+}
+
 func TestClientAPIKeysAuthFilesAliasesAndAbsolutePaths(t *testing.T) {
 	var parsed struct {
 		APIKeys ClientAPIKeys `yaml:"api-keys"`

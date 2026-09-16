@@ -71,6 +71,9 @@ func (h *BaseAPIHandler) prepareExecutionRequest(ctx context.Context, handlerTyp
 		}
 		metadata[coreexecutor.AllowedAuthIDsMetadataKey] = boundIDs
 	}
+	if clientModelAliasDisabledFromContext(ctx) {
+		metadata[coreexecutor.DisableModelAliasMetadataKey] = true
+	}
 	metadata[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(metadata, handlerType, normalizedModel, rawJSON)
 	passthroughHeaders := PassthroughHeadersEnabled(h.Cfg)

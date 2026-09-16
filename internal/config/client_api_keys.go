@@ -15,13 +15,14 @@ import (
 // requests sent to CLIProxyAPI. The key may optionally be disabled, restricted
 // to client-visible models, assigned usage quotas, or bound to an auth-file pool.
 type ClientAPIKeyEntry struct {
-	APIKey         string            `yaml:"api-key" json:"api-key"`
-	Note           string            `yaml:"note,omitempty" json:"note,omitempty"`
-	Disabled       bool              `yaml:"disabled,omitempty" json:"disabled,omitempty"`
-	AllowedModels  []string          `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
-	ExcludedModels []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
-	AuthFiles      []string          `yaml:"auth-files,omitempty" json:"auth-files,omitempty"`
-	Quota          ClientAPIKeyQuota `yaml:"quota,omitempty" json:"quota,omitempty"`
+	APIKey            string            `yaml:"api-key" json:"api-key"`
+	Note              string            `yaml:"note,omitempty" json:"note,omitempty"`
+	Disabled          bool              `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	DisableModelAlias bool              `yaml:"disable-model-alias,omitempty" json:"disable-model-alias,omitempty"`
+	AllowedModels     []string          `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
+	ExcludedModels    []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+	AuthFiles         []string          `yaml:"auth-files,omitempty" json:"auth-files,omitempty"`
+	Quota             ClientAPIKeyQuota `yaml:"quota,omitempty" json:"quota,omitempty"`
 }
 
 // ClientAPIKeyQuota limits request count, token usage, and spend for one
@@ -196,7 +197,7 @@ func (keys ClientAPIKeys) MarshalYAML() (any, error) {
 		if entry.APIKey == "" {
 			continue
 		}
-		if entry.Note == "" && !entry.Disabled && len(entry.AllowedModels) == 0 && len(entry.ExcludedModels) == 0 && len(entry.AuthFiles) == 0 && !entry.Quota.HasLimits() {
+		if entry.Note == "" && !entry.Disabled && !entry.DisableModelAlias && len(entry.AllowedModels) == 0 && len(entry.ExcludedModels) == 0 && len(entry.AuthFiles) == 0 && !entry.Quota.HasLimits() {
 			out = append(out, entry.APIKey)
 			continue
 		}
@@ -208,6 +209,9 @@ func (keys ClientAPIKeys) MarshalYAML() (any, error) {
 		}
 		if entry.Disabled {
 			item["disabled"] = true
+		}
+		if entry.DisableModelAlias {
+			item["disable-model-alias"] = true
 		}
 		if len(entry.AllowedModels) > 0 {
 			item["allowed-models"] = entry.AllowedModels
@@ -248,23 +252,26 @@ func (keys *ClientAPIKeys) UnmarshalYAML(value *yaml.Node) error {
 			parsed = append(parsed, ClientAPIKeyEntry{APIKey: strings.TrimSpace(item.Value)})
 		case yaml.MappingNode:
 			var raw struct {
-				APIKey         string            `yaml:"api-key"`
-				Note           string            `yaml:"note"`
-				Disabled       bool              `yaml:"disabled"`
-				AllowedModels  []string          `yaml:"allowed-models"`
-				ExcludedModels []string          `yaml:"excluded-models"`
-				AuthFiles      []string          `yaml:"auth-files"`
-				AuthFile       string            `yaml:"auth-file"`
-				AuthFilesCamel []string          `yaml:"authFiles"`
-				AuthFileCamel  string            `yaml:"authFile"`
-				Quota          ClientAPIKeyQuota `yaml:"quota"`
+				APIKey                 string            `yaml:"api-key"`
+				Note                   string            `yaml:"note"`
+				Disabled               bool              `yaml:"disabled"`
+				DisableModelAlias      bool              `yaml:"disable-model-alias"`
+				DisableModelAliasCamel bool              `yaml:"disableModelAlias"`
+				DisableModelAliasSnake bool              `yaml:"disable_model_alias"`
+				AllowedModels          []string          `yaml:"allowed-models"`
+				ExcludedModels         []string          `yaml:"excluded-models"`
+				AuthFiles              []string          `yaml:"auth-files"`
+				AuthFile               string            `yaml:"auth-file"`
+				AuthFilesCamel         []string          `yaml:"authFiles"`
+				AuthFileCamel          string            `yaml:"authFile"`
+				Quota                  ClientAPIKeyQuota `yaml:"quota"`
 			}
 			if err := item.Decode(&raw); err != nil {
 				return err
 			}
 			raw.AuthFiles = append(raw.AuthFiles, raw.AuthFilesCamel...)
 			raw.AuthFiles = append(raw.AuthFiles, raw.AuthFile, raw.AuthFileCamel)
-			parsed = append(parsed, ClientAPIKeyEntry{APIKey: raw.APIKey, Note: raw.Note, Disabled: raw.Disabled, AllowedModels: raw.AllowedModels, ExcludedModels: raw.ExcludedModels, AuthFiles: raw.AuthFiles, Quota: raw.Quota})
+			parsed = append(parsed, ClientAPIKeyEntry{APIKey: raw.APIKey, Note: raw.Note, Disabled: raw.Disabled, DisableModelAlias: raw.DisableModelAlias || raw.DisableModelAliasCamel || raw.DisableModelAliasSnake, AllowedModels: raw.AllowedModels, ExcludedModels: raw.ExcludedModels, AuthFiles: raw.AuthFiles, Quota: raw.Quota})
 		default:
 			return fmt.Errorf("api-keys entries must be strings or objects")
 		}
@@ -307,6 +314,7 @@ func (keys *ClientAPIKeys) UnmarshalJSON(data []byte) error {
 			}
 			entry.Note = extractClientAPIKeyNote(typed)
 			entry.Disabled = extractClientAPIKeyDisabled(typed)
+			entry.DisableModelAlias = extractClientAPIKeyDisableModelAlias(typed)
 			entry.AllowedModels = extractClientAPIKeyModels(typed, "allowed-models", "allowedModels")
 			entry.ExcludedModels = extractClientAPIKeyModels(typed, "excluded-models", "excludedModels")
 			entry.AuthFiles = extractClientAPIKeyAuthFiles(typed)
@@ -318,6 +326,18 @@ func (keys *ClientAPIKeys) UnmarshalJSON(data []byte) error {
 	}
 	*keys = NormalizeClientAPIKeys(parsed)
 	return nil
+}
+
+func extractClientAPIKeyDisableModelAlias(record map[string]any) bool {
+	for _, name := range []string{"disable-model-alias", "disable-model-aliases", "disableModelAlias", "disable_model_alias"} {
+		if raw, ok := record[name]; ok {
+			value, parsed := parseClientAPIKeyBool(raw)
+			if parsed {
+				return value
+			}
+		}
+	}
+	return false
 }
 
 func extractClientAPIKeyDisabled(record map[string]any) bool {
@@ -721,6 +741,7 @@ func NormalizeClientAPIKeys(entries ClientAPIKeys) ClientAPIKeys {
 				current.Note = entry.Note
 			}
 			current.Disabled = current.Disabled || entry.Disabled
+			current.DisableModelAlias = current.DisableModelAlias || entry.DisableModelAlias
 			current.AllowedModels = mergeModelPatternLists(current.AllowedModels, entry.AllowedModels)
 			current.ExcludedModels = mergeModelPatternLists(current.ExcludedModels, entry.ExcludedModels)
 			current.AuthFiles = mergeClientAPIKeyAuthFiles(current.AuthFiles, entry.AuthFiles)

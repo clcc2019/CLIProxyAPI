@@ -127,6 +127,7 @@ type mixedExecutionState struct {
 	lastErr             error
 	homeMode            bool
 	homeAuthCount       int
+	disableModelAlias   bool
 }
 
 type preparedMixedCredential struct {
@@ -156,6 +157,7 @@ func newMixedExecutionState(ctx context.Context, m *Manager, providers []string,
 		attempted:           borrowAuthIDSet(),
 		homeMode:            m.HomeEnabled(),
 		homeAuthCount:       1,
+		disableModelAlias:   disableModelAliasFromOptions(opts),
 	}, nil
 }
 
@@ -229,7 +231,7 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 			execCtx = contextWithRequestedModelAlias(execCtx, state.opts, state.routeModel)
 			execCtx = policy.responseMode.withExecutionCallbacks(execCtx, m)
 		}
-		models, pooled := m.preparedExecutionModels(auth, state.routeModel)
+		models, pooled := m.preparedExecutionModels(auth, state.routeModel, state.disableModelAlias)
 		if len(models) == 0 {
 			continue
 		}
@@ -364,10 +366,12 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 		transportRetries := m.requestRetryLimitForAuth(credential.auth)
 		requestScopedContinue := false
 		for _, upstreamModel := range credential.models {
-			resultModel := m.stateModelForExecution(credential.auth, state.routeModel, upstreamModel, credential.pooled)
+			resultModel := m.stateModelForExecution(credential.auth, state.routeModel, upstreamModel, credential.pooled, state.disableModelAlias)
 			execReq := state.req
 			execReq.Model = upstreamModel
-			execReq = m.withOAuthModelAliasReasoningEffort(execReq, credential.auth, state.routeModel, state.opts)
+			if !state.disableModelAlias {
+				execReq = m.withOAuthModelAliasReasoningEffort(execReq, credential.auth, state.routeModel, state.opts)
+			}
 			for retryAttempt := 0; ; retryAttempt++ {
 				releaseAdmission, errAdmission := m.admitAuthExecution(credential.auth, resultModel, retryAttempt > 0)
 				if errAdmission != nil {

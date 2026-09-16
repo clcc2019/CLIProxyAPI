@@ -57,6 +57,9 @@ func newProvider(name string, keys internalconfig.ClientAPIKeys) *provider {
 			if len(key.ExcludedModels) > 0 {
 				meta["excluded_models"] = strings.Join(key.ExcludedModels, ",")
 			}
+			if key.DisableModelAlias {
+				meta[coreexecutor.DisableModelAliasMetadataKey] = "true"
+			}
 			internalconfig.AddClientAPIKeyQuotaMetadata(meta, key.Quota)
 			if len(key.AuthFiles) > 0 {
 				if encoded, err := json.Marshal(key.AuthFiles); err == nil {

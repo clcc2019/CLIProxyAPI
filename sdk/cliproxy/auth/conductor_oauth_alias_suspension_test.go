@@ -128,3 +128,31 @@ func TestManagerExecute_OAuthAliasBypassesBlockedRouteModel(t *testing.T) {
 		t.Fatalf("execute alias = %q, want %q", gotAliases[0], routeModel)
 	}
 }
+
+func TestManagerExecute_DisableModelAliasMetadata(t *testing.T) {
+	const provider = "claude"
+	const routeModel = "claude-opus-4-6"
+	const targetModel = "claude-opus-4-6-thinking"
+
+	manager := NewManager(nil, nil, nil)
+	executor := &aliasRoutingExecutor{id: provider}
+	manager.RegisterExecutor(executor)
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{provider: {{Name: targetModel, Alias: routeModel}}})
+	auth := &Auth{ID: "oauth-no-alias", Provider: provider, Status: StatusActive, Attributes: map[string]string{"auth_kind": "oauth"}}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	resp, err := manager.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.DisableModelAliasMetadataKey: true},
+	})
+	if err != nil {
+		t.Fatalf("execute error = %v", err)
+	}
+	if string(resp.Payload) != routeModel {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), routeModel)
+	}
+}

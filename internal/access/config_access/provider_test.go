@@ -62,6 +62,19 @@ func TestAuthenticateIncludesBoundAuthFiles(t *testing.T) {
 	}
 }
 
+func TestAuthenticateIncludesDisableModelAliasMetadata(t *testing.T) {
+	provider := newProvider("test", internalconfig.ClientAPIKeys{{APIKey: "raw-key", DisableModelAlias: true}})
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer raw-key")
+	result, authErr := provider.Authenticate(context.Background(), req)
+	if authErr != nil || result == nil {
+		t.Fatalf("authenticate failed: result=%#v err=%v", result, authErr)
+	}
+	if result.Metadata[coreexecutor.DisableModelAliasMetadataKey] != "true" {
+		t.Fatalf("disable model alias metadata = %#v", result.Metadata)
+	}
+}
+
 func BenchmarkExtractBearerTokenMixedCase(b *testing.B) {
 	for b.Loop() {
 		if got := extractBearerToken("bEaReR quota-key"); got != "quota-key" {

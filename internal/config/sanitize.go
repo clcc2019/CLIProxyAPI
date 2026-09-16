@@ -216,6 +216,13 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.Models = normalizeOpenAICompatibilityModels(e.Models)
+		for j := range e.APIKeyEntries {
+			keyEntry := &e.APIKeyEntries[j]
+			keyEntry.APIKey = strings.TrimSpace(keyEntry.APIKey)
+			keyEntry.ProxyURL = strings.TrimSpace(keyEntry.ProxyURL)
+			keyEntry.Models = normalizeOpenAICompatibilityModels(keyEntry.Models)
+		}
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -223,6 +230,25 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		out = append(out, e)
 	}
 	cfg.OpenAICompatibility = out
+}
+
+// normalizeOpenAICompatibilityModels trims model names and aliases while
+// preserving the configured model order.
+func normalizeOpenAICompatibilityModels(models []OpenAICompatibilityModel) []OpenAICompatibilityModel {
+	if models == nil {
+		return nil
+	}
+	out := make([]OpenAICompatibilityModel, 0, len(models))
+	for i := range models {
+		model := models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
 }
 
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.

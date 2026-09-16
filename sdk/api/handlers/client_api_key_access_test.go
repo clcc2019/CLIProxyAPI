@@ -59,6 +59,16 @@ func TestClientAuthFilesFromGin(t *testing.T) {
 	}
 }
 
+func TestClientModelAliasDisabledFromContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set("accessMetadata", map[string]string{coreexecutor.DisableModelAliasMetadataKey: "true"})
+	ctx := context.WithValue(context.Background(), "gin", c)
+	if !clientModelAliasDisabledFromContext(ctx) {
+		t.Fatal("expected model alias disabling metadata")
+	}
+}
+
 func TestFilterModelMapsForClient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

@@ -253,10 +253,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	poolModeRetries := m.apiKeyPoolModeRetries(auth)
 	transportRetries := m.requestRetryLimitForAuth(auth)
 	for idx, execModel := range execModels {
-		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
+		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled, disableModelAliasFromOptions(opts))
 		execReq := req
 		execReq.Model = execModel
-		execReq = m.withOAuthModelAliasReasoningEffort(execReq, auth, routeModel, opts)
+		if !disableModelAliasFromOptions(opts) {
+			execReq = m.withOAuthModelAliasReasoningEffort(execReq, auth, routeModel, opts)
+		}
 		for retryAttempt := 0; ; retryAttempt++ {
 			releaseAdmission, errAdmission := m.admitAuthExecution(auth, resultModel, retryAttempt > 0)
 			if errAdmission != nil {

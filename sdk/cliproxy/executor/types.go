@@ -36,6 +36,9 @@ const (
 	// ClientAuthFilesMetadataKey stores the JSON-encoded auth-file pool bound to
 	// the authenticated client API key.
 	ClientAuthFilesMetadataKey = "auth_files"
+	// DisableModelAliasMetadataKey disables model alias rewriting for the
+	// authenticated client API key.
+	DisableModelAliasMetadataKey = "disable_model_alias"
 	// AllowedAuthIDsMetadataKey stores the resolved auth IDs permitted for one execution.
 	AllowedAuthIDsMetadataKey = "allowed_auth_ids"
 	// StreamChunkBufferSize is the default buffer depth for proxy-internal

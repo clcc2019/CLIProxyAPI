@@ -47,6 +47,40 @@ func TestResolveOpenAICompatibilityUsesBaseURLToDisambiguateDuplicateNames(t *te
 	}
 }
 
+func TestOpenAICompatibilityModelsForAPIKey(t *testing.T) {
+	providerModels := []OpenAICompatibilityModel{{Name: "provider-model", Alias: "shared"}}
+	keyModels := []OpenAICompatibilityModel{{Name: "key-model", Alias: "shared"}}
+	provider := &OpenAICompatibility{
+		Models: providerModels,
+		APIKeyEntries: []OpenAICompatibilityAPIKey{
+			{APIKey: "key-a", Models: keyModels},
+			{APIKey: "key-b"},
+		},
+	}
+
+	if got := OpenAICompatibilityModelsForAPIKey(provider, "KEY-A"); len(got) != 1 || got[0].Name != "key-model" {
+		t.Fatalf("key-a models = %#v, want key-model", got)
+	}
+	if got := OpenAICompatibilityModelsForAPIKey(provider, "key-b"); len(got) != 1 || got[0].Name != "provider-model" {
+		t.Fatalf("key-b models = %#v, want provider-model inheritance", got)
+	}
+	if got := OpenAICompatibilityModelsForAPIKey(provider, "unknown"); len(got) != 1 || got[0].Name != "provider-model" {
+		t.Fatalf("unknown-key models = %#v, want provider-model inheritance", got)
+	}
+}
+
+func TestOpenAICompatibilityModelsForAPIKeyEmptyInheritsProvider(t *testing.T) {
+	provider := &OpenAICompatibility{
+		Models:        []OpenAICompatibilityModel{{Name: "provider-model", Alias: "shared"}},
+		APIKeyEntries: []OpenAICompatibilityAPIKey{{APIKey: "key-a", Models: []OpenAICompatibilityModel{}}},
+	}
+
+	got := OpenAICompatibilityModelsForAPIKey(provider, "key-a")
+	if len(got) != 1 || got[0].Name != "provider-model" {
+		t.Fatalf("key-a models = %#v, want provider-model inheritance", got)
+	}
+}
+
 func TestLoadConfigMigratesLegacySingleOpenAICompatibilityKeyInMemory(t *testing.T) {
 	path := t.TempDir() + "/config.yaml"
 	content := []byte("openai-compatibility:\n  - base-url: https://example.com/v1\n    api-key: legacy-key\n    models:\n      - name: upstream\n        alias: public\n")

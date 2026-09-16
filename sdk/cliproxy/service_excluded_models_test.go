@@ -266,6 +266,58 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 }
 
+func TestRegisterModelsForAuth_OpenAICompatibilityUsesAPIKeyModels(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "provider",
+				BaseURL: "https://provider.example/v1",
+				Models:  []config.OpenAICompatibilityModel{{Name: "provider-model", Alias: "shared"}},
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "key-a", Models: []config.OpenAICompatibilityModel{{Name: "key-a-model", Alias: "shared"}}},
+					{APIKey: "key-b"},
+				},
+			}},
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	newAuth := func(id, apiKey string) *coreauth.Auth {
+		return &coreauth.Auth{
+			ID:       id,
+			Provider: "openai-compatibility",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"auth_kind":    "api_key",
+				"api_key":      apiKey,
+				"compat_name":  "provider",
+				"provider_key": "provider",
+				"base_url":     "https://provider.example/v1",
+			},
+		}
+	}
+	authA := newAuth("auth-openai-compat-key-a", "key-a")
+	authB := newAuth("auth-openai-compat-key-b", "key-b")
+	modelRegistry.UnregisterClient(authA.ID)
+	modelRegistry.UnregisterClient(authB.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(authA.ID)
+		modelRegistry.UnregisterClient(authB.ID)
+	})
+
+	service.registerModelsForAuth(authA)
+	modelsA := modelRegistry.GetModelsForClient(authA.ID)
+	if len(modelsA) != 1 || modelsA[0].ID != "shared" || modelsA[0].Name != "key-a-model" {
+		t.Fatalf("key-a registered models = %#v, want key-a-model", modelsA)
+	}
+
+	service.registerModelsForAuth(authB)
+	modelsB := modelRegistry.GetModelsForClient(authB.ID)
+	if len(modelsB) != 1 || modelsB[0].ID != "shared" || modelsB[0].Name != "provider-model" {
+		t.Fatalf("key-b registered models = %#v, want provider-model inheritance", modelsB)
+	}
+}
+
 func TestRegisterModelsForAuth_OpenAICompatibilityEmptyNameUsesBaseURL(t *testing.T) {
 	service := &Service{
 		cfg: &config.Config{
