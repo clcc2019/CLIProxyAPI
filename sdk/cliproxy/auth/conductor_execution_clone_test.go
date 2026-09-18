@@ -293,8 +293,8 @@ func TestAuthCloneForManagementSummaryDropsLargeTokenMetadata(t *testing.T) {
 	if cloned.Metadata["refresh_token"] != "refresh-token" || cloned.Metadata["plan_type"] != "plus" {
 		t.Fatalf("management summary metadata = %#v", cloned.Metadata)
 	}
-	if cloned.RateLimits != nil {
-		t.Fatalf("management summary copied runtime rate limits: %#v", cloned.RateLimits)
+	if snapshot, ok := cloned.RateLimits["codex"]; !ok || snapshot.PlanType != "plus" {
+		t.Fatalf("management summary lost quota projection: %#v", cloned.RateLimits)
 	}
 	for _, key := range []string{"originator", "beta_features", "installation_id", "include_timing_metrics", "codex_client_profile_pinned"} {
 		if _, ok := cloned.Metadata[key]; !ok {

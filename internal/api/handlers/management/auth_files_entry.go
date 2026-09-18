@@ -58,6 +58,9 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
+	if rateLimit := codexAuthRateLimitEntry(auth); rateLimit != nil {
+		entry["rate_limit"] = rateLimit
+	}
 	if credits := codexAuthCreditsEntry(auth); credits != nil {
 		entry["credits"] = credits
 	}
@@ -211,19 +214,14 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 }
 
 func codexAuthCreditsEntry(auth *coreauth.Auth) gin.H {
-	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || len(auth.RateLimits) == 0 {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
-	snapshot, ok := auth.RateLimits["codex"]
-	if !ok || snapshot.Credits == nil {
-		for _, candidate := range auth.RateLimits {
-			if candidate.Credits != nil {
-				snapshot = candidate
-				ok = true
-				break
-			}
-		}
-	}
+	return codexAuthCreditsEntryFromSnapshots(auth.RateLimits)
+}
+
+func codexAuthCreditsEntryFromSnapshots(rateLimits map[string]coreauth.RateLimitSnapshot) gin.H {
+	snapshot, ok := codexAuthCreditsSnapshot(rateLimits)
 	if !ok || snapshot.Credits == nil {
 		return nil
 	}
@@ -236,6 +234,77 @@ func codexAuthCreditsEntry(auth *coreauth.Auth) gin.H {
 		credits["updated_at"] = snapshot.UpdatedAt
 	}
 	return credits
+}
+
+func codexAuthCreditsSnapshot(rateLimits map[string]coreauth.RateLimitSnapshot) (coreauth.RateLimitSnapshot, bool) {
+	if len(rateLimits) == 0 {
+		return coreauth.RateLimitSnapshot{}, false
+	}
+	if snapshot, ok := rateLimits["codex"]; ok && snapshot.Credits != nil {
+		return snapshot, true
+	}
+	for _, snapshot := range rateLimits {
+		if snapshot.Credits != nil {
+			return snapshot, true
+		}
+	}
+	return coreauth.RateLimitSnapshot{}, false
+}
+
+func codexAuthRateLimitSnapshot(rateLimits map[string]coreauth.RateLimitSnapshot) (coreauth.RateLimitSnapshot, bool) {
+	if len(rateLimits) == 0 {
+		return coreauth.RateLimitSnapshot{}, false
+	}
+	if snapshot, ok := rateLimits["codex"]; ok {
+		return snapshot, true
+	}
+	for _, snapshot := range rateLimits {
+		return snapshot, true
+	}
+	return coreauth.RateLimitSnapshot{}, false
+}
+
+func codexAuthRateLimitEntry(auth *coreauth.Auth) gin.H {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return nil
+	}
+	return codexAuthRateLimitEntryFromSnapshots(auth.RateLimits)
+}
+
+func codexAuthRateLimitEntryFromSnapshots(rateLimits map[string]coreauth.RateLimitSnapshot) gin.H {
+	snapshot, ok := codexAuthRateLimitSnapshot(rateLimits)
+	if !ok {
+		return nil
+	}
+	entry := gin.H{}
+	if snapshot.Primary != nil {
+		entry["primary_window"] = codexAuthRateLimitWindowEntry(snapshot.Primary)
+	}
+	if snapshot.Secondary != nil {
+		entry["secondary_window"] = codexAuthRateLimitWindowEntry(snapshot.Secondary)
+	}
+	if !snapshot.UpdatedAt.IsZero() {
+		entry["updated_at"] = snapshot.UpdatedAt
+	}
+	if len(entry) == 0 {
+		return nil
+	}
+	return entry
+}
+
+func codexAuthRateLimitWindowEntry(window *coreauth.RateLimitWindow) gin.H {
+	if window == nil {
+		return nil
+	}
+	entry := gin.H{"used_percent": window.UsedPercent}
+	if window.WindowMinutes != nil {
+		entry["window_minutes"] = *window.WindowMinutes
+		entry["limit_window_seconds"] = *window.WindowMinutes * 60
+	}
+	if window.ResetsAt != nil {
+		entry["reset_at"] = *window.ResetsAt
+	}
+	return entry
 }
 
 func statAuthFileEntryPath(path string, opts authFileEntryBuildOptions) (os.FileInfo, error) {

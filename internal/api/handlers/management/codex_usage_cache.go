@@ -157,6 +157,7 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 	now := time.Now()
 	if cacheKey != "" && !opts.force {
 		if payload, _, ok := h.loadCodexUsageCache(ctx, cache, cacheKey, now, false); ok {
+			h.updateCodexRateLimitsFromUsage(ctx, auth, payload, now)
 			h.syncCodexUsageQuotaCooldown(ctx, auth, payload)
 			return payload, http.StatusOK, nil
 		}
@@ -184,6 +185,7 @@ func (h *Handler) fetchCodexUsageWithCache(ctx context.Context, auth *coreauth.A
 	value, err, _ := cache.flights.Do(flightKey, func() (any, error) {
 		if !opts.force {
 			if payload, _, ok := h.loadCodexUsageCache(ctx, cache, cacheKey, time.Now(), false); ok {
+				h.updateCodexRateLimitsFromUsage(ctx, auth, payload, time.Now())
 				return result{payload: payload, status: http.StatusOK}, nil
 			}
 		}

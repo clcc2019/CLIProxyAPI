@@ -173,6 +173,17 @@ func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
 	go s.consumeAuthUpdates(queueCtx)
 }
 
+func (s *Service) newCodexAutoExecutor() *executor.CodexAutoExecutor {
+	if s == nil {
+		return nil
+	}
+	exec := executor.NewCodexAutoExecutorWithResponseObserver(s.cfg, s.observeCodexResponseMetadata)
+	if s.coreManager != nil {
+		exec.SetAuthManager(s.coreManager)
+	}
+	return exec
+}
+
 func (s *Service) consumeAuthUpdates(ctx context.Context) {
 	ctx = coreauth.WithSkipPersist(ctx)
 	for {
@@ -480,7 +491,7 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 				}
 			}
 		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutorWithResponseObserver(s.cfg, s.observeCodexResponseMetadata))
+		s.coreManager.RegisterExecutor(s.newCodexAutoExecutor())
 		return
 	}
 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
@@ -686,7 +697,7 @@ func (s *Service) registerHomeExecutors() {
 
 	// Register baseline executors so home-dispatched auth entries can execute without
 	// requiring any local auth-dir credentials.
-	s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(s.newCodexAutoExecutor())
 	s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
@@ -1122,6 +1133,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+			// This also stops provider-owned background harvesters before the
+			// service tears down the remaining network resources.
+			s.coreManager.CloseExecutionSession(coreauth.CloseAllExecutionSessionsID)
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

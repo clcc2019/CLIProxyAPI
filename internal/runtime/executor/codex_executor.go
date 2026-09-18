@@ -87,6 +87,7 @@ type CodexExecutor struct {
 	responseObserver CodexResponseObserver
 	codexAuthCache   sync.Map
 	httpTurnState    *codexHTTPTurnStateStore
+	turnStateTickets *codexTurnStateTicketProvider
 	responseDedupe   helps.InFlightGroup[codexNonStreamHTTPResult]
 	// refreshDedupe serialises concurrent token refreshes per auth.ID. Without
 	// it multiple in-flight requests sharing an expired access_token would each
@@ -106,6 +107,7 @@ func NewCodexExecutorWithResponseObserver(cfg *config.Config, observer CodexResp
 		cfg:              cfg,
 		responseObserver: observer,
 		httpTurnState:    newCodexHTTPTurnStateStore(),
+		turnStateTickets: newCodexTurnStateTicketProvider(cfg),
 	}
 }
 

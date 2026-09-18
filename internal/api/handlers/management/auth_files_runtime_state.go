@@ -50,7 +50,7 @@ func authFileRuntimeState(meta map[string]any) (coreauth.AuthRuntimeState, bool)
 	if state.Status == "" && state.StatusMessage == "" && !state.Unavailable && state.LastError == nil &&
 		state.Success == 0 && state.Failed == 0 && len(state.RecentRequests) == 0 && len(state.ModelStates) == 0 &&
 		state.Quota.Reason == "" && !state.Quota.Exceeded && state.Quota.BackoffLevel == 0 && state.Quota.NextRecoverAt.IsZero() &&
-		state.NextRetryAfter.IsZero() && state.UpdatedAt.IsZero() && state.SavedAt.IsZero() {
+		len(state.RateLimits) == 0 && state.NextRetryAfter.IsZero() && state.UpdatedAt.IsZero() && state.SavedAt.IsZero() {
 		return coreauth.AuthRuntimeState{}, false
 	}
 	return state, true
@@ -111,6 +111,12 @@ func applyAuthFileRuntimeStateEntry(entry gin.H, state coreauth.AuthRuntimeState
 	if state.Failed != 0 {
 		set("failed", state.Failed)
 	}
+	if rateLimit := codexAuthRateLimitEntryFromSnapshots(state.RateLimits); rateLimit != nil {
+		set("rate_limit", rateLimit)
+	}
+	if credits := codexAuthCreditsEntryFromSnapshots(state.RateLimits); credits != nil {
+		set("credits", credits)
+	}
 	if !state.NextRetryAfter.IsZero() {
 		set("next_retry_after", state.NextRetryAfter.UTC())
 	}
@@ -158,6 +164,12 @@ func applyAuthFileRuntimeStateSummaryEntry(entry gin.H, state coreauth.AuthRunti
 	}
 	if state.Failed != 0 {
 		set("failed", state.Failed)
+	}
+	if rateLimit := codexAuthRateLimitEntryFromSnapshots(state.RateLimits); rateLimit != nil {
+		set("rate_limit", rateLimit)
+	}
+	if credits := codexAuthCreditsEntryFromSnapshots(state.RateLimits); credits != nil {
+		set("credits", credits)
 	}
 	if recent := authFileRecentRequestsFromRuntimeState(state, time.Now()); len(recent) > 0 {
 		set("recent_requests", recent)

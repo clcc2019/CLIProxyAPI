@@ -82,6 +82,61 @@ func TestListAuthFilesFromDiskExposesRuntimeStateError(t *testing.T) {
 	}
 }
 
+func TestListAuthFilesFromDiskExposesPersistedCodexQuota(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	raw := map[string]any{
+		"type": "codex",
+		"cliproxy_runtime_state": map[string]any{
+			"version": 1,
+			"rate_limits": map[string]any{
+				"codex": map[string]any{
+					"primary": map[string]any{"used_percent": 73.5, "window_minutes": 300},
+					"credits": map[string]any{"has_credits": true, "balance": "4"},
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal auth file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "codex-quota.json"), data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, nil)
+	resp := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(resp)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(c)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(body.Files) != 1 {
+		t.Fatalf("files = %#v, want one file", body.Files)
+	}
+	rateLimit, ok := body.Files[0]["rate_limit"].(map[string]any)
+	if !ok {
+		t.Fatalf("rate_limit = %#v, want persisted quota", body.Files[0]["rate_limit"])
+	}
+	primary, ok := rateLimit["primary_window"].(map[string]any)
+	if !ok || primary["used_percent"] != float64(73.5) {
+		t.Fatalf("primary_window = %#v, want used_percent 73.5", rateLimit["primary_window"])
+	}
+	credits, ok := body.Files[0]["credits"].(map[string]any)
+	if !ok || credits["balance"] != "4" {
+		t.Fatalf("credits = %#v, want balance 4", body.Files[0]["credits"])
+	}
+}
+
 func TestListAuthFiles_PaginatedManagerResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	authDir := t.TempDir()

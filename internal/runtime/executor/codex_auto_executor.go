@@ -32,13 +32,39 @@ func NewCodexAutoExecutor(cfg *config.Config) *CodexAutoExecutor {
 // NewCodexAutoExecutorWithResponseObserver applies one response observer to
 // both the HTTP and WebSocket Codex transports.
 func NewCodexAutoExecutorWithResponseObserver(cfg *config.Config, observer CodexResponseObserver) *CodexAutoExecutor {
-	return &CodexAutoExecutor{
-		httpExec: NewCodexExecutorWithResponseObserver(cfg, observer),
-		wsExec:   NewCodexWebsocketsExecutorWithResponseObserver(cfg, observer),
-	}
+	httpExec := NewCodexExecutorWithResponseObserver(cfg, observer)
+	wsExec := NewCodexWebsocketsExecutorWithResponseObserver(cfg, observer)
+	// HTTP and WebSocket transports must share the account/model ticket cache,
+	// otherwise a WebSocket-first auth would harvest the same ticket twice and
+	// could race its HTTP fallback with a different cache entry.
+	tickets := newCodexTurnStateTicketProvider(cfg)
+	httpExec.turnStateTickets = tickets
+	wsExec.CodexExecutor.turnStateTickets = tickets
+	return &CodexAutoExecutor{httpExec: httpExec, wsExec: wsExec}
 }
 
 func (e *CodexAutoExecutor) Identifier() string { return "codex" }
+
+// SetAuthManager attaches the live auth registry used by the optional
+// background x-codex-turn-state harvester. The manager is deliberately
+// injected after construction to keep the executor usable in standalone tools
+// and unit tests that do not own an auth registry.
+func (e *CodexAutoExecutor) SetAuthManager(manager *cliproxyauth.Manager) {
+	if e == nil {
+		return
+	}
+	var tickets *codexTurnStateTicketProvider
+	if e.httpExec != nil {
+		tickets = e.httpExec.turnStateTickets
+	}
+	if tickets == nil && e.wsExec != nil && e.wsExec.CodexExecutor != nil {
+		tickets = e.wsExec.CodexExecutor.turnStateTickets
+	}
+	if tickets == nil {
+		return
+	}
+	tickets.setAuthManager(manager)
+}
 
 func (e *CodexAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if e == nil || e.httpExec == nil {

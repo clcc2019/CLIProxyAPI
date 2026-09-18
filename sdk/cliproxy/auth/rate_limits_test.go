@@ -67,6 +67,140 @@ func TestMergeRateLimitSnapshotsIgnoresTimestampOnlyChanges(t *testing.T) {
 	}
 }
 
+func TestManagerUpdateRateLimitsPreservesPartialSnapshots(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   StatusActive,
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	primaryReset := int64(1704070000)
+	secondaryReset := int64(1704073600)
+	manager.UpdateRateLimits(context.Background(), "codex-auth", []RateLimitSnapshot{{
+		LimitID:   "codex",
+		Primary:   &RateLimitWindow{UsedPercent: 25, WindowMinutes: int64Pointer(300), ResetsAt: &primaryReset},
+		Secondary: &RateLimitWindow{UsedPercent: 40, WindowMinutes: int64Pointer(10080), ResetsAt: &secondaryReset},
+		Credits:   &CreditsSnapshot{HasCredits: true, Balance: "12"},
+	}})
+
+	// A later usage response may only contain the primary window. Existing
+	// secondary/credits data must remain available to management readers.
+	manager.UpdateRateLimits(context.Background(), "codex-auth", []RateLimitSnapshot{{
+		LimitID: "codex",
+		Primary: &RateLimitWindow{UsedPercent: 50},
+	}})
+
+	auth, ok := manager.GetByID("codex-auth")
+	if !ok || auth == nil {
+		t.Fatal("updated auth missing")
+	}
+	snapshot := auth.RateLimits["codex"]
+	if snapshot.Primary == nil || snapshot.Primary.UsedPercent != 50 {
+		t.Fatalf("primary snapshot = %#v, want updated usage", snapshot.Primary)
+	}
+	if snapshot.Primary.ResetsAt == nil || *snapshot.Primary.ResetsAt != primaryReset {
+		t.Fatalf("primary reset = %#v, want %d", snapshot.Primary.ResetsAt, primaryReset)
+	}
+	if snapshot.Secondary == nil || snapshot.Secondary.UsedPercent != 40 {
+		t.Fatalf("secondary snapshot = %#v, want preserved usage", snapshot.Secondary)
+	}
+	if snapshot.Credits == nil || snapshot.Credits.Balance != "12" {
+		t.Fatalf("credits snapshot = %#v, want preserved credits", snapshot.Credits)
+	}
+}
+
+func TestManagerUpdatePreservesRateLimitsAcrossAuthReplacement(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID:         "codex-auth",
+		Provider:   "codex",
+		Status:     StatusActive,
+		Metadata:   map[string]any{"type": "codex"},
+		Attributes: map[string]string{"path": "/tmp/codex.json"},
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager.UpdateRateLimits(context.Background(), "codex-auth", []RateLimitSnapshot{{
+		LimitID: "codex",
+		Primary: &RateLimitWindow{UsedPercent: 37},
+		Credits: &CreditsSnapshot{HasCredits: true, Balance: "8"},
+	}})
+
+	// File watcher/OAuth refresh updates commonly contain only credential
+	// metadata. They must not erase the in-memory quota snapshot.
+	if _, err := manager.Update(context.Background(), &Auth{
+		ID:         "codex-auth",
+		Provider:   "codex",
+		Status:     StatusActive,
+		Metadata:   map[string]any{"type": "codex", "access_token": "new-token"},
+		Attributes: map[string]string{"path": "/tmp/codex.json"},
+	}); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	auth, ok := manager.GetByID("codex-auth")
+	if !ok || auth == nil || auth.RateLimits["codex"].Primary == nil {
+		t.Fatalf("rate limits lost after auth replacement: %#v", auth)
+	}
+	if got := auth.RateLimits["codex"].Primary.UsedPercent; got != 37 {
+		t.Fatalf("primary usage after replacement = %v, want 37", got)
+	}
+}
+
+func TestManagerUpdateRateLimitsPersistsAndReloadsRuntimeState(t *testing.T) {
+	store := &fakeRuntimeStateStore{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetRuntimeStateStore(store)
+	t.Cleanup(manager.stopPersistLoop)
+	if _, err := manager.Register(WithSkipPersist(context.Background()), &Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   StatusActive,
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager.UpdateRateLimits(context.Background(), "codex-auth", []RateLimitSnapshot{{
+		LimitID: "codex",
+		Primary: &RateLimitWindow{UsedPercent: 61},
+		Credits: &CreditsSnapshot{HasCredits: true, Balance: "3"},
+	}})
+	manager.flushPersistQueue()
+
+	persisted, ok := store.saved["codex-auth"]
+	if !ok || persisted.RateLimits["codex"].Primary == nil {
+		t.Fatalf("runtime store missing rate limits: %#v", store.saved)
+	}
+	if got := persisted.RateLimits["codex"].Primary.UsedPercent; got != 61 {
+		t.Fatalf("persisted primary usage = %v, want 61", got)
+	}
+
+	store.states = store.saved
+	reloaded := NewManager(nil, nil, nil)
+	reloaded.SetRuntimeStateStore(store)
+	if err := reloaded.LoadRuntimeStates(context.Background()); err != nil {
+		t.Fatalf("LoadRuntimeStates() error = %v", err)
+	}
+	t.Cleanup(reloaded.stopPersistLoop)
+	if _, err := reloaded.Register(WithSkipPersist(context.Background()), &Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   StatusActive,
+	}); err != nil {
+		t.Fatalf("reloaded Register() error = %v", err)
+	}
+	auth, ok := reloaded.GetByID("codex-auth")
+	if !ok || auth == nil || auth.RateLimits["codex"].Primary == nil {
+		t.Fatalf("reloaded auth missing rate limits: %#v", auth)
+	}
+	if got := auth.RateLimits["codex"].Credits.Balance; got != "3" {
+		t.Fatalf("reloaded credits balance = %q, want 3", got)
+	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
 func TestManagerClearAuthQuotaCooldownClearsAuthAndModelQuota(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	if _, err := manager.Register(context.Background(), &Auth{

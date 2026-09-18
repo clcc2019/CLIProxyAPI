@@ -45,24 +45,26 @@ func newCodexHTTPTurnStateStoreWithLimit(maxEntries int) *codexHTTPTurnStateStor
 	}
 }
 
-func (e *CodexExecutor) applyCodexHTTPTurnState(auth *cliproxyauth.Auth, executionSessionID string, headers http.Header) {
+func (e *CodexExecutor) applyCodexHTTPTurnState(auth *cliproxyauth.Auth, executionSessionID string, headers http.Header) bool {
 	if e == nil || e.httpTurnState == nil || headers == nil {
-		return
+		return false
 	}
 	if strings.TrimSpace(headers.Get(codexHeaderTurnState)) != "" {
-		return
+		return false
 	}
 	key := e.codexHTTPTurnStateKey(auth, executionSessionID)
 	if key == "" {
-		return
+		return false
 	}
 	scope := codexHTTPTurnStateScope(headers.Get(codexHeaderTurnMetadata))
 	if scope == "" {
-		return
+		return false
 	}
 	if state := e.httpTurnState.get(key, scope, time.Now()); state != "" {
 		headers.Set(codexHeaderTurnState, state)
+		return true
 	}
+	return false
 }
 
 func (e *CodexExecutor) rememberCodexHTTPTurnState(auth *cliproxyauth.Auth, prepared codexPreparedRequest, responseHeaders http.Header) {
@@ -117,6 +119,9 @@ func (e *CodexExecutor) forgetCodexHTTPTurnState(auth *cliproxyauth.Auth, prepar
 
 func (e *CodexExecutor) CloseExecutionSession(sessionID string) {
 	e.clearCodexHTTPTurnStateSession(sessionID)
+	if strings.TrimSpace(sessionID) == cliproxyauth.CloseAllExecutionSessionsID && e != nil && e.turnStateTickets != nil {
+		e.turnStateTickets.stop()
+	}
 }
 
 func (e *CodexExecutor) ResetExecutionSession(sessionID string) {
@@ -130,6 +135,9 @@ func (e *CodexExecutor) ResetAuthContinuity(authID string) {
 	codexResetClientProfileForAuthID(authID)
 	if e.httpTurnState != nil {
 		e.httpTurnState.deleteAuth(authID)
+	}
+	if e.turnStateTickets != nil {
+		e.turnStateTickets.deleteAuth(authID)
 	}
 }
 

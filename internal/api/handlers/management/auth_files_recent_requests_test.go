@@ -94,6 +94,65 @@ func TestListAuthFiles_IncludesRecentRequestsBuckets(t *testing.T) {
 	}
 }
 
+func TestListAuthFilesIncludesCachedCodexQuota(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-quota.json",
+		FileName: "codex-quota.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"type": "codex"},
+		Attributes: map[string]string{
+			"path": "/tmp/codex-quota.json",
+		},
+	}); err != nil {
+		t.Fatalf("failed to register auth record: %v", err)
+	}
+	manager.UpdateRateLimits(context.Background(), "codex-quota.json", []coreauth.RateLimitSnapshot{
+		{
+			LimitID: "codex",
+			Primary: &coreauth.RateLimitWindow{UsedPercent: 42, WindowMinutes: int64PtrForTest(300)},
+			Credits: &coreauth.CreditsSnapshot{HasCredits: true, Balance: "9"},
+		},
+	})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?summary=true", nil)
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list payload: %v", err)
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("files = %#v, want one entry", payload.Files)
+	}
+	rateLimit, ok := payload.Files[0]["rate_limit"].(map[string]any)
+	if !ok {
+		t.Fatalf("rate_limit = %#v, want cached quota window", payload.Files[0]["rate_limit"])
+	}
+	primary, ok := rateLimit["primary_window"].(map[string]any)
+	if !ok || primary["used_percent"] != float64(42) {
+		t.Fatalf("primary_window = %#v, want used_percent 42", rateLimit["primary_window"])
+	}
+	credits, ok := payload.Files[0]["credits"].(map[string]any)
+	if !ok || credits["balance"] != "9" {
+		t.Fatalf("credits = %#v, want balance 9", payload.Files[0]["credits"])
+	}
+}
+
+func int64PtrForTest(value int64) *int64 { return &value }
+
 func TestListAuthFilesSummaryOmitsHeavyRuntimeFields(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

@@ -193,6 +193,43 @@ type CodexHeaderDefaults struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	// OpenAICodexTicket controls optional harvesting and injection of the
+	// account/model-scoped x-codex-turn-state ticket used by ChatGPT Codex.
+	// Tickets are deliberately kept in the executor's memory only; they are
+	// short-lived upstream capabilities and must not be written to auth files.
+	OpenAICodexTicket CodexTurnStateTicketConfig `yaml:"openai-codex-ticket" json:"openai-codex-ticket"`
+}
+
+// CodexTurnStateTicketConfig controls ChatGPT OAuth x-codex-turn-state ticket
+// harvesting. Harvest requests use HarvestProxyURL, while production requests
+// keep using the auth/global proxy configured for the credential.
+type CodexTurnStateTicketConfig struct {
+	// Enabled enables background ticket harvesting and request injection.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// AuthFiles limits harvesting and injection to the listed auth IDs or auth
+	// file paths/basenames. Empty means every eligible Codex OAuth auth.
+	AuthFiles []string `yaml:"auth-files" json:"auth-files"`
+	// TargetLength is the exact byte length accepted for a ticket. ChatGPT's
+	// current ticket format is 292 bytes.
+	TargetLength int `yaml:"target-length" json:"target-length"`
+	// TTLSeconds is the in-memory lifetime assigned to a harvested ticket.
+	TTLSeconds int `yaml:"ttl-seconds" json:"ttl-seconds"`
+	// RefreshBeforeSeconds starts a new harvest before the current ticket expires.
+	RefreshBeforeSeconds int `yaml:"refresh-before-seconds" json:"refresh-before-seconds"`
+	// HarvestProxyURL is the dedicated egress proxy used only by harvest probes.
+	// Supported schemes are http, https, socks5, socks5h, and direct/none.
+	HarvestProxyURL string `yaml:"harvest-proxy-url" json:"harvest-proxy-url"`
+	// HarvestProbeIntervalSeconds controls the delay between background scans.
+	HarvestProbeIntervalSeconds int `yaml:"harvest-probe-interval-seconds" json:"harvest-probe-interval-seconds"`
+	// HarvestAttemptTimeoutSeconds bounds one probe, including proxy setup.
+	HarvestAttemptTimeoutSeconds int `yaml:"harvest-attempt-timeout-seconds" json:"harvest-attempt-timeout-seconds"`
+	// FailClosed rejects eligible production requests when no valid ticket is
+	// available. The default is false so enabling harvesting cannot make an
+	// account unavailable while the harvester is warming up.
+	FailClosed bool `yaml:"fail-closed" json:"fail-closed"`
+	// Models lists exact outbound model names that require a ticket. Empty uses
+	// the current ChatGPT Codex defaults.
+	Models []string `yaml:"models" json:"models"`
 }
 
 // TLSConfig holds HTTPS server settings.

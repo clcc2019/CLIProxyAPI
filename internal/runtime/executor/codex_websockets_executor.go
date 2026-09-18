@@ -288,16 +288,18 @@ func (s *codexWebsocketSession) setTurnStateScope(scope string) {
 	s.turnState.Store("")
 }
 
-func (s *codexWebsocketSession) applyTurnStateHeader(headers http.Header) {
+func (s *codexWebsocketSession) applyTurnStateHeader(headers http.Header) bool {
 	if s == nil || headers == nil {
-		return
+		return false
 	}
 	if strings.TrimSpace(headers.Get(codexHeaderTurnState)) != "" {
-		return
+		return false
 	}
 	if state := s.currentTurnState(); state != "" {
 		headers.Set(codexHeaderTurnState, state)
+		return true
 	}
+	return false
 }
 
 func (s *codexWebsocketSession) rememberTurnStateHeader(headers http.Header) {
@@ -1568,6 +1570,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		authID:             authID,
 		executionSessionID: executionSessionID,
 	}
+	sessionTurnStateApplied := false
 	if prepared.executionSessionID != "" {
 		_, authPrincipal := cliproxyauth.CredentialPrincipal(auth)
 		prepared.reuseKey = codexWebsocketReusableKeyFromParts(
@@ -1591,8 +1594,18 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 			prepared.httpFallback = prepared.sess.httpFallbackActive()
 			if !prepared.httpFallback {
 				prepared.sess.setTurnStateScope(turnStateScope)
-				prepared.sess.applyTurnStateHeader(prepared.wsHeaders)
+				sessionTurnStateApplied = prepared.sess.applyTurnStateHeader(prepared.wsHeaders)
 			}
+		}
+	}
+	if !prepared.httpFallback && e.CodexExecutor != nil && e.CodexExecutor.turnStateTickets != nil && codexTurnStateTicketRequestURLAllowed(httpURL) {
+		model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+		if model == "" {
+			model = baseModel
+		}
+		if errTicket := e.CodexExecutor.turnStateTickets.apply(ctx, auth, model, prepared.wsHeaders, !sessionTurnStateApplied); errTicket != nil {
+			prepared.unlockSession()
+			return nil, errTicket
 		}
 	}
 

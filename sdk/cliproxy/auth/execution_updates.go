@@ -114,6 +114,9 @@ func mergeRateLimitSnapshots(auth *Auth, snapshots []RateLimitSnapshot, now time
 			auth.RateLimits = make(map[string]RateLimitSnapshot, len(snapshots))
 		}
 		current, exists := auth.RateLimits[key]
+		if exists {
+			snapshot = mergeRateLimitSnapshot(current, snapshot)
+		}
 		if exists && rateLimitSnapshotsEqual(current, snapshot) {
 			continue
 		}
@@ -121,6 +124,70 @@ func mergeRateLimitSnapshots(auth *Auth, snapshots []RateLimitSnapshot, now time
 		changed = true
 	}
 	return changed
+}
+
+// mergeRateLimitSnapshot keeps fields from the last complete upstream
+// response when a later response is partial. Codex may omit credits or one of
+// the windows in an otherwise successful usage response; replacing the whole
+// snapshot would make the management list lose previously observed quota.
+func mergeRateLimitSnapshot(current, incoming RateLimitSnapshot) RateLimitSnapshot {
+	merged := cloneRateLimitSnapshot(incoming)
+	if merged.LimitID == "" {
+		merged.LimitID = current.LimitID
+	}
+	if merged.LimitName == "" {
+		merged.LimitName = current.LimitName
+	}
+	if merged.PlanType == "" {
+		merged.PlanType = current.PlanType
+	}
+	if merged.RateLimitReachedType == "" {
+		merged.RateLimitReachedType = current.RateLimitReachedType
+	}
+	merged.Primary = mergeRateLimitWindow(current.Primary, incoming.Primary)
+	merged.Secondary = mergeRateLimitWindow(current.Secondary, incoming.Secondary)
+	if incoming.Credits == nil {
+		merged.Credits = cloneRateLimitSnapshot(current).Credits
+	}
+	return merged
+}
+
+func mergeRateLimitWindow(current, incoming *RateLimitWindow) *RateLimitWindow {
+	if incoming == nil {
+		if current == nil {
+			return nil
+		}
+		return cloneRateLimitWindow(current)
+	}
+	merged := cloneRateLimitWindow(incoming)
+	if current == nil {
+		return merged
+	}
+	if merged.WindowMinutes == nil && current.WindowMinutes != nil {
+		value := *current.WindowMinutes
+		merged.WindowMinutes = &value
+	}
+	if merged.ResetsAt == nil && current.ResetsAt != nil {
+		value := *current.ResetsAt
+		merged.ResetsAt = &value
+	}
+	return merged
+}
+
+func cloneRateLimitWindow(window *RateLimitWindow) *RateLimitWindow {
+	if window == nil {
+		return nil
+	}
+	clone := *window
+	if window.WindowMinutes != nil {
+		value := *window.WindowMinutes
+		clone.WindowMinutes = &value
+	}
+	if window.ResetsAt != nil {
+		value := *window.ResetsAt
+		clone.ResetsAt = &value
+	}
+	return &clone
 }
 
 func normalizeRateLimitID(value string) string {

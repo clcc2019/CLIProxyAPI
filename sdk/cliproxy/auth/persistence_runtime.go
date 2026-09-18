@@ -51,6 +51,11 @@ func preserveRuntimeState(existing, auth *Auth) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = cloneRecentRequestRing(existing.recentRequests)
+	// Auth file watcher updates and OAuth refreshes carry a new credential
+	// snapshot that normally has no upstream quota data. Keep the latest
+	// rate-limit observations from the manager so a file update cannot erase
+	// values that were just written to memory/Redis.
+	auth.RateLimits = preserveRateLimitSnapshots(existing.RateLimits, auth.RateLimits)
 	// Request-time auth preparation works from an execution snapshot and calls
 	// Update when it has filled in metadata. That snapshot can predate a quota
 	// cooldown written by a concurrent usage probe. Preserve an active auth-wide
@@ -67,6 +72,33 @@ func preserveRuntimeState(existing, auth *Auth) {
 			auth.UpdatedAt = existing.UpdatedAt
 		}
 	}
+}
+
+func preserveRateLimitSnapshots(existing, replacement map[string]RateLimitSnapshot) map[string]RateLimitSnapshot {
+	if len(existing) == 0 {
+		return cloneRateLimitSnapshots(replacement)
+	}
+	merged := cloneRateLimitSnapshots(replacement)
+	if merged == nil {
+		merged = make(map[string]RateLimitSnapshot, len(existing))
+	}
+	for key, previous := range existing {
+		current, ok := merged[key]
+		if !ok || !rateLimitSnapshotHasData(current) {
+			merged[key] = cloneRateLimitSnapshot(previous)
+			continue
+		}
+		if current.UpdatedAt.IsZero() || (!previous.UpdatedAt.IsZero() && previous.UpdatedAt.After(current.UpdatedAt)) {
+			mergedSnapshot := mergeRateLimitSnapshot(current, previous)
+			if !previous.UpdatedAt.IsZero() {
+				mergedSnapshot.UpdatedAt = previous.UpdatedAt
+			}
+			merged[key] = mergedSnapshot
+			continue
+		}
+		merged[key] = mergeRateLimitSnapshot(previous, current)
+	}
+	return merged
 }
 
 var refreshPreservedMetadataKeys = []string{

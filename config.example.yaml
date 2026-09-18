@@ -221,6 +221,27 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # Optional ChatGPT OAuth x-codex-turn-state ticket harvesting.
+  # Disabled by default. Harvest probes use a dedicated egress proxy; production
+  # requests continue to use each auth's normal proxy. Tickets stay in memory
+  # and are scoped to one auth file plus one exact outbound model.
+  # openai-codex-ticket:
+  #   enabled: true
+  #   # Empty means all eligible Codex OAuth files; otherwise match auth ID,
+  #   # full auth file path, or auth file basename.
+  #   auth-files:
+  #     - codex-primary.json
+  #     - codex-secondary.json
+  #   target-length: 292
+  #   ttl-seconds: 3600
+  #   refresh-before-seconds: 600
+  #   harvest-proxy-url: "socks5h://user:password@127.0.0.1:1080"
+  #   harvest-probe-interval-seconds: 6
+  #   harvest-attempt-timeout-seconds: 25
+  #   fail-closed: false
+  #   models:
+  #     - gpt-6-astra
+  #     - gpt-5.6-sol
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

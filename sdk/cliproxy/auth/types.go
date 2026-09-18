@@ -657,8 +657,9 @@ func (a *Auth) cloneSnapshotBase() Auth {
 	return a.cloneSnapshotBaseWithRateLimits(true)
 }
 
-// cloneSnapshotBaseWithoutRateLimits omits runtime quota windows while keeping
-// the small credits projection used by management list entries.
+// cloneSnapshotBaseWithoutRateLimits omits runtime quota windows from the
+// general snapshot. Management summaries add back the small, non-sensitive
+// quota projection needed by the auth-file list.
 func (a *Auth) cloneSnapshotBaseWithoutRateLimits() Auth {
 	return a.cloneSnapshotBaseWithRateLimits(false)
 }
@@ -784,27 +785,7 @@ func cloneManagementSummaryRateLimits(src map[string]RateLimitSnapshot) map[stri
 	if len(src) == 0 {
 		return nil
 	}
-	copyCredits := func(key string, snapshot RateLimitSnapshot) map[string]RateLimitSnapshot {
-		if snapshot.Credits == nil {
-			return nil
-		}
-		return map[string]RateLimitSnapshot{key: {
-			LimitID:   snapshot.LimitID,
-			Credits:   cloneRateLimitSnapshot(snapshot).Credits,
-			UpdatedAt: snapshot.UpdatedAt,
-		}}
-	}
-	if snapshot, ok := src["codex"]; ok {
-		if projected := copyCredits("codex", snapshot); projected != nil {
-			return projected
-		}
-	}
-	for key, snapshot := range src {
-		if projected := copyCredits(key, snapshot); projected != nil {
-			return projected
-		}
-	}
-	return nil
+	return cloneRateLimitSnapshots(src)
 }
 
 func cloneRateLimitSnapshot(snapshot RateLimitSnapshot) RateLimitSnapshot {

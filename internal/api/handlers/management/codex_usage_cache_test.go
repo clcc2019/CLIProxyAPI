@@ -265,6 +265,51 @@ func TestFetchCodexUsageWithCacheIsolatesSingleflightPayloads(t *testing.T) {
 	}
 }
 
+func TestFetchCodexUsageWithCacheHydratesManagerRateLimits(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-cache.json",
+		FileName: "codex-cache.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "cache-token",
+			"account_id":   "acct-cache",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	h := &Handler{authManager: manager, cfg: &config.Config{}}
+	key := h.codexUsageCacheKey(auth)
+	h.codexUsageHandlerCache().store(key, &codexUsageCacheEntry{
+		Payload: gin.H{
+			"rate_limit": gin.H{
+				"primary_window": gin.H{"used_percent": 18.5, "limit_window_seconds": 18000},
+			},
+			"credits": gin.H{"has_credits": true, "balance": "6"},
+		},
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+
+	payload, status, err := h.fetchCodexUsageWithCache(context.Background(), auth, codexUsageRequestOptions{})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("cached usage = status %d err %v payload %#v", status, err, payload)
+	}
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("cached usage auth missing from manager")
+	}
+	snapshot := updated.RateLimits["codex"]
+	if snapshot.Primary == nil || snapshot.Primary.UsedPercent != 18.5 {
+		t.Fatalf("cached primary quota = %#v, want 18.5", snapshot.Primary)
+	}
+	if snapshot.Credits == nil || snapshot.Credits.Balance != "6" {
+		t.Fatalf("cached credits = %#v, want balance 6", snapshot.Credits)
+	}
+}
+
 func TestCodexUsageCacheKeyPreservesCaseSensitiveAuthIdentity(t *testing.T) {
 	h := &Handler{}
 	upper := h.codexUsageCacheKey(&coreauth.Auth{ID: "Auth-A", FileName: "Codex.json"})
