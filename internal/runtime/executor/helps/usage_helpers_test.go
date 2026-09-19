@@ -74,6 +74,47 @@ func TestUsageReporterCodexResponseMetadataKeepsSentModel(t *testing.T) {
 	}
 }
 
+func TestUsageReporterCaptureResponseModelSupportsProviderShapes(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "openai responses", payload: `{"response":{"model":"gpt-5.5"}}`, want: "gpt-5.5"},
+		{name: "anthropic", payload: `{"message":{"model":"claude-sonnet-4-5"}}`, want: "claude-sonnet-4-5"},
+		{name: "gemini", payload: `{"modelVersion":"gemini-2.5-pro"}`, want: "gemini-2.5-pro"},
+		{name: "sse", payload: `data: {"model":"gpt-5.4"}`, want: "gpt-5.4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reporter := NewUsageReporter(context.Background(), "test", "requested", nil)
+			reporter.CaptureResponseModel([]byte(tt.payload))
+			if got := reporter.buildRecord(usage.Detail{}, false).ResponseModel; got != tt.want {
+				t.Fatalf("response model = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUsageReporterCaptureResponseModelPrefersTerminalAndTracksConflict(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "requested", nil)
+	reporter.CaptureResponseModel([]byte(`{"model":"gpt-5.6-sol"}`))
+	reporter.CaptureResponseModel([]byte(`{"model":"gpt-5.6-terra"}`))
+	reporter.CaptureResponseModel([]byte(`{"type":"response.completed","response":{"model":"gpt-5.6-luna"}}`))
+	reporter.CaptureResponseModel([]byte(`{"model":"gpt-5.6-ignored"}`))
+
+	record := reporter.buildRecord(usage.Detail{}, false)
+	if record.ResponseModel != "gpt-5.6-luna" {
+		t.Fatalf("response model = %q, want terminal model", record.ResponseModel)
+	}
+	if !record.ResponseModelConflict {
+		t.Fatal("response model conflict = false, want true")
+	}
+	if record.ModelMappingChain != "requested→requested→gpt-5.6-luna" && record.ModelMappingChain != "requested→gpt-5.6-luna" {
+		t.Fatalf("mapping chain = %q", record.ModelMappingChain)
+	}
+}
+
 func TestParseOpenAIUsageResponses(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7,"cache_creation_tokens":3},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail := ParseOpenAIUsage(data)

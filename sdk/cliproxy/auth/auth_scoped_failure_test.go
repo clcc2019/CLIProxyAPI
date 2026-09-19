@@ -66,6 +66,20 @@ func TestUsageLimit429IsClassifiedAsAuthScopedCredentialFailover(t *testing.T) {
 	}
 }
 
+func TestCodexChatGPTUnsupportedModelRequestsCredentialFailover(t *testing.T) {
+	err := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+	}
+
+	if isAuthScopedFailure(err) {
+		t.Fatal("model support rejection should remain model-scoped")
+	}
+	if !isCredentialFailoverFailure(err) {
+		t.Fatal("model support rejection should request credential failover")
+	}
+}
+
 // TestMarkResult_AuthScoped429_SuspendsEntireAuth verifies that when an
 // executor returns an auth-scoped failure (i.e., OAuth's shared-bucket
 // AGENTIC_REQUEST 429), the conductor suspends the whole auth so session

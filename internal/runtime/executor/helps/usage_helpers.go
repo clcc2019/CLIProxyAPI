@@ -22,29 +22,31 @@ import (
 )
 
 type UsageReporter struct {
-	provider             string
-	executorType         string
-	model                string
-	alias                string
-	serverModel          string
-	reasoningIncluded    bool
-	authID               string
-	authIndex            string
-	authType             string
-	apiKey               string
-	source               string
-	modelReasoningEffort string
-	reasoning            string
-	serviceTier          string
-	stream               bool
-	sessionID            string
-	parentSessionID      string
-	requestedAt          time.Time
-	ttftMu               sync.RWMutex
-	ttft                 time.Duration
-	ttftStart            time.Time
-	ttftSet              bool
-	once                 sync.Once
+	provider              string
+	executorType          string
+	model                 string
+	alias                 string
+	serverModel           string
+	responseModelTerminal bool
+	responseModelConflict bool
+	reasoningIncluded     bool
+	authID                string
+	authIndex             string
+	authType              string
+	apiKey                string
+	source                string
+	modelReasoningEffort  string
+	reasoning             string
+	serviceTier           string
+	stream                bool
+	sessionID             string
+	parentSessionID       string
+	requestedAt           time.Time
+	ttftMu                sync.RWMutex
+	ttft                  time.Duration
+	ttftStart             time.Time
+	ttftSet               bool
+	once                  sync.Once
 }
 
 type usageExecutor interface {
@@ -131,10 +133,84 @@ func (r *UsageReporter) SetCodexResponseMetadata(serverModel string, reasoningIn
 		return
 	}
 	if serverModel = strings.TrimSpace(serverModel); serverModel != "" {
+		serverModel = truncateObservedModel(serverModel, 200)
+		if r.serverModel != "" && !strings.EqualFold(r.serverModel, serverModel) {
+			r.responseModelConflict = true
+		}
 		r.serverModel = serverModel
 	}
 	if reasoningIncluded {
 		r.reasoningIncluded = true
+	}
+}
+
+// CaptureResponseModel records the model declared by an upstream response.
+// It accepts OpenAI-compatible, Anthropic, Gemini, and SSE data payloads.
+func (r *UsageReporter) CaptureResponseModel(payload []byte) {
+	if r == nil || len(payload) == 0 {
+		return
+	}
+	payload = bytes.TrimSpace(payload)
+	if bytes.HasPrefix(payload, []byte("data:")) {
+		payload = bytes.TrimSpace(payload[len("data:"):])
+	}
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !gjson.ValidBytes(payload) {
+		return
+	}
+	model := ""
+	modelPath := ""
+	for _, path := range []string{
+		"response.model", "message.model", "model", "modelVersion",
+		"response.modelVersion", "response.response.modelVersion",
+	} {
+		model = strings.TrimSpace(gjson.GetBytes(payload, path).String())
+		if model != "" {
+			modelPath = path
+			break
+		}
+	}
+	if model == "" {
+		return
+	}
+	model = truncateObservedModel(model, 200)
+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	terminal := strings.Contains(modelPath, "modelVersion") || eventType == "response.completed" || eventType == "response.done" || eventType == "response.failed" || eventType == "response.incomplete" || eventType == "response.cancelled" || eventType == "response.canceled"
+	if r.responseModelTerminal && !terminal {
+		return
+	}
+	if r.serverModel != "" && !strings.EqualFold(r.serverModel, model) {
+		r.responseModelConflict = true
+	}
+	if terminal {
+		r.responseModelTerminal = true
+		r.serverModel = model
+		return
+	}
+	if r.serverModel == "" {
+		r.serverModel = model
+	}
+}
+
+func truncateObservedModel(model string, maxRunes int) string {
+	model = strings.TrimSpace(model)
+	if model == "" || maxRunes <= 0 {
+		return model
+	}
+	runes := []rune(model)
+	if len(runes) <= maxRunes {
+		return model
+	}
+	return string(runes[:maxRunes])
+}
+
+// SetUpstreamModel updates the model actually sent to the provider after any
+// provider-specific normalization (for example, stripping a Kimi prefix).
+func (r *UsageReporter) SetUpstreamModel(model string) {
+	if r == nil {
+		return
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		r.model = model
 	}
 }
 
@@ -381,35 +457,66 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, ErrorMessage: usageErrorMessage(err)}
 	}
 	sentModel := strings.TrimSpace(model)
-	return usage.Record{
-		Provider:             r.provider,
-		ExecutorType:         r.executorType,
-		Model:                sentModel,
-		Alias:                r.alias,
-		RequestedModel:       r.alias,
-		SessionID:            r.sessionID,
-		ParentSessionID:      r.parentSessionID,
-		ResponseModel:        r.serverModel,
-		ReasoningIncluded:    r.reasoningIncluded,
-		ModelReasoningEffort: r.modelReasoningEffort,
-		Source:               r.source,
-		APIKey:               r.apiKey,
-		AuthID:               r.authID,
-		AuthIndex:            r.authIndex,
-		AuthType:             r.authType,
-		ReasoningEffort:      r.reasoning,
-		ServiceTier:          r.serviceTier,
-		RequestServiceTier:   r.serviceTier,
-		ResponseServiceTier:  strings.TrimSpace(detail.ResponseServiceTier),
-		Stream:               r.stream,
-		RequestedAt:          r.requestedAt,
-		Latency:              r.latency(),
-		TTFT:                 r.ttftDuration(),
-		Failed:               failed,
-		Fail:                 fail,
-		ErrorMessage:         usageErrorMessage(err),
-		Detail:               detail,
+	requestedModel := strings.TrimSpace(r.alias)
+	responseModel := strings.TrimSpace(r.serverModel)
+	var responseModelMismatch *bool
+	if sentModel != "" && responseModel != "" {
+		mismatch := !strings.EqualFold(sentModel, responseModel)
+		responseModelMismatch = &mismatch
 	}
+	return usage.Record{
+		Provider:                 r.provider,
+		ExecutorType:             r.executorType,
+		Model:                    sentModel,
+		Alias:                    r.alias,
+		RequestedModel:           r.alias,
+		SessionID:                r.sessionID,
+		ParentSessionID:          r.parentSessionID,
+		ResponseModel:            r.serverModel,
+		ModelMappingChain:        buildModelMappingChain(requestedModel, sentModel, responseModel),
+		ResponseModelMismatch:    responseModelMismatch,
+		ResponseModelConflict:    r.responseModelConflict,
+		ReasoningIncluded:        r.reasoningIncluded,
+		ModelReasoningEffort:     r.modelReasoningEffort,
+		RequestedReasoningEffort: r.modelReasoningEffort,
+		Source:                   r.source,
+		APIKey:                   r.apiKey,
+		AuthID:                   r.authID,
+		AuthIndex:                r.authIndex,
+		AuthType:                 r.authType,
+		ReasoningEffort:          r.reasoning,
+		UpstreamReasoningEffort:  r.reasoning,
+		ServiceTier:              r.serviceTier,
+		RequestServiceTier:       r.serviceTier,
+		RequestedServiceTier:     r.serviceTier,
+		ResponseServiceTier:      strings.TrimSpace(detail.ResponseServiceTier),
+		Stream:                   r.stream,
+		RequestedAt:              r.requestedAt,
+		Latency:                  r.latency(),
+		TTFT:                     r.ttftDuration(),
+		Failed:                   failed,
+		Fail:                     fail,
+		ErrorMessage:             usageErrorMessage(err),
+		Detail:                   detail,
+	}
+}
+
+func buildModelMappingChain(models ...string) string {
+	chain := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		if len(chain) > 0 && strings.EqualFold(chain[len(chain)-1], model) {
+			continue
+		}
+		chain = append(chain, model)
+	}
+	if len(chain) < 2 {
+		return ""
+	}
+	return strings.Join(chain, "→")
 }
 
 func extractServiceTierFromPayload(payload []byte) string {

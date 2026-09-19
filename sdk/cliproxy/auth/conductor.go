@@ -754,7 +754,7 @@ func (m *Manager) globalAutoRefreshEnabled() bool {
 }
 
 func (m *Manager) authAutoRefreshEnabled(auth *Auth) bool {
-	if auth == nil {
+	if auth == nil || auth.IsDisabled() {
 		return false
 	}
 	if m.globalAutoRefreshEnabled() {

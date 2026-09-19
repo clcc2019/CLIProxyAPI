@@ -24,6 +24,30 @@ var detailRetentionLimit atomic.Int64
 
 const aggregateRecordRetentionWindow = 7 * 24 * time.Hour
 
+func modelWasDowngraded(record coreusage.Record) bool {
+	requestedModel := strings.TrimSpace(record.Model)
+	responseModel := strings.TrimSpace(record.ResponseModel)
+	if requestedModel == "" || responseModel == "" || strings.EqualFold(requestedModel, responseModel) {
+		return false
+	}
+
+	return true
+}
+
+func responseModelMismatch(record coreusage.Record) *bool {
+	if explicit := record.ResponseModelMismatch; explicit != nil {
+		value := *explicit
+		return &value
+	}
+	upstreamModel := strings.TrimSpace(record.Model)
+	responseModel := strings.TrimSpace(record.ResponseModel)
+	if upstreamModel == "" || responseModel == "" {
+		return nil
+	}
+	value := !strings.EqualFold(upstreamModel, responseModel)
+	return &value
+}
+
 func init() {
 	statisticsEnabled.Store(true)
 	detailRetentionLimit.Store(100)
@@ -166,18 +190,30 @@ type usageDayKey struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp            time.Time  `json:"timestamp"`
-	APIKey               string     `json:"api_key,omitempty"`
-	Endpoint             string     `json:"endpoint,omitempty"`
-	ClientIP             string     `json:"client_ip,omitempty"`
-	LatencyMs            int64      `json:"latency_ms"`
-	TTFTMs               float64    `json:"ttft_ms,omitempty"`
-	Source               string     `json:"source"`
-	AuthIndex            string     `json:"auth_index"`
-	ModelReasoningEffort string     `json:"model_reasoning_effort,omitempty"`
-	Tokens               TokenStats `json:"tokens"`
-	Failed               bool       `json:"failed"`
-	ErrorMessage         string     `json:"error_message,omitempty"`
+	RequestedModel           string     `json:"requested_model,omitempty"`
+	UpstreamModel            string     `json:"upstream_model,omitempty"`
+	ResponseModel            string     `json:"response_model,omitempty"`
+	ModelDowngraded          bool       `json:"model_downgraded,omitempty"`
+	Timestamp                time.Time  `json:"timestamp"`
+	APIKey                   string     `json:"api_key,omitempty"`
+	Endpoint                 string     `json:"endpoint,omitempty"`
+	ClientIP                 string     `json:"client_ip,omitempty"`
+	LatencyMs                int64      `json:"latency_ms"`
+	TTFTMs                   float64    `json:"ttft_ms,omitempty"`
+	Source                   string     `json:"source"`
+	AuthIndex                string     `json:"auth_index"`
+	ModelReasoningEffort     string     `json:"model_reasoning_effort,omitempty"`
+	RequestedReasoningEffort string     `json:"requested_reasoning_effort,omitempty"`
+	UpstreamReasoningEffort  string     `json:"upstream_reasoning_effort,omitempty"`
+	RequestedServiceTier     string     `json:"requested_service_tier,omitempty"`
+	UpstreamServiceTier      string     `json:"upstream_service_tier,omitempty"`
+	ResponseServiceTier      string     `json:"response_service_tier,omitempty"`
+	ModelMappingChain        string     `json:"model_mapping_chain,omitempty"`
+	ResponseModelMismatch    *bool      `json:"response_model_mismatch,omitempty"`
+	ResponseModelConflict    bool       `json:"response_model_conflict,omitempty"`
+	Tokens                   TokenStats `json:"tokens"`
+	Failed                   bool       `json:"failed"`
+	ErrorMessage             string     `json:"error_message,omitempty"`
 	// Attempts lists the credentials that failed before this request settled.
 	// It is empty for the common single-attempt case, and only ever populated
 	// on failover, so it costs nothing on the happy path. Without it the
@@ -319,20 +355,32 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	attempts, attemptsTruncated := internallogging.UpstreamAttempts(ctx)
 	requestDetail := RequestDetail{
-		Timestamp:            timestamp,
-		APIKey:               apiKey,
-		Endpoint:             strings.TrimSpace(internallogging.GetEndpoint(ctx)),
-		ClientIP:             strings.TrimSpace(internallogging.GetClientIP(ctx)),
-		LatencyMs:            normaliseLatency(record.Latency),
-		TTFTMs:               max(record.TTFT.Seconds()*1000, 0),
-		Source:               record.Source,
-		AuthIndex:            record.AuthIndex,
-		ModelReasoningEffort: strings.TrimSpace(record.ModelReasoningEffort),
-		Tokens:               detail,
-		Failed:               failed,
-		ErrorMessage:         normalizeRequestErrorMessage(record.ErrorMessage, failed),
-		Attempts:             attempts,
-		AttemptsTruncated:    attemptsTruncated,
+		RequestedModel:           firstNonEmptyUsageModel(record.RequestedModel, record.Alias),
+		UpstreamModel:            strings.TrimSpace(record.Model),
+		ResponseModel:            strings.TrimSpace(record.ResponseModel),
+		ModelDowngraded:          modelWasDowngraded(record),
+		Timestamp:                timestamp,
+		APIKey:                   apiKey,
+		Endpoint:                 strings.TrimSpace(internallogging.GetEndpoint(ctx)),
+		ClientIP:                 strings.TrimSpace(internallogging.GetClientIP(ctx)),
+		LatencyMs:                normaliseLatency(record.Latency),
+		TTFTMs:                   max(record.TTFT.Seconds()*1000, 0),
+		Source:                   record.Source,
+		AuthIndex:                record.AuthIndex,
+		ModelReasoningEffort:     effectiveModelReasoningEffort(record),
+		RequestedReasoningEffort: firstNonEmptyUsageModel(record.RequestedReasoningEffort, record.ModelReasoningEffort),
+		UpstreamReasoningEffort:  firstNonEmptyUsageModel(record.UpstreamReasoningEffort, record.ReasoningEffort),
+		RequestedServiceTier:     firstNonEmptyUsageModel(record.RequestedServiceTier, record.RequestServiceTier, record.ServiceTier),
+		UpstreamServiceTier:      strings.TrimSpace(record.UpstreamServiceTier),
+		ResponseServiceTier:      strings.TrimSpace(record.ResponseServiceTier),
+		ModelMappingChain:        usageModelMappingChain(record),
+		ResponseModelMismatch:    responseModelMismatch(record),
+		ResponseModelConflict:    record.ResponseModelConflict,
+		Tokens:                   detail,
+		Failed:                   failed,
+		ErrorMessage:             normalizeRequestErrorMessage(record.ErrorMessage, failed),
+		Attempts:                 attempts,
+		AttemptsTruncated:        attemptsTruncated,
 	}
 	s.updateAPIStats(stats, modelName, requestDetail)
 	s.appendAggregateRecord(statsKey, modelName, requestDetail)
@@ -341,6 +389,49 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+}
+
+func firstNonEmptyUsageModel(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func usageModelMappingChain(record coreusage.Record) string {
+	if chain := strings.TrimSpace(record.ModelMappingChain); chain != "" {
+		return chain
+	}
+	models := []string{
+		firstNonEmptyUsageModel(record.RequestedModel, record.Alias),
+		strings.TrimSpace(record.Model),
+		strings.TrimSpace(record.ResponseModel),
+	}
+	chain := make([]string, 0, len(models))
+	for _, model := range models {
+		if model == "" || (len(chain) > 0 && strings.EqualFold(chain[len(chain)-1], model)) {
+			continue
+		}
+		chain = append(chain, model)
+	}
+	if len(chain) < 2 {
+		return ""
+	}
+	return strings.Join(chain, "→")
+}
+
+// effectiveModelReasoningEffort returns the effort that was actually sent to
+// the upstream provider. ReasoningEffort is populated after request
+// translation (including OAuth model-alias overrides), while
+// ModelReasoningEffort preserves the client-requested value for fallback and
+// compatibility with records produced before translation metadata existed.
+func effectiveModelReasoningEffort(record coreusage.Record) string {
+	if effort := strings.TrimSpace(record.ReasoningEffort); effort != "" {
+		return effort
+	}
+	return strings.TrimSpace(record.ModelReasoningEffort)
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {

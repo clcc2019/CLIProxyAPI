@@ -57,7 +57,13 @@ func isCredentialFailoverFailure(err error) bool {
 			return true
 		}
 	}
-	return isUsageLimitExhaustedFailure(err)
+	// A model-support rejection is credential-scoped even when the executor
+	// does not wrap it in the marker interface. This is especially important
+	// for Codex's ChatGPT-account response (HTTP 400), because the request may
+	// carry selected-auth/session metadata. Treating it as a failover failure
+	// clears that binding so the next eligible auth file can be selected rather
+	// than retrying the same unsupported account.
+	return isModelSupportError(err) || isUsageLimitExhaustedFailure(err)
 }
 
 // isUsageLimitExhaustedFailure recognizes the quota-exhaustion response that

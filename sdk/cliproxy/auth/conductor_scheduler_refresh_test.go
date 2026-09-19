@@ -78,6 +78,9 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	if updated.LastError.Code != "unauthorized" {
 		t.Fatalf("LastError.Code = %q, want unauthorized", updated.LastError.Code)
 	}
+	if !updated.Disabled || updated.Status != StatusDisabled {
+		t.Fatalf("disabled/status = %v/%v, want true/%v", updated.Disabled, updated.Status, StatusDisabled)
+	}
 	if !updated.NextRefreshAfter.IsZero() {
 		t.Fatalf("NextRefreshAfter = %s, want zero for unauthorized refresh failure", updated.NextRefreshAfter)
 	}

@@ -1,15 +1,6 @@
 package auth
 
-import (
-	"errors"
-	"time"
-)
-
-// refreshPermanentBackoff parks an auth whose refresh token is permanently
-// invalid. The interval is long enough to stop the auto-refresh loop from
-// burning upstream quota but finite so operator intervention (re-login,
-// edit, or auth file replacement) is picked up on the next tick.
-const refreshPermanentBackoff = 24 * time.Hour
+import "errors"
 
 // PermanentAuthError marks an error returned from ProviderExecutor.Refresh as
 // unrecoverable without human intervention (revoked refresh token, rotated

@@ -509,6 +509,40 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	c.JSON(200, gin.H{"models": result})
 }
 
+// RefreshCodexTurnStateTicket forces an immediate ticket harvest for one Codex auth file.
+func (h *Handler) RefreshCodexTurnStateTicket(c *gin.Context) {
+	auth, status, message := h.resolveCodexUsageAuth(c)
+	if status != http.StatusOK {
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+	manager := h.authManagerSnapshot()
+	if manager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager unavailable"})
+		return
+	}
+	exec, ok := manager.Executor("codex")
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "codex executor unavailable"})
+		return
+	}
+	refresher, ok := exec.(interface {
+		RefreshTurnStateTicket(context.Context, *coreauth.Auth) error
+	})
+	if !ok {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "codex turn-state ticket refresh is unavailable"})
+		return
+	}
+	if err := refresher.RefreshTurnStateTicket(c.Request.Context(), auth); err != nil {
+		// Harvest failures are operational results, not management transport
+		// failures. Return a structured 200 response so reverse proxies do not
+		// replace the useful upstream diagnostic with a generic 502 page.
+		c.JSON(http.StatusOK, gin.H{"status": "error", "auth_file": auth.ID, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "auth_file": auth.ID})
+}
+
 // GetCodexUsage fetches Codex quota with the same ChatGPT backend flow used by
 // the official Codex client. Subscription expiry is not part of /wham/usage, so
 // locally known/JWT-derived subscription fields are merged into the response.

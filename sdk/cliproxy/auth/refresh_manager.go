@@ -304,6 +304,27 @@ func authRefreshSuppressed(auth *Auth) bool {
 	return auth == nil || auth.IsDisabled() || hasUnauthorizedAuthFailure(auth)
 }
 
+// markAuthRefreshFailureLocked records a refresh failure while m.mu is held.
+// Permanent refresh failures mean the credential cannot recover without a new
+// login, so disable the auth file itself. This keeps it out of routing and
+// prevents the background refresh loop from scheduling it again.
+func (m *Manager) markAuthRefreshFailureLocked(auth *Auth, refreshErrInfo *Error, permanent bool, now time.Time) {
+	if auth == nil {
+		return
+	}
+	auth.LastError = refreshErrInfo
+	auth.UpdatedAt = now
+	if permanent {
+		auth.Disabled = true
+		auth.Status = StatusDisabled
+		auth.Unavailable = true
+		auth.NextRefreshAfter = time.Time{}
+		auth.StatusMessage = "refresh token invalid — re-login required"
+		return
+	}
+	auth.NextRefreshAfter = now.Add(refreshFailureBackoff)
+}
+
 func authPreferredInterval(a *Auth) time.Duration {
 	if d := authConfiguredInterval(a); d > 0 {
 		return d

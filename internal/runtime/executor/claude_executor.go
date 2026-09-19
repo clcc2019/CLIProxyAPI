@@ -345,12 +345,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	if stream {
 		forEachResponseLine(data, func(line []byte) bool {
+			reporter.CaptureResponseModel(line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
 			return true
 		})
 	} else {
+		reporter.CaptureResponseModel(data)
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
 	// Reverse the OAuth tool name remap so the downstream client sees original names.
@@ -550,6 +552,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			streamCompleted := false
 			errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				reporter.CaptureResponseModel(line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					recordStreamUsage(detail)
 				}
@@ -580,6 +583,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		streamCompleted := false
 		errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.CaptureResponseModel(line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				recordStreamUsage(detail)
 			}

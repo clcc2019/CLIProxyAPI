@@ -183,6 +183,49 @@ func TestCodexTurnStateTicketProviderHarvestsAndInjects(t *testing.T) {
 	}
 }
 
+func TestCodexTurnStateTicketRefreshErrorOmitsProbeDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"error":"turn state unavailable"}`)
+	}))
+	defer server.Close()
+
+	previousURL := codexTurnStateTicketHarvestURL
+	codexTurnStateTicketHarvestURL = server.URL
+	t.Cleanup(func() { codexTurnStateTicketHarvestURL = previousURL })
+
+	cfg := &config.Config{Codex: config.CodexConfig{OpenAICodexTicket: testCodexTurnStateTicketConfig()}}
+	provider := newCodexTurnStateTicketProvider(cfg)
+	err := provider.refreshAuth(context.Background(), testCodexOAuthAuth("diagnostic-auth"))
+	if err == nil {
+		t.Fatal("refreshAuth() error = nil, want missing turn-state error")
+	}
+
+	message := err.Error()
+	want := "model gpt-ticket: harvest request failed: harvest response is HTTP 200 but missing " + codexHeaderTurnState
+	if message != want {
+		t.Fatalf("refreshAuth() error = %q, want %q", message, want)
+	}
+	for _, forbidden := range []string{
+		"diagnostic",
+		"request_method",
+		"request_url",
+		"request_headers",
+		"response_headers",
+		"response_body",
+		server.URL,
+		"Reply with exactly: pong",
+	} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("refreshAuth() error exposed probe details %q: %q", forbidden, message)
+		}
+	}
+	if strings.Contains(message, "oauth-token") {
+		t.Fatalf("refreshAuth() error exposed OAuth token: %q", message)
+	}
+}
+
 func TestCodexExecutorInjectsHarvestedTicketIntoOfficialHTTPResponses(t *testing.T) {
 	ticketCfg := testCodexTurnStateTicketConfig()
 	cfg := &config.Config{Codex: config.CodexConfig{OpenAICodexTicket: ticketCfg}}

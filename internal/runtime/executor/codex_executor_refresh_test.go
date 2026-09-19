@@ -10,6 +10,7 @@ import (
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -55,6 +56,24 @@ func TestCodexAuthServiceFallsBackToConfigProxyURL(t *testing.T) {
 
 	if first != second {
 		t.Fatal("expected empty auth proxy URLs to share the config proxy bucket")
+	}
+}
+
+func TestCodexAuthServiceUsesHarvestProxyOverride(t *testing.T) {
+	t.Parallel()
+
+	executor := NewCodexExecutor(&config.Config{
+		SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://business-proxy.example.com:8080"},
+	})
+	auth := &cliproxyauth.Auth{ProxyURL: "http://account-proxy.example.com:8080"}
+	ctx := helps.WithProxyOverride(context.Background(), "http://harvest-proxy.example.com:8080")
+
+	service := executor.codexAuthServiceWithContext(ctx, auth)
+	if service != executor.codexAuthServiceWithContext(ctx, auth) {
+		t.Fatal("expected harvest proxy override service to reuse its dedicated proxy bucket")
+	}
+	if service == executor.codexAuthService(auth) {
+		t.Fatal("harvest proxy override must not reuse account/business proxy service")
 	}
 }
 

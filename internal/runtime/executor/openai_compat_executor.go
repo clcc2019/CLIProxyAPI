@@ -121,6 +121,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	reporter.CaptureResponseModel(body)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -172,6 +173,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	reporter.CaptureResponseModel(body)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
 	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
@@ -355,6 +357,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatChunks(state openAICompatStream
 			if !bytes.HasPrefix(line, []byte("data:")) {
 				return nil
 			}
+			state.reporter.CaptureResponseModel(line)
 			if passthroughOpenAI {
 				payload := bytes.TrimSpace(line[5:])
 				if len(payload) == 0 {
@@ -433,6 +436,7 @@ func (e *OpenAICompatExecutor) streamOpenAICompatNativeChunks(ctx context.Contex
 			if len(payload) == 0 {
 				return nil
 			}
+			reporter.CaptureResponseModel(payload)
 			if bytes.Equal(payload, []byte("[DONE]")) {
 				streamCompleted = true
 				return errOpenAICompatStreamDone

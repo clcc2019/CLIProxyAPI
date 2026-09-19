@@ -12,6 +12,7 @@ import (
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	usageLimit := isCodexUsageLimitError(body)
+	modelUnsupported := isCodexModelUnsupportedError(body)
 	errCode := codexStatusCode(statusCode, body)
 	if errCode <= 0 {
 		errCode = http.StatusInternalServerError
@@ -21,10 +22,35 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 		err.authScopedFailure = true
 		err.credentialFailoverFailure = true
 	}
+	if modelUnsupported && (errCode == http.StatusBadRequest || errCode == http.StatusUnprocessableEntity) {
+		err.credentialFailoverFailure = true
+	}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+func isCodexModelUnsupportedError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	patterns := [...]string{
+		"model_not_supported",
+		"requested model is not supported",
+		"requested model is unsupported",
+		"model is not supported",
+		"model not supported",
+		"unsupported model",
+		"not available for your plan",
+		"not available for your account",
+	}
+	for _, pattern := range patterns {
+		if asciifold.ContainsBytes(errorBody, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {

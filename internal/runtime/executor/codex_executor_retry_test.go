@@ -154,6 +154,22 @@ func TestNewCodexStatusErrTreatsUsageLimitReachedAsAuthScopedFailover(t *testing
 	}
 }
 
+func TestNewCodexStatusErrTreatsChatGPTUnsupportedModelAsCredentialFailover(t *testing.T) {
+	body := []byte(`{"error":{"message":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."}}`)
+
+	err := newCodexStatusErr(http.StatusBadRequest, body)
+
+	if got := err.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	}
+	if err.IsAuthScopedFailure() {
+		t.Fatal("model support rejection should remain model-scoped")
+	}
+	if !err.IsCredentialFailoverFailure() {
+		t.Fatal("model support rejection should request credential failover")
+	}
+}
+
 func TestParseCodexWebsocketErrorInfersUsageLimitStatus(t *testing.T) {
 	payload := []byte(`{"type":"error","error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex.","resets_in_seconds":30}}`)
 

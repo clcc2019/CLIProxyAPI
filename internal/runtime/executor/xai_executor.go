@@ -175,6 +175,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			return true
 		}
 		eventData := bytes.TrimSpace(line[len(xaiDataTag):])
+		reporter.CaptureResponseModel(eventData)
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -376,6 +377,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			translatedLine := bytes.Clone(line)
 			if bytes.HasPrefix(line, xaiDataTag) {
 				eventData := bytes.TrimSpace(line[len(xaiDataTag):])
+				reporter.CaptureResponseModel(eventData)
 				switch gjson.GetBytes(eventData, "type").String() {
 				case "response.output_item.done":
 					xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)

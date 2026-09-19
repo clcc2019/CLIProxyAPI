@@ -100,6 +100,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	// Strip kimi- prefix for upstream API
 	upstreamModel := stripKimiPrefix(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
 	body, err = sjson.SetBytes(body, "model", upstreamModel)
 	if err != nil {
 		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
@@ -173,6 +174,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.CaptureResponseModel(data)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
@@ -296,6 +298,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		errRead := helps.ReadStreamLines(guardedBody, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			streamUsage.ObserveOpenAIStream(line)
+			reporter.CaptureResponseModel(line)
 			if isOpenAIStreamTerminalLine(line) {
 				streamCompleted = true
 			}

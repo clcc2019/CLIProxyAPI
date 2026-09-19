@@ -107,6 +107,48 @@ func TestManagerRefreshAuthOncePersistsRefreshErrorRuntimeState(t *testing.T) {
 	}
 }
 
+func TestManagerRefreshAuthOnceDisablesPermanentFailureAndSkipsDisabledAuth(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &autoRefreshTestExecutor{
+		provider: "oauth",
+		refreshFunc: func(auth *Auth) (*Auth, error) {
+			return nil, &Error{Code: "unauthorized", Message: "refresh token invalidated", HTTPStatus: http.StatusUnauthorized}
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "oauth-permanent-refresh-failure",
+		Provider: "oauth",
+		Status:   StatusActive,
+		Metadata: map[string]any{"type": "oauth", "refresh_token": "revoked"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	if _, err := manager.refreshAuthOnce(context.Background(), auth.ID); err == nil {
+		t.Fatal("expected permanent refresh error")
+	}
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth to remain registered")
+	}
+	if !updated.Disabled || updated.Status != StatusDisabled {
+		t.Fatalf("disabled/status = %v/%v, want true/%v", updated.Disabled, updated.Status, StatusDisabled)
+	}
+	if manager.authAutoRefreshEnabled(updated) {
+		t.Fatal("disabled auth should not be eligible for auto-refresh")
+	}
+
+	if _, err := manager.refreshAuthOnce(context.Background(), auth.ID); err != nil {
+		t.Fatalf("refreshing disabled auth returned error: %v", err)
+	}
+	if got := len(executor.refreshedIDs()); got != 1 {
+		t.Fatalf("refresh calls = %d, want 1 after disabled auth is skipped", got)
+	}
+}
+
 func TestManager_StartAutoRefresh_DisabledByDefault(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	executor := &autoRefreshTestExecutor{provider: "test"}

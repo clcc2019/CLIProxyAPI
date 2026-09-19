@@ -42,10 +42,32 @@ type Record struct {
 	Source               string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
+	// RequestedReasoningEffort is the client-visible thinking level before any
+	// model alias or provider mapping is applied.
+	RequestedReasoningEffort string
+	// UpstreamReasoningEffort is the thinking level actually forwarded upstream.
+	// ReasoningEffort remains the legacy alias for this value.
+	UpstreamReasoningEffort string
+	// ModelMappingChain records the model rewrite path, for example
+	// "public-alias→gpt-5.6-sol".
+	ModelMappingChain string
+	// ResponseModelMismatch is tri-state: nil means the upstream response did
+	// not declare a model; false means it declared a matching model; true means
+	// it declared a different model.
+	ResponseModelMismatch *bool
+	// ResponseModelConflict reports conflicting model declarations within one
+	// streamed response.
+	ResponseModelConflict bool
 	// ServiceTier stores the client-requested service tier for request event logs.
 	ServiceTier string
 	// RequestServiceTier explicitly aliases the client-requested service tier.
 	RequestServiceTier string
+	// RequestedServiceTier is the client-visible service tier before provider
+	// normalization.
+	RequestedServiceTier string
+	// UpstreamServiceTier is the tier actually sent to the upstream request.
+	// RequestServiceTier remains the legacy alias for this value when available.
+	UpstreamServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
 	Stream              bool

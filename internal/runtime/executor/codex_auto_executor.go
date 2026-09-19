@@ -66,6 +66,14 @@ func (e *CodexAutoExecutor) SetAuthManager(manager *cliproxyauth.Manager) {
 	tickets.setAuthManager(manager)
 }
 
+// RefreshTurnStateTicket forces an immediate Codex turn-state ticket harvest for one auth file.
+func (e *CodexAutoExecutor) RefreshTurnStateTicket(ctx context.Context, auth *cliproxyauth.Auth) error {
+	if e == nil || e.httpExec == nil || e.httpExec.turnStateTickets == nil {
+		return fmt.Errorf("codex turn-state ticket harvester is unavailable")
+	}
+	return e.httpExec.turnStateTickets.refreshAuth(ctx, auth)
+}
+
 func (e *CodexAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if e == nil || e.httpExec == nil {
 		return nil

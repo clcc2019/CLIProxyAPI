@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	codexHTTPMaxRequestRetries    = 4
-	codexHTTPMaxStreamReadRetries = 5
-	codexHTTPRetryBaseDelay       = 200 * time.Millisecond
-	codexHTTPRetryDrainLimit      = 64 << 10
+	codexHTTPMaxRequestRetries      = 4
+	codexHTTPMaxStreamReadRetries   = 5
+	codexHTTPRetryBaseDelay         = 200 * time.Millisecond
+	codexHTTPRetryDrainLimit        = 64 << 10
+	codexHTTPStatusTurnStateRefresh = 312
 )
 
 var codexHTTPRetryableTransportMarkers = []string{
@@ -45,6 +46,7 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 	encoding := strings.TrimSpace(prepared.httpReq.Header.Get("Content-Encoding"))
 	encodingIsZstd := codexHTTPEncodingIsZstd(encoding)
 	turnStateRetryUsed := false
+	ticketRefreshRetryUsed := false
 	for attempt := 0; ; attempt++ {
 		req, errBuild := codexHTTPRequestForAttempt(prepared, encoding, attempt)
 		if errBuild != nil {
@@ -64,6 +66,21 @@ func (e *CodexExecutor) doCodexHTTPRequest(ctx context.Context, auth *cliproxyau
 			}
 			helps.LogWithRequestID(ctx).Debugf("codex executor: retrying HTTP request without zstd after status=%d", statusCode)
 			continue
+		}
+		if err == nil && !ticketRefreshRetryUsed && httpResp != nil && httpResp.StatusCode == codexHTTPStatusTurnStateRefresh && prepared.httpReq != nil && strings.TrimSpace(prepared.httpReq.Header.Get(codexHeaderTurnState)) != "" && e.turnStateTickets != nil {
+			ticketRefreshRetryUsed = true
+			model := strings.TrimSpace(gjson.GetBytes(prepared.body, "model").String())
+			if model != "" {
+				if errRefresh := e.turnStateTickets.refreshModel(ctx, auth, model); errRefresh == nil {
+					if ticket := e.turnStateTickets.tickets.get(e.turnStateTickets.keyFor(auth, model), time.Now(), e.turnStateTickets.config().TargetLength); ticket != nil {
+						prepared.httpReq.Header.Set(codexHeaderTurnState, ticket.state)
+						if errClose := codexDrainAndCloseRetryResponse(httpResp); errClose != nil {
+							log.Debugf("codex executor: close 312 response: %v", errClose)
+						}
+						continue
+					}
+				}
+			}
 		}
 		if err == nil && !turnStateRetryUsed && (encoding == "" || encodingIsZstd) && codexShouldRetryHTTPResponseWithoutTurnState(httpResp, prepared) {
 			turnStateRetryUsed = true

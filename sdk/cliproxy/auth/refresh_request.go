@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"errors"
-	"net/http"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -97,20 +96,11 @@ func (m *Manager) coordinatedRefreshForRequest(ctx context.Context, auth *Auth) 
 			// next tick and apply the same treatment.
 			if isPermanentRefreshError(refreshErr) {
 				refreshErrInfo := refreshErrorFromError(refreshErr)
-				unauthorized := refreshErrInfo != nil && refreshErrInfo.StatusCode() == http.StatusUnauthorized
 				shouldPersist := false
 				m.mu.Lock()
 				if cur := m.auths[id]; !authRefreshSuppressed(cur) {
 					now := time.Now()
-					if unauthorized {
-						cur.NextRefreshAfter = time.Time{}
-					} else {
-						cur.NextRefreshAfter = now.Add(refreshPermanentBackoff)
-					}
-					cur.LastError = refreshErrInfo
-					cur.Status = StatusError
-					cur.Unavailable = true
-					cur.StatusMessage = "refresh token invalid — re-login required"
+					m.markAuthRefreshFailureLocked(cur, refreshErrInfo, true, now)
 					m.auths[id] = cur
 					shouldPersist = true
 					if m.scheduler != nil {
@@ -222,24 +212,17 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) (*Auth, error)
 		// failing state. Park it until an operator re-logs in.
 		permanent := isPermanentRefreshError(err)
 		refreshErrInfo := refreshErrorFromError(err)
-		unauthorized := refreshErrInfo != nil && refreshErrInfo.StatusCode() == http.StatusUnauthorized
 		shouldReschedule := false
 		shouldPersist := false
 		m.mu.Lock()
 		if current := m.auths[id]; !authRefreshSuppressed(current) {
 			if permanent {
-				if unauthorized {
-					current.NextRefreshAfter = time.Time{}
-				} else {
-					current.NextRefreshAfter = now.Add(refreshPermanentBackoff)
-				}
+				m.markAuthRefreshFailureLocked(current, refreshErrInfo, true, now)
+			} else {
+				m.markAuthRefreshFailureLocked(current, refreshErrInfo, false, now)
 				current.Status = StatusError
 				current.Unavailable = true
-				current.StatusMessage = "refresh token invalid — re-login required"
-			} else {
-				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			}
-			current.LastError = refreshErrInfo
 			m.auths[id] = current
 			shouldReschedule = true
 			shouldPersist = true

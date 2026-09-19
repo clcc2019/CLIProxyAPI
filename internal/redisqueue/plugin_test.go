@@ -69,6 +69,27 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginPayloadIncludesModelDowngrade(t *testing.T) {
+	withEnabledQueue(t, func() {
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:      "codex",
+			Model:         "gpt-5.6-sol",
+			ResponseModel: "gpt-5.5",
+			RequestedAt:   time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:  10,
+				OutputTokens: 20,
+				TotalTokens:  30,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "response_model", "gpt-5.5")
+		requireBoolField(t, payload, "model_downgraded", true)
+	})
+}
+
 func TestUsageQueuePluginNormalisesOpenAIReasoningAsOutputDetail(t *testing.T) {
 	withEnabledQueue(t, func() {
 		plugin := &usageQueuePlugin{}

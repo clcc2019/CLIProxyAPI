@@ -291,6 +291,58 @@ func TestGetDetailedUsageStatisticsReturnsDetails(t *testing.T) {
 	}
 }
 
+func TestGetDetailedUsageStatisticsIncludesModelDowngrade(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stats := usage.NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:       "codex",
+		APIKey:         "request-log-test",
+		Model:          "gpt-6-astra",
+		RequestedModel: "client/codex-alias",
+		ResponseModel:  "gpt-5.6-luna",
+		RequestedAt:    time.Date(2026, 4, 10, 13, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  11,
+			OutputTokens: 29,
+			TotalTokens:  40,
+		},
+	})
+
+	handler := &Handler{usageStats: stats}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/details?recent=1&compact=true", nil)
+
+	handler.GetDetailedUsageStatistics(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Usage usage.StatisticsSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	model := payload.Usage.APIs["request-log-test"].Models["gpt-6-astra"]
+	if got := len(model.Details); got != 1 {
+		t.Fatalf("details len = %d, want 1", got)
+	}
+	detail := model.Details[0]
+	if detail.ResponseModel != "gpt-5.6-luna" {
+		t.Fatalf("response_model = %q, want %q", detail.ResponseModel, "gpt-5.6-luna")
+	}
+	if detail.RequestedModel != "client/codex-alias" || detail.UpstreamModel != "gpt-6-astra" {
+		t.Fatalf("model audit fields = requested:%q upstream:%q", detail.RequestedModel, detail.UpstreamModel)
+	}
+	if !detail.ModelDowngraded {
+		t.Fatal("model_downgraded = false, want true")
+	}
+}
+
 func TestGetDetailedUsageStatisticsRecentReturnsGlobalRecentDetails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
