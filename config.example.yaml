@@ -221,10 +221,10 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
-  # Optional ChatGPT OAuth x-codex-turn-state ticket harvesting.
-  # Disabled by default. Harvest probes use a dedicated egress proxy; production
-  # requests continue to use each auth's normal proxy. Tickets stay in memory
-  # and are scoped to one auth file plus one exact outbound model.
+  # Optional ChatGPT OAuth x-codex-turn-state ticket acquisition for HTTP.
+  # Disabled by default. The first eligible request performs a bounded probe
+  # through the dedicated harvest-proxy-url; no background probes run. Tickets
+  # stay in memory and are scoped to one auth file.
   # openai-codex-ticket:
   #   enabled: true
   #   # Empty means all eligible Codex OAuth files; otherwise match auth ID,
@@ -235,13 +235,15 @@ codex:
   #   target-length: 292
   #   ttl-seconds: 3600
   #   refresh-before-seconds: 600
+  #   # Required for ticket probes. This proxy is independent from the
+  #   # auth/global proxy used by production requests. Use "direct" explicitly
+  #   # when a direct probe is intended.
   #   harvest-proxy-url: "socks5h://user:password@127.0.0.1:1080"
   #   harvest-probe-interval-seconds: 6
   #   harvest-attempt-timeout-seconds: 25
   #   fail-closed: false
-  #   # Kept for compatibility with older configurations. Harvest probes
-  #   # always use gpt-5.6-sol, and the ticket is injected into every request
-  #   # routed to the selected auth file.
+  #   # Normal requests probe their actual model;
+  #   # this list is used only by the explicit management refresh API.
   #   models:
   #     - gpt-6-astra
   #     - gpt-5.6-sol

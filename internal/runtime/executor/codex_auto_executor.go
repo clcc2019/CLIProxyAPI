@@ -34,12 +34,11 @@ func NewCodexAutoExecutor(cfg *config.Config) *CodexAutoExecutor {
 func NewCodexAutoExecutorWithResponseObserver(cfg *config.Config, observer CodexResponseObserver) *CodexAutoExecutor {
 	httpExec := NewCodexExecutorWithResponseObserver(cfg, observer)
 	wsExec := NewCodexWebsocketsExecutorWithResponseObserver(cfg, observer)
-	// HTTP and WebSocket transports must share the account/model ticket cache,
-	// otherwise a WebSocket-first auth would harvest the same ticket twice and
-	// could race its HTTP fallback with a different cache entry.
+	// The ticket provider is intentionally owned by the HTTP transport. The
+	// feature is not supported by WebSocket, so a WebSocket-first request must
+	// not acquire or consume an HTTP probe ticket.
 	tickets := newCodexTurnStateTicketProvider(cfg)
 	httpExec.turnStateTickets = tickets
-	wsExec.CodexExecutor.turnStateTickets = tickets
 	return &CodexAutoExecutor{httpExec: httpExec, wsExec: wsExec}
 }
 

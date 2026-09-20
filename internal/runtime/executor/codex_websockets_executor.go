@@ -1570,7 +1570,6 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		authID:             authID,
 		executionSessionID: executionSessionID,
 	}
-	sessionTurnStateApplied := false
 	if prepared.executionSessionID != "" {
 		_, authPrincipal := cliproxyauth.CredentialPrincipal(auth)
 		prepared.reuseKey = codexWebsocketReusableKeyFromParts(
@@ -1594,20 +1593,13 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 			prepared.httpFallback = prepared.sess.httpFallbackActive()
 			if !prepared.httpFallback {
 				prepared.sess.setTurnStateScope(turnStateScope)
-				sessionTurnStateApplied = prepared.sess.applyTurnStateHeader(prepared.wsHeaders)
+				prepared.sess.applyTurnStateHeader(prepared.wsHeaders)
 			}
 		}
 	}
-	if !prepared.httpFallback && e.CodexExecutor != nil && e.CodexExecutor.turnStateTickets != nil && codexTurnStateTicketRequestURLAllowed(httpURL) {
-		model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
-		if model == "" {
-			model = baseModel
-		}
-		if errTicket := e.CodexExecutor.turnStateTickets.apply(ctx, auth, model, prepared.wsHeaders, !sessionTurnStateApplied); errTicket != nil {
-			prepared.unlockSession()
-			return nil, errTicket
-		}
-	}
+	// Turn-state ticket acquisition/injection is HTTP-only. WebSocket sessions
+	// keep their existing in-session continuity behavior and never spend a
+	// probe or consume the HTTP ticket cache.
 
 	if !prepared.httpFallback && prepared.sess != nil {
 		if incrementalBody, ok := buildCodexIncrementalWebsocketRequestBody(prepared.sess, body, wsHeaders.Get("X-Codex-Turn-Metadata")); ok {

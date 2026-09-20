@@ -203,13 +203,17 @@ func (e *CodexExecutor) prepareCodexHTTPCallWithBaseModelAndFinalOptions(
 		// Stored Responses backends such as Azure rely on store +
 		// previous_response_id rather than ChatGPT Codex turn-state headers.
 		if !finalOpts.store {
-			sessionTurnStateApplied := e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
+			e.applyCodexHTTPTurnState(auth, executionSessionID, prepared.httpReq.Header)
 			if e.turnStateTickets != nil && codexTurnStateTicketRequestURLAllowed(url) {
 				model := strings.TrimSpace(gjson.GetBytes(prepared.body, "model").String())
 				if model == "" {
 					model = baseModel
 				}
-				if errTicket := e.turnStateTickets.apply(ctx, auth, model, prepared.httpReq.Header, !sessionTurnStateApplied); errTicket != nil {
+				// Once the optional account-scoped ticket is available it is the
+				// default state for HTTP requests, including replacing a caller or
+				// locally remembered state. If no ticket can be acquired, the
+				// existing continuity path remains untouched.
+				if errTicket := e.turnStateTickets.apply(ctx, auth, model, prepared.httpReq.Header, true); errTicket != nil {
 					return codexPreparedHTTPCall{}, errTicket
 				}
 			}

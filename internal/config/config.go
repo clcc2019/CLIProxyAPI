@@ -193,7 +193,7 @@ type CodexHeaderDefaults struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
-	// OpenAICodexTicket controls optional harvesting and injection of the
+	// OpenAICodexTicket controls optional acquisition and injection of the
 	// account/model-scoped x-codex-turn-state ticket used by ChatGPT Codex.
 	// Tickets are deliberately kept in the executor's memory only; they are
 	// short-lived upstream capabilities and must not be written to auth files.
@@ -201,10 +201,11 @@ type CodexConfig struct {
 }
 
 // CodexTurnStateTicketConfig controls ChatGPT OAuth x-codex-turn-state ticket
-// harvesting. Harvest requests use HarvestProxyURL, while production requests
-// keep using the auth/global proxy configured for the credential.
+// acquisition. Acquisition is demand-driven by an eligible HTTP request and
+// uses HarvestProxyURL, independent from the auth/global production proxy;
+// no background probes run.
 type CodexTurnStateTicketConfig struct {
-	// Enabled enables background ticket harvesting and request injection.
+	// Enabled enables HTTP ticket acquisition and request injection.
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// AuthFiles limits harvesting and injection to the listed auth IDs or auth
 	// file paths/basenames. Empty means every eligible Codex OAuth auth.
@@ -214,12 +215,14 @@ type CodexTurnStateTicketConfig struct {
 	TargetLength int `yaml:"target-length" json:"target-length"`
 	// TTLSeconds is the in-memory lifetime assigned to a harvested ticket.
 	TTLSeconds int `yaml:"ttl-seconds" json:"ttl-seconds"`
-	// RefreshBeforeSeconds starts a new harvest before the current ticket expires.
+	// RefreshBeforeSeconds is retained for config compatibility; an expired or
+	// near-expiry ticket is refreshed by the next eligible HTTP request.
 	RefreshBeforeSeconds int `yaml:"refresh-before-seconds" json:"refresh-before-seconds"`
-	// HarvestProxyURL is the dedicated egress proxy used only by harvest probes.
-	// Supported schemes are http, https, socks5, socks5h, and direct/none.
+	// HarvestProxyURL is the explicit, independent egress used only by ticket
+	// probes. Supported schemes are http, https, socks5, socks5h, and direct.
 	HarvestProxyURL string `yaml:"harvest-proxy-url" json:"harvest-proxy-url"`
-	// HarvestProbeIntervalSeconds controls the delay between background scans.
+	// HarvestProbeIntervalSeconds is retained for backward-compatible config
+	// parsing and is ignored because acquisition is request-driven.
 	HarvestProbeIntervalSeconds int `yaml:"harvest-probe-interval-seconds" json:"harvest-probe-interval-seconds"`
 	// HarvestAttemptTimeoutSeconds bounds one probe, including proxy setup.
 	HarvestAttemptTimeoutSeconds int `yaml:"harvest-attempt-timeout-seconds" json:"harvest-attempt-timeout-seconds"`
@@ -227,9 +230,8 @@ type CodexTurnStateTicketConfig struct {
 	// available. The default is false so enabling harvesting cannot make an
 	// account unavailable while the harvester is warming up.
 	FailClosed bool `yaml:"fail-closed" json:"fail-closed"`
-	// Models is retained for compatibility with older configurations. Tickets
-	// are harvested with the Sol probe and injected into every Codex request
-	// routed to an eligible auth file, regardless of the request model.
+	// Models is retained for compatibility and selects the explicit management
+	// refresh model. A normal HTTP request always probes its own model.
 	Models []string `yaml:"models" json:"models"`
 }
 
