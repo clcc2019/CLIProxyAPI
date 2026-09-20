@@ -227,8 +227,9 @@ type CodexTurnStateTicketConfig struct {
 	// available. The default is false so enabling harvesting cannot make an
 	// account unavailable while the harvester is warming up.
 	FailClosed bool `yaml:"fail-closed" json:"fail-closed"`
-	// Models lists exact outbound model names that require a ticket. Empty uses
-	// the current ChatGPT Codex defaults.
+	// Models is retained for compatibility with older configurations. Tickets
+	// are harvested with the Sol probe and injected into every Codex request
+	// routed to an eligible auth file, regardless of the request model.
 	Models []string `yaml:"models" json:"models"`
 }
 

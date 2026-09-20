@@ -23,6 +23,9 @@ type patchAuthFileFieldsRequest struct {
 	ProxyURL                     *string             `json:"proxy_url"`
 	ProxyURLLegacy               *string             `json:"proxy-url"`
 	ProxyURLCamel                *string             `json:"proxyUrl"`
+	BaseURL                      *string             `json:"base_url"`
+	BaseURLLegacy                *string             `json:"base-url"`
+	BaseURLCamel                 *string             `json:"baseUrl"`
 	Headers                      map[string]string   `json:"headers"`
 	Priority                     json.RawMessage     `json:"priority"`
 	Note                         *string             `json:"note"`
@@ -62,6 +65,16 @@ func (req patchAuthFileFieldsRequest) resolvedProxyURL() *string {
 		return req.ProxyURLLegacy
 	}
 	return req.ProxyURLCamel
+}
+
+func (req patchAuthFileFieldsRequest) resolvedBaseURL() *string {
+	if req.BaseURL != nil {
+		return req.BaseURL
+	}
+	if req.BaseURLLegacy != nil {
+		return req.BaseURLLegacy
+	}
+	return req.BaseURLCamel
 }
 
 func (req patchAuthFileFieldsRequest) resolvedUserAgent() *string {
@@ -204,6 +217,16 @@ func applyPatchAuthFileDocument(
 			delete(doc, "proxy_url")
 		} else {
 			doc["proxy_url"] = proxyURL
+		}
+	}
+	if reqBaseURL := req.resolvedBaseURL(); reqBaseURL != nil {
+		baseURL := strings.TrimSpace(*reqBaseURL)
+		delete(doc, "base-url")
+		delete(doc, "baseUrl")
+		if baseURL == "" {
+			delete(doc, "base_url")
+		} else {
+			doc["base_url"] = baseURL
 		}
 	}
 	if len(req.Headers) > 0 {
@@ -485,6 +508,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 	reqProxyURL := req.resolvedProxyURL()
+	reqBaseURL := req.resolvedBaseURL()
 	reqUserAgent := req.resolvedUserAgent()
 	reqInstallationID := req.resolvedInstallationID()
 	reqExcludedModels := req.resolvedExcludedModels()
@@ -528,6 +552,27 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			delete(targetAuth.Metadata, "proxy_url")
 		} else {
 			targetAuth.Metadata["proxy_url"] = proxyURL
+		}
+		changed = true
+	}
+	if reqBaseURL != nil {
+		baseURL := strings.TrimSpace(*reqBaseURL)
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if targetAuth.Attributes == nil {
+			targetAuth.Attributes = make(map[string]string)
+		}
+		delete(targetAuth.Metadata, "base-url")
+		delete(targetAuth.Metadata, "baseUrl")
+		delete(targetAuth.Attributes, "base-url")
+		delete(targetAuth.Attributes, "baseUrl")
+		if baseURL == "" {
+			delete(targetAuth.Metadata, "base_url")
+			delete(targetAuth.Attributes, "base_url")
+		} else {
+			targetAuth.Metadata["base_url"] = baseURL
+			targetAuth.Attributes["base_url"] = baseURL
 		}
 		changed = true
 	}

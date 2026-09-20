@@ -239,8 +239,12 @@ codex:
   #   harvest-probe-interval-seconds: 6
   #   harvest-attempt-timeout-seconds: 25
   #   fail-closed: false
+  #   # Kept for compatibility with older configurations. Harvest probes
+  #   # always use gpt-5.6-sol, and the ticket is injected into every request
+  #   # routed to the selected auth file.
   #   models:
   #     - gpt-6-astra
+  #     - gpt-5.6-sol
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

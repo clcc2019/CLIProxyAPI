@@ -34,6 +34,8 @@ const (
 	codexTurnStateTicketStatePrefix                 = "gAAAAA"
 	codexTurnStateTicketDefaultModelAstra           = "gpt-6-astra"
 	codexTurnStateTicketDefaultModelSol             = "gpt-5.6-sol"
+	codexTurnStateTicketHarvestModel                = codexTurnStateTicketDefaultModelSol
+	codexTurnStateTicketSolStateLength              = 312
 	codexTurnStateTicketHarvestEndpoint             = "https://chatgpt.com/backend-api/codex/responses"
 	codexTurnStateTicketHarvestProxyRequiredMessage = "codex turn-state ticket harvest proxy is not configured"
 	codexTurnStateTicketUnavailableMessage          = "codex turn-state ticket unavailable"
@@ -184,11 +186,10 @@ func (s *codexTurnStateTicketStore) deleteAuth(authID string) {
 	if s == nil || authID == "" {
 		return
 	}
-	prefix := authID + "\x00"
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, entry := range s.entries {
-		if strings.HasPrefix(key, prefix) {
+		if key == authID || strings.HasPrefix(key, authID+"\x00") {
 			s.removeLocked(key, entry)
 		}
 	}
@@ -273,7 +274,9 @@ func codexTurnStateTicketConfigForConfig(cfg *config.Config) config.CodexTurnSta
 	}
 	out.HarvestProxyURL = strings.TrimSpace(out.HarvestProxyURL)
 	if len(out.Models) == 0 {
-		out.Models = []string{codexTurnStateTicketDefaultModelAstra}
+		// Use Sol for ticket probes by default when callers omit the optional
+		// models list.
+		out.Models = []string{codexTurnStateTicketDefaultModelSol}
 	} else {
 		models := make([]string, 0, len(out.Models))
 		seen := make(map[string]struct{}, len(out.Models))
@@ -287,12 +290,6 @@ func codexTurnStateTicketConfigForConfig(cfg *config.Config) config.CodexTurnSta
 			}
 			seen[model] = struct{}{}
 			models = append(models, model)
-		}
-		// The original default pair included Sol, but Ticket harvesting is
-		// currently supported only for Astra. Treat that exact legacy default
-		// pair as Astra-only while preserving explicitly configured custom models.
-		if len(models) == 2 && models[0] == codexTurnStateTicketDefaultModelAstra && models[1] == codexTurnStateTicketDefaultModelSol {
-			models = []string{codexTurnStateTicketDefaultModelAstra}
 		}
 		out.Models = models
 	}
@@ -320,24 +317,12 @@ func codexTurnStateTicketKey(auth *cliproxyauth.Auth, model string) string {
 		return ""
 	}
 	authID := strings.TrimSpace(auth.ID)
-	model = strings.TrimSpace(model)
-	if authID == "" || model == "" {
+	if authID == "" {
 		return ""
 	}
-	return authID + "\x00" + model
-}
-
-func codexTurnStateTicketModelAllowed(cfg config.CodexTurnStateTicketConfig, model string) bool {
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return false
-	}
-	for _, configured := range cfg.Models {
-		if strings.TrimSpace(configured) == model {
-			return true
-		}
-	}
-	return false
+	// Tickets are scoped to the auth file and reused for every model routed to
+	// that auth. Keep model in the signature for compatibility with callers.
+	return authID
 }
 
 func codexTurnStateTicketAuthAllowed(cfg config.CodexTurnStateTicketConfig, auth *cliproxyauth.Auth) bool {
@@ -517,25 +502,19 @@ func (p *codexTurnStateTicketProvider) refresh(ctx context.Context) {
 		auth  *cliproxyauth.Auth
 		model string
 	}
-	jobs := make([]harvestJob, 0, len(auths)*len(cfg.Models))
+	jobs := make([]harvestJob, 0, len(auths))
 	for _, auth := range auths {
 		if !codexTurnStateTicketOAuthAuth(auth) || !codexTurnStateTicketAuthAllowed(cfg, auth) {
 			continue
 		}
-		for _, model := range cfg.Models {
-			model = strings.TrimSpace(model)
-			if model == "" {
-				continue
-			}
-			key := codexTurnStateTicketKey(auth, model)
-			if key == "" {
-				continue
-			}
-			if ticket := p.tickets.get(key, now, cfg.TargetLength); ticket != nil && !ticket.needsRefresh(now, refreshBefore) {
-				continue
-			}
-			jobs = append(jobs, harvestJob{auth: auth, model: model})
+		key := codexTurnStateTicketKey(auth, "")
+		if key == "" {
+			continue
 		}
+		if ticket := p.tickets.get(key, now, cfg.TargetLength); ticket != nil && !ticket.needsRefresh(now, refreshBefore) {
+			continue
+		}
+		jobs = append(jobs, harvestJob{auth: auth, model: codexTurnStateTicketHarvestModel})
 	}
 	if len(jobs) == 0 {
 		return
@@ -587,7 +566,7 @@ func (p *codexTurnStateTicketProvider) refreshModel(ctx context.Context, auth *c
 	}
 	cfg := p.config()
 	model = strings.TrimSpace(model)
-	if !cfg.Enabled || strings.TrimSpace(cfg.HarvestProxyURL) == "" || !codexTurnStateTicketAuthAllowed(cfg, auth) || !codexTurnStateTicketModelAllowed(cfg, model) {
+	if !cfg.Enabled || strings.TrimSpace(cfg.HarvestProxyURL) == "" || !codexTurnStateTicketAuthAllowed(cfg, auth) {
 		return errors.New("codex turn-state ticket refresh is not allowed")
 	}
 	key := codexTurnStateTicketKey(auth, model)
@@ -626,7 +605,7 @@ func (p *codexTurnStateTicketProvider) refreshModel(ctx context.Context, auth *c
 		return fmt.Errorf("model %s: x-codex-turn-state has unexpected prefix", model)
 	}
 	now := time.Now()
-	p.tickets.put(key, &codexTurnStateTicket{model: model, state: state, capturedAt: now, expiresAt: now.Add(time.Duration(cfg.TTLSeconds) * time.Second)})
+	p.tickets.put(key, &codexTurnStateTicket{model: codexTurnStateTicketHarvestModel, state: state, capturedAt: now, expiresAt: now.Add(time.Duration(cfg.TTLSeconds) * time.Second)})
 	return nil
 }
 
@@ -641,47 +620,30 @@ func (p *codexTurnStateTicketProvider) refreshAuth(ctx context.Context, auth *cl
 	if !codexTurnStateTicketAuthAllowed(cfg, auth) {
 		return errors.New("auth file is not enabled for codex turn-state ticket harvest")
 	}
-	var refreshed int
-	var lastErr error
-	for _, model := range cfg.Models {
-		model = strings.TrimSpace(model)
-		if model == "" || !codexTurnStateTicketModelAllowed(cfg, model) {
-			continue
-		}
-		token, _ := codexCreds(auth)
-		state, status, err := p.fireProbe(ctx, auth, token, model)
-		if err == nil && status == http.StatusUnauthorized {
-			if manager := p.managerSnapshot(); manager != nil {
-				refreshCtx := helps.WithProxyOverride(ctx, p.config().HarvestProxyURL)
-				if updated, refreshErr := manager.RefreshAuth(refreshCtx, auth); refreshErr == nil && updated != nil {
-					auth = updated
-					token, _ = codexCreds(auth)
-					state, status, err = p.fireProbe(ctx, auth, token, model)
-				}
+	model := codexTurnStateTicketHarvestModel
+	token, _ := codexCreds(auth)
+	state, status, err := p.fireProbe(ctx, auth, token, model)
+	if err == nil && status == http.StatusUnauthorized {
+		if manager := p.managerSnapshot(); manager != nil {
+			refreshCtx := helps.WithProxyOverride(ctx, p.config().HarvestProxyURL)
+			if updated, refreshErr := manager.RefreshAuth(refreshCtx, auth); refreshErr == nil && updated != nil {
+				auth = updated
+				token, _ = codexCreds(auth)
+				state, status, err = p.fireProbe(ctx, auth, token, model)
 			}
 		}
-		if err != nil {
-			lastErr = fmt.Errorf("model %s: harvest request failed: %w", model, err)
-			continue
-		}
-		if status != http.StatusOK {
-			lastErr = fmt.Errorf("model %s: harvest upstream returned HTTP %d", model, status)
-			continue
-		}
-		if !codexTurnStateTicketStateValid(state, cfg.TargetLength) {
-			lastErr = fmt.Errorf("model %s: harvest response did not contain a valid x-codex-turn-state", model)
-			continue
-		}
-		now := time.Now()
-		p.tickets.put(codexTurnStateTicketKey(auth, model), &codexTurnStateTicket{model: model, state: state, capturedAt: now, expiresAt: now.Add(time.Duration(cfg.TTLSeconds) * time.Second)})
-		refreshed++
 	}
-	if refreshed == 0 {
-		if lastErr != nil {
-			return lastErr
-		}
-		return errors.New("no turn-state ticket was harvested")
+	if err != nil {
+		return fmt.Errorf("model %s: harvest request failed: %w", model, err)
 	}
+	if status != http.StatusOK {
+		return fmt.Errorf("model %s: harvest upstream returned HTTP %d", model, status)
+	}
+	if !codexTurnStateTicketStateValid(state, cfg.TargetLength) {
+		return fmt.Errorf("model %s: harvest response did not contain a valid x-codex-turn-state", model)
+	}
+	now := time.Now()
+	p.tickets.put(codexTurnStateTicketKey(auth, model), &codexTurnStateTicket{model: model, state: state, capturedAt: now, expiresAt: now.Add(time.Duration(cfg.TTLSeconds) * time.Second)})
 	return nil
 }
 
@@ -738,13 +700,16 @@ func codexTurnStateTicketStateValid(state string, targetLength int) bool {
 	if targetLength <= 0 || !strings.HasPrefix(state, codexTurnStateTicketStatePrefix) {
 		return false
 	}
-	if len(state) == targetLength {
+	if len(state) == targetLength || (targetLength == codexTurnStateTicketDefaultTargetLength && len(state) == codexTurnStateTicketSolStateLength) {
 		return true
 	}
 	return false
 }
 
 func codexTurnStateTicketAcceptedLengths(targetLength int) string {
+	if targetLength == codexTurnStateTicketDefaultTargetLength {
+		return fmt.Sprintf("%d or %d", targetLength, codexTurnStateTicketSolStateLength)
+	}
 	return fmt.Sprintf("%d", targetLength)
 }
 
@@ -789,8 +754,9 @@ func (p *codexTurnStateTicketProvider) fireProbe(ctx context.Context, auth *clip
 	attemptTimeout := time.Duration(cfg.HarvestAttemptTimeoutSeconds) * time.Second
 	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
+	probeModel := codexTurnStateTicketHarvestModel
 	body, err := json.Marshal(map[string]any{
-		"model":        strings.TrimSpace(model),
+		"model":        probeModel,
 		"store":        false,
 		"stream":       true,
 		"instructions": "Reply with exactly: pong",
@@ -826,7 +792,7 @@ func (p *codexTurnStateTicketProvider) fireProbe(ctx context.Context, auth *clip
 	resp, err := (&http.Client{Transport: transport}).Do(req)
 	if err != nil {
 		log.WithFields(log.Fields{
-			"model": model, "method": req.Method, "url": req.URL.String(),
+			"model": probeModel, "method": req.Method, "url": req.URL.String(),
 			"proxy": proxyutil.Redact(proxyURL), "request_headers": diagnostic.RequestHeaders,
 			"request_body": diagnostic.RequestBody,
 		}).Warnf("codex turn-state ticket harvest request failed: %v", err)
@@ -847,7 +813,7 @@ func (p *codexTurnStateTicketProvider) fireProbe(ctx context.Context, auth *clip
 		diagnostic.ResponseBodyReadError = readErr.Error()
 	}
 	fields := log.Fields{
-		"model": model, "method": req.Method, "url": req.URL.String(),
+		"model": probeModel, "method": req.Method, "url": req.URL.String(),
 		"proxy": proxyutil.Redact(proxyURL), "request_headers": diagnostic.RequestHeaders,
 		"request_body": diagnostic.RequestBody, "response_status": diagnostic.ResponseStatus,
 		"response_headers": diagnostic.ResponseHeaders, "turn_state_length": diagnostic.TurnStateLength,
@@ -867,8 +833,8 @@ func (p *codexTurnStateTicketProvider) fireProbe(ctx context.Context, auth *clip
 		return state, resp.StatusCode, fmt.Errorf("harvest response contains invalid %s: length=%d accepted_lengths=%s prefix_valid=%t", codexHeaderTurnState, len(state), codexTurnStateTicketAcceptedLengths(cfg.TargetLength), diagnostic.TurnStatePrefixValid)
 	}
 	if resp.StatusCode == http.StatusOK {
-		if responseModel := codexTurnStateTicketResponseModel(responseBody); responseModel != "" && !strings.EqualFold(responseModel, strings.TrimSpace(model)) {
-			return state, resp.StatusCode, fmt.Errorf("harvest response model mismatch: requested=%q returned=%q; refusing to cache Ticket", strings.TrimSpace(model), responseModel)
+		if responseModel := codexTurnStateTicketResponseModel(responseBody); responseModel != "" && !strings.EqualFold(responseModel, probeModel) {
+			return state, resp.StatusCode, fmt.Errorf("harvest response model mismatch: requested=%q returned=%q; refusing to cache Ticket", probeModel, responseModel)
 		}
 	}
 	return state, resp.StatusCode, nil
@@ -895,7 +861,7 @@ func (p *codexTurnStateTicketProvider) apply(ctx context.Context, auth *cliproxy
 		return nil
 	}
 	cfg := p.config()
-	if !cfg.Enabled || !codexTurnStateTicketOAuthAuth(auth) || !codexTurnStateTicketAuthAllowed(cfg, auth) || !codexTurnStateTicketModelAllowed(cfg, model) {
+	if !cfg.Enabled || !codexTurnStateTicketOAuthAuth(auth) || !codexTurnStateTicketAuthAllowed(cfg, auth) {
 		return nil
 	}
 	if strings.TrimSpace(headers.Get(codexHeaderTurnState)) != "" && !overwriteExisting {

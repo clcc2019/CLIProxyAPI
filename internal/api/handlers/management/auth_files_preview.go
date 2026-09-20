@@ -48,6 +48,7 @@ type codexAuthFilePreview struct {
 	ChatGPTSubscriptionActiveStart any      `json:"chatgpt_subscription_active_start,omitempty"`
 	ChatGPTSubscriptionActiveUntil any      `json:"chatgpt_subscription_active_until,omitempty"`
 	Priority                       any      `json:"priority,omitempty"`
+	BaseURL                        string   `json:"base_url,omitempty"`
 	Note                           string   `json:"note,omitempty"`
 	UserAgent                      string   `json:"user_agent,omitempty"`
 	Originator                     string   `json:"originator,omitempty"`
@@ -139,6 +140,7 @@ func buildCodexAuthFilePreview(doc map[string]any) codexAuthFilePreview {
 		ChatGPTSubscriptionActiveStart: authFilePreviewSubscriptionActiveStart(doc, claims, subscriptionExpiresAt),
 		ChatGPTSubscriptionActiveUntil: authFilePreviewFirstValue(doc, "chatgpt_subscription_active_until", "chatgptSubscriptionActiveUntil"),
 		Priority:                       authFilePreviewFirstValue(doc, "priority"),
+		BaseURL:                        authFilePreviewMetadataString(doc, "base_url", "base-url", "baseUrl"),
 		Note:                           authFilePreviewMetadataString(doc, "note"),
 		UserAgent:                      authFilePreviewClientProfileString(doc, "user_agent", "user-agent", "userAgent", "header:User-Agent"),
 		Originator:                     authFilePreviewClientProfileString(doc, coreauth.AuthFileCodexOriginatorKey, coreauth.AuthFileCodexOriginatorHeader, "header:"+coreauth.AuthFileCodexOriginatorHeader),

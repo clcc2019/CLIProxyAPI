@@ -297,7 +297,7 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	body := `{"name":"codex-auth.json","priority":0,"note":"new note","user_agent":"new-ua","headers":{"X-Old":"2","X-New":"3","X-Remove":""},"disable_cooling":false,"excluded_models":[" Model-B ","model-a","model-b"],"websockets":true,"service_tier_passthrough":true}`
+	body := `{"name":"codex-auth.json","priority":0,"note":"new note","user_agent":"new-ua","base_url":"https://upstream.example/v1","headers":{"X-Old":"2","X-New":"3","X-Remove":""},"disable_cooling":false,"excluded_models":[" Model-B ","model-a","model-b"],"websockets":true,"service_tier_passthrough":true}`
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -342,6 +342,9 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	if got := updated.Attributes["note"]; got != "new note" {
 		t.Fatalf("Attributes[note] = %q, want %q", got, "new note")
 	}
+	if got := updated.Attributes["base_url"]; got != "https://upstream.example/v1" {
+		t.Fatalf("Attributes[base_url] = %q, want %q", got, "https://upstream.example/v1")
+	}
 	if got := updated.Attributes["header:User-Agent"]; got != "new-ua" {
 		t.Fatalf("Attributes[header:User-Agent] = %q, want %q", got, "new-ua")
 	}
@@ -379,6 +382,9 @@ func TestPatchAuthFileFields_PersistsExtendedFields(t *testing.T) {
 	}
 	if got, ok := document["note"].(string); !ok || got != "new note" {
 		t.Fatalf("file.note = %#v, want %q", document["note"], "new note")
+	}
+	if got, ok := document["base_url"].(string); !ok || got != "https://upstream.example/v1" {
+		t.Fatalf("file.base_url = %#v, want %q", document["base_url"], "https://upstream.example/v1")
 	}
 	if got, ok := document["user_agent"].(string); !ok || got != "new-ua" {
 		t.Fatalf("file.user_agent = %#v, want %q", document["user_agent"], "new-ua")

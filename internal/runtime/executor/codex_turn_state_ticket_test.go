@@ -39,6 +39,34 @@ func testCodexOAuthAuth(id string) *cliproxyauth.Auth {
 	}
 }
 
+func TestCodexTurnStateTicketConfigDefaultsToSol(t *testing.T) {
+	got := codexTurnStateTicketConfigForConfig(nil)
+	if len(got.Models) != 1 || got.Models[0] != codexTurnStateTicketDefaultModelSol {
+		t.Fatalf("default ticket models = %#v, want [%q]", got.Models, codexTurnStateTicketDefaultModelSol)
+	}
+
+	cfg := &config.Config{Codex: config.CodexConfig{OpenAICodexTicket: config.CodexTurnStateTicketConfig{
+		Models: []string{codexTurnStateTicketDefaultModelAstra, codexTurnStateTicketDefaultModelSol},
+	}}}
+	got = codexTurnStateTicketConfigForConfig(cfg)
+	if len(got.Models) != 2 || got.Models[0] != codexTurnStateTicketDefaultModelAstra || got.Models[1] != codexTurnStateTicketDefaultModelSol {
+		t.Fatalf("configured ticket target models = %#v, want [%q, %q]", got.Models, codexTurnStateTicketDefaultModelAstra, codexTurnStateTicketDefaultModelSol)
+	}
+
+	cfg.Codex.OpenAICodexTicket.Models = []string{codexTurnStateTicketDefaultModelAstra}
+	got = codexTurnStateTicketConfigForConfig(cfg)
+	if len(got.Models) != 1 || got.Models[0] != codexTurnStateTicketDefaultModelAstra {
+		t.Fatalf("configured ticket target models = %#v, want [%q]", got.Models, codexTurnStateTicketDefaultModelAstra)
+	}
+}
+
+func TestCodexTurnStateTicketSolLengthAcceptedWithLegacyDefaultTarget(t *testing.T) {
+	state := "gAAAAA" + strings.Repeat("x", codexTurnStateTicketSolStateLength-len(codexTurnStateTicketStatePrefix))
+	if !codexTurnStateTicketStateValid(state, codexTurnStateTicketDefaultTargetLength) {
+		t.Fatalf("Sol ticket length %d was rejected with legacy target length %d", len(state), codexTurnStateTicketDefaultTargetLength)
+	}
+}
+
 func TestCodexTurnStateTicketProviderScopesAndGatesTickets(t *testing.T) {
 	cfg := &config.Config{Codex: config.CodexConfig{OpenAICodexTicket: testCodexTurnStateTicketConfig()}}
 	provider := newCodexTurnStateTicketProvider(cfg)
@@ -61,8 +89,12 @@ func TestCodexTurnStateTicketProviderScopesAndGatesTickets(t *testing.T) {
 	if err := provider.apply(context.Background(), otherAuth, "gpt-ticket", make(http.Header), true); !errors.Is(err, errCodexTurnStateTicketUnavailable) {
 		t.Fatalf("other auth apply() error = %v, want ticket unavailable", err)
 	}
-	if err := provider.apply(context.Background(), auth, "other-model", make(http.Header), true); err != nil {
-		t.Fatalf("ungated model apply() error = %v", err)
+	otherModelHeaders := make(http.Header)
+	if err := provider.apply(context.Background(), auth, "other-model", otherModelHeaders, true); err != nil {
+		t.Fatalf("other model apply() error = %v", err)
+	}
+	if got := otherModelHeaders.Get(codexHeaderTurnState); got != testCodexTurnStateTicket {
+		t.Fatalf("other model turn state = %q, want %q", got, testCodexTurnStateTicket)
 	}
 
 	expired := make(http.Header)
@@ -163,8 +195,8 @@ func TestCodexTurnStateTicketProviderHarvestsAndInjects(t *testing.T) {
 	provider.lifecycleMu.Unlock()
 
 	provider.refresh(context.Background())
-	if seenBody["model"] != model {
-		t.Fatalf("probe model = %#v, want %q", seenBody["model"], model)
+	if seenBody["model"] != codexTurnStateTicketHarvestModel {
+		t.Fatalf("probe model = %#v, want %q", seenBody["model"], codexTurnStateTicketHarvestModel)
 	}
 	if seenBody["store"] != false || seenBody["stream"] != true {
 		t.Fatalf("probe body flags = %#v", seenBody)
@@ -203,7 +235,7 @@ func TestCodexTurnStateTicketRefreshErrorOmitsProbeDetails(t *testing.T) {
 	}
 
 	message := err.Error()
-	want := "model gpt-ticket: harvest request failed: harvest response is HTTP 200 but missing " + codexHeaderTurnState
+	want := "model " + codexTurnStateTicketHarvestModel + ": harvest request failed: harvest response is HTTP 200 but missing " + codexHeaderTurnState
 	if message != want {
 		t.Fatalf("refreshAuth() error = %q, want %q", message, want)
 	}
