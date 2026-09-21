@@ -1597,10 +1597,6 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 			}
 		}
 	}
-	// Turn-state ticket acquisition/injection is HTTP-only. WebSocket sessions
-	// keep their existing in-session continuity behavior and never spend a
-	// probe or consume the HTTP ticket cache.
-
 	if !prepared.httpFallback && prepared.sess != nil {
 		if incrementalBody, ok := buildCodexIncrementalWebsocketRequestBody(prepared.sess, body, wsHeaders.Get("X-Codex-Turn-Metadata")); ok {
 			prepared.wsReqBody = incrementalBody

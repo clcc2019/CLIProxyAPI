@@ -697,7 +697,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/auth-files/codex-usage", s.mgmt.GetCodexUsage)
-		mgmt.POST("/auth-files/codex-turn-state-ticket/refresh", s.mgmt.RefreshCodexTurnStateTicket)
 		mgmt.GET("/auth-files/codex-rate-limit-reset-credits", s.mgmt.GetCodexRateLimitResetCredits)
 		mgmt.POST("/auth-files/codex-rate-limit-reset-credits/consume", s.mgmt.ConsumeCodexRateLimitResetCredit)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)

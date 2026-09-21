@@ -58,9 +58,6 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
-	if auth.LastError != nil && auth.LastError.StatusCode() == 312 {
-		entry["turn_state_ticket"] = gin.H{"status": "refresh_required", "status_code": 312}
-	}
 	if rateLimit := codexAuthRateLimitEntry(auth); rateLimit != nil {
 		entry["rate_limit"] = rateLimit
 	}

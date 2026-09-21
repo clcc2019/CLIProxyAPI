@@ -87,7 +87,6 @@ type CodexExecutor struct {
 	responseObserver CodexResponseObserver
 	codexAuthCache   sync.Map
 	httpTurnState    *codexHTTPTurnStateStore
-	turnStateTickets *codexTurnStateTicketProvider
 	responseDedupe   helps.InFlightGroup[codexNonStreamHTTPResult]
 	// refreshDedupe serialises concurrent token refreshes per auth.ID. Without
 	// it multiple in-flight requests sharing an expired access_token would each
@@ -107,7 +106,6 @@ func NewCodexExecutorWithResponseObserver(cfg *config.Config, observer CodexResp
 		cfg:              cfg,
 		responseObserver: observer,
 		httpTurnState:    newCodexHTTPTurnStateStore(),
-		turnStateTickets: newCodexTurnStateTicketProvider(cfg),
 	}
 }
 
@@ -869,7 +867,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := e.codexAuthServiceWithContext(ctx, auth)
+	svc := e.codexAuthService(auth)
 	// Deduplicate concurrent refreshes for the same auth. OpenAI returns
 	// refresh_token_reused once a refresh_token has been exchanged, which
 	// invalidates the entire credential — a race between two requests racing
@@ -972,11 +970,7 @@ func (e *CodexExecutor) recoverCodexAuthAfterUnauthorized(ctx context.Context, a
 }
 
 func (e *CodexExecutor) codexAuthService(auth *cliproxyauth.Auth) *codexauth.CodexAuth {
-	return e.codexAuthServiceWithContext(context.Background(), auth)
-}
-
-func (e *CodexExecutor) codexAuthServiceWithContext(ctx context.Context, auth *cliproxyauth.Auth) *codexauth.CodexAuth {
-	proxyURL := e.codexAuthProxyURLWithContext(ctx, auth)
+	proxyURL := e.codexAuthProxyURL(auth)
 	// Composite key: proxyURL plus a fingerprint of env-driven CA configuration.
 	// If CODEX_CA_CERTIFICATE or SSL_CERT_FILE changes at runtime, cached
 	// transports would otherwise silently keep the stale root pool. The env
@@ -1014,16 +1008,6 @@ func (e *CodexExecutor) ResetCodexAuthCache() {
 }
 
 func (e *CodexExecutor) codexAuthProxyURL(auth *cliproxyauth.Auth) string {
-	return e.codexAuthProxyURLWithContext(context.Background(), auth)
-}
-
-func (e *CodexExecutor) codexAuthProxyURLWithContext(ctx context.Context, auth *cliproxyauth.Auth) string {
-	// Ticket harvesting can refresh an expired OAuth token. Keep that exchange
-	// on the same dedicated harvest proxy as the synthetic probe instead of
-	// leaking onto the account or process-wide business proxy.
-	if override := helps.ProxyOverrideFromContext(ctx); override != "" {
-		return override
-	}
 	if auth != nil {
 		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
 			return proxyURL

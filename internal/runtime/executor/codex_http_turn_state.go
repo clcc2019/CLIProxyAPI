@@ -119,9 +119,6 @@ func (e *CodexExecutor) forgetCodexHTTPTurnState(auth *cliproxyauth.Auth, prepar
 
 func (e *CodexExecutor) CloseExecutionSession(sessionID string) {
 	e.clearCodexHTTPTurnStateSession(sessionID)
-	if strings.TrimSpace(sessionID) == cliproxyauth.CloseAllExecutionSessionsID && e != nil && e.turnStateTickets != nil {
-		e.turnStateTickets.stop()
-	}
 }
 
 func (e *CodexExecutor) ResetExecutionSession(sessionID string) {
@@ -135,9 +132,6 @@ func (e *CodexExecutor) ResetAuthContinuity(authID string) {
 	codexResetClientProfileForAuthID(authID)
 	if e.httpTurnState != nil {
 		e.httpTurnState.deleteAuth(authID)
-	}
-	if e.turnStateTickets != nil {
-		e.turnStateTickets.deleteAuth(authID)
 	}
 }
 

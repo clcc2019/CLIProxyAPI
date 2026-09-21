@@ -17,26 +17,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-type proxyOverrideContextKey struct{}
-
-// WithProxyOverride binds an explicit outbound proxy to the operation carried
-// by ctx. It is used by auxiliary upstream flows (such as Ticket harvesting)
-// that must not inherit the account or process-wide business proxy.
-func WithProxyOverride(ctx context.Context, proxyURL string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, proxyOverrideContextKey{}, strings.TrimSpace(proxyURL))
-}
-
-func ProxyOverrideFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	value, _ := ctx.Value(proxyOverrideContextKey{}).(string)
-	return strings.TrimSpace(value)
-}
-
 const (
 	pooledTransportMaxIdleConns        = proxyutil.DefaultMaxIdleConns
 	pooledTransportMaxIdleConnsPerHost = proxyutil.DefaultMaxIdleConnsPerHost
@@ -80,13 +60,6 @@ var (
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	if override := ProxyOverrideFromContext(ctx); override != "" {
-		transport := cachedProxyTransport(override)
-		if transport != nil {
-			return cachedHTTPClient("proxy-override:"+override, transport, timeout)
-		}
-		log.Debugf("failed to setup proxy override from URL: %s, falling back to normal proxy resolution", override)
-	}
 	contextRT := contextRoundTripper(ctx)
 	authProxy := authProxyURL(auth)
 	pool, errCA := misc.CustomRootCAsFromEnv()

@@ -178,9 +178,6 @@ func (s *Service) newCodexAutoExecutor() *executor.CodexAutoExecutor {
 		return nil
 	}
 	exec := executor.NewCodexAutoExecutorWithResponseObserver(s.cfg, s.observeCodexResponseMetadata)
-	if s.coreManager != nil {
-		exec.SetAuthManager(s.coreManager)
-	}
 	return exec
 }
 

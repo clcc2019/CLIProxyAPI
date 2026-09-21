@@ -34,44 +34,10 @@ func NewCodexAutoExecutor(cfg *config.Config) *CodexAutoExecutor {
 func NewCodexAutoExecutorWithResponseObserver(cfg *config.Config, observer CodexResponseObserver) *CodexAutoExecutor {
 	httpExec := NewCodexExecutorWithResponseObserver(cfg, observer)
 	wsExec := NewCodexWebsocketsExecutorWithResponseObserver(cfg, observer)
-	// The ticket provider is intentionally owned by the HTTP transport. The
-	// feature is not supported by WebSocket, so a WebSocket-first request must
-	// not acquire or consume an HTTP probe ticket.
-	tickets := newCodexTurnStateTicketProvider(cfg)
-	httpExec.turnStateTickets = tickets
 	return &CodexAutoExecutor{httpExec: httpExec, wsExec: wsExec}
 }
 
 func (e *CodexAutoExecutor) Identifier() string { return "codex" }
-
-// SetAuthManager attaches the live auth registry used by the optional
-// background x-codex-turn-state harvester. The manager is deliberately
-// injected after construction to keep the executor usable in standalone tools
-// and unit tests that do not own an auth registry.
-func (e *CodexAutoExecutor) SetAuthManager(manager *cliproxyauth.Manager) {
-	if e == nil {
-		return
-	}
-	var tickets *codexTurnStateTicketProvider
-	if e.httpExec != nil {
-		tickets = e.httpExec.turnStateTickets
-	}
-	if tickets == nil && e.wsExec != nil && e.wsExec.CodexExecutor != nil {
-		tickets = e.wsExec.CodexExecutor.turnStateTickets
-	}
-	if tickets == nil {
-		return
-	}
-	tickets.setAuthManager(manager)
-}
-
-// RefreshTurnStateTicket forces an immediate Codex turn-state ticket harvest for one auth file.
-func (e *CodexAutoExecutor) RefreshTurnStateTicket(ctx context.Context, auth *cliproxyauth.Auth) error {
-	if e == nil || e.httpExec == nil || e.httpExec.turnStateTickets == nil {
-		return fmt.Errorf("codex turn-state ticket harvester is unavailable")
-	}
-	return e.httpExec.turnStateTickets.refreshAuth(ctx, auth)
-}
 
 func (e *CodexAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if e == nil || e.httpExec == nil {
