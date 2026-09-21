@@ -14,10 +14,11 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort    = 54545
-	codexCallbackPort        = 1455
-	maxAuthFileUploadBytes   = 2 << 20
-	maxAuthFilesListPageSize = 200
+	anthropicCallbackPort        = 54545
+	codexCallbackPort            = 1455
+	maxAuthFileUploadBytes       = 2 << 20
+	maxAuthFilesListPageSize     = 200
+	defaultAuthFilesListPageSize = 50
 )
 
 var (

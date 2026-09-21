@@ -19,6 +19,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// ListAuthFiles returns a bounded first page unless the caller supplies an
+// explicit page_size or full=true. The latter preserves the legacy unpaged
+// response for export-style management clients; dashboard callers should use
+// summary=true and recent_requests=false when they only need card data.
 func (h *Handler) ListAuthFiles(c *gin.Context) {
 	if h == nil {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
@@ -53,7 +57,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		}
 	}
 	sortAuthFileEntriesByName(files)
-	c.JSON(200, gin.H{"files": files, "total": len(files)})
+	writeAuthFilesJSON(c, http.StatusOK, gin.H{"files": files, "total": len(files)})
 }
 
 // listAuthFileTypeCountsFromManager is the narrow companion to ListAuthFiles.
@@ -85,7 +89,7 @@ func (h *Handler) listAuthFileTypeCountsFromManager(c *gin.Context, q authFilesL
 			entries = append(entries, entry)
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{
+	writeAuthFilesJSON(c, http.StatusOK, gin.H{
 		"files":       []gin.H{},
 		"total":       0,
 		"type_counts": authFileEntryTypeCounts(dedupeAuthFileEntries(entries), q),
@@ -206,7 +210,7 @@ func (h *Handler) listAuthFilesFromManager(c *gin.Context, codexSubscriptionMode
 			RecentRequestSnapshotter: entryOpts.RecentRequestSnapshotter,
 		})
 	}
-	c.JSON(200, authFilesListPayload(pageFiles, total, q, typeCounts))
+	writeAuthFilesJSON(c, http.StatusOK, authFilesListPayload(pageFiles, total, q, typeCounts))
 }
 
 // listAuthFilesFromManagerPage uses lightweight management snapshots to find
@@ -348,7 +352,7 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 			}
 		}
 		q.PageRecentRequestsApplied = q.PageRecentRequests
-		c.JSON(http.StatusOK, authFilesListPayload(pageEntries, total, q, typeCounts))
+		writeAuthFilesJSON(c, http.StatusOK, authFilesListPayload(pageEntries, total, q, typeCounts))
 		return true
 	}
 
@@ -385,7 +389,7 @@ func (h *Handler) listAuthFilesFromManagerPage(c *gin.Context, codexSubscription
 			RecentRequestSnapshotter: recentSnapshotter,
 		})
 	}
-	c.JSON(http.StatusOK, authFilesListPayload(fullEntries, total, q, typeCounts))
+	writeAuthFilesJSON(c, http.StatusOK, authFilesListPayload(fullEntries, total, q, typeCounts))
 	return true
 }
 
@@ -727,12 +731,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 		}
 	}
 	if !q.active() {
-		c.JSON(200, gin.H{"files": files, "total": len(files)})
+		writeAuthFilesJSON(c, http.StatusOK, gin.H{"files": files, "total": len(files)})
 		return
 	}
 	typeCounts := authFileEntryTypeCounts(files, q)
 	if q.TypeCountsOnly {
-		c.JSON(http.StatusOK, gin.H{"files": []gin.H{}, "total": 0, "type_counts": typeCounts})
+		writeAuthFilesJSON(c, http.StatusOK, gin.H{"files": []gin.H{}, "total": 0, "type_counts": typeCounts})
 		return
 	}
 	filtered := make([]gin.H, 0, len(files))
@@ -748,5 +752,5 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 	if deferRefreshToPage {
 		pageFiles = h.refreshAuthFileEntryPageFromDisk(c.Request.Context(), pageFiles)
 	}
-	c.JSON(200, authFilesListPayload(pageFiles, total, q, typeCounts))
+	writeAuthFilesJSON(c, http.StatusOK, authFilesListPayload(pageFiles, total, q, typeCounts))
 }

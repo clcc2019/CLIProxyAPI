@@ -14,9 +14,13 @@ import (
 )
 
 type authFilesListQuery struct {
-	Paginated   bool
-	Page        int
-	PageSize    int
+	Paginated bool
+	Page      int
+	PageSize  int
+	// Full opts into the legacy unbounded list behavior. Bare list requests
+	// are paginated so a dashboard cannot accidentally download every auth
+	// entry during its initial render.
+	Full        bool
 	Type        string
 	Search      string
 	SearchParts []string
@@ -57,6 +61,8 @@ type authFileStatResult struct {
 }
 
 func authFilesListQueryFromRequest(c *gin.Context) authFilesListQuery {
+	rawSummary := firstNonEmptyQueryValue(c, "summary", "lite", "compact", "summary_only", "summaryOnly")
+	rawPageSize := firstNonEmptyQueryValue(c, "page_size", "pageSize", "limit")
 	q := authFilesListQuery{
 		Page:     1,
 		PageSize: 0,
@@ -70,7 +76,8 @@ func authFilesListQueryFromRequest(c *gin.Context) authFilesListQuery {
 	if strings.Contains(q.Search, "*") {
 		q.SearchParts = strings.Split(q.Search, "*")
 	}
-	q.Summary = isTruthyQueryValue(firstNonEmptyQueryValue(c, "summary", "lite", "compact", "summary_only", "summaryOnly"))
+	q.Full = isTruthyQueryValue(firstNonEmptyQueryValue(c, "full", "all", "details", "include_details", "includeDetails"))
+	q.Summary = isTruthyQueryValue(rawSummary)
 	q.IncludeRecentRequests = true
 	q.TypeCountsOnly = isTruthyQueryValue(firstNonEmptyQueryValue(c, "type_counts_only", "typeCountsOnly"))
 	if rawRecentRequests := firstNonEmptyQueryValue(c, "recent_requests", "include_recent_requests", "includeRecentRequests"); rawRecentRequests != "" {
@@ -79,11 +86,25 @@ func authFilesListQueryFromRequest(c *gin.Context) authFilesListQuery {
 	if page := parsePositiveQueryInt(firstNonEmptyQueryValue(c, "page")); page > 0 {
 		q.Page = page
 	}
-	if pageSize := parsePositiveQueryInt(firstNonEmptyQueryValue(c, "page_size", "pageSize", "limit")); pageSize > 0 {
+	if pageSize := parsePositiveQueryInt(rawPageSize); pageSize > 0 {
 		if pageSize > maxAuthFilesListPageSize {
 			pageSize = maxAuthFilesListPageSize
 		}
 		q.PageSize = pageSize
+		q.Paginated = true
+	}
+	if q.Full {
+		// Full is an explicit compatibility escape hatch. If a caller sends
+		// conflicting flags, returning the legacy detailed shape is the least
+		// surprising result.
+		q.Summary = false
+	}
+	if !q.Full && q.PageSize == 0 && !q.TypeCountsOnly {
+		// The old unbounded default made dashboard requests clone and serialize
+		// every credential. Keep the requested response shape for the returned
+		// page, but bound the initial transfer and work. Callers that truly need
+		// the legacy unbounded response can use full=true.
+		q.PageSize = defaultAuthFilesListPageSize
 		q.Paginated = true
 	}
 	q.PageRecentRequests = q.Paginated && q.Summary && isTruthyQueryValue(

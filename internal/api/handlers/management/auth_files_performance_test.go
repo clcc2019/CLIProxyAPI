@@ -51,12 +51,20 @@ func BenchmarkListAuthFilesFilteredManager(b *testing.B) {
 		target string
 	}{
 		{
+			name:   "bare_default_page",
+			target: "/v0/management/auth-files",
+		},
+		{
 			name:   "initial_page",
 			target: "/v0/management/auth-files?summary=true&page=1&page_size=20&recent_requests=false&page_recent_requests=true&codex_subscription=skip",
 		},
 		{
 			name:   "provider_filter",
 			target: "/v0/management/auth-files?summary=true&type=claude&page=1&page_size=20&recent_requests=false&page_recent_requests=true&codex_subscription=skip",
+		},
+		{
+			name:   "legacy_full_list",
+			target: "/v0/management/auth-files?full=true",
 		},
 	} {
 		b.Run(benchmark.name, func(b *testing.B) {
