@@ -33,6 +33,12 @@ type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 
 type TLS = internalconfig.TLSConfig
+type CredentialConcurrencyConfig = internalconfig.CredentialConcurrencyConfig
+type CredentialInFlightConfig = internalconfig.CredentialInFlightConfig
+
+func DefaultCredentialInFlightConfig() CredentialInFlightConfig {
+	return internalconfig.DefaultCredentialInFlightConfig()
+}
 
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }
 

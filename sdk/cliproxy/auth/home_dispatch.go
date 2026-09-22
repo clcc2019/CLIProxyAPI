@@ -6,9 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 )
 
 type homeErrorEnvelope struct {
@@ -16,9 +19,12 @@ type homeErrorEnvelope struct {
 }
 
 type homeErrorDetail struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-	Code    string `json:"code,omitempty"`
+	Type         string `json:"type"`
+	Message      string `json:"message"`
+	Code         string `json:"code,omitempty"`
+	Retryable    bool   `json:"retryable,omitempty"`
+	RetryAfterMS int64  `json:"retry_after_ms,omitempty"`
+	RequestRetry *int   `json:"request_retry,omitempty"`
 }
 
 const (
@@ -295,37 +301,97 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	}
 
 	client := currentHomeDispatcher()
+	var dispatchRegistry *executionregistry.Registry
+	if bundle := m.HomeDispatchBundle(); bundle != nil && bundle.client != nil {
+		client = bundle.client
+		dispatchRegistry = bundle.registry
+	}
 	if client == nil || !client.HeartbeatOK() {
 		return nil, nil, "", &Error{Code: "home_unavailable", Message: "home control center unavailable", HTTPStatus: http.StatusServiceUnavailable}
 	}
 
 	requestedModel := requestedModelFromMetadata(opts.Metadata, model)
 	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	parentSessionID := ""
+	if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, opts.OriginalRequest, opts.Metadata); ok {
+		if sessionID == "" {
+			sessionID = info.SessionID
+		}
+		parentSessionID = info.ParentSessionID
+	}
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
 
-	raw, err := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
+	var pending *executionregistry.PendingDispatch
+	var concurrencyEnvelope homeDispatchConcurrencyEnvelope
+	var concurrencyPresent bool
+	var installedScope *executionregistry.Scope
+	if dispatchRegistry != nil {
+		pending, _ = dispatchRegistry.BeginDispatch()
+	}
+	var raw []byte
+	var err error
+	if hierarchy, ok := client.(interface {
+		RPopAuthWithSessionHierarchy(context.Context, string, string, string, http.Header, int) ([]byte, error)
+	}); ok && parentSessionID != "" {
+		raw, err = hierarchy.RPopAuthWithSessionHierarchy(ctx, requestedModel, sessionID, parentSessionID, dispatchHeaders, count)
+	} else {
+		raw, err = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
+	}
 	if err != nil {
+		if pending != nil {
+			pending.End()
+		}
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
+	}
+	if pending != nil {
+		if envelope, errEnvelope := decodeHomeDispatchConcurrencyEnvelope(raw); errEnvelope != nil {
+			pending.End()
+			return nil, nil, "", invalidHomeConcurrencyResponse(errEnvelope.Error())
+		} else if !envelope.Present {
+			pending.End()
+		} else {
+			concurrencyEnvelope = envelope
+			concurrencyPresent = true
+			// The scope is installed after the auth identity is decoded below.
+			// Keep the pending token in request-local metadata until then.
+			defer func() {
+				if pending != nil {
+					pending.End()
+				}
+			}()
+		}
 	}
 
 	var env homeErrorEnvelope
-	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal == nil && env.Error != nil {
-		code := strings.TrimSpace(env.Error.Type)
-		if code == "" {
-			code = strings.TrimSpace(env.Error.Code)
+	var rawFields map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &rawFields)
+	errEnv := json.Unmarshal(raw, &env)
+	if _, hasErrorField := rawFields["error"]; hasErrorField && (errEnv != nil || env.Error == nil) {
+		if concurrencyPresent && dispatchRegistry != nil && pending != nil {
+			if ambiguous, ok := client.(interface{ AbortAmbiguousDispatch() }); ok {
+				ambiguous.AbortAmbiguousDispatch()
+			}
 		}
-		msg := strings.TrimSpace(env.Error.Message)
-		if msg == "" {
-			msg = "home returned error"
+		if concurrencyPresent {
+			return nil, nil, "", invalidHomeConcurrencyResponse("Home returned malformed error payload")
 		}
-		status := http.StatusBadGateway
-		switch {
-		case strings.EqualFold(code, "model_not_found"):
-			status = http.StatusNotFound
-		case strings.EqualFold(code, "authentication_error"), strings.EqualFold(code, "unauthorized"):
-			status = http.StatusUnauthorized
+		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned malformed error payload", HTTPStatus: http.StatusBadGateway}
+	}
+	if errEnv == nil && env.Error != nil {
+		if concurrencyPresent && dispatchRegistry != nil && pending != nil {
+			scope, errInstall := installHomeConcurrencyScope(dispatchRegistry, pending, concurrencyEnvelope.Tuple, executionregistry.ScopeSpec{RequestID: strings.TrimSpace(sessionID), Kind: "home-error", StartedAt: time.Now(), CredentialID: concurrencyEnvelope.Tuple.CredentialID, Model: concurrencyEnvelope.Tuple.Model})
+			if errInstall == nil {
+				pending = nil
+				if ambiguous, ok := client.(interface{ AbortAmbiguousDispatch() }); ok {
+					ambiguous.AbortAmbiguousDispatch()
+				}
+				scope.End("home_error")
+			}
 		}
-		return nil, nil, "", &Error{Code: code, Message: msg, HTTPStatus: status}
+		if decoded := decodeHomeDispatchError(raw); decoded != nil {
+			return nil, nil, "", decoded
+		}
+		return nil, nil, "", invalidHomeConcurrencyResponse("Home returned malformed error payload")
 	}
 
 	var dispatch homeAuthDispatchResponse
@@ -340,6 +406,29 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 			return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 		}
 	}
+	if concurrencyPresent && dispatchRegistry != nil && pending != nil {
+		if errIdentity := verifyAccountedHomeConcurrencyIdentity(concurrencyEnvelope.Tuple, &auth, strings.TrimSpace(dispatch.AuthIndex)); errIdentity != nil {
+			pending.End()
+			return nil, nil, "", errIdentity
+		}
+		scope, errInstall := installHomeConcurrencyScope(dispatchRegistry, pending, concurrencyEnvelope.Tuple, executionregistry.ScopeSpec{
+			RequestID: strings.TrimSpace(sessionID),
+			Kind:      "home",
+			StartedAt: time.Now(),
+		})
+		if errInstall != nil {
+			pending.End()
+			return nil, nil, "", homeConcurrencyInstallError(errInstall)
+		}
+		setHomeScopeOnAuth(&auth, scope)
+		installedScope = scope
+		pending = nil
+	}
+	defer func() {
+		if installedScope != nil {
+			installedScope.End("dispatch_validation_failed")
+		}
+	}()
 	if upstreamModel := strings.TrimSpace(dispatch.Model); upstreamModel != "" {
 		if auth.Attributes == nil {
 			auth.Attributes = make(map[string]string, 1)
@@ -380,5 +469,6 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && executionSessionID != "" && authWebsocketsEnabled(authCopy) {
 		m.rememberHomeRuntimeAuth(executionSessionID, authCopy)
 	}
+	installedScope = nil
 	return authCopy, executor, providerKey, nil
 }

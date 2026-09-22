@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -211,6 +212,10 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 
 func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
 	if err == nil {
+		return 0, false
+	}
+	var homeBusy *HomeConcurrencyBusyError
+	if errors.As(err, &homeBusy) {
 		return 0, false
 	}
 	if maxWait <= 0 {

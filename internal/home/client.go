@@ -23,12 +23,14 @@ import (
 )
 
 const (
-	redisKeyConfig     = "config"
-	redisChannelConfig = "config"
-	redisKeyModels     = "models"
-	redisKeyUsage      = "usage"
-	redisKeyRequestLog = "request-log"
-	redisKeyAppLog     = "app-log"
+	redisKeyConfig             = "config"
+	redisChannelConfig         = "config"
+	redisKeyModels             = "models"
+	redisKeyUsage              = "usage"
+	redisKeyInFlightSnapshot   = "in-flight-snapshot"
+	redisKeyConcurrencyRelease = "concurrency-release"
+	redisKeyRequestLog         = "request-log"
+	redisKeyAppLog             = "app-log"
 	// RequestLogRetentionLimit is the maximum number of request logs retained
 	// by both the Home queue and local file logger.
 	RequestLogRetentionLimit = 20
@@ -47,6 +49,7 @@ var (
 	ErrAuthNotFound   = errors.New("home auth not found")
 	ErrConfigNotFound = errors.New("home config not found")
 	ErrModelsNotFound = errors.New("home models not found")
+	ErrDispatchFenced = errors.New("home dispatch fenced")
 )
 
 type clusterNode struct {
@@ -75,6 +78,9 @@ type Client struct {
 	heartbeatOK       atomic.Bool
 	clusterNodes      []clusterNode
 	reconnectFailures int
+	dispatchFenced    atomic.Bool
+	lifecycle         config.CredentialConcurrencyConfig
+	limiter           atomic.Pointer[config.CredentialConcurrencyConfig]
 }
 
 func New(homeCfg config.HomeConfig) *Client {
@@ -112,6 +118,14 @@ func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closeClientsLocked()
+}
+
+// AbortAmbiguousDispatch fences new dispatches after an accounted Home error
+// whose ownership cannot be proven locally. This prevents double admission.
+func (c *Client) AbortAmbiguousDispatch() {
+	if c != nil {
+		c.dispatchFenced.Store(true)
+	}
 }
 
 func (c *Client) closeClientsLocked() {
@@ -565,15 +579,30 @@ func newAuthDispatchRequest(requestedModel string, sessionID string, headers htt
 		count = 1
 	}
 	return authDispatchRequest{
-		Type:      "auth",
-		Model:     requestedModel,
-		Count:     count,
-		SessionID: strings.TrimSpace(sessionID),
-		Headers:   headersToLowerMap(headers),
+		Type:                "auth",
+		Model:               requestedModel,
+		Count:               count,
+		ConcurrencyProtocol: 1,
+		SessionID:           strings.TrimSpace(sessionID),
+		Headers:             headersToLowerMap(headers),
 	}
 }
 
 func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error) {
+	return c.rPopAuth(ctx, requestedModel, sessionID, "", headers, count)
+}
+
+// RPopAuthWithSessionHierarchy carries parent lineage to Home so distributed
+// dispatch can apply soft parent affinity when a Merkle LCP fork has no exact
+// session match.
+func (c *Client) RPopAuthWithSessionHierarchy(ctx context.Context, requestedModel, sessionID, parentSessionID string, headers http.Header, count int) ([]byte, error) {
+	return c.rPopAuth(ctx, requestedModel, sessionID, parentSessionID, headers, count)
+}
+
+func (c *Client) rPopAuth(ctx context.Context, requestedModel, sessionID, parentSessionID string, headers http.Header, count int) ([]byte, error) {
+	if c == nil || c.dispatchFenced.Load() {
+		return nil, ErrDispatchFenced
+	}
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
@@ -583,6 +612,7 @@ func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID 
 		return nil, fmt.Errorf("home: requested model is empty")
 	}
 	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count)
+	req.ParentSessionID = strings.TrimSpace(parentSessionID)
 	keyBytes, err := json.Marshal(&req)
 	if err != nil {
 		return nil, err
@@ -641,6 +671,66 @@ func (c *Client) LPushUsage(ctx context.Context, payload []byte) error {
 		return nil
 	}
 	return cmd.LPush(ctx, redisKeyUsage, payload).Err()
+}
+
+// LPushInFlightSnapshot publishes one bounded credential observation frame.
+// It deliberately uses the same command client as usage but a dedicated Redis
+// list, so a slow observer cannot consume heartbeat or usage messages.
+func (c *Client) LPushInFlightSnapshot(ctx context.Context, payload []byte) error {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return errClient
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	return cmd.LPush(ctx, redisKeyInFlightSnapshot, payload).Err()
+}
+
+// PushConcurrencyRelease sends a cumulative, idempotent release frame.
+func (c *Client) PushConcurrencyRelease(ctx context.Context, frame ConcurrencyReleaseFrame) error {
+	if frame.CredentialID == "" || frame.Model == "" || frame.ReleaseSeq <= 0 {
+		return fmt.Errorf("home: invalid concurrency release")
+	}
+	payload, errMarshal := json.Marshal(frame)
+	if errMarshal != nil {
+		return errMarshal
+	}
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return errClient
+	}
+	return cmd.LPush(ctx, redisKeyConcurrencyRelease, payload).Err()
+}
+
+// SetLifecycleConfig validates and atomically installs Home concurrency timing.
+func (c *Client) SetLifecycleConfig(cfg config.CredentialConcurrencyConfig) error {
+	cfg = cfg.WithDefaults()
+	if errValidate := config.ValidateCredentialConcurrency(cfg); errValidate != nil {
+		return errValidate
+	}
+	c.mu.Lock()
+	c.lifecycle = cfg
+	c.mu.Unlock()
+	c.limiter.Store(&cfg)
+	return nil
+}
+
+// LimiterConfig returns a stable copy of the current concurrency policy.
+func (c *Client) LimiterConfig() config.CredentialConcurrencyConfig {
+	if c == nil {
+		return config.CredentialConcurrencyConfig{}.WithDefaults()
+	}
+	if cfg := c.limiter.Load(); cfg != nil {
+		return *cfg
+	}
+	c.mu.Lock()
+	cfg := c.lifecycle
+	c.mu.Unlock()
+	if cfg.MaxLimit == 0 {
+		cfg = cfg.WithDefaults()
+	}
+	return cfg
 }
 
 func (c *Client) RPushRequestLog(ctx context.Context, payload []byte) error {

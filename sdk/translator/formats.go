@@ -6,4 +6,7 @@ const (
 	FormatOpenAIResponse Format = "openai-response"
 	FormatClaude         Format = "claude"
 	FormatCodex          Format = "codex"
+	FormatGemini         Format = "gemini"
+	FormatAntigravity    Format = "antigravity"
+	FormatInteractions   Format = "interactions"
 )

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
@@ -131,12 +132,13 @@ type mixedExecutionState struct {
 }
 
 type preparedMixedCredential struct {
-	auth     *Auth
-	executor ProviderExecutor
-	provider string
-	ctx      context.Context
-	models   []string
-	pooled   bool
+	auth      *Auth
+	executor  ProviderExecutor
+	provider  string
+	ctx       context.Context
+	models    []string
+	pooled    bool
+	homeScope *executionregistry.Scope
 }
 
 func newMixedExecutionState(ctx context.Context, m *Manager, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (mixedExecutionState, error) {
@@ -254,12 +256,13 @@ func (state *mixedExecutionState) nextCredential(m *Manager, policy mixedExecuti
 		}
 		execCtx = withExecutionAuthPrincipal(execCtx, preparedAuth)
 		return &preparedMixedCredential{
-			auth:     preparedAuth,
-			executor: executor,
-			provider: provider,
-			ctx:      execCtx,
-			models:   models,
-			pooled:   pooled,
+			auth:      preparedAuth,
+			executor:  executor,
+			provider:  provider,
+			ctx:       execCtx,
+			models:    models,
+			pooled:    pooled,
+			homeScope: homeScopeFromAuth(preparedAuth),
 		}, nil
 	}
 }
@@ -394,6 +397,9 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 				result := Result{AuthID: credential.auth.ID, Provider: credential.provider, Model: resultModel, Success: errExec == nil}
 				if errExec != nil {
 					if errCtx := credential.ctx.Err(); errCtx != nil {
+						if credential.homeScope != nil {
+							credential.homeScope.End("context_cancelled")
+						}
 						return cliproxyexecutor.Response{}, errCtx
 					}
 					applyResultError(&result, errExec)
@@ -441,6 +447,9 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 				}
 				m.MarkResult(credential.ctx, result)
 				mode.recordSuccess(m, credential.ctx, credential.auth, resp)
+				if credential.homeScope != nil {
+					credential.homeScope.End("execution_complete")
+				}
 				return resp, nil
 			}
 			if stopModelLoop {
@@ -448,6 +457,9 @@ func (m *Manager) executeResponseMixedOnce(ctx context.Context, providers []stri
 			}
 		}
 		if authErr != nil {
+			if credential.homeScope != nil {
+				credential.homeScope.End("credential_failed")
+			}
 			if errFailover := state.failCredential(credential, credentialStartedAt, authErr, requestScopedContinue); errFailover != nil {
 				return cliproxyexecutor.Response{}, errFailover
 			}
@@ -484,6 +496,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			credential.pooled,
 		)
 		if errStream != nil {
+			if credential.homeScope != nil {
+				credential.homeScope.End("stream_failed")
+			}
 			if errCtx := credential.ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
@@ -504,6 +519,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errFailover
 			}
 			continue
+		}
+		if credential.homeScope != nil {
+			credential.homeScope.End("stream_started")
 		}
 		return streamResult, nil
 	}

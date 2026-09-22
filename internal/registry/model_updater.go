@@ -226,6 +226,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 
 	sections := []section{
 		{"claude", oldData.Claude, newData.Claude},
+		{"devin", oldData.Devin, newData.Devin},
 		{"codex", oldData.CodexFree, newData.CodexFree},
 		{"codex", oldData.CodexTeam, newData.CodexTeam},
 		{"codex", oldData.CodexPlus, newData.CodexPlus},

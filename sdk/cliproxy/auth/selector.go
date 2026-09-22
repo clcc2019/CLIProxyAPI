@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
@@ -582,6 +583,9 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
+	// lcp keeps a bounded Merkle-prefix index for requests that do not carry a
+	// stable session ID (and for forks whose explicit ID changes).
+	lcp *cliproxysession.MerklePrefixMatcher
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -609,6 +613,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	return &SessionAffinitySelector{
 		fallback: cfg.Fallback,
 		cache:    NewSessionCache(cfg.TTL),
+		lcp:      cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
 	}
 }
 
@@ -648,6 +653,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, opts.OriginalRequest, opts.Metadata); ok {
+		if primaryID == "" {
+			primaryID = info.SessionID
+		}
+		if fallbackID == "" {
+			fallbackID = info.ParentSessionID
+		}
+	}
 	if primaryID == "" {
 		debugLog("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
@@ -665,6 +678,28 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	available, err := getAvailableAuthsWithoutWebsocketPreference(availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
+	}
+
+	// Merkle LCP affinity is evaluated before the legacy flat cache. It is
+	// intentionally scoped to provider/caller, so opaque client prompts cannot
+	// become cross-tenant global routing keys.
+	var lcpTurns []cliproxysession.CanonicalTurn
+	lcpNamespace := strings.ToLower(strings.TrimSpace(provider))
+	if scope := metadataStringValue(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey); scope != "" {
+		lcpNamespace += "::" + scope
+	}
+	if s.lcp != nil && len(opts.OriginalRequest) > 0 {
+		lcpTurns = cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest)
+		if match, ok := s.lcp.Match(lcpNamespace, lcpTurns); ok && match.AuthID != "" {
+			for _, candidate := range available {
+				if candidate != nil && candidate.ID == match.AuthID {
+					if primaryID != "" {
+						s.cache.Set(sessionAffinityCacheKey(provider, primaryID, opts.Metadata), candidate.ID)
+					}
+					return candidate, nil
+				}
+			}
+		}
 	}
 
 	cacheKey := sessionAffinityCacheKey(provider, primaryID, opts.Metadata)
@@ -722,6 +757,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		consumeForceNewMarkers(s.cache, cacheKey, fallbackKey)
 	}
 	s.cache.Set(cacheKey, auth.ID)
+	if s.lcp != nil && len(lcpTurns) > 0 {
+		s.lcp.Bind(lcpNamespace, lcpTurns, auth.ID)
+	}
 	infoLog("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
 }

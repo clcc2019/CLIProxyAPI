@@ -59,6 +59,14 @@ const (
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
 	ParentSessionMetadataKey    = "parent_session_id"
+	// Canonical/derived session metadata keys are used by the session affinity
+	// package when projecting protocol-specific IDs into a stable lineage.
+	DerivedSessionIDMetadataKey     = "derived_session_id"
+	CanonicalSessionIDMetadataKey   = "canonical_session_id"
+	ParentSessionIDMetadataKey      = ParentSessionMetadataKey
+	LCPAffinitySessionIDMetadataKey = "lcp_affinity_session_id"
+	CallerScopeMetadataKey          = "caller_scope"
+	IsCompactionMetadataKey         = "is_compaction"
 	// ForcedUpstreamSessionMetadataKey carries a proxy-owned upstream session ID
 	// used after auth failover so the next credential does not inherit stale
 	// provider-scoped conversation state.

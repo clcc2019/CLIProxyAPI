@@ -164,19 +164,21 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store                 Store
-	runtimeStateStore     RuntimeStateStore
-	proxyLeaseStore       ProxyLeaseStore
-	previousResponseStore PreviousResponseStore
-	executors             map[string]ProviderExecutor
-	selector              Selector
-	hook                  Hook
-	mu                    sync.RWMutex
-	auths                 map[string]*Auth
-	removedAuths          map[string]authRemovalTombstone
-	runtimeStates         map[string]AuthRuntimeState
-	scheduler             *authScheduler
-	authInFlightCounts    sync.Map
+	store                       Store
+	runtimeStateStore           RuntimeStateStore
+	proxyLeaseStore             ProxyLeaseStore
+	previousResponseStore       PreviousResponseStore
+	executors                   map[string]ProviderExecutor
+	selector                    Selector
+	hook                        Hook
+	mu                          sync.RWMutex
+	auths                       map[string]*Auth
+	removedAuths                map[string]authRemovalTombstone
+	runtimeStates               map[string]AuthRuntimeState
+	scheduler                   *authScheduler
+	authInFlightCounts          sync.Map
+	homeInFlightPublisherConfig atomic.Pointer[HomeInFlightPublisherConfig]
+	homeDispatchBundle          atomic.Pointer[HomeDispatchBundle]
 	// authExecutionGates serializes admission with failure-state updates for an
 	// individual credential. It lets a quota cooldown become the cutoff for new
 	// upstream executions without serializing unrelated auth files.
@@ -284,6 +286,9 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
+	if defaultInFlightConfig, errInFlightConfig := HomeInFlightPublisherConfigFromConfig(internalconfig.DefaultCredentialInFlightConfig()); errInFlightConfig == nil {
+		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
+	}
 	manager.openAICompatRuntime.Store(buildOpenAICompatRuntimeSnapshot(nil))
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.persistEnabled.Store(store != nil)
@@ -709,6 +714,9 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	openAICompatRuntime := buildOpenAICompatRuntimeSnapshot(cfg)
 	m.runtimeConfig.Store(cfg)
+	if publisherCfg, errPublisherCfg := HomeInFlightPublisherConfigFromConfig(cfg.CredentialInFlight); errPublisherCfg == nil {
+		m.ApplyHomeInFlightPublisherConfig(publisherCfg)
+	}
 	m.openAICompatRuntime.Store(openAICompatRuntime)
 	m.configurePreviousResponseAffinity(cfg)
 	if !cfg.Home.Enabled {

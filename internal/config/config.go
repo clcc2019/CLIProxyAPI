@@ -36,6 +36,14 @@ type Config struct {
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
 
+	// CredentialConcurrency contains Home-authoritative credential lifecycle
+	// settings. It is kept in the overlay so standalone nodes can validate the
+	// same lease/reclaim protocol as Home.
+	CredentialConcurrency CredentialConcurrencyConfig `yaml:"credential-concurrency" json:"credential-concurrency"`
+
+	// CredentialInFlight bounds periodic in-flight observation snapshots.
+	CredentialInFlight CredentialInFlightConfig `yaml:"credential-in-flight" json:"credential-in-flight"`
+
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
@@ -304,6 +312,10 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// SessionAffinitySubagents enables parent-session fallback for forked or
+	// subagent requests when no exact LCP/session match exists.
+	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
 
 	// PreviousResponseAffinityTTL specifies how long response-to-auth bindings are retained.
 	// Default: 2h. Accepts duration strings like "30m", "1h", "2h30m".

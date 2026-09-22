@@ -17,5 +17,7 @@ func newConfigWithDefaults() Config {
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
+	cfg.CredentialConcurrency = CredentialConcurrencyConfig{}.WithDefaults()
+	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 	return cfg
 }

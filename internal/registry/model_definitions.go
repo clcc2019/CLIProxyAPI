@@ -39,12 +39,18 @@ var (
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
 	Claude    []*ModelInfo `json:"claude"`
+	Devin     []*ModelInfo `json:"devin"`
 	CodexFree []*ModelInfo `json:"codex-free"`
 	CodexTeam []*ModelInfo `json:"codex-team"`
 	CodexPlus []*ModelInfo `json:"codex-plus"`
 	CodexPro  []*ModelInfo `json:"codex-pro"`
 	Kimi      []*ModelInfo `json:"kimi"`
 	XAI       []*ModelInfo `json:"xai"`
+}
+
+var staticDevinModels = []*ModelInfo{
+	{ID: "devin/swe-2", Object: "model", Type: "devin", OwnedBy: "cognition", DisplayName: "SWE-2", ContextLength: 262000, MaxCompletionTokens: 128000},
+	{ID: "devin/swe-1-7", Object: "model", Type: "devin", OwnedBy: "cognition", DisplayName: "SWE-1.7", ContextLength: 262000, MaxCompletionTokens: 128000},
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -234,6 +240,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	switch key {
 	case "claude":
 		return GetClaudeModels()
+	case "devin":
+		return GetDevinModels()
 	case "codex":
 		return GetCodexProModels()
 	case "kimi":
@@ -295,6 +303,7 @@ func buildStaticModelLookup(data *staticModelsJSON) map[string]*ModelInfo {
 	}
 	allModels := [][]*ModelInfo{
 		data.Claude,
+		data.Devin,
 		data.CodexPro,
 		data.Kimi,
 		data.XAI,

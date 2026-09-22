@@ -63,6 +63,16 @@ func (cfg *Config) normalizeLoadedConfig(configFile string) error {
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	if err := ValidateCredentialConcurrency(cfg.CredentialConcurrency); err != nil {
+		return err
+	}
+	if cfg.CredentialInFlight.SnapshotInterval == "" {
+		cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
+	}
+	if err := cfg.CredentialInFlight.Validate(); err != nil {
+		return err
+	}
 
 	// Sanitize client-facing API key configuration and keep legacy string entries compatible.
 	cfg.SanitizeClientAPIKeys()

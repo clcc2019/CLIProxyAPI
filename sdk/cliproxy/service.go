@@ -28,6 +28,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -104,7 +105,8 @@ type Service struct {
 	wsGateway *wsrelay.Manager
 
 	// homeClient manages the optional remote home control connection.
-	homeClient *home.Client
+	homeClient            *home.Client
+	homeExecutionRegistry *executionregistry.Registry
 
 	// homeCancel cancels home background subscriptions.
 	homeCancel context.CancelFunc
@@ -837,13 +839,32 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 
 	client := home.New(cfg.Home)
 	s.homeClient = client
+	if errLifecycle := client.SetLifecycleConfig(cfg.CredentialConcurrency); errLifecycle != nil {
+		log.Warnf("invalid Home credential concurrency policy: %v", errLifecycle)
+	}
+	s.homeExecutionRegistry = executionregistry.New()
 	home.SetCurrent(client)
+	if s.coreManager != nil {
+		s.coreManager.PublishHomeDispatch(client, s.homeExecutionRegistry, uint64(time.Now().UnixNano()))
+		inFlightConfig := cfg.CredentialInFlight
+		if inFlightConfig.SnapshotInterval == "" {
+			inFlightConfig = internalconfig.DefaultCredentialInFlightConfig()
+		}
+		if publisherCfg, errCfg := coreauth.HomeInFlightPublisherConfigFromConfig(inFlightConfig); errCfg == nil {
+			s.coreManager.ApplyHomeInFlightPublisherConfig(publisherCfg)
+			go s.coreManager.StartHomeInFlightPublisher(homeCtx, client, s.homeExecutionRegistry)
+		}
+	}
 
 	go client.StartConfigSubscriber(homeCtx, func(raw []byte) error {
 		parsed, err := config.ParseConfigBytes(raw)
 		if err != nil {
 			log.Warnf("failed to parse home config payload: %v", err)
 			return err
+		}
+		if errLifecycle := client.SetLifecycleConfig(parsed.CredentialConcurrency); errLifecycle != nil {
+			log.Warnf("invalid Home credential concurrency policy: %v", errLifecycle)
+			return errLifecycle
 		}
 		s.applyHomeOverlay(parsed)
 		return nil
@@ -868,6 +889,12 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Keep the shared model registry current for every provider. Each updater
+	// validates before swapping its immutable snapshot and retains the last
+	// known-good catalog when the network is unavailable.
+	registry.StartModelsUpdater(ctx)
+	registry.StartCodexClientModelsUpdater(ctx)
+	registry.StartDevinModelsUpdater(ctx)
 
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
@@ -1118,6 +1145,15 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.homeCancel()
 			s.homeCancel = nil
 		}
+		if s.coreManager != nil {
+			if bundle := s.coreManager.HomeDispatchBundle(); bundle != nil {
+				_ = s.coreManager.ClearHomeDispatchBundle(bundle)
+				if s.homeExecutionRegistry != nil {
+					_ = s.homeExecutionRegistry.Drain(ctx)
+					_ = s.homeExecutionRegistry.Close()
+				}
+			}
+		}
 		if s.homeClient != nil {
 			s.homeClient.Close()
 			s.homeClient = nil
@@ -1298,6 +1334,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
+		models = applyExcludedModels(models, excluded)
+	case "devin":
+		models = registry.GetDevinModels()
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Resolve compatibility providers by explicit name first, then base URL for

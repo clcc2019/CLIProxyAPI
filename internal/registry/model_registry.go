@@ -250,6 +250,11 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
 		return info
 	}
+	if strings.EqualFold(p, "devin") || strings.HasPrefix(strings.ToLower(modelID), "devin/") {
+		if info := LookupDevinModel(modelID); info != nil {
+			return info
+		}
+	}
 	return LookupStaticModelInfo(modelID)
 }
 
@@ -270,6 +275,11 @@ func LookupModelInfoReadOnly(modelID string, provider ...string) *ModelInfo {
 
 	if info := GetGlobalRegistry().getModelInfoReadOnly(modelID, p); info != nil {
 		return info
+	}
+	if strings.EqualFold(p, "devin") || strings.HasPrefix(strings.ToLower(modelID), "devin/") {
+		if info := LookupDevinModel(modelID); info != nil {
+			return info
+		}
 	}
 	return lookupStaticModelInfo(modelID)
 }

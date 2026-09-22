@@ -75,6 +75,31 @@ auth-dir: "~/.cli-proxy-api"
 #       total-cost: 100
 api-keys: []
 
+# Home-authoritative distributed credential admission. Nodes use cumulative
+# release sequences and reclaim stale leases after a heartbeat timeout.
+# credential-concurrency:
+#   cpa-heartbeat-timeout: 3s
+#   cpa-cancel-bound: 5s
+#   reclaim-grace: 5s
+#   cleanup-interval: 5s
+#   release-flush-interval: 250ms
+#   release-max-backoff: 2s
+#   busy-retry-min: 250ms
+#   busy-retry-max: 1s
+#   max-limit: 1000000
+
+# Bounded credential in-flight observation snapshots published to Home.
+# credential-in-flight:
+#   snapshot-interval: 2s
+#   stale-after: 10s
+#   max-part-bytes: 262144
+#   max-part-count: 64
+#   max-revision-bytes: 16777216
+#   max-aggregate-groups: 100000
+#   max-details: 10000
+#   max-string-bytes: 256
+#   staging-retention: 1m
+
 # Enable debug logging
 debug: false
 
@@ -209,6 +234,8 @@ routing:
   session-affinity: true # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # Apply parent-session affinity to Merkle LCP forks and subagents.
+  session-affinity-subagents: true
   # How long previous_response_id-to-auth bindings are retained. Default: 2h
   previous-response-affinity-ttl: "2h"
   # Maximum number of previous_response_id bindings kept in process memory.

@@ -29,6 +29,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
+	cfg.CredentialConcurrency = CredentialConcurrencyConfig{}.WithDefaults()
+	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
 	}
@@ -64,6 +66,13 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	if err := ValidateCredentialConcurrency(cfg.CredentialConcurrency); err != nil {
+		return nil, err
+	}
+	if err := cfg.CredentialInFlight.Validate(); err != nil {
+		return nil, err
 	}
 
 	// Apply the same sanitization pipeline.
