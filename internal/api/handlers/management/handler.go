@@ -35,6 +35,14 @@ type CacheStore interface {
 	DeleteCache(ctx context.Context, namespace, key string) error
 }
 
+// AuthFileModelRefreshHandler refreshes the provider-side model catalog for a
+// selected auth file before its registered model list is returned.
+//
+// The management package deliberately depends on a callback rather than the
+// cliproxy Service directly: the Service owns provider-specific remote catalog
+// caches, while the API package owns the management HTTP handlers.
+type AuthFileModelRefreshHandler func(context.Context, *coreauth.Auth) error
+
 // attemptCleanupInterval controls how often stale IP entries are purged
 const attemptCleanupInterval = 1 * time.Hour
 
@@ -43,21 +51,22 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.RWMutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	cacheStore          CacheStore
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	configSavedHook     func(*config.Config)
+	cfg                  *config.Config
+	configFilePath       string
+	mu                   sync.RWMutex
+	attemptsMu           sync.Mutex
+	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	authManager          *coreauth.Manager
+	authFileModelRefresh AuthFileModelRefreshHandler
+	usageStats           *usage.RequestStatistics
+	tokenStore           coreauth.Store
+	cacheStore           CacheStore
+	localPassword        string
+	allowRemoteOverride  bool
+	envSecret            string
+	logDir               string
+	postAuthHook         coreauth.PostAuthHook
+	configSavedHook      func(*config.Config)
 	// codexUsageCache memoises Codex /wham/usage responses with a short TTL
 	// and keeps a brief stale copy for transient ChatGPT backend 5xx spikes.
 	// Its zero value is ready for use, so cache hits do not contend on the
@@ -202,6 +211,28 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	if manager != nil {
 		h.StartCodexQuotaMaintenance()
 	}
+}
+
+// SetAuthFileModelRefreshHandler wires the provider-aware model refresh used
+// by GET /v0/management/auth-files/models. A nil handler preserves the
+// read-only registry behavior used by standalone management-handler tests and
+// embedders that do not own provider model catalogs.
+func (h *Handler) SetAuthFileModelRefreshHandler(handler AuthFileModelRefreshHandler) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.authFileModelRefresh = handler
+	h.mu.Unlock()
+}
+
+func (h *Handler) authFileModelRefreshHandlerSnapshot() AuthFileModelRefreshHandler {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.authFileModelRefresh
 }
 
 func (h *Handler) authManagerSnapshot() *coreauth.Manager {

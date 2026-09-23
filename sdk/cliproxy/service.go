@@ -132,6 +132,10 @@ type Service struct {
 	// codexRemoteCatalogObservedETags suppresses duplicate background refreshes
 	// while a response-advertised catalog ETag is already being resolved.
 	codexRemoteCatalogObservedETags sync.Map
+	// officialModelCatalogRefresh is installed during Run so management reads
+	// can synchronously refresh the same global models.json snapshot used by
+	// OAuth model rules before rebuilding one auth's registry entry.
+	officialModelCatalogRefresh func(context.Context) error
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -889,6 +893,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	s.officialModelCatalogRefresh = registry.RefreshModels
 	// Keep the shared model registry current for every provider. Each updater
 	// validates before swapping its immutable snapshot and retains the last
 	// known-good catalog when the network is unavailable.
@@ -959,6 +964,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, serverOptions...)
 	s.server.SetManagementConfigSavedHandler(s.applyPersistedConfigUpdate)
+	s.server.SetAuthFileModelRefreshHandler(s.refreshCodexAuthModels)
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
@@ -1020,6 +1026,15 @@ func (s *Service) Run(ctx context.Context) error {
 			for _, auth := range s.coreManager.ListByProvider(provider) {
 				if auth == nil || auth.ID == "" || auth.IsDisabled() {
 					continue
+				}
+				// The community implementation rebuilds auth registrations from
+				// the latest global catalog whenever it changes. This fork also
+				// keeps an account-scoped Codex /models snapshot; invalidate that
+				// snapshot here or it would mask newly added global OAuth models
+				// during the re-registration below.
+				if provider == "codex" {
+					s.codexRemoteCatalogs.Delete(auth.ID)
+					s.codexRemoteCatalogObservedETags.Delete(auth.ID)
 				}
 				if s.refreshModelRegistrationForAuth(auth) {
 					refreshed++
@@ -1255,6 +1270,14 @@ func (s *Service) ensureAuthDir() error {
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
+	s.registerModelsForAuthWithOptions(a, true)
+}
+
+// registerModelsForAuthWithOptions rebuilds one auth registration. Codex's
+// account-scoped /models response is useful on the request path, but the
+// management auth-file view must be able to reflect the freshly synchronized
+// official catalog. Callers can disable that account overlay for that view.
+func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRemoteCatalog bool) {
 	if a == nil || a.ID == "" {
 		return
 	}
@@ -1319,7 +1342,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		default:
 			models = registry.GetCodexProModels()
 		}
-		models = s.codexModelsFromRemoteCatalog(a, models)
+		if useCodexRemoteCatalog {
+			models = s.codexModelsFromRemoteCatalog(a, models)
+		}
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry)
@@ -1401,6 +1426,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 // as part of the previous registration snapshot and is cleared when the auth is
 // rebound to the refreshed model catalog.
 func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
+	return s.refreshModelRegistrationForAuthWithOptions(current, true)
+}
+
+// refreshModelRegistrationForAuthWithOptions re-applies one auth's model
+// registration and reconciles concurrent auth changes. When
+// useCodexRemoteCatalog is false, Codex registrations are built from the
+// synchronized official catalog instead of the account-scoped /models cache.
+func (s *Service) refreshModelRegistrationForAuthWithOptions(current *coreauth.Auth, useCodexRemoteCatalog bool) bool {
 	if s == nil || s.coreManager == nil || current == nil || current.ID == "" {
 		return false
 	}
@@ -1408,7 +1441,7 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 	if !current.IsDisabled() {
 		s.ensureExecutorsForAuth(current)
 	}
-	s.registerModelsForAuth(current)
+	s.registerModelsForAuthWithOptions(current, useCodexRemoteCatalog)
 	s.coreManager.ReconcileRegistryModelStates(context.Background(), current.ID)
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
@@ -1422,7 +1455,7 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 	// stale model registrations behind. This may duplicate registration work when
 	// no auth fields changed, but keeps the refresh path simple and correct.
 	s.ensureExecutorsForAuth(latest)
-	s.registerModelsForAuth(latest)
+	s.registerModelsForAuthWithOptions(latest, useCodexRemoteCatalog)
 	s.coreManager.ReconcileRegistryModelStates(context.Background(), latest.ID)
 	s.coreManager.RefreshSchedulerEntry(current.ID)
 	return true

@@ -39,6 +39,7 @@ var modelsCatalogStore = &modelStore{}
 var (
 	modelsFetchClient     *http.Client
 	modelsFetchClientOnce sync.Once
+	modelsRefreshMu       sync.Mutex
 )
 
 var updaterOnce sync.Once
@@ -87,6 +88,19 @@ func StartModelsUpdater(ctx context.Context) {
 	})
 }
 
+// RefreshModels synchronously refreshes the shared official models.json
+// catalog. It uses the same validation, change detection, and model-refresh
+// callback as the background updater, but waits until the new snapshot has
+// been installed. Management reads use this to avoid returning a stale auth
+// registration immediately after the upstream catalog changes.
+func RefreshModels(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, _, err := refreshModels(ctx)
+	return err
+}
+
 func runModelsUpdater(ctx context.Context) {
 	tryStartupRefresh(ctx)
 	periodicRefresh(ctx)
@@ -120,29 +134,38 @@ func tryStartupRefresh(ctx context.Context) {
 }
 
 func tryRefreshModels(ctx context.Context, label string) {
-	oldData := getModels()
-
-	parsed, url := fetchModelsFromRemote(ctx)
-	if parsed == nil {
-		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
+	changed, sourceURL, err := refreshModels(ctx)
+	if err != nil {
+		log.Warnf("%s: %v; keeping current data", label, err)
+		return
+	}
+	if len(changed) == 0 {
+		log.Infof("%s completed from %s, no changes detected", label, sourceURL)
 		return
 	}
 
-	// Detect changes before updating store.
-	changed := detectChangedProviders(oldData, parsed)
+	log.Infof("%s completed from %s, changes detected for providers: %v", label, sourceURL, changed)
+}
 
-	// Update store with new data regardless.
+func refreshModels(ctx context.Context) ([]string, string, error) {
+	modelsRefreshMu.Lock()
+	defer modelsRefreshMu.Unlock()
+
+	oldData := getModels()
+	parsed, sourceURL := fetchModelsFromRemote(ctx)
+	if parsed == nil {
+		return nil, "", fmt.Errorf("official models catalog fetch failed from all URLs")
+	}
+
+	// Detect changes before updating the immutable catalog snapshot.
+	changed := detectChangedProviders(oldData, parsed)
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
-
-	if len(changed) == 0 {
-		log.Infof("%s completed from %s, no changes detected", label, url)
-		return
+	if len(changed) > 0 {
+		notifyModelRefresh(changed)
 	}
-
-	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
-	notifyModelRefresh(changed)
+	return changed, sourceURL, nil
 }
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog

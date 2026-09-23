@@ -234,6 +234,103 @@ func TestRefreshCodexRemoteCatalogRefetchesExpiredEntry(t *testing.T) {
 	}
 }
 
+func TestRefreshCodexAuthModelsBypassesFreshCatalogAndReRegisters(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := calls.Add(1)
+		model := "old-account-model"
+		if call > 1 {
+			model = "new-account-model"
+		}
+		_, _ = w.Write([]byte(`{"models":[{"slug":"` + model + `"}]}`))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexRemoteModelsTestExecutor{})
+	auth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:         "auth-forced-catalog-refresh",
+		Provider:   "codex",
+		Attributes: map[string]string{"auth_kind": "oauth", "base_url": server.URL, "account_id": "acct-forced"},
+		Metadata:   map[string]any{"access_token": "forced-token"},
+	})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	service := &Service{coreManager: manager, cfg: &config.Config{}}
+	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
+
+	if err = service.refreshCodexRemoteCatalog(context.Background(), auth); err != nil {
+		t.Fatalf("initial refreshCodexRemoteCatalog: %v", err)
+	}
+	service.registerModelsForAuth(auth)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("initial upstream calls = %d, want 1", got)
+	}
+	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); !containsModelID(ids, "old-account-model") {
+		t.Fatalf("initial registry models = %#v, want old-account-model", ids)
+	}
+
+	if err = service.refreshCodexAuthModels(context.Background(), auth); err != nil {
+		t.Fatalf("refreshCodexAuthModels: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("forced refresh upstream calls = %d, want 2", got)
+	}
+	ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID)
+	if !containsModelID(ids, "new-account-model") || containsModelID(ids, "old-account-model") {
+		t.Fatalf("refreshed registry models = %#v, want new account model without stale model", ids)
+	}
+}
+
+func TestRefreshCodexAuthModelsUsesOfficialCatalogForOAuth(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexRemoteModelsTestExecutor{})
+	auth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-official-catalog",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{"email": "oauth@example.test"},
+	})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	service := &Service{
+		coreManager: manager,
+		cfg:         &config.Config{},
+		officialModelCatalogRefresh: func(context.Context) error {
+			return nil
+		},
+	}
+	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
+
+	// Simulate a stale account-scoped response that would otherwise mask the
+	// official catalog during the management read.
+	service.codexRemoteCatalogs.Store(auth.ID, codexRemoteCatalogCacheEntry{
+		payload:   []byte(`{"models":[{"slug":"old-account-model"}]}`),
+		fetchedAt: time.Now(),
+		sourceKey: codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), ""),
+	})
+	service.registerModelsForAuth(auth)
+	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); !containsModelID(ids, "old-account-model") {
+		t.Fatalf("stale setup models = %#v, want old-account-model", ids)
+	}
+
+	if err := service.refreshCodexAuthModels(context.Background(), auth); err != nil {
+		t.Fatalf("refreshCodexAuthModels: %v", err)
+	}
+	ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID)
+	if containsModelID(ids, "old-account-model") {
+		t.Fatalf("official refresh retained stale account model: %#v", ids)
+	}
+	if !containsModelID(ids, "gpt-6-astra") {
+		t.Fatalf("official refresh omitted global catalog model: %#v", ids)
+	}
+}
+
 func TestCodexModelsFromRemoteCatalogRejectsExpiredEntry(t *testing.T) {
 	service := &Service{}
 	auth := &coreauth.Auth{
@@ -255,6 +352,33 @@ func TestCodexModelsFromRemoteCatalogRejectsExpiredEntry(t *testing.T) {
 	models := service.codexModelsFromRemoteCatalog(auth, fallback)
 	if len(models) != 1 || models[0] != fallback[0] {
 		t.Fatalf("expired catalog models = %#v, want fallback %#v", models, fallback)
+	}
+}
+
+func TestCodexModelsFromRemoteCatalogPreservesOfficialFallback(t *testing.T) {
+	service := &Service{}
+	auth := &coreauth.Auth{
+		ID:       "auth-partial-catalog",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url":   "https://catalog.example.test",
+			"account_id": "acct-partial",
+		},
+	}
+	sourceKey := codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), "")
+	service.codexRemoteCatalogs.Store(auth.ID, codexRemoteCatalogCacheEntry{
+		payload:   []byte(`{"models":[{"slug":"account-model"}]}`),
+		fetchedAt: time.Now(),
+		sourceKey: sourceKey,
+	})
+	fallback := []*ModelInfo{{ID: "gpt-6-sol"}, {ID: "official-only-model"}}
+
+	models := service.codexModelsFromRemoteCatalog(auth, fallback)
+	if !containsModelID(modelInfoIDs(models), "account-model") {
+		t.Fatalf("merged catalog omitted account model: %#v", models)
+	}
+	if !containsModelID(modelInfoIDs(models), "official-only-model") {
+		t.Fatalf("merged catalog omitted official fallback model: %#v", models)
 	}
 }
 
@@ -405,4 +529,14 @@ func containsModelID(ids []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func modelInfoIDs(models []*ModelInfo) []string {
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		if model != nil {
+			ids = append(ids, model.ID)
+		}
+	}
+	return ids
 }

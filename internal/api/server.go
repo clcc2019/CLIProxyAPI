@@ -232,6 +232,15 @@ func (s *Server) SetManagementConfigSavedHandler(handler func(*config.Config)) {
 	s.mgmt.SetConfigSavedHook(handler)
 }
 
+// SetAuthFileModelRefreshHandler wires the provider-aware model refresh used
+// by the management auth-file model endpoint.
+func (s *Server) SetAuthFileModelRefreshHandler(handler managementHandlers.AuthFileModelRefreshHandler) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetAuthFileModelRefreshHandler(handler)
+}
+
 // Ready reports the current readiness state.
 func (s *Server) Ready() bool {
 	if s == nil {

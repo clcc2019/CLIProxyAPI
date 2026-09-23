@@ -477,16 +477,34 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 	// Try to find auth ID via authManager
 	var authID string
+	var targetAuth *coreauth.Auth
 	if manager := h.authManagerSnapshot(); manager != nil {
 		if auth, ok := manager.GetByID(name); ok {
 			authID = auth.ID
+			targetAuth = auth
 		} else if auth, ok := manager.GetByFileName(name); ok {
 			authID = auth.ID
+			targetAuth = auth
 		}
 	}
 
 	if authID == "" {
 		authID = name // fallback to filename as ID
+	}
+
+	// A per-auth Codex catalog is account-scoped and can outlive changes to the
+	// global model definitions. Refresh the provider-aware registration before
+	// reading the registry so this endpoint never returns a stale snapshot.
+	if targetAuth != nil && strings.EqualFold(strings.TrimSpace(targetAuth.Provider), "codex") {
+		if refresh := h.authFileModelRefreshHandlerSnapshot(); refresh != nil {
+			if err := refresh(c.Request.Context(), targetAuth); err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error":  "failed to refresh auth file models",
+					"detail": err.Error(),
+				})
+				return
+			}
+		}
 	}
 
 	// Get models from registry

@@ -40,10 +40,61 @@ func (s *Service) refreshCodexRemoteCatalog(ctx context.Context, auth *coreauth.
 	return err
 }
 
+// refreshCodexAuthModels synchronizes the official Codex model catalog and
+// rebuilds that auth's registered model set. The account-scoped /models
+// response is refreshed too, then merged onto the official catalog. Ordinary
+// request-path refreshes continue to honor the five-minute/ETag cache.
+func (s *Service) refreshCodexAuthModels(ctx context.Context, auth *coreauth.Auth) error {
+	if s == nil || auth == nil || auth.ID == "" || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return nil
+	}
+	// The management handler receives a defensive auth snapshot. Resolve the
+	// current core-manager snapshot before making an upstream request so a
+	// concurrent token/account update cannot refresh the catalog with stale
+	// credentials.
+	if latest, ok := s.latestAuthForModelRegistration(auth.ID); ok {
+		auth = latest
+	}
+	if refresh := s.officialModelCatalogRefresh; refresh != nil {
+		if err := refresh(ctx); err != nil {
+			return fmt.Errorf("failed to refresh official model catalog: %w", err)
+		}
+		// Drop the previous account snapshot before forcing a fresh request.
+		// Registration merges the refreshed account response onto the official
+		// catalog, so a partial/stale account response cannot hide new models.
+		s.codexRemoteCatalogs.Delete(auth.ID)
+		s.codexRemoteCatalogObservedETags.Delete(auth.ID)
+		if _, err := s.refreshCodexRemoteCatalogForced(ctx, auth); err != nil {
+			return err
+		}
+		if !s.refreshModelRegistrationForAuth(auth) {
+			return fmt.Errorf("auth file models could not be registered")
+		}
+		return nil
+	}
+
+	// Bypass the normal freshness window for this explicit management read. The
+	// singleflight group still coalesces concurrent requests for the same source.
+	s.codexRemoteCatalogObservedETags.Delete(auth.ID)
+	if _, err := s.refreshCodexRemoteCatalogForced(ctx, auth); err != nil {
+		return err
+	}
+	s.refreshModelRegistrationForAuth(auth)
+	return nil
+}
+
+func (s *Service) refreshCodexRemoteCatalogForced(ctx context.Context, auth *coreauth.Auth) (bool, error) {
+	return s.refreshCodexRemoteCatalogWithOptions(ctx, auth, "", true)
+}
+
 // refreshCodexRemoteCatalogWithETag mirrors the official Codex client: a
 // response ETag that differs from the cached /models ETag forces one online
 // refresh, while a matching ETag only renews the five-minute cache lifetime.
 func (s *Service) refreshCodexRemoteCatalogWithETag(ctx context.Context, auth *coreauth.Auth, responseETag string) (bool, error) {
+	return s.refreshCodexRemoteCatalogWithOptions(ctx, auth, responseETag, false)
+}
+
+func (s *Service) refreshCodexRemoteCatalogWithOptions(ctx context.Context, auth *coreauth.Auth, responseETag string, force bool) (bool, error) {
 	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.IsDisabled() {
 		return false, nil
 	}
@@ -59,12 +110,14 @@ func (s *Service) refreshCodexRemoteCatalogWithETag(ctx context.Context, auth *c
 	sourceKey := codexRemoteCatalogSourceKey(auth, baseURL, residency)
 	now := time.Now()
 	if cached, ok := s.codexRemoteCatalogs.Load(auth.ID); ok {
-		if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) && (responseETag == "" || entry.etag == responseETag) {
-			if responseETag != "" {
-				entry.fetchedAt = now
-				s.codexRemoteCatalogs.Store(auth.ID, entry)
+		if !force {
+			if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) && (responseETag == "" || entry.etag == responseETag) {
+				if responseETag != "" {
+					entry.fetchedAt = now
+					s.codexRemoteCatalogs.Store(auth.ID, entry)
+				}
+				return false, nil
 			}
-			return false, nil
 		}
 	}
 
@@ -72,12 +125,14 @@ func (s *Service) refreshCodexRemoteCatalogWithETag(ctx context.Context, auth *c
 	value, err, _ := s.codexRemoteCatalogRefreshes.Do(flightKey, func() (any, error) {
 		now = time.Now()
 		if cached, ok := s.codexRemoteCatalogs.Load(auth.ID); ok {
-			if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) && (responseETag == "" || entry.etag == responseETag) {
-				if responseETag != "" {
-					entry.fetchedAt = now
-					s.codexRemoteCatalogs.Store(auth.ID, entry)
+			if !force {
+				if entry, okEntry := cached.(codexRemoteCatalogCacheEntry); okEntry && entry.fresh(now, sourceKey) && (responseETag == "" || entry.etag == responseETag) {
+					if responseETag != "" {
+						entry.fetchedAt = now
+						s.codexRemoteCatalogs.Store(auth.ID, entry)
+					}
+					return false, nil
 				}
-				return false, nil
 			}
 		}
 
@@ -213,8 +268,42 @@ func (s *Service) codexModelsFromRemoteCatalog(auth *coreauth.Auth, fallback []*
 	if err != nil || len(models) == 0 {
 		return fallback
 	}
+	models = appendCodexFallbackModels(models, fallback)
 	models = appendCodexLocalAliases(models, fallback)
 	return registry.WithCodexBuiltins(models)
+}
+
+// appendCodexFallbackModels keeps the official catalog as the baseline when
+// an account-scoped /models response is partial. Remote entries retain their
+// account-specific capabilities; fallback entries provide newly published
+// official models and any static aliases omitted by the account response.
+func appendCodexFallbackModels(models, fallback []*ModelInfo) []*ModelInfo {
+	seen := make(map[string]struct{}, len(models)+len(fallback))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if id := strings.ToLower(strings.TrimSpace(model.ID)); id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	for _, model := range fallback {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		clone := *model
+		models = append(models, &clone)
+		seen[key] = struct{}{}
+	}
+	return models
 }
 
 func codexServiceBaseURL(auth *coreauth.Auth) string {
