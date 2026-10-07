@@ -35,7 +35,7 @@ func parseRuntimeFlags() runtimeFlags {
 	flag.StringVar(&flags.password, "password", "", "")
 	flag.BoolVar(&flags.tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&flags.standalone, "standalone", false, "In TUI mode, start an embedded local server")
-	flag.BoolVar(&flags.localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
+	flag.BoolVar(&flags.localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
 
 	flag.CommandLine.Usage = usageForFlags
 	flag.Parse()

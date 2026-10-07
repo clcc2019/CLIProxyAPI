@@ -23,9 +23,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestResponsesWebsocketUpgraderEnablesCompression(t *testing.T) {
-	if !responsesWebsocketUpgrader.EnableCompression {
-		t.Fatal("Responses WebSocket upgrader should negotiate permessage-deflate")
+func TestResponsesWebsocketUpgraderDisablesCompression(t *testing.T) {
+	if responsesWebsocketUpgrader.EnableCompression {
+		t.Fatal("Responses WebSocket upgrader should not negotiate permessage-deflate")
 	}
 }
 

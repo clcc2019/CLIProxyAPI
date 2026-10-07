@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -54,6 +55,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
+	if errMutation != nil {
+		return nil, errMutation
+	}
+	defer releaseMutation()
 	applyDefaultRefreshInterval(auth)
 	auth.EnsureIndex()
 	m.applyProxyPoolLease(ctx, auth)
@@ -95,10 +101,13 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(authClone.CloneForScheduler())
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
-	if errRuntime := m.persistRuntimeState(ctx, auth); errRuntime != nil {
+	if errPersist := m.persistMutation(ctx, authClone); errPersist != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist registered auth: %v", errPersist)
+	}
+	if errRuntime := m.persistRuntimeState(ctx, authClone); errRuntime != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth runtime state: %v", errRuntime)
 	}
+	releaseMutation()
 	m.reconcileProxyPoolLeasesAfterAuthChange(ctx)
 	if current, okCurrent := m.GetByID(auth.ID); okCurrent && current != nil {
 		auth = current
@@ -112,6 +121,11 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
+	if errMutation != nil {
+		return nil, errMutation
+	}
+	defer releaseMutation()
 	applyDefaultRefreshInterval(auth)
 	m.applyProxyPoolLease(ctx, auth)
 	m.mu.Lock()
@@ -196,10 +210,16 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.releaseProxyLease(ctx, auth.ID)
 		clearProxyPoolLease(auth)
 	}
-	persistErr := m.persist(ctx, auth)
-	if errRuntime := m.persistRuntimeState(ctx, auth); errRuntime != nil {
+	persistSnapshot := authClone
+	if m.shouldReleaseProxyLeaseForAuth(authClone) {
+		persistSnapshot = authClone.Clone()
+		clearProxyPoolLease(persistSnapshot)
+	}
+	persistErr := m.persistMutation(ctx, persistSnapshot)
+	if errRuntime := m.persistRuntimeState(ctx, persistSnapshot); errRuntime != nil {
 		logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth runtime state: %v", errRuntime)
 	}
+	releaseMutation()
 	// Refresh updates normally skip reconciliation because token-only changes do
 	// not affect proxy eligibility. A Codex plan transition to Free is different:
 	// applyProxyPoolLease released its scarce lease above, so wake reconciliation
@@ -232,6 +252,8 @@ func (m *Manager) Remove(ctx context.Context, id string) (*Auth, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	releaseMutation := m.lockAuthMutation(id)
+	defer releaseMutation()
 
 	var removed *Auth
 	var loop *authAutoRefreshLoop
@@ -261,6 +283,7 @@ func (m *Manager) Remove(ctx context.Context, id string) (*Auth, error) {
 	runtimeStore = m.runtimeStateStore
 	m.mu.Unlock()
 	m.resetAuthContinuity(ctx, id)
+	releaseMutation()
 
 	if authProxyPoolAssigned(removed) {
 		m.releaseProxyLease(ctx, id)
@@ -478,6 +501,23 @@ func authRuntimeOnly(auth *Auth) bool {
 
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m.authLoadGate == nil {
+		m.mu.Lock()
+		if m.authLoadGate == nil {
+			m.authLoadGate = newAuthLoadGate()
+		}
+		m.mu.Unlock()
+	}
+	if errAcquire := m.authLoadGate.Acquire(ctx, math.MaxInt64); errAcquire != nil {
+		return errAcquire
+	}
+	defer m.authLoadGate.Release(math.MaxInt64)
 	m.mu.RLock()
 	if m.store == nil {
 		m.mu.RUnlock()

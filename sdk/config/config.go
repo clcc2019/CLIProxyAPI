@@ -15,6 +15,8 @@ type ModelPrices = internalconfig.ModelPrices
 
 type Config = internalconfig.Config
 
+type ModelCatalogs = internalconfig.ModelCatalogs
+
 type OAuthRefreshConfig = internalconfig.OAuthRefreshConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig

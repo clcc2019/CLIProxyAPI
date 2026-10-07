@@ -20,6 +20,7 @@ import (
 type patchAuthFileFieldsRequest struct {
 	Name                         string              `json:"name"`
 	Prefix                       *string             `json:"prefix"`
+	OpenAIRequestTimezone        *string             `json:"openai_request_timezone"`
 	ProxyURL                     *string             `json:"proxy_url"`
 	ProxyURLLegacy               *string             `json:"proxy-url"`
 	ProxyURLCamel                *string             `json:"proxyUrl"`
@@ -207,6 +208,14 @@ func applyPatchAuthFileDocument(
 			delete(doc, "prefix")
 		} else {
 			doc["prefix"] = prefix
+		}
+	}
+	if req.OpenAIRequestTimezone != nil {
+		timezone := strings.TrimSpace(*req.OpenAIRequestTimezone)
+		if timezone == "" {
+			delete(doc, coreauth.AuthFileOpenAIRequestTimezoneKey)
+		} else {
+			doc[coreauth.AuthFileOpenAIRequestTimezoneKey] = timezone
 		}
 	}
 	if reqProxyURL := req.resolvedProxyURL(); reqProxyURL != nil {
@@ -501,6 +510,16 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
+	if req.OpenAIRequestTimezone != nil {
+		if !strings.EqualFold(strings.TrimSpace(targetAuth.Provider), "codex") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "openai_request_timezone is only valid for Codex auth files"})
+			return
+		}
+		if timezone := strings.TrimSpace(*req.OpenAIRequestTimezone); timezone != "" && !coreauth.IsValidOpenAIRequestTimezone(timezone) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "openai_request_timezone must be an allowed IANA timezone"})
+			return
+		}
+	}
 
 	priorityPresent, prioritySet, priorityValue, err := parseOptionalJSONIntField(req.Priority)
 	if err != nil {
@@ -527,6 +546,18 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	changed := false
+	if req.OpenAIRequestTimezone != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		timezone := strings.TrimSpace(*req.OpenAIRequestTimezone)
+		if timezone == "" {
+			delete(targetAuth.Metadata, coreauth.AuthFileOpenAIRequestTimezoneKey)
+		} else {
+			targetAuth.Metadata[coreauth.AuthFileOpenAIRequestTimezoneKey] = timezone
+		}
+		changed = true
+	}
 	if req.Prefix != nil {
 		prefix := strings.TrimSpace(*req.Prefix)
 		targetAuth.Prefix = prefix

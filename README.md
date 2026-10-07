@@ -60,10 +60,25 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - CLI authentication flows for Codex, Claude, and Grok/xAI
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
+- Per-Codex request timezone rewriting for environment context and web search location
 - Grok Build multi-account load balancing
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
+
+### Per-Codex request timezone
+
+Codex auth files can set `openai_request_timezone` in their auth metadata. The
+default is `Asia/Singapore`. Before a request reaches the Codex Responses
+upstream, CLIProxyAPI replaces an existing timezone inside a complete
+`<environment_context>` user block and an existing web search
+`user_location.timezone`. It preserves the client supplied date and all other
+context fields; ordinary user text is not searched globally.
+
+Use `PATCH /v0/management/auth-files/fields` with the auth file `name` and an
+allow-listed IANA timezone, or clear the value with an empty string to return to
+the default. The available values are returned by
+`GET /v0/management/openai-request-timezones`.
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 

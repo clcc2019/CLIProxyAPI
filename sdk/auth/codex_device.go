@@ -442,7 +442,7 @@ func (a *CodexAuthenticator) buildAuthRecordWithClientFeatures(authSvc *codex.Co
 	if tokenStorage.IDToken != "" {
 		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
 			if planType == "" {
-				planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+				planType = strings.TrimSpace(claims.GetPlanType())
 			}
 			if hashAccountID == "" {
 				accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)
@@ -456,11 +456,16 @@ func (a *CodexAuthenticator) buildAuthRecordWithClientFeatures(authSvc *codex.Co
 			}
 		}
 	}
+	if planType == "" {
+		planType = codex.DefaultPlanType
+	}
+	tokenStorage.PlanType = planType
 
 	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 	metadata := map[string]any{
 		"email":        tokenStorage.Email,
 		"access_token": tokenStorage.AccessToken,
+		"plan_type":    planType,
 	}
 	if tokenStorage.AccountID != "" {
 		metadata["account_id"] = tokenStorage.AccountID
@@ -481,10 +486,7 @@ func (a *CodexAuthenticator) buildAuthRecordWithClientFeatures(authSvc *codex.Co
 		fmt.Println("Codex API key obtained and stored")
 	}
 
-	attrs := map[string]string{}
-	if planType != "" {
-		attrs["plan_type"] = planType
-	}
+	attrs := map[string]string{"plan_type": planType}
 	if tokenStorage.AccountID != "" {
 		attrs["account_id"] = tokenStorage.AccountID
 	}

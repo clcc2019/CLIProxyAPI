@@ -205,6 +205,7 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		entry[coreauth.AuthFileServiceTierPassthroughKey] = auth.ServiceTierPassthrough()
+		entry[coreauth.AuthFileOpenAIRequestTimezoneKey] = auth.OpenAIRequestTimezone()
 		applyCodexAuthModeEntry(entry, auth)
 	}
 	if disableCooling, ok := auth.DisableCoolingOverride(); ok {

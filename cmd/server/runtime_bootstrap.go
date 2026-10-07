@@ -149,8 +149,9 @@ func runApplication(flags runtimeFlags, state startupState) error {
 		cmd.WaitForCloudDeploy()
 		return nil
 	}
+	registry.SetLocalModelCatalogs(flags.localModel)
 	if flags.localModel && (!flags.tuiMode || flags.standalone) {
-		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
+		log.Info("Local model mode: using embedded catalogs unless an explicit catalog source is configured")
 	}
 	if flags.tuiMode {
 		return runTUI(flags, state)
@@ -177,11 +178,8 @@ func startSupportServices(localModel bool) context.CancelFunc {
 	// and could outlive the main service, leaking goroutines and (for the
 	// management asset auto-updater) keeping a polling http.Client alive past
 	// process drain in k8s rolling restarts.
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-
-	if !localModel {
-		registry.StartModelsUpdater(ctx)
-	}
+	_, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	registry.SetLocalModelCatalogs(localModel)
 	return cancel
 }
 

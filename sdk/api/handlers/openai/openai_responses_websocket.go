@@ -113,7 +113,6 @@ var responsesWebsocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:    1024,
 	WriteBufferSize:   1024,
 	WriteBufferPool:   &responsesWebsocketWriteBufferPool,
-	EnableCompression: true,
 	CheckOrigin: func(r *http.Request) bool {
 		return responsesWebsocketOriginAllowed(r)
 	},
@@ -2097,7 +2096,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 						stopForward = true
 						return false
 					}
-					collectResponsesWebsocketOutputItem(filteredPayload, outputItemsByIndex, &outputItemsFallback)
+					collectResponsesWebsocketOutputItemWithType(eventType, filteredPayload, outputItemsByIndex, &outputItemsFallback)
 					if eventType == wsEventTypeCompleted {
 						filteredPayload = restoreResponsesWebsocketCompletionOutput(filteredPayload, outputItemsByIndex, outputItemsFallback)
 					}
@@ -2151,7 +2150,11 @@ func responseCompletedOutputFromPayload(payload []byte) []byte {
 }
 
 func collectResponsesWebsocketOutputItem(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
-	if websocketPayloadEventTypeValue(payload) != "response.output_item.done" {
+	collectResponsesWebsocketOutputItemWithType(websocketPayloadEventTypeValue(payload), payload, outputItemsByIndex, outputItemsFallback)
+}
+
+func collectResponsesWebsocketOutputItemWithType(eventType string, payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
+	if eventType != "response.output_item.done" {
 		return
 	}
 	item := gjson.GetBytes(payload, "item")

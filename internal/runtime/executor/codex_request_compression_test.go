@@ -11,7 +11,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-func TestMaybeEnableCodexRequestCompression_DefaultEnabledWithoutEnv(t *testing.T) {
+func TestMaybeEnableCodexRequestCompression_DefaultDisabledWithoutEnv(t *testing.T) {
 	t.Setenv(codexCompressionEnv, "")
 
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"compress me"}]}]}`)
@@ -29,8 +29,8 @@ func TestMaybeEnableCodexRequestCompression_DefaultEnabledWithoutEnv(t *testing.
 	if err := maybeEnableCodexRequestCompression(req, auth); err != nil {
 		t.Fatalf("maybeEnableCodexRequestCompression() error = %v", err)
 	}
-	if got := req.Header.Get("Content-Encoding"); got != "zstd" {
-		t.Fatalf("Content-Encoding = %q, want zstd", got)
+	if got := req.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty", got)
 	}
 }
 
@@ -173,7 +173,7 @@ func TestCodexRequestCompressionEnvEnabled(t *testing.T) {
 		value string
 		want  bool
 	}{
-		{name: "empty defaults enabled", value: "", want: true},
+		{name: "empty defaults disabled", value: "", want: false},
 		{name: "one", value: "1", want: true},
 		{name: "true mixed case", value: " TrUe ", want: true},
 		{name: "yes", value: "YES", want: true},
@@ -182,7 +182,7 @@ func TestCodexRequestCompressionEnvEnabled(t *testing.T) {
 		{name: "false mixed case", value: " FaLsE ", want: false},
 		{name: "no", value: "NO", want: false},
 		{name: "off", value: "off", want: false},
-		{name: "unknown defaults enabled", value: "maybe", want: true},
+		{name: "unknown defaults disabled", value: "maybe", want: false},
 	}
 
 	for i := range tests {

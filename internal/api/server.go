@@ -704,6 +704,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
+		mgmt.GET("/openai-request-timezones", s.mgmt.GetOpenAIRequestTimezones)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/auth-files/codex-usage", s.mgmt.GetCodexUsage)
 		mgmt.GET("/auth-files/codex-rate-limit-reset-credits", s.mgmt.GetCodexRateLimitResetCredits)

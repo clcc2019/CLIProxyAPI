@@ -46,6 +46,11 @@ type StreamForwardOptions struct {
 	// without an error (e.g. OpenAI's `[DONE]`). It should not flush.
 	WriteDone func()
 
+	// CloseError optionally validates that the upstream stream carried a valid
+	// terminal marker before it is treated as successfully completed. It is
+	// called after any pending stream error has been checked and before WriteDone.
+	CloseError func() *interfaces.ErrorMessage
+
 	// WriteKeepAlive optionally writes a keep-alive heartbeat. It should not flush.
 	// When nil, a standard SSE comment heartbeat is used.
 	WriteKeepAlive func()
@@ -249,6 +254,16 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					cancel(ErrorMessageCause(terminalErr))
 					return
 				}
+				if opts.CloseError != nil {
+					if closeErr := opts.CloseError(); closeErr != nil {
+						if opts.WriteTerminalError != nil {
+							opts.WriteTerminalError(closeErr)
+						}
+						flushNow()
+						cancel(ErrorMessageCause(closeErr))
+						return
+					}
+				}
 				if opts.WriteDone != nil {
 					opts.WriteDone()
 				}
@@ -376,6 +391,13 @@ func (h *BaseAPIHandler) ForwardStreamResult(c *gin.Context, flusher http.Flushe
 			return
 		case chunk, ok := <-result.Chunks:
 			if !ok {
+				if opts.CloseError != nil {
+					if closeErr := opts.CloseError(); closeErr != nil {
+						FinalizeStreamResult(result, false)
+						writeError(closeErr)
+						return
+					}
+				}
 				FinalizeStreamResult(result, true)
 				if opts.WriteDone != nil {
 					opts.WriteDone()

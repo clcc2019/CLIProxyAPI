@@ -1521,6 +1521,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		omitServiceTier:         auth == nil || !auth.ServiceTierPassthrough(),
 		deferredReasoningEffort: codexDeferredReasoningEffortFromContext(ctx),
 	})
+	body = normalizeCodexRequestTimezone(body, auth)
 
 	executionSessionID := executionSessionIDFromOptions(opts)
 	body = codexSanitizeForcedUpstreamSessionBody(ctx, body)

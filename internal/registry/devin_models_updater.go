@@ -23,9 +23,7 @@ var devinModelsUpdaterOnce sync.Once
 // Devin model catalog immediately and refreshes it every 3 hours.
 // Safe to call multiple times; only one updater runs.
 func StartDevinModelsUpdater(ctx context.Context) {
-	devinModelsUpdaterOnce.Do(func() {
-		go runDevinModelsUpdater(ctx)
-	})
+	devinCatalogUpdater.configure(ctx, "")
 }
 
 func runDevinModelsUpdater(ctx context.Context) {

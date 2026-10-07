@@ -7,6 +7,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -452,7 +453,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, modelName str
 	flusher.Flush()
 
 	// Continue streaming the rest
-	h.handleStreamResultDirect(c, flusher, func(err error) { cliCancel(err) }, streamResult)
+	h.handleStreamResultDirect(c, flusher, func(err error) { cliCancel(err) }, streamResult, chunkHasFinishReason(first.Chunk))
 }
 
 // handleCompletionsNonStreamingResponse handles non-streaming completions responses.
@@ -550,14 +551,28 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, mo
 
 	h.handleStreamResult(c, flusher, func(err error) {
 		cliCancel(err)
-	}, dataChan, errChan, convertChatCompletionsStreamChunkToCompletions)
+	}, dataChan, errChan, converted != nil && chunkHasFinishReason(converted), convertChatCompletionsStreamChunkToCompletions)
 }
 
-func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, transforms ...func([]byte) []byte) {
+func chunkHasFinishReason(chunk []byte) bool {
+	chunk = bytes.TrimSpace(chunk)
+	if bytes.HasPrefix(chunk, []byte("data:")) {
+		chunk = bytes.TrimSpace(chunk[5:])
+	}
+	for _, choice := range gjson.GetBytes(chunk, "choices").Array() {
+		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != gjson.Null && reason.String() != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialHasFinishReason bool, transforms ...func([]byte) []byte) {
 	var transform func([]byte) []byte
 	if len(transforms) > 0 {
 		transform = transforms[0]
 	}
+	sawFinishReason := initialHasFinishReason
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) bool {
 			if transform != nil {
@@ -566,6 +581,9 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 					return false
 				}
 			}
+			if !sawFinishReason && chunkHasFinishReason(chunk) {
+				sawFinishReason = true
+			}
 			return handlers.WriteSSEDataFrame(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -583,17 +601,27 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			body := handlers.BuildErrorResponseBody(status, errText)
 			handlers.WriteSSEDataFrame(c.Writer, body)
 		},
+		CloseError: func() *interfaces.ErrorMessage {
+			if sawFinishReason {
+				return nil
+			}
+			return &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Error:      fmt.Errorf("upstream stream closed before any chunk carried finish_reason"),
+			}
+		},
 		WriteDone: func() {
 			handlers.WriteSSEDataFrame(c.Writer, []byte("[DONE]"))
 		},
 	})
 }
 
-func (h *OpenAIAPIHandler) handleStreamResultDirect(c *gin.Context, flusher http.Flusher, cancel func(error), result *coreexecutor.StreamResult, transforms ...func([]byte) []byte) {
+func (h *OpenAIAPIHandler) handleStreamResultDirect(c *gin.Context, flusher http.Flusher, cancel func(error), result *coreexecutor.StreamResult, initialHasFinishReason bool, transforms ...func([]byte) []byte) {
 	var transform func([]byte) []byte
 	if len(transforms) > 0 {
 		transform = transforms[0]
 	}
+	sawFinishReason := initialHasFinishReason
 	h.ForwardStreamResult(c, flusher, cancel, result, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) bool {
 			if transform != nil {
@@ -602,6 +630,9 @@ func (h *OpenAIAPIHandler) handleStreamResultDirect(c *gin.Context, flusher http
 					return false
 				}
 			}
+			if !sawFinishReason && chunkHasFinishReason(chunk) {
+				sawFinishReason = true
+			}
 			return handlers.WriteSSEDataFrame(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -618,6 +649,15 @@ func (h *OpenAIAPIHandler) handleStreamResultDirect(c *gin.Context, flusher http
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
 			handlers.WriteSSEDataFrame(c.Writer, body)
+		},
+		CloseError: func() *interfaces.ErrorMessage {
+			if sawFinishReason {
+				return nil
+			}
+			return &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Error:      fmt.Errorf("upstream stream closed before any chunk carried finish_reason"),
+			}
 		},
 		WriteDone: func() {
 			handlers.WriteSSEDataFrame(c.Writer, []byte("[DONE]"))

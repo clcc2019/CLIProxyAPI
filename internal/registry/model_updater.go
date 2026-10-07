@@ -17,7 +17,8 @@ import (
 
 const (
 	modelsFetchTimeout          = 30 * time.Second
-	modelsRefreshInterval       = 3 * time.Hour
+	ModelsRefreshInterval       = 3 * time.Hour
+	modelsRefreshInterval       = ModelsRefreshInterval
 	maxRemoteModelsCatalogBytes = 8 << 20
 )
 
@@ -83,9 +84,7 @@ func init() {
 // immediately on startup and then refreshes the model catalog every 3 hours.
 // Safe to call multiple times; only one updater will run.
 func StartModelsUpdater(ctx context.Context) {
-	updaterOnce.Do(func() {
-		go runModelsUpdater(ctx)
-	})
+	generalCatalogUpdater.configure(ctx, "")
 }
 
 // RefreshModels synchronously refreshes the shared official models.json

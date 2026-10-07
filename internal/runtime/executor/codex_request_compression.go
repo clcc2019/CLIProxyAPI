@@ -127,18 +127,18 @@ func codexRequestCompressionEnabled(cfg *config.Config) bool {
 func codexRequestCompressionEnvEnabled(value string) bool {
 	value = strings.TrimSpace(value)
 	switch {
-	case value == "",
-		value == "1",
+	case value == "1",
 		strings.EqualFold(value, "true"),
 		strings.EqualFold(value, "yes"),
 		strings.EqualFold(value, "on"):
 		return true
-	case value == "0",
+	case value == "",
+		value == "0",
 		strings.EqualFold(value, "false"),
 		strings.EqualFold(value, "no"),
 		strings.EqualFold(value, "off"):
 		return false
 	default:
-		return true
+		return false
 	}
 }

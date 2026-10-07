@@ -59,6 +59,7 @@ func TestCodexDrainAndCloseRetryResponseBoundsLargeBody(t *testing.T) {
 }
 
 func TestDoCodexHTTPRequestRetriesZstdEOFWithoutCompression(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
@@ -292,6 +293,7 @@ func BenchmarkCodexHTTPEncodingIsZstd(b *testing.B) {
 }
 
 func TestDoCodexHTTPRequestRetriesZstdRejectionWithoutCompression(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
@@ -358,6 +360,7 @@ func TestDoCodexHTTPRequestRetriesZstdRejectionWithoutCompression(t *testing.T) 
 }
 
 func TestDoCodexHTTPRequestDoesNotRetryZstdApplicationBadRequest(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
@@ -622,6 +625,7 @@ func TestDoCodexHTTPRequestRetriesStoredPreviousResponseNotFoundWithoutPreviousR
 }
 
 func TestDoCodexHTTPRequestRebuildsBodyAcrossSeparateCalls(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
 	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",

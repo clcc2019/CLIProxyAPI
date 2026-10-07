@@ -58,7 +58,10 @@ func (m *Manager) lockAuthExecutionGate(authID string) func() {
 		return func() {}
 	}
 	gate.Lock()
-	return gate.Unlock
+	var once sync.Once
+	return func() {
+		once.Do(gate.Unlock)
+	}
 }
 
 // admitAuthExecution takes a per-auth read lease across the actual executor

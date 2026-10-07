@@ -1,3 +1,14 @@
+# Optional model catalog sources. Each value accepts an http(s) URL or an
+# absolute local JSON file path. An explicit source overrides --local-model;
+# an empty value uses the official remote source in normal mode and the
+# embedded catalog when --local-model is enabled. Failed refreshes keep the
+# last valid catalog, and source changes take effect without restarting.
+# Home mode disables the general catalog while keeping Codex and Devin catalogs.
+# models:
+#   catalog: ""
+#   codex-catalog: ""
+#   devin-catalog: ""
+
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
 host: ""

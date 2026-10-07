@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -238,6 +240,10 @@ type Manager struct {
 	persistWG      sync.WaitGroup
 	persistIDs     map[string]struct{}
 	persistLocks   sync.Map
+	// authMutationLocks serialize credential mutations by ID. The load gate
+	// below keeps a complete store reload from racing a mutation's persistence.
+	authMutationLocks sync.Map
+	authLoadGate      *semaphore.Weighted
 
 	// Debounced proxy-pool reconciliation after auth changes.
 	proxyReconcileMu       sync.Mutex
@@ -274,6 +280,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager := &Manager{
 		store:                 store,
+		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
 		selector:              selector,
 		hook:                  hook,
@@ -487,6 +494,8 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	if m == nil || authID == "" {
 		return
 	}
+	releaseMutation := m.lockAuthMutation(authID)
+	defer releaseMutation()
 
 	supportedModelInfos := registry.GetGlobalRegistry().GetModelsForClient(authID)
 	supported := make(map[string]struct{}, len(supportedModelInfos)*2)
@@ -573,13 +582,14 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	m.mu.Unlock()
 
 	if runtimeSnapshot != nil {
-		if errPersist := m.persist(ctx, runtimeSnapshot); errPersist != nil {
+		if errPersist := m.persistMutation(ctx, runtimeSnapshot); errPersist != nil {
 			logEntryWithRequestID(ctx).WithField("auth_id", runtimeSnapshot.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
 		}
 		if errPersist := m.persistRuntimeState(ctx, runtimeSnapshot); errPersist != nil {
 			logEntryWithRequestID(ctx).WithField("auth_id", runtimeSnapshot.ID).Warnf("failed to persist auth runtime state during model state reconciliation: %v", errPersist)
 		}
 	}
+	releaseMutation()
 	for _, model := range quotaModelsToClear {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(authID, model)
 	}

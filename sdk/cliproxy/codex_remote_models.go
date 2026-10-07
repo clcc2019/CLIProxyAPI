@@ -42,8 +42,9 @@ func (s *Service) refreshCodexRemoteCatalog(ctx context.Context, auth *coreauth.
 
 // refreshCodexAuthModels synchronizes the official Codex model catalog and
 // rebuilds that auth's registered model set. The account-scoped /models
-// response is refreshed too, then merged onto the official catalog. Ordinary
-// request-path refreshes continue to honor the five-minute/ETag cache.
+// response is refreshed too; static definitions are used only as metadata
+// for remote entries with the same model ID. Ordinary request-path refreshes
+// continue to honor the five-minute/ETag cache.
 func (s *Service) refreshCodexAuthModels(ctx context.Context, auth *coreauth.Auth) error {
 	if s == nil || auth == nil || auth.ID == "" || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
@@ -60,8 +61,8 @@ func (s *Service) refreshCodexAuthModels(ctx context.Context, auth *coreauth.Aut
 			return fmt.Errorf("failed to refresh official model catalog: %w", err)
 		}
 		// Drop the previous account snapshot before forcing a fresh request.
-		// Registration merges the refreshed account response onto the official
-		// catalog, so a partial/stale account response cannot hide new models.
+		// Registration is rebuilt from the refreshed account response, so a
+		// partial/stale account response cannot leave old account models behind.
 		s.codexRemoteCatalogs.Delete(auth.ID)
 		s.codexRemoteCatalogObservedETags.Delete(auth.ID)
 		if _, err := s.refreshCodexRemoteCatalogForced(ctx, auth); err != nil {
@@ -268,42 +269,8 @@ func (s *Service) codexModelsFromRemoteCatalog(auth *coreauth.Auth, fallback []*
 	if err != nil || len(models) == 0 {
 		return fallback
 	}
-	models = appendCodexFallbackModels(models, fallback)
 	models = appendCodexLocalAliases(models, fallback)
 	return registry.WithCodexBuiltins(models)
-}
-
-// appendCodexFallbackModels keeps the official catalog as the baseline when
-// an account-scoped /models response is partial. Remote entries retain their
-// account-specific capabilities; fallback entries provide newly published
-// official models and any static aliases omitted by the account response.
-func appendCodexFallbackModels(models, fallback []*ModelInfo) []*ModelInfo {
-	seen := make(map[string]struct{}, len(models)+len(fallback))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		if id := strings.ToLower(strings.TrimSpace(model.ID)); id != "" {
-			seen[id] = struct{}{}
-		}
-	}
-	for _, model := range fallback {
-		if model == nil {
-			continue
-		}
-		id := strings.TrimSpace(model.ID)
-		if id == "" {
-			continue
-		}
-		key := strings.ToLower(id)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		clone := *model
-		models = append(models, &clone)
-		seen[key] = struct{}{}
-	}
-	return models
 }
 
 func codexServiceBaseURL(auth *coreauth.Auth) string {
@@ -434,11 +401,9 @@ func codexServiceAccountID(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if auth.Attributes != nil {
-		if accountID := strings.TrimSpace(auth.Attributes["account_id"]); accountID != "" {
-			return accountID
-		}
-	}
+	// The request headers use the account ID projected from token metadata.
+	// Prefer the same source here so a stale legacy Attributes projection
+	// cannot fetch a model catalog for a different account.
 	if auth.Metadata != nil {
 		for _, key := range []string{"account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"} {
 			if value, ok := auth.Metadata[key].(string); ok {
@@ -446,6 +411,11 @@ func codexServiceAccountID(auth *coreauth.Auth) string {
 					return accountID
 				}
 			}
+		}
+	}
+	if auth.Attributes != nil {
+		if accountID := strings.TrimSpace(auth.Attributes["account_id"]); accountID != "" {
+			return accountID
 		}
 	}
 	return ""

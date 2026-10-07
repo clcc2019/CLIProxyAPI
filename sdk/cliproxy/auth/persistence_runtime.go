@@ -349,19 +349,25 @@ func (m *Manager) flushPersistQueue() {
 	clear(m.persistIDs)
 	m.persistMu.Unlock()
 
-	snapshots := make([]*Auth, 0, len(ids))
-	m.mu.RLock()
 	for _, id := range ids {
-		auth := m.auths[id]
-		if auth == nil {
+		releaseMutation, errMutation := m.lockAuthMutationContext(context.Background(), id)
+		if errMutation != nil {
+			logEntryWithRequestID(context.Background()).WithField("auth_id", id).Warnf("deferred auth mutation lock failed: %v", errMutation)
 			continue
 		}
-		snapshots = append(snapshots, auth.Clone())
-	}
-	m.mu.RUnlock()
 
-	for _, snapshot := range snapshots {
-		if err := m.persist(context.Background(), snapshot); err != nil {
+		m.mu.RLock()
+		var snapshot *Auth
+		if auth := m.auths[id]; auth != nil {
+			snapshot = auth.Clone()
+		}
+		m.mu.RUnlock()
+		if snapshot == nil {
+			releaseMutation()
+			continue
+		}
+
+		if err := m.persistMutation(context.Background(), snapshot); err != nil {
 			logEntryWithRequestID(context.Background()).
 				WithField("auth_id", snapshot.ID).
 				Warnf("deferred auth persist failed: %v", err)
@@ -371,5 +377,6 @@ func (m *Manager) flushPersistQueue() {
 				WithField("auth_id", snapshot.ID).
 				Warnf("deferred auth runtime state persist failed: %v", err)
 		}
+		releaseMutation()
 	}
 }

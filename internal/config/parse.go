@@ -87,6 +87,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if err := cfg.ValidateCredentialWeights(); err != nil {
 		return nil, err
 	}
+	if err := cfg.Models.Validate(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
 }

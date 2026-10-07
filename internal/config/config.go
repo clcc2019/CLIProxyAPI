@@ -23,6 +23,10 @@ const (
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
+	// Models selects optional catalog sources independently for the general,
+	// Codex client, and Devin model catalogs.
+	Models ModelCatalogs `yaml:"models" json:"models"`
+
 	SDKConfig `yaml:",inline"`
 	// Host is the network host/interface on which the API server will bind.
 	// Default is empty ("") to bind all interfaces (IPv4 + IPv6). Use "127.0.0.1" or "localhost" for local-only access.
@@ -117,9 +121,8 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
-	// EnableRequestCompression controls zstd compression for Codex JSON requests.
-	// A nil value uses the built-in default, which stays enabled to match the
-	// official client unless a config file explicitly disables it.
+	// EnableRequestCompression opts into zstd compression for Codex JSON requests.
+	// A nil value uses the built-in default, which is disabled.
 	EnableRequestCompression *bool `yaml:"enable-request-compression,omitempty" json:"enable-request-compression,omitempty"`
 
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
@@ -675,6 +678,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, err
 	}
 	if err := cfg.ValidateCredentialWeights(); err != nil {
+		if optional {
+			return &Config{}, nil
+		}
+		return nil, err
+	}
+	if err := cfg.Models.Validate(); err != nil {
 		if optional {
 			return &Config{}, nil
 		}

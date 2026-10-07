@@ -27,6 +27,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if !result.Success {
 		unlockExecutionGate = m.lockAuthExecutionGate(result.AuthID)
 	}
+	releaseMutation := m.lockAuthMutation(result.AuthID)
+	defer releaseMutation()
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
@@ -214,6 +216,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if persistAuthID != "" {
 		m.enqueuePersistAuthID(ctx, persistAuthID)
 	}
+	releaseMutation()
 	if m.scheduler != nil && schedulerSnapshot != nil {
 		m.scheduler.upsertAuthResult(schedulerSnapshot, result)
 	}
@@ -259,6 +262,9 @@ func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, reco
 		return
 	}
 	unlockExecutionGate := m.lockAuthExecutionGate(authID)
+	defer unlockExecutionGate()
+	releaseMutation := m.lockAuthMutation(authID)
+	defer releaseMutation()
 
 	persistAuthID := ""
 	var schedulerSnapshot *Auth
@@ -266,7 +272,6 @@ func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, reco
 	if auth, ok := m.auths[authID]; ok && auth != nil {
 		if quotaCooldownDisabledForAuth(auth) {
 			m.mu.Unlock()
-			unlockExecutionGate()
 			return
 		}
 		auth.Unavailable = true
@@ -289,6 +294,7 @@ func (m *Manager) MarkAuthQuotaCooldown(ctx context.Context, authID string, reco
 		schedulerSnapshot = auth.CloneForScheduler()
 	}
 	m.mu.Unlock()
+	releaseMutation()
 	unlockExecutionGate()
 
 	if persistAuthID != "" {
@@ -355,8 +361,10 @@ func (m *Manager) clearExpiredQuotaCooldownsForAuth(ctx context.Context, authID 
 	if authID == "" {
 		return false
 	}
-
 	unlockExecutionGate := m.lockAuthExecutionGate(authID)
+	defer unlockExecutionGate()
+	releaseMutation := m.lockAuthMutation(authID)
+	defer releaseMutation()
 	persistAuthID := ""
 	var schedulerSnapshot *Auth
 	invalidateAuthAffinity := false
@@ -393,6 +401,7 @@ func (m *Manager) clearExpiredQuotaCooldownsForAuth(ctx context.Context, authID 
 		}
 	}
 	m.mu.Unlock()
+	releaseMutation()
 	unlockExecutionGate()
 
 	if persistAuthID == "" {
@@ -420,6 +429,9 @@ func (m *Manager) clearAuthQuotaCooldown(ctx context.Context, authID string, cle
 		return false
 	}
 	unlockExecutionGate := m.lockAuthExecutionGate(authID)
+	defer unlockExecutionGate()
+	releaseMutation := m.lockAuthMutation(authID)
+	defer releaseMutation()
 
 	now := time.Now()
 	persistAuthID := ""
@@ -463,6 +475,7 @@ func (m *Manager) clearAuthQuotaCooldown(ctx context.Context, authID string, cle
 		}
 	}
 	m.mu.Unlock()
+	releaseMutation()
 	unlockExecutionGate()
 
 	if persistAuthID == "" {

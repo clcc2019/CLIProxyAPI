@@ -119,12 +119,20 @@ func (c *JWTClaims) GetAccountID() string {
 	return c.CodexAuthInfo.ChatgptAccountID
 }
 
+// DefaultPlanType defines the least-privileged plan used when a token does
+// not carry a ChatGPT subscription plan claim.
+const DefaultPlanType = "free"
+
 // GetPlanType extracts the ChatGPT plan type from token claims.
+// If the claim is missing or empty, it defaults to "free".
 func (c *JWTClaims) GetPlanType() string {
 	if c == nil {
-		return ""
+		return DefaultPlanType
 	}
-	return strings.TrimSpace(c.CodexAuthInfo.ChatgptPlanType)
+	if planType := strings.TrimSpace(c.CodexAuthInfo.ChatgptPlanType); planType != "" {
+		return planType
+	}
+	return DefaultPlanType
 }
 
 // ExpirationTime returns the JWT exp timestamp when present.

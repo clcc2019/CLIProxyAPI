@@ -233,3 +233,36 @@ func TestBuildAuthRecordPersistsPlanTypeFromTokenData(t *testing.T) {
 		t.Fatalf("Attributes[plan_type] = %q, want plus", got)
 	}
 }
+
+func TestBuildAuthRecordDefaultsMissingPlanTypeToFree(t *testing.T) {
+	authenticator := NewCodexAuthenticator()
+	authSvc := &codex.CodexAuth{}
+	bundle := &codex.CodexAuthBundle{
+		TokenData: codex.CodexTokenData{
+			Email:        "codex@example.com",
+			AccessToken:  "access-token",
+			RefreshToken: "refresh-token",
+			AccountID:    "account-123",
+		},
+		LastRefresh: "2026-03-31T00:00:00Z",
+	}
+
+	record, err := authenticator.buildAuthRecord(authSvc, bundle, nil)
+	if err != nil {
+		t.Fatalf("buildAuthRecord() error = %v", err)
+	}
+
+	if got, _ := record.Metadata["plan_type"].(string); got != codex.DefaultPlanType {
+		t.Fatalf("Metadata[plan_type] = %q, want %q", got, codex.DefaultPlanType)
+	}
+	if got := record.Attributes["plan_type"]; got != codex.DefaultPlanType {
+		t.Fatalf("Attributes[plan_type] = %q, want %q", got, codex.DefaultPlanType)
+	}
+	storage, ok := record.Storage.(*codex.CodexTokenStorage)
+	if !ok || storage == nil {
+		t.Fatalf("record.Storage = %T, want *codex.CodexTokenStorage", record.Storage)
+	}
+	if storage.PlanType != codex.DefaultPlanType {
+		t.Fatalf("storage.PlanType = %q, want %q", storage.PlanType, codex.DefaultPlanType)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -613,6 +614,10 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	if newCfg == nil {
 		return
 	}
+	if errValidate := newCfg.Models.Validate(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected config update with invalid model catalog sources")
+		return
+	}
 
 	previousStrategy = normalizeRoutingStrategy(previousStrategy)
 	nextStrategy := normalizeRoutingStrategy(newCfg.Routing.Strategy)
@@ -636,6 +641,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
+	registry.UpdateModelCatalogSources(newCfg.Models, newCfg.Home.Enabled)
 	if s.coreManager != nil {
 		s.coreManager.SetConfig(newCfg)
 		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
@@ -654,9 +660,14 @@ func (s *Service) applyPersistedConfigUpdate(newCfg *config.Config) {
 	if s == nil || newCfg == nil {
 		return
 	}
+	if errValidate := newCfg.Models.Validate(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected persisted config update with invalid model catalog sources")
+		return
+	}
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
+	registry.UpdateModelCatalogSources(newCfg.Models, newCfg.Home.Enabled)
 	if s.coreManager == nil {
 		return
 	}
@@ -894,15 +905,18 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	s.officialModelCatalogRefresh = registry.RefreshModels
-	// Keep the shared model registry current for every provider. Each updater
-	// validates before swapping its immutable snapshot and retains the last
-	// known-good catalog when the network is unavailable.
-	registry.StartModelsUpdater(ctx)
-	registry.StartCodexClientModelsUpdater(ctx)
-	registry.StartDevinModelsUpdater(ctx)
+	s.cfgMu.RLock()
+	startupCfg := s.cfg
+	s.cfgMu.RUnlock()
+	// Keep each model catalog on its configured source. Every updater validates
+	// before swapping its immutable snapshot and retains the last known-good
+	// catalog when the source is unavailable.
+	if startupCfg != nil {
+		registry.StartModelCatalogUpdaters(ctx, startupCfg.Models, startupCfg.Home.Enabled)
+	}
 
 	usage.StartDefault(ctx)
-	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
+	homeEnabled := startupCfg != nil && startupCfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
@@ -1270,13 +1284,16 @@ func (s *Service) ensureAuthDir() error {
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
-	s.registerModelsForAuthWithOptions(a, true)
+	// Account-scoped Codex /models responses are a transport capability
+	// snapshot, not an entitlement list. Build request routing from the
+	// configured plan or API-key model set so a global catalog entry cannot be
+	// advertised to a ChatGPT account that cannot use it.
+	s.registerModelsForAuthWithOptions(a, false)
 }
 
-// registerModelsForAuthWithOptions rebuilds one auth registration. Codex's
-// account-scoped /models response is useful on the request path, but the
-// management auth-file view must be able to reflect the freshly synchronized
-// official catalog. Callers can disable that account overlay for that view.
+// registerModelsForAuthWithOptions rebuilds one auth registration. The optional
+// account-scoped catalog overlay is retained only for compatibility with the
+// legacy refresh path; normal registrations use plan/config permissions.
 func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRemoteCatalog bool) {
 	if a == nil || a.ID == "" {
 		return
@@ -1286,6 +1303,18 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 		return
 	}
 	authKind := normalizeAuthKind(a.Attributes["auth_kind"])
+	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	if provider == "codex" {
+		// Codex auth metadata can contain both Agent Identity material and an
+		// access token. CodexAuthKind applies the metadata-first precedence used
+		// by the executor instead of relying on a stale attributes projection.
+		authKind = normalizeAuthKind(coreauth.CodexAuthKind(a))
+	}
+	if authKind == "" && provider == "codex" && a.Attributes != nil && strings.TrimSpace(a.Attributes["api_key"]) != "" {
+		// Legacy API-key auth files may not carry auth_kind. Keep the explicit
+		// API-key field ahead of the broader AccountInfo OAuth fallback.
+		authKind = "apikey"
+	}
 	if authKind == "" {
 		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
 			authKind = "apikey"
@@ -1299,7 +1328,6 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 			}
 		}
 	}
-	provider := strings.ToLower(strings.TrimSpace(a.Provider))
 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
 	if compatDetected {
 		provider = "openai-compatibility"
@@ -1326,6 +1354,19 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
+		if authKind == "apikey" {
+			// Codex API keys only receive models from the matching config entry.
+			// Falling through to a plan catalog here can bind an OAuth-only model
+			// to an API key, and a stale config index can bind another key's model
+			// permissions to this credential.
+			if entry := s.resolveConfigCodexKey(a); entry != nil {
+				models = buildCodexConfigModels(entry)
+				excluded = entry.ExcludedModels
+			}
+			models = applyExcludedModels(models, excluded)
+			break
+		}
+
 		codexPlanType := ""
 		if a.Attributes != nil {
 			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
@@ -1344,14 +1385,6 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 		}
 		if useCodexRemoteCatalog {
 			models = s.codexModelsFromRemoteCatalog(a, models)
-		}
-		if entry := s.resolveConfigCodexKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildCodexConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
 		}
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
@@ -1426,7 +1459,7 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 // as part of the previous registration snapshot and is cleared when the auth is
 // rebound to the refreshed model catalog.
 func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
-	return s.refreshModelRegistrationForAuthWithOptions(current, true)
+	return s.refreshModelRegistrationForAuthWithOptions(current, false)
 }
 
 // refreshModelRegistrationForAuthWithOptions re-applies one auth's model
@@ -1518,6 +1551,11 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
+	if entry := configEntryForAuthIndex(auth, s.cfg.CodexKey); entry != nil {
+		if configCodexKeyMatchesAuth(entry, auth) {
+			return entry
+		}
+	}
 	var attrKey, attrBase string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
@@ -1538,6 +1576,41 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 		}
 	}
 	return nil
+}
+
+// configEntryForAuthIndex resolves an entry synthesized from the current
+// configuration. The index is only a hint: callers must still verify the
+// credential and endpoint before trusting it, because config entries can be
+// reordered or replaced while an auth snapshot is in flight.
+func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
+	if auth == nil || auth.Attributes == nil {
+		return nil
+	}
+	if source := strings.TrimSpace(auth.Attributes["source"]); source != "" && !strings.HasPrefix(strings.ToLower(source), "config:") {
+		return nil
+	}
+	index, err := strconv.Atoi(strings.TrimSpace(auth.Attributes[coreauth.AttributeConfigIndex]))
+	if err != nil || index < 0 || index >= len(entries) {
+		return nil
+	}
+	return &entries[index]
+}
+
+func configCodexKeyMatchesAuth(entry *config.CodexKey, auth *coreauth.Auth) bool {
+	if entry == nil || auth == nil {
+		return false
+	}
+	attrKey, attrBase := "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	cfgKey := strings.TrimSpace(entry.APIKey)
+	cfgBase := strings.TrimSpace(entry.BaseURL)
+	if attrKey != "" {
+		return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
+	}
+	return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
 }
 
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {
@@ -1764,7 +1837,10 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+	if len(entry.Models) == 0 {
+		return registry.GetCodexProModels()
+	}
+	return buildConfigModels(entry.Models, "openai", "openai")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

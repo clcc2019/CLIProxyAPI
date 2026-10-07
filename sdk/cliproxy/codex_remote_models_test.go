@@ -113,6 +113,41 @@ func TestRefreshCodexRemoteCatalogUsesAccountScopedModels(t *testing.T) {
 	}
 }
 
+func TestRefreshCodexRemoteCatalogPrefersMetadataAccountID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if got := req.Header.Get("ChatGPT-Account-ID"); got != "acct-current" {
+			t.Errorf("ChatGPT-Account-ID = %q, want acct-current", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"models\":[{\"slug\":\"account-model\"}]}"))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexRemoteModelsTestExecutor{})
+	service := &Service{coreManager: manager}
+	auth := &coreauth.Auth{
+		ID:       "auth-stale-account-attribute",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind":  "oauth",
+			"base_url":   server.URL,
+			"account_id": "acct-stale",
+		},
+		Metadata: map[string]any{
+			"access_token": "access-current",
+			"account_id":   "acct-current",
+		},
+	}
+
+	if err := service.refreshCodexRemoteCatalog(context.Background(), auth); err != nil {
+		t.Fatalf("refreshCodexRemoteCatalog: %v", err)
+	}
+	if got := codexServiceAccountID(auth); got != "acct-current" {
+		t.Fatalf("codexServiceAccountID = %q, want acct-current", got)
+	}
+}
+
 func TestRefreshCodexRemoteCatalogUsesStandardOpenAIListForAPIKeyAuth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if got := req.URL.Path; got != "/models" {
@@ -234,7 +269,7 @@ func TestRefreshCodexRemoteCatalogRefetchesExpiredEntry(t *testing.T) {
 	}
 }
 
-func TestRefreshCodexAuthModelsBypassesFreshCatalogAndReRegisters(t *testing.T) {
+func TestRefreshCodexAuthModelsDoesNotUseAccountCatalogAsEntitlements(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		call := calls.Add(1)
@@ -267,8 +302,8 @@ func TestRefreshCodexAuthModelsBypassesFreshCatalogAndReRegisters(t *testing.T) 
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("initial upstream calls = %d, want 1", got)
 	}
-	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); !containsModelID(ids, "old-account-model") {
-		t.Fatalf("initial registry models = %#v, want old-account-model", ids)
+	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); containsModelID(ids, "old-account-model") {
+		t.Fatalf("initial registry exposed account catalog model: %#v", ids)
 	}
 
 	if err = service.refreshCodexAuthModels(context.Background(), auth); err != nil {
@@ -278,8 +313,8 @@ func TestRefreshCodexAuthModelsBypassesFreshCatalogAndReRegisters(t *testing.T) 
 		t.Fatalf("forced refresh upstream calls = %d, want 2", got)
 	}
 	ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID)
-	if !containsModelID(ids, "new-account-model") || containsModelID(ids, "old-account-model") {
-		t.Fatalf("refreshed registry models = %#v, want new account model without stale model", ids)
+	if containsModelID(ids, "new-account-model") || containsModelID(ids, "old-account-model") {
+		t.Fatalf("refreshed registry retained account catalog models: %#v", ids)
 	}
 }
 
@@ -315,8 +350,8 @@ func TestRefreshCodexAuthModelsUsesOfficialCatalogForOAuth(t *testing.T) {
 		sourceKey: codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), ""),
 	})
 	service.registerModelsForAuth(auth)
-	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); !containsModelID(ids, "old-account-model") {
-		t.Fatalf("stale setup models = %#v, want old-account-model", ids)
+	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); containsModelID(ids, "old-account-model") {
+		t.Fatalf("stale account catalog model was registered: %#v", ids)
 	}
 
 	if err := service.refreshCodexAuthModels(context.Background(), auth); err != nil {
@@ -355,7 +390,7 @@ func TestCodexModelsFromRemoteCatalogRejectsExpiredEntry(t *testing.T) {
 	}
 }
 
-func TestCodexModelsFromRemoteCatalogPreservesOfficialFallback(t *testing.T) {
+func TestCodexModelsFromRemoteCatalogUsesRemoteIDsWithStaticMetadata(t *testing.T) {
 	service := &Service{}
 	auth := &coreauth.Auth{
 		ID:       "auth-partial-catalog",
@@ -371,14 +406,27 @@ func TestCodexModelsFromRemoteCatalogPreservesOfficialFallback(t *testing.T) {
 		fetchedAt: time.Now(),
 		sourceKey: sourceKey,
 	})
-	fallback := []*ModelInfo{{ID: "gpt-6-sol"}, {ID: "official-only-model"}}
+	fallback := []*ModelInfo{
+		{ID: "account-model", DisplayName: "Static account metadata"},
+		{ID: "official-only-model"},
+	}
 
 	models := service.codexModelsFromRemoteCatalog(auth, fallback)
 	if !containsModelID(modelInfoIDs(models), "account-model") {
-		t.Fatalf("merged catalog omitted account model: %#v", models)
+		t.Fatalf("remote catalog omitted account model: %#v", models)
 	}
-	if !containsModelID(modelInfoIDs(models), "official-only-model") {
-		t.Fatalf("merged catalog omitted official fallback model: %#v", models)
+	if containsModelID(modelInfoIDs(models), "official-only-model") {
+		t.Fatalf("account catalog exposed static-only model: %#v", models)
+	}
+	var accountModel *ModelInfo
+	for _, model := range models {
+		if model != nil && model.ID == "account-model" {
+			accountModel = model
+			break
+		}
+	}
+	if accountModel == nil || accountModel.DisplayName != "Static account metadata" {
+		t.Fatalf("remote model did not retain same-ID static metadata: %#v", accountModel)
 	}
 }
 
@@ -475,8 +523,8 @@ func TestCodexResponseModelsETagRefreshesCatalogOnlyWhenChanged(t *testing.T) {
 	if entry.etag != "catalog-v1" {
 		t.Fatalf("cached ETag = %q, want catalog-v1", entry.etag)
 	}
-	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); !containsModelID(ids, "etag-catalog-model") {
-		t.Fatalf("refreshed registry models = %#v, want etag-catalog-model", ids)
+	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); containsModelID(ids, "etag-catalog-model") {
+		t.Fatalf("account catalog model was registered after ETag refresh: %#v", ids)
 	}
 
 	service.observeCodexResponseMetadata(context.Background(), auth, runtimeexecutor.CodexResponseMetadata{ModelsETag: "catalog-v1"})

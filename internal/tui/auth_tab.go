@@ -24,6 +24,7 @@ var authEditableFields = []editableField{
 	{label: "Prefix", key: "prefix"},
 	{label: "Proxy URL", key: "proxy_url"},
 	{label: "Priority", key: "priority"},
+	{label: "Request Timezone", key: "openai_request_timezone"},
 }
 
 // authTabModel displays auth credential files with interactive management.
@@ -288,6 +289,13 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		{"Created", "created_at", false},
 		{"Updated", "updated_at", false},
 	}
+	if isCodexAuthFile(f) {
+		fields = append(fields, struct {
+			label    string
+			key      string
+			editable bool
+		}{"Request Timezone", "openai_request_timezone", true})
+	}
 
 	for _, field := range fields {
 		val := getAnyString(f, field.key)
@@ -415,6 +423,10 @@ func getAnyString(m map[string]any, key string) string {
 	return fmt.Sprintf("%v", v)
 }
 
+func isCodexAuthFile(file map[string]any) bool {
+	return strings.EqualFold(getString(file, "type"), "codex") || strings.EqualFold(getString(file, "provider"), "codex")
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -540,6 +552,11 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 		return m, m.startEdit(1) // proxy_url
 	case "3":
 		return m, m.startEdit(2) // priority
+	case "4":
+		if m.cursor < len(m.files) && isCodexAuthFile(m.files[m.cursor]) {
+			return m, m.startEdit(3) // request timezone
+		}
+		return m, nil
 	case "r":
 		m.status = ""
 		return m, m.fetchFiles

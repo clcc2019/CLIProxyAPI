@@ -69,6 +69,8 @@ func (m *Manager) UpdateRateLimits(ctx context.Context, authID string, snapshots
 	if m == nil || strings.TrimSpace(authID) == "" || len(snapshots) == 0 {
 		return
 	}
+	releaseMutation := m.lockAuthMutation(authID)
+	defer releaseMutation()
 	now := time.Now().UTC()
 	persistAuthID := ""
 	var schedulerSnapshot *Auth
