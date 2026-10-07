@@ -96,8 +96,9 @@ func normalizeCodexRequestTimezone(body []byte, auth *cliproxyauth.Auth) []byte 
 		if value.Type != gjson.String {
 			return
 		}
-		updated := rewriteCodexEnvironmentTimezone(value.String(), timezone)
-		if updated == value.String() {
+		original := value.String()
+		updated := rewriteCodexEnvironmentTimezone(original, timezone)
+		if updated == original {
 			return
 		}
 		if rewritten, err := sjson.SetBytes(body, path, updated); err == nil {
@@ -105,7 +106,11 @@ func normalizeCodexRequestTimezone(body []byte, auth *cliproxyauth.Auth) []byte 
 		}
 	}
 
-	input := gjson.GetBytes(body, "input")
+	// Read both collections in one JSON scan. The paths and array indexes remain
+	// stable because the normalizer only changes string values, so the snapshot
+	// can safely be applied back to body through sjson below.
+	values := gjson.GetManyBytes(body, "input", "tools")
+	input, tools := values[0], values[1]
 	if input.IsArray() {
 		for inputIndex, item := range input.Array() {
 			if item.Get("role").String() != "user" {
@@ -125,7 +130,6 @@ func normalizeCodexRequestTimezone(body []byte, auth *cliproxyauth.Auth) []byte 
 		}
 	}
 
-	tools := gjson.GetBytes(body, "tools")
 	if tools.IsArray() {
 		for index, tool := range tools.Array() {
 			kind := tool.Get("type").String()

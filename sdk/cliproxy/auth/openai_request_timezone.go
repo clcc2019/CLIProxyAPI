@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	_ "time/tzdata"
 )
@@ -25,6 +26,11 @@ var openAIRequestTimezoneAllowed = func() map[string]struct{} {
 	return allowed
 }()
 
+// Timezone validation is used on the hot request path through
+// Auth.OpenAIRequestTimezone. Keep the result for each allow-listed name so a
+// request does not repeatedly parse the embedded tzdata.
+var openAIRequestTimezoneValidity sync.Map // map[string]bool
+
 func OpenAIRequestTimezoneOptions() []string {
 	options := append([]string(nil), openAIRequestTimezoneOptions...)
 	sort.Strings(options)
@@ -36,8 +42,13 @@ func IsValidOpenAIRequestTimezone(name string) bool {
 	if _, ok := openAIRequestTimezoneAllowed[name]; !ok {
 		return false
 	}
+	if cached, ok := openAIRequestTimezoneValidity.Load(name); ok {
+		return cached.(bool)
+	}
 	_, err := time.LoadLocation(name)
-	return err == nil
+	valid := err == nil
+	actual, _ := openAIRequestTimezoneValidity.LoadOrStore(name, valid)
+	return actual.(bool)
 }
 
 func (a *Auth) OpenAIRequestTimezone() string {
