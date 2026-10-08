@@ -201,6 +201,78 @@ func TestApplyAuthExcludedModelsMeta(t *testing.T) {
 	}
 }
 
+func TestFileAuthKind(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *coreauth.Auth
+		want string
+	}{
+		{
+			name: "explicit oauth wins over api key fallback",
+			auth: &coreauth.Auth{Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"api_key":   "legacy-token",
+			}},
+			want: "oauth",
+		},
+		{
+			name: "api key spelling is canonicalized",
+			auth: &coreauth.Auth{Attributes: map[string]string{
+				"auth_kind": "api_key",
+			}},
+			want: "apikey",
+		},
+		{
+			name: "legacy api key file without auth kind",
+			auth: &coreauth.Auth{Attributes: map[string]string{
+				"api_key": "file-key",
+			}},
+			want: "apikey",
+		},
+		{
+			name: "metadata api key file without projected attributes",
+			auth: &coreauth.Auth{Metadata: map[string]any{
+				"api_key": "file-key",
+			}},
+			want: "apikey",
+		},
+		{
+			name: "default oauth",
+			auth: &coreauth.Auth{},
+			want: "oauth",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fileAuthKind(tt.auth); got != tt.want {
+				t.Fatalf("fileAuthKind() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyAuthExcludedModelsMeta_NormalizesAPIKeyKind(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   "codex",
+		Attributes: make(map[string]string),
+	}
+	cfg := &config.Config{
+		OAuthExcludedModels: map[string][]string{
+			"codex": {"oauth-only"},
+		},
+	}
+
+	ApplyAuthExcludedModelsMeta(auth, cfg, []string{"key-only"}, "api_key")
+
+	if got := auth.Attributes["auth_kind"]; got != "apikey" {
+		t.Fatalf("auth_kind = %q, want apikey", got)
+	}
+	if got := auth.Attributes["excluded_models"]; got != "key-only" {
+		t.Fatalf("excluded_models = %q, want only the API-key exclusions", got)
+	}
+}
+
 func TestApplyAuthExcludedModelsMeta_OAuthMergeWritesCombinedModels(t *testing.T) {
 	auth := &coreauth.Auth{
 		Provider:   "claude",

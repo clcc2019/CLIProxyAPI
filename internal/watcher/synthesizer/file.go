@@ -104,10 +104,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		log.WithError(errWeight).WithField("path", fullPath).Warn("skipping auth file with invalid credential weight")
 		return nil
 	}
-	authKind := strings.TrimSpace(a.Attributes["auth_kind"])
-	if authKind == "" {
-		authKind = "oauth"
-	}
+	authKind := fileAuthKind(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, authKind)
 	return []*coreauth.Auth{a}
 }

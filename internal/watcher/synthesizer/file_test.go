@@ -695,6 +695,46 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_CodexAPIKeyUsesAPIKeyModelPermissions(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":            "codex",
+		"api_key":         "file-key",
+		"excluded_models": []string{"key-only"},
+	}
+	data, errMarshal := json.Marshal(authData)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth file: %v", errMarshal)
+	}
+	if errWriteFile := os.WriteFile(filepath.Join(tempDir, "codex.json"), data, 0644); errWriteFile != nil {
+		t.Fatalf("write auth file: %v", errWriteFile)
+	}
+
+	auths, errSynthesize := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config: &config.Config{
+			OAuthExcludedModels: map[string][]string{
+				"codex": {"oauth-only"},
+			},
+		},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if errSynthesize != nil {
+		t.Fatalf("synthesize auth file: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if got := auth.Attributes["auth_kind"]; got != "apikey" {
+		t.Fatalf("auth_kind = %q, want apikey", got)
+	}
+	if got := auth.Attributes["excluded_models"]; got != "key-only" {
+		t.Fatalf("excluded_models = %q, want only the API-key exclusions", got)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
 	tests := []struct {
 		name     string

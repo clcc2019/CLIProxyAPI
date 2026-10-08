@@ -51,6 +51,49 @@ func (g *StableIDGenerator) Next(kind string, parts ...string) (string, string) 
 	return fmt.Sprintf("%s:%s", kind, short), short
 }
 
+// normalizeFileAuthKind keeps the auth-kind spellings accepted by auth files
+// on the same routing value. In particular, both api_key and apikey must take
+// the API-key model-permission path.
+func normalizeFileAuthKind(kind string) string {
+	trimmed := strings.TrimSpace(kind)
+	switch strings.ToLower(trimmed) {
+	case "apikey", "api_key", "api-key":
+		return "apikey"
+	case "oauth", "oauth2":
+		return "oauth"
+	default:
+		return trimmed
+	}
+}
+
+// fileAuthKind returns the effective credential kind for an auth-file
+// projection. An explicit auth_kind is authoritative; legacy files that only
+// contain api_key are API-key credentials rather than OAuth credentials.
+func fileAuthKind(auth *coreauth.Auth) string {
+	if auth == nil {
+		return "oauth"
+	}
+	if auth.Attributes != nil {
+		if kind := normalizeFileAuthKind(auth.Attributes["auth_kind"]); kind != "" {
+			return kind
+		}
+		if strings.TrimSpace(auth.Attributes["api_key"]) != "" {
+			return "apikey"
+		}
+	}
+	if auth.Metadata != nil {
+		if kind, ok := auth.Metadata["auth_kind"].(string); ok {
+			if kind = normalizeFileAuthKind(kind); kind != "" {
+				return kind
+			}
+		}
+		if apiKey, ok := auth.Metadata["api_key"].(string); ok && strings.TrimSpace(apiKey) != "" {
+			return "apikey"
+		}
+	}
+	return "oauth"
+}
+
 // ApplyAuthExcludedModelsMeta applies excluded models metadata to an auth entry.
 // It computes a hash of excluded models and sets the auth_kind attribute.
 // For OAuth entries, perKey (from the JSON file's excluded-models field) is merged
@@ -59,7 +102,8 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 	if auth == nil || cfg == nil {
 		return
 	}
-	authKindKey := strings.ToLower(strings.TrimSpace(authKind))
+	authKind = normalizeFileAuthKind(authKind)
+	authKindKey := strings.ToLower(authKind)
 	seen := make(map[string]struct{})
 	add := func(list []string) {
 		for _, entry := range list {
