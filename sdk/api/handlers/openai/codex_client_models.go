@@ -104,6 +104,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
+			mergeCodexClientModelDefaults(entry, defaultTemplate)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
 			result = append(result, entry)
@@ -150,6 +151,21 @@ func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any,
 	})
 
 	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
+}
+
+// mergeCodexClientModelDefaults fills fields omitted by a compact capability
+// entry from the complete gpt-5.5 template. This keeps newly added official
+// models usable by clients while preserving their model-specific capabilities.
+func mergeCodexClientModelDefaults(entry, defaults map[string]any) {
+	if len(entry) == 0 || len(defaults) == 0 {
+		return
+	}
+	for key, value := range defaults {
+		if _, exists := entry[key]; exists {
+			continue
+		}
+		entry[key] = cloneCodexClientModelValue(value)
+	}
 }
 
 func applyCodexClientModelMetadata(entry map[string]any, id string, model map[string]any) {

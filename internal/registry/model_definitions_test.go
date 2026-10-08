@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCodexStaticModelsIncludeGPT55WithExpectedContextLength(t *testing.T) {
 	tests := []struct {
@@ -38,7 +41,6 @@ func TestCodexStaticModelsIncludeGPT6Astra(t *testing.T) {
 		name   string
 		models []*ModelInfo
 	}{
-		{name: "free", models: GetCodexFreeModels()},
 		{name: "team", models: GetCodexTeamModels()},
 		{name: "plus", models: GetCodexPlusModels()},
 		{name: "pro", models: GetCodexProModels()},
@@ -55,6 +57,10 @@ func TestCodexStaticModelsIncludeGPT6Astra(t *testing.T) {
 			}
 		})
 	}
+
+	if info := findModelInfo(GetCodexFreeModels(), "gpt-6-astra"); info != nil {
+		t.Fatalf("gpt-6-astra unexpectedly available in codex-free: %#v", info)
+	}
 }
 
 func TestCodexStaticModelsIncludeGPT56Family(t *testing.T) {
@@ -63,10 +69,10 @@ func TestCodexStaticModelsIncludeGPT56Family(t *testing.T) {
 		models []*ModelInfo
 		ids    []string
 	}{
-		{name: "free", models: GetCodexFreeModels(), ids: []string{"gpt-5.6-terra", "gpt-5.6-luna"}},
-		{name: "team", models: GetCodexTeamModels(), ids: []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
-		{name: "plus", models: GetCodexPlusModels(), ids: []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
-		{name: "pro", models: GetCodexProModels(), ids: []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
+		{name: "free", models: GetCodexFreeModels(), ids: []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"}},
+		{name: "team", models: GetCodexTeamModels(), ids: []string{"gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
+		{name: "plus", models: GetCodexPlusModels(), ids: []string{"gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
+		{name: "pro", models: GetCodexProModels(), ids: []string{"gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}},
 	}
 
 	for _, tt := range tests {
@@ -77,9 +83,6 @@ func TestCodexStaticModelsIncludeGPT56Family(t *testing.T) {
 					t.Fatalf("%s not found", id)
 				}
 				wantContextLength := 272000
-				if id == "gpt-5.6" {
-					wantContextLength = 372000
-				}
 				if info.ContextLength != wantContextLength {
 					t.Fatalf("%s context length = %d, want %d", id, info.ContextLength, wantContextLength)
 				}
@@ -117,6 +120,40 @@ func TestCodexStaticModelsIncludeGPT56Family(t *testing.T) {
 	}
 }
 
+func TestCodexStaticModelsMatchCommunityPlanSets(t *testing.T) {
+	want := map[string][]string{
+		"free": {"gpt-6-luna", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"},
+		"team": {"gpt-5.5", "gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"},
+		"plus": {"gpt-5.5", "gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"},
+		"pro":  {"gpt-5.5", "gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"},
+	}
+	actual := map[string][]*ModelInfo{
+		"free": GetCodexFreeModels(),
+		"team": GetCodexTeamModels(),
+		"plus": GetCodexPlusModels(),
+		"pro":  GetCodexProModels(),
+	}
+	for plan, models := range actual {
+		t.Run(plan, func(t *testing.T) {
+			got := make(map[string]struct{}, len(models))
+			for _, model := range models {
+				if model == nil || strings.HasPrefix(model.ID, "gpt-image-") {
+					continue
+				}
+				got[model.ID] = struct{}{}
+			}
+			if len(got) != len(want[plan]) {
+				t.Fatalf("model IDs = %#v, want %v", got, want[plan])
+			}
+			for _, id := range want[plan] {
+				if _, ok := got[id]; !ok {
+					t.Fatalf("missing model %q from %s plan: %#v", id, plan, got)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkLookupModelHeaderOverrides(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -146,7 +183,7 @@ func TestStaticProviderModelsIncludeLatestSyncedModels(t *testing.T) {
 		{name: "claude opus 5", models: GetClaudeModels(), id: "claude-opus-5"},
 		{name: "claude sonnet 5", models: GetClaudeModels(), id: "claude-sonnet-5"},
 		{name: "claude fable 5", models: GetClaudeModels(), id: "claude-fable-5"},
-		{name: "codex plus spark", models: GetCodexPlusModels(), id: "gpt-5.3-codex-spark"},
+		{name: "codex plus gpt 6.1 sol", models: GetCodexPlusModels(), id: "gpt-6.1-sol"},
 		{name: "kimi k2.7 code", models: GetKimiModels(), id: "kimi-k2.7-code"},
 		{name: "kimi k2.7 code highspeed", models: GetKimiModels(), id: "kimi-k2.7-code-highspeed"},
 	}
@@ -273,6 +310,28 @@ func TestCodexClientModelCapabilitiesIncludeGPT6Astra(t *testing.T) {
 	}
 	if len(capabilities.ServiceTiers) != 1 || capabilities.ServiceTiers[0] != "priority" {
 		t.Fatalf("service tiers = %#v, want [priority]", capabilities.ServiceTiers)
+	}
+}
+
+func TestCodexClientModelCapabilitiesIncludeGPT61Sol(t *testing.T) {
+	capabilities, ok := CodexClientModelCapabilitiesForModel("gpt-6.1-sol")
+	if !ok {
+		t.Fatal("expected gpt-6.1-sol in embedded Codex client model catalog")
+	}
+	if !capabilities.SupportsParallelToolCalls || !capabilities.UseResponsesLite {
+		t.Fatalf("gpt-6.1-sol capabilities = %#v, want parallel tools and responses_lite", capabilities)
+	}
+	if capabilities.DefaultReasoningLevel != "low" {
+		t.Fatalf("default reasoning level = %q, want low", capabilities.DefaultReasoningLevel)
+	}
+	wantLevels := []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+	if len(capabilities.SupportedReasoningLevels) != len(wantLevels) {
+		t.Fatalf("reasoning levels = %#v, want %#v", capabilities.SupportedReasoningLevels, wantLevels)
+	}
+	for i, want := range wantLevels {
+		if capabilities.SupportedReasoningLevels[i] != want {
+			t.Fatalf("reasoning levels = %#v, want %#v", capabilities.SupportedReasoningLevels, wantLevels)
+		}
 	}
 }
 

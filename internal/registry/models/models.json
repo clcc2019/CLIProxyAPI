@@ -271,14 +271,14 @@
   ],
   "codex-free": [
     {
-      "id": "gpt-6-astra",
+      "id": "gpt-6-luna",
       "object": "model",
-      "created": 1788465958,
+      "created": 1790035200,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT-6-Astra",
-      "version": "gpt-6",
-      "description": "Our most capable model for complex, demanding work.",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -290,33 +290,7 @@
           "medium",
           "high",
           "xhigh",
-          "max",
-          "ultra"
-        ]
-      }
-    },
-    {
-      "id": "gpt-daybreak-blue-latest",
-      "object": "model",
-      "created": 1788480000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "Daybreak Blue",
-      "version": "gpt-daybreak-blue-latest",
-      "description": "Latest frontier agentic coding model for broad defensive cybersecurity work.",
-      "context_length": 272000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max",
-          "ultra"
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -325,30 +299,11 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
-    },
-    {
-      "id": "gpt-5.4-mini",
-      "object": "model",
-      "created": 1773705600,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4 Mini",
-      "version": "gpt-5.4-mini",
-      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
       ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.5",
@@ -454,6 +409,29 @@
   ],
   "codex-team": [
     {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
       "id": "gpt-6-astra",
       "object": "model",
       "created": 1788465958,
@@ -479,14 +457,14 @@
       }
     },
     {
-      "id": "gpt-daybreak-blue-latest",
+      "id": "gpt-6-sol",
       "object": "model",
-      "created": 1788480000,
+      "created": 1790035200,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "Daybreak Blue",
-      "version": "gpt-daybreak-blue-latest",
-      "description": "Latest frontier agentic coding model for broad defensive cybersecurity work.",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -498,8 +476,7 @@
           "medium",
           "high",
           "xhigh",
-          "max",
-          "ultra"
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -508,63 +485,21 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
-    },
-    {
-      "id": "gpt-5.4",
-      "object": "model",
-      "created": 1772668800,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4",
-      "version": "gpt-5.4",
-      "description": "Stable version of GPT 5.4",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
       ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
-      "id": "gpt-5.4-mini",
+      "id": "gpt-6.1-sol",
       "object": "model",
-      "created": 1773705600,
+      "created": 1790640000,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 5.4 Mini",
-      "version": "gpt-5.4-mini",
-      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
+      "display_name": "GPT 6.1 Sol",
+      "version": "gpt-6.0",
+      "description": "Latest workhorse model for coding and everyday work.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -575,9 +510,56 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -679,37 +661,35 @@
           "medium",
           "high",
           "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.6",
-      "object": "model",
-      "created": 1783616400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.6",
-      "version": "gpt-5.6",
-      "description": "Alias for GPT 5.6 Sol.",
-      "context_length": 372000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max",
-          "ultra"
         ]
       }
     }
   ],
   "codex-plus": [
     {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
       "id": "gpt-6-astra",
       "object": "model",
       "created": 1788465958,
@@ -735,14 +715,14 @@
       }
     },
     {
-      "id": "gpt-daybreak-blue-latest",
+      "id": "gpt-6-sol",
       "object": "model",
-      "created": 1788480000,
+      "created": 1790035200,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "Daybreak Blue",
-      "version": "gpt-daybreak-blue-latest",
-      "description": "Latest frontier agentic coding model for broad defensive cybersecurity work.",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -754,8 +734,7 @@
           "medium",
           "high",
           "xhigh",
-          "max",
-          "ultra"
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -764,86 +743,21 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
-    },
-    {
-      "id": "gpt-5.3-codex-spark",
-      "object": "model",
-      "created": 1770912000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
       ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
-      "id": "gpt-5.4",
+      "id": "gpt-6.1-sol",
       "object": "model",
-      "created": 1772668800,
+      "created": 1790640000,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 5.4",
-      "version": "gpt-5.4",
-      "description": "Stable version of GPT 5.4",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.4-mini",
-      "object": "model",
-      "created": 1773705600,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4 Mini",
-      "version": "gpt-5.4-mini",
-      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
+      "display_name": "GPT 6.1 Sol",
+      "version": "gpt-6.0",
+      "description": "Latest workhorse model for coding and everyday work.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -854,9 +768,56 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -958,37 +919,35 @@
           "medium",
           "high",
           "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.6",
-      "object": "model",
-      "created": 1783616400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.6",
-      "version": "gpt-5.6",
-      "description": "Alias for GPT 5.6 Sol.",
-      "context_length": 372000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max",
-          "ultra"
         ]
       }
     }
   ],
   "codex-pro": [
     {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
       "id": "gpt-6-astra",
       "object": "model",
       "created": 1788465958,
@@ -1014,14 +973,14 @@
       }
     },
     {
-      "id": "gpt-daybreak-blue-latest",
+      "id": "gpt-6-sol",
       "object": "model",
-      "created": 1788480000,
+      "created": 1790035200,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "Daybreak Blue",
-      "version": "gpt-daybreak-blue-latest",
-      "description": "Latest frontier agentic coding model for broad defensive cybersecurity work.",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -1033,8 +992,7 @@
           "medium",
           "high",
           "xhigh",
-          "max",
-          "ultra"
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -1043,86 +1001,21 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
-    },
-    {
-      "id": "gpt-5.3-codex-spark",
-      "object": "model",
-      "created": 1770912000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
       ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
-      "id": "gpt-5.4",
+      "id": "gpt-6.1-sol",
       "object": "model",
-      "created": 1772668800,
+      "created": 1790640000,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 5.4",
-      "version": "gpt-5.4",
-      "description": "Stable version of GPT 5.4",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.4-mini",
-      "object": "model",
-      "created": 1773705600,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4 Mini",
-      "version": "gpt-5.4-mini",
-      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
+      "display_name": "GPT 6.1 Sol",
+      "version": "gpt-6.0",
+      "description": "Latest workhorse model for coding and everyday work.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -1133,9 +1026,56 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -1237,31 +1177,6 @@
           "medium",
           "high",
           "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.6",
-      "object": "model",
-      "created": 1783616400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.6",
-      "version": "gpt-5.6",
-      "description": "Alias for GPT 5.6 Sol.",
-      "context_length": 372000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max",
-          "ultra"
         ]
       }
     }

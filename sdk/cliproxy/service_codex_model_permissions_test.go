@@ -120,15 +120,18 @@ func TestRegisterModelsForAuthCodexOAuthDoesNotUseAccountCatalogAsEntitlements(t
 		Metadata: map[string]any{"access_token": "test-token"},
 	}
 	service.codexRemoteCatalogs.Store(authID, codexRemoteCatalogCacheEntry{
-		payload:   []byte(`{"models":[{"slug":"gpt-6.1-sol"}]}`),
+		payload:   []byte(`{"models":[{"slug":"account-only-model"}]}`),
 		fetchedAt: time.Now(),
 		sourceKey: codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), ""),
 	})
 
 	service.registerModelsForAuth(auth)
 	got := modelIDs(registry.GetModelsForClient(authID))
-	if _, ok := got["gpt-6.1-sol"]; ok {
+	if _, ok := got["account-only-model"]; ok {
 		t.Fatalf("unsupported account-catalog model was registered: %v", got)
+	}
+	if _, ok := got["gpt-6.1-sol"]; !ok {
+		t.Fatalf("plus plan fixed model catalog omitted gpt-6.1-sol: %v", got)
 	}
 	if _, ok := got["gpt-5.6-sol"]; !ok {
 		t.Fatalf("plus plan model missing from OAuth registration: %v", got)
