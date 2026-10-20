@@ -32,6 +32,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -472,6 +473,8 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/readyz", readyzHandler)
 	s.engine.HEAD("/readyz", readyzHandler)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
+	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
+	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 
@@ -503,6 +506,15 @@ func (s *Server) setupRoutes() {
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
+	// Gemini-compatible API routes.
+	v1beta := s.engine.Group("/v1beta")
+	v1beta.Use(AuthMiddleware(s.accessManager))
+	{
+		v1beta.GET("/models", geminiHandlers.GeminiModels)
+		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
+		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+	}
+
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -514,11 +526,14 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
+	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
 	s.engine.GET("/anthropic/callback", s.oauthCallbackRouteHandler("anthropic"))
 	s.engine.GET("/codex/callback", s.oauthCallbackRouteHandler("codex"))
+	s.engine.GET("/google/callback", s.oauthCallbackRouteHandler("gemini"))
+	s.engine.GET("/antigravity/callback", s.oauthCallbackRouteHandler("antigravity"))
 	s.engine.GET("/xai/callback", s.oauthCallbackRouteHandler("xai"))
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
@@ -651,6 +666,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 
+		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
+		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
+		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)
+		mgmt.DELETE("/gemini-api-key", s.mgmt.DeleteGeminiKey)
+
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
 		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)
@@ -693,6 +713,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
 
+		mgmt.GET("/vertex-api-key", s.mgmt.GetVertexCompatKeys)
+		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)
+		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
+		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
+
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
 		mgmt.PATCH("/oauth-excluded-models", s.mgmt.PatchOAuthExcludedModels)
@@ -703,10 +728,16 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
+		mgmt.GET("/model-aliases", s.mgmt.GetModelAliases)
+		mgmt.PUT("/model-aliases", s.mgmt.PutModelAliases)
+		mgmt.PATCH("/model-aliases", s.mgmt.PatchModelAliases)
+		mgmt.DELETE("/model-aliases", s.mgmt.DeleteModelAlias)
+
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/openai-request-timezones", s.mgmt.GetOpenAIRequestTimezones)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/auth-files/codex-usage", s.mgmt.GetCodexUsage)
+		mgmt.GET("/auth-files/antigravity-usage", s.mgmt.GetAntigravityUsage)
 		mgmt.GET("/auth-files/codex-rate-limit-reset-credits", s.mgmt.GetCodexRateLimitResetCredits)
 		mgmt.POST("/auth-files/codex-rate-limit-reset-credits/consume", s.mgmt.ConsumeCodexRateLimitResetCredit)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
@@ -719,6 +750,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/codex-auth-mode", s.mgmt.PatchCodexAuthMode)
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
+		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
+		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)

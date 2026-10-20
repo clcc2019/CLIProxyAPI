@@ -104,6 +104,6 @@ func TestGetAuthFileModelsIgnoresCodexRefreshErrors(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if len(payload.Models) != 1 || payload.Models[0].ID != "static-model" {
-		t.Fatalf("models = %#v, want static model", payload.Models)
+		t.Fatalf("models = %#v, want static model", payload)
 	}
 }

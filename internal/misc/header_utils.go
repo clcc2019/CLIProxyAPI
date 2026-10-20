@@ -14,6 +14,12 @@ import (
 )
 
 const (
+	// GeminiCLIVersion is the version reported in Gemini CLI upstream requests.
+	GeminiCLIVersion = "0.34.0"
+
+	// GeminiCLIApiClientHeader identifies the Google GenAI client used by Gemini CLI.
+	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
+
 	// CodexCLIVersion is the upstream-compatible Codex CLI version embedded in
 	// the User-Agent and Version header. Keep this at or above the highest
 	// minimal_client_version in the Codex model catalog bundled with the proxy.
@@ -44,6 +50,33 @@ const (
 	CodexSubagentHeader      = "x-openai-subagent"
 	codexCLIFallbackTerminal = "xterm-256color"
 )
+
+// GeminiCLIUserAgent returns a User-Agent matching the Gemini CLI format.
+func GeminiCLIUserAgent(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "unknown"
+	}
+	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s; terminal)", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch())
+}
+
+func geminiCLIOS() string {
+	if runtime.GOOS == "windows" {
+		return "win32"
+	}
+	return runtime.GOOS
+}
+
+func geminiCLIArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "386":
+		return "x86"
+	default:
+		return runtime.GOARCH
+	}
+}
 
 var (
 	codexCLIOSOnce      sync.Once

@@ -73,6 +73,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 		pendingToolCalls := make([]interface{}, 0)
 		pendingToolCallIDs := make([]string, 0)
+		pendingReasoningContent := ""
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
 
@@ -82,6 +83,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+			if pendingReasoningContent != "" {
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", pendingReasoningContent)
+				pendingReasoningContent = ""
+			}
 			appendMessage(assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
@@ -121,7 +126,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			if itemType == "" && item.Get("role").String() != "" {
 				itemType = "message"
 			}
-			if itemType != "function_call" {
+			if itemType != "function_call" && itemType != "reasoning" {
 				flushPendingToolCalls()
 			}
 
@@ -134,6 +139,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 				message := []byte(`{"role":"","content":[]}`)
 				message, _ = sjson.SetBytes(message, "role", role)
+				if role == "assistant" && pendingReasoningContent != "" {
+					message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoningContent)
+					pendingReasoningContent = ""
+				}
 
 				if content := item.Get("content"); content.Exists() && content.IsArray() {
 					contentItems := translatorcommon.NewRawArrayItems(content.Get("#").Int())
@@ -150,6 +159,19 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							contentPart := []byte(`{"type":"text","text":""}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "text", text)
 							contentItems = append(contentItems, contentPart)
+						case "input_video", "video_url":
+							contentPart := []byte(`{"type":"video_url","video_url":{}}`)
+							videoURL := contentItem.Get("video_url")
+							if videoURL.IsObject() {
+								contentPart, _ = sjson.SetRawBytes(contentPart, "video_url", []byte(videoURL.Raw))
+							} else if videoURL.Exists() {
+								contentPart, _ = sjson.SetRawBytes(contentPart, "video_url.url", []byte(videoURL.Raw))
+							}
+							if processing := contentItem.Get("processing"); processing.Exists() {
+								contentPart, _ = sjson.SetRawBytes(contentPart, "video_url.processing", []byte(processing.Raw))
+							}
+							// Preserve malformed video parts so the upstream can validate them.
+							contentItems = append(contentItems, contentPart)
 						case "input_image":
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
@@ -164,6 +186,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				appendRegularMessage(message)
+
+			case "reasoning":
+				pendingReasoningContent += openAIResponsesReasoningSummaryText(item)
 
 			case "function_call":
 				// Buffer consecutive function calls and emit them as one assistant message.
@@ -277,6 +302,21 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func openAIResponsesReasoningSummaryText(item gjson.Result) string {
+	var builder strings.Builder
+	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+		summary.ForEach(func(_, part gjson.Result) bool {
+			if text := part.Get("text"); text.Exists() {
+				builder.WriteString(text.String())
+			} else if part.Type == gjson.String {
+				builder.WriteString(part.String())
+			}
+			return true
+		})
+	}
+	return builder.String()
 }
 
 func normalizeReasoningEffort(value string) string {

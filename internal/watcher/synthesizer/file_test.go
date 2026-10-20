@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -159,6 +160,56 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if auths[0].Status != coreauth.StatusActive {
 		t.Errorf("expected status active, got %s", auths[0].Status)
+	}
+}
+
+func TestFileSynthesizer_Synthesize_GeminiMultiProjectAuth(t *testing.T) {
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: t.TempDir(),
+		Now:     time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	data := []byte(`{"type":"gemini","email":"gemini@example.com","access_token":"access-token","refresh_token":"refresh-token","project_id":"project-a, project-b, project-a"}`)
+
+	auths := SynthesizeAuthFile(ctx, filepath.Join(ctx.AuthDir, "gemini.json"), data)
+	if len(auths) != 3 {
+		t.Fatalf("auth count = %d, want primary plus two virtual projects", len(auths))
+	}
+
+	primary := auths[0]
+	if primary.Provider != "gemini-cli" {
+		t.Fatalf("primary provider = %q, want gemini-cli", primary.Provider)
+	}
+	if !primary.Disabled || primary.Status != coreauth.StatusDisabled {
+		t.Fatalf("primary auth should be disabled, disabled=%t status=%q", primary.Disabled, primary.Status)
+	}
+	if _, ok := primary.Runtime.(*geminicli.SharedCredential); !ok {
+		t.Fatalf("primary runtime = %T, want *geminicli.SharedCredential", primary.Runtime)
+	}
+
+	wantProjects := []string{"project-a", "project-b"}
+	for i, wantProject := range wantProjects {
+		virtual := auths[i+1]
+		if virtual.Provider != "gemini-cli" {
+			t.Errorf("virtual %d provider = %q, want gemini-cli", i, virtual.Provider)
+		}
+		if virtual.Status != coreauth.StatusActive || virtual.Disabled {
+			t.Errorf("virtual %d should be active, status=%q disabled=%t", i, virtual.Status, virtual.Disabled)
+		}
+		if got := virtual.Metadata["project_id"]; got != wantProject {
+			t.Errorf("virtual %d project_id = %#v, want %q", i, got, wantProject)
+		}
+		runtime, ok := virtual.Runtime.(*geminicli.VirtualCredential)
+		if !ok {
+			t.Errorf("virtual %d runtime = %T, want *geminicli.VirtualCredential", i, virtual.Runtime)
+			continue
+		}
+		if runtime.ProjectID != wantProject {
+			t.Errorf("virtual %d runtime project = %q, want %q", i, runtime.ProjectID, wantProject)
+		}
+		if runtime.Parent != primary.Runtime {
+			t.Errorf("virtual %d does not share primary credential", i)
+		}
 	}
 }
 

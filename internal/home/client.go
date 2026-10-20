@@ -65,6 +65,15 @@ type clusterNodesEnvelope struct {
 	Nodes []clusterNode `json:"nodes"`
 }
 
+// KVSetOptions controls the Redis SET options exposed through the Home KV
+// bridge. EX/PX are mutually exclusive, as are NX/XX.
+type KVSetOptions struct {
+	EX time.Duration
+	PX time.Duration
+	NX bool
+	XX bool
+}
+
 type Client struct {
 	mu sync.Mutex
 
@@ -293,6 +302,104 @@ func (c *Client) commandClient() (*redis.Client, error) {
 		return nil, ErrNotConnected
 	}
 	return cmd, nil
+}
+
+func buildKVSetArgs(key string, value []byte, opts KVSetOptions) ([]any, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, fmt.Errorf("home kv: key is empty")
+	}
+	if opts.EX > 0 && opts.PX > 0 {
+		return nil, fmt.Errorf("home kv: EX and PX are mutually exclusive")
+	}
+	if opts.EX < 0 || opts.PX < 0 {
+		return nil, fmt.Errorf("home kv: ttl must not be negative")
+	}
+	if opts.NX && opts.XX {
+		return nil, fmt.Errorf("home kv: NX and XX are mutually exclusive")
+	}
+	args := []any{key, append([]byte(nil), value...)}
+	if opts.EX > 0 {
+		args = append(args, "EX", durationCeil(opts.EX, time.Second))
+	}
+	if opts.PX > 0 {
+		args = append(args, "PX", durationCeil(opts.PX, time.Millisecond))
+	}
+	if opts.NX {
+		args = append(args, "NX")
+	}
+	if opts.XX {
+		args = append(args, "XX")
+	}
+	return args, nil
+}
+
+func durationCeil(value, unit time.Duration) int64 {
+	if value <= 0 || unit <= 0 {
+		return 0
+	}
+	return int64((value + unit - 1) / unit)
+}
+
+func (c *Client) KVGet(ctx context.Context, key string) ([]byte, bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return nil, false, errClient
+	}
+	raw, errGet := cmd.Get(ctx, key).Bytes()
+	if errors.Is(errGet, redis.Nil) {
+		return nil, false, nil
+	}
+	if errGet != nil {
+		return nil, false, errGet
+	}
+	return append([]byte(nil), raw...), true, nil
+}
+
+func (c *Client) KVSet(ctx context.Context, key string, value []byte, opts KVSetOptions) (bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return false, errClient
+	}
+	args, errArgs := buildKVSetArgs(key, value, opts)
+	if errArgs != nil {
+		return false, errArgs
+	}
+	result, errSet := cmd.Do(ctx, append([]any{"SET"}, args...)...).Result()
+	if errors.Is(errSet, redis.Nil) {
+		return false, nil
+	}
+	if errSet != nil {
+		return false, errSet
+	}
+	return result != nil, nil
+}
+
+func (c *Client) KVSetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
+	opts := KVSetOptions{NX: true}
+	if ttl > 0 {
+		opts.EX = ttl
+	}
+	return c.KVSet(ctx, key, value, opts)
+}
+
+func (c *Client) KVDel(ctx context.Context, keys ...string) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return 0, errClient
+	}
+	return cmd.Del(ctx, keys...).Result()
+}
+
+func (c *Client) KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return false, errClient
+	}
+	return cmd.Expire(ctx, key, ttl).Result()
 }
 
 func (c *Client) subscriptionClient() (*redis.Client, error) {

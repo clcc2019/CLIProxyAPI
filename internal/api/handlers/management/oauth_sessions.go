@@ -280,6 +280,10 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "codex", nil
 	case strings.EqualFold(provider, "openai"):
 		return "codex", nil
+	case strings.EqualFold(provider, "gemini"), strings.EqualFold(provider, "google"), strings.EqualFold(provider, "gemini-cli"):
+		return "gemini", nil
+	case strings.EqualFold(provider, "antigravity"), strings.EqualFold(provider, "anti-gravity"):
+		return "antigravity", nil
 	case strings.EqualFold(provider, "xai"):
 		return "xai", nil
 	case strings.EqualFold(provider, "x-ai"):

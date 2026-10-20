@@ -19,7 +19,9 @@ type Handler = internalmanagement.Handler
 // ManagementTokenRequester exposes a limited subset of management endpoints for requesting tokens.
 type ManagementTokenRequester interface {
 	RequestAnthropicToken(*gin.Context)
+	RequestGeminiCLIToken(*gin.Context)
 	RequestCodexToken(*gin.Context)
+	RequestAntigravityToken(*gin.Context)
 	RequestXAIToken(*gin.Context)
 	GetAuthStatus(c *gin.Context)
 	PostOAuthCallback(c *gin.Context)

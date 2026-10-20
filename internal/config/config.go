@@ -121,6 +121,13 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
+	// AntigravitySignatureCacheEnabled controls validation of cached Gemini thought signatures.
+	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
+	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
+
+	// GeminiKey defines Gemini API key configurations with optional routing overrides.
+	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
+
 	// EnableRequestCompression opts into zstd compression for Codex JSON requests.
 	// A nil value uses the built-in default, which is disabled.
 	EnableRequestCompression *bool `yaml:"enable-request-compression,omitempty" json:"enable-request-compression,omitempty"`
@@ -145,6 +152,9 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
+	// VertexCompatAPIKey defines Vertex-compatible API key configurations.
+	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
@@ -155,6 +165,10 @@ type Config struct {
 	// NOTE: This does not apply to existing per-credential model alias features under:
 	// codex-api-key, claude-api-key, and openai-compatibility.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
+
+	// ModelAliases defines global client-visible model aliases and their upstream replacements.
+	// Global aliases apply to every provider and take precedence over provider-specific aliases.
+	ModelAliases []ModelAlias `yaml:"model-aliases,omitempty" json:"model-aliases,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
@@ -296,6 +310,10 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+
+	// AntigravityCredits enables credits-based last-resort fallback for Claude
+	// models after free-tier Antigravity credentials are exhausted.
+	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -344,6 +362,14 @@ type OAuthModelAlias struct {
 	// upstream. It is currently applied to Codex OAuth aliases. The special
 	// "default" key applies when the client does not specify an effort.
 	ReasoningEffort map[string]string `yaml:"reasoning-effort,omitempty" json:"reasoning_effort,omitempty"`
+}
+
+// ModelAlias maps a client-requested alias to the upstream model name for every provider.
+// When Fork is true, the alias is added to model listings while keeping the original model ID.
+type ModelAlias struct {
+	Name  string `yaml:"name" json:"name"`
+	Alias string `yaml:"alias" json:"alias"`
+	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -544,6 +570,31 @@ type CodexModel struct {
 
 func (m CodexModel) GetName() string  { return m.Name }
 func (m CodexModel) GetAlias() string { return m.Alias }
+
+// GeminiKey represents a Gemini API key and its optional routing overrides.
+type GeminiKey struct {
+	APIKey         string            `yaml:"api-key" json:"api-key"`
+	Priority       int               `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Prefix         string            `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	BaseURL        string            `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	ProxyURL       string            `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+	Models         []GeminiModel     `yaml:"models,omitempty" json:"models,omitempty"`
+	Headers        map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	ExcludedModels []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+	DisableCooling bool              `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
+
+func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
+func (k GeminiKey) GetBaseURL() string { return k.BaseURL }
+
+// GeminiModel describes a Gemini upstream model and client-facing alias.
+type GeminiModel struct {
+	Name  string `yaml:"name" json:"name"`
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m GeminiModel) GetName() string  { return m.Name }
+func (m GeminiModel) GetAlias() string { return m.Alias }
 
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.

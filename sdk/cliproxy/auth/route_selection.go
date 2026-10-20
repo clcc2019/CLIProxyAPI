@@ -174,10 +174,11 @@ func (m *Manager) routeAwareSelectionRequiredWithKey(auth *Auth, routeModel, rou
 	prefix := strings.TrimSpace(auth.Prefix)
 	prefixRewrite := prefix != "" && strings.HasPrefix(routeModel, prefix+"/")
 	channel := m.oauthModelAliasChannelForAuth(auth)
-	if !prefixRewrite && channel == "" {
+	_, globalAliasConfigured := m.resolveGlobalModelAlias(routeModel)
+	if !prefixRewrite && channel == "" && !globalAliasConfigured {
 		return false
 	}
-	if !prefixRewrite && !m.oauthModelAliasConfigured(channel) {
+	if !prefixRewrite && channel != "" && !m.oauthModelAliasConfigured(channel) && !globalAliasConfigured {
 		return false
 	}
 	return m.selectionModelKeyForAuth(auth, routeModel) != routeKey

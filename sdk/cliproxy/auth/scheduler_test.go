@@ -1297,6 +1297,63 @@ func TestManagerPickNextSessionAffinityStableDistribution(t *testing.T) {
 	}
 }
 
+func TestManagerPickNextSessionAffinityBalancesConcurrentSessions(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, auth := range []*Auth{
+		{ID: "affinity-a", Provider: "codex", Status: StatusActive},
+		{ID: "affinity-b", Provider: "codex", Status: StatusActive},
+		{ID: "affinity-c", Provider: "codex", Status: StatusActive},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	const sessionCount = 24
+	start := make(chan struct{})
+	results := make(chan string, sessionCount)
+	var wg sync.WaitGroup
+	for index := 0; index < sessionCount; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"session_id":"concurrent-session-` + strconv.Itoa(index) + `"}}`)}
+			got, _, errPick := manager.pickNext(context.Background(), "codex", "", opts, nil)
+			if errPick != nil {
+				t.Errorf("pickNext() #%d error = %v", index, errPick)
+				return
+			}
+			if got == nil {
+				t.Errorf("pickNext() #%d auth = nil", index)
+				return
+			}
+			results <- got.ID
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	counts := make(map[string]int, 3)
+	for authID := range results {
+		counts[authID]++
+	}
+	for _, authID := range []string{"affinity-a", "affinity-b", "affinity-c"} {
+		if counts[authID] != sessionCount/3 {
+			t.Fatalf("auth %s received %d sessions, want %d; counts = %#v", authID, counts[authID], sessionCount/3, counts)
+		}
+	}
+}
+
 func TestManagerPickNextMixedSessionAffinityStableAcrossRestart(t *testing.T) {
 	t.Parallel()
 

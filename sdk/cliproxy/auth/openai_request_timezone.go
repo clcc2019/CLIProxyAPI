@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	DefaultOpenAIRequestTimezone     = "Asia/Singapore"
+	DefaultOpenAIRequestTimezone     = "Asia/Tokyo"
 	AuthFileOpenAIRequestTimezoneKey = "openai_request_timezone"
 )
 

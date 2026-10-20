@@ -2,14 +2,17 @@ package cache
 
 import (
 	"container/heap"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -168,6 +171,28 @@ func CacheSignature(modelName, text, signature string) {
 	enforceGroupEntryLimitLocked(sc.entries)
 }
 
+// CacheSignatureBestEffort stores a signature in Home KV when Home mode is
+// active, otherwise in the local bounded cache.
+func CacheSignatureBestEffort(ctx context.Context, modelName, text, signature string) bool {
+	if text == "" || signature == "" || len(signature) < MinValidSignatureLen {
+		return false
+	}
+	if client, homeMode, errClient := homekv.CurrentKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("home kv best-effort signature set failed prefix=cpa:signature:*: %v", errClient)
+			return false
+		}
+		written, errSet := client.KVSet(ctx, signatureKVKey(modelName, text), []byte(signature), homekv.KVSetOptions{EX: SignatureCacheTTL})
+		if errSet != nil {
+			log.Errorf("home kv best-effort signature set failed prefix=cpa:signature:*: %v", errSet)
+			return false
+		}
+		return written
+	}
+	CacheSignature(modelName, text, signature)
+	return true
+}
+
 func enforceGroupEntryLimitLocked(entries map[string]SignatureEntry) {
 	excessEntries := len(entries) - SignatureCacheMaxEntriesPerGroup
 	if excessEntries <= 0 {
@@ -264,6 +289,44 @@ func GetCachedSignature(modelName, text string) string {
 	return missingCachedSignature(groupKey)
 }
 
+// GetCachedSignatureRequired retrieves a signature for request-time paths and
+// returns the Gemini bypass sentinel when no replay signature is available.
+func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (string, error) {
+	groupKey := GetModelGroup(modelName)
+	if text == "" {
+		if groupKey == "gemini" {
+			return "skip_thought_signature_validator", nil
+		}
+		return "", nil
+	}
+	if client, homeMode, errClient := homekv.CurrentKVClient(); homeMode {
+		if errClient != nil {
+			return "", errClient
+		}
+		raw, found, errGet := client.KVGet(ctx, signatureKVKey(modelName, text))
+		if errGet != nil {
+			return "", errGet
+		}
+		if !found {
+			if groupKey == "gemini" {
+				return "skip_thought_signature_validator", nil
+			}
+			return "", nil
+		}
+		if _, errExpire := client.KVExpire(ctx, signatureKVKey(modelName, text), SignatureCacheTTL); errExpire != nil {
+			return "", errExpire
+		}
+		return string(raw), nil
+	}
+	if signature := GetCachedSignature(modelName, text); signature != "" {
+		return signature, nil
+	}
+	if groupKey == "gemini" {
+		return "skip_thought_signature_validator", nil
+	}
+	return "", nil
+}
+
 func lookupCachedSignature(sc *groupCache, textHash string, now time.Time) (string, bool) {
 	sc.mu.RLock()
 	entry, exists := sc.entries[textHash]
@@ -307,18 +370,55 @@ func ClearSignatureCache(modelName string) {
 	signatureCache.Delete(groupKey)
 }
 
+// DeleteCachedSignatureRequired removes one exact cached signature.
+func DeleteCachedSignatureRequired(ctx context.Context, modelName, text string) error {
+	if text == "" {
+		return nil
+	}
+	if client, homeMode, errClient := homekv.CurrentKVClient(); homeMode {
+		if errClient != nil {
+			return errClient
+		}
+		_, errDel := client.KVDel(ctx, signatureKVKey(modelName, text))
+		return errDel
+	}
+	groupKey := GetModelGroup(modelName)
+	textHash := hashText(text)
+	val, ok := signatureCache.Load(groupKey)
+	if !ok {
+		return nil
+	}
+	sc := val.(*groupCache)
+	sc.mu.Lock()
+	delete(sc.entries, textHash)
+	isEmpty := len(sc.entries) == 0
+	sc.mu.Unlock()
+	if isEmpty {
+		signatureCache.Delete(groupKey)
+	}
+	return nil
+}
+
 // HasValidSignature checks if a signature is valid (non-empty and long enough)
 func HasValidSignature(modelName, signature string) bool {
-	return signature != "" && len(signature) >= MinValidSignatureLen
+	return (signature != "" && len(signature) >= MinValidSignatureLen) ||
+		(signature == "skip_thought_signature_validator" && GetModelGroup(modelName) == "gemini")
 }
 
 func GetModelGroup(modelName string) string {
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
 	if strings.Contains(modelName, "gpt") {
 		return "gpt"
 	} else if strings.Contains(modelName, "claude") {
 		return "claude"
+	} else if strings.Contains(modelName, "gemini") {
+		return "gemini"
 	}
 	return modelName
+}
+
+func signatureKVKey(modelName, text string) string {
+	return fmt.Sprintf("cpa:signature:%s:%s", GetModelGroup(modelName), homekv.HashKeyPart(text))
 }
 
 var signatureCacheEnabled atomic.Bool

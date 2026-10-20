@@ -6,6 +6,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	log "github.com/sirupsen/logrus"
 	// automaxprocs sets GOMAXPROCS from the container CPU quota at startup.
 	// In CPU-limited containers (k8s, ECS) Go would otherwise see all host

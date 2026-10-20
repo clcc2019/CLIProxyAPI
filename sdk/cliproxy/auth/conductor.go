@@ -205,6 +205,9 @@ type Manager struct {
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
 
+	// globalModelAlias stores provider-independent alias -> upstream model mappings.
+	globalModelAlias atomic.Value
+
 	// apiKeyModelAlias caches resolved model alias mappings for API-key auths.
 	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
 	apiKeyModelAlias atomic.Value
@@ -298,6 +301,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager.openAICompatRuntime.Store(buildOpenAICompatRuntimeSnapshot(nil))
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.globalModelAlias.Store(globalModelAliasTable(nil))
 	manager.persistEnabled.Store(store != nil)
 	manager.scheduler = newAuthScheduler(selector)
 	manager.scheduler.authLoad = manager.authInFlightCount
@@ -724,6 +728,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	openAICompatRuntime := buildOpenAICompatRuntimeSnapshot(cfg)
 	m.runtimeConfig.Store(cfg)
+	m.globalModelAlias.Store(compileGlobalModelAliasTable(cfg.ModelAliases))
 	if publisherCfg, errPublisherCfg := HomeInFlightPublisherConfigFromConfig(cfg.CredentialInFlight); errPublisherCfg == nil {
 		m.ApplyHomeInFlightPublisherConfig(publisherCfg)
 	}
@@ -733,6 +738,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		m.clearHomeRuntimeAuths()
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.clearRouteAwareCaches()
 	m.ReconcileProxyPoolLeases(context.Background())
 }
 

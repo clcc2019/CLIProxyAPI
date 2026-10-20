@@ -52,6 +52,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {
 		return nil, nil
 	}
+	ApplyCodexMetadataFromMetadata(auth)
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
@@ -121,6 +122,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	ApplyCodexMetadataFromMetadata(auth)
 	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
 	if errMutation != nil {
 		return nil, errMutation
@@ -537,6 +539,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
+		ApplyCodexMetadataFromMetadata(auth)
 		auth.EnsureIndex()
 		applyDefaultRefreshInterval(auth)
 		auth.ApplyRuntimeStateFromMetadata()

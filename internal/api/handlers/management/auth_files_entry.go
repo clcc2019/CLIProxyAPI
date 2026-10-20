@@ -64,6 +64,9 @@ func (h *Handler) buildAuthFileEntryWithOptions(auth *coreauth.Auth, opts authFi
 	if credits := codexAuthCreditsEntry(auth); credits != nil {
 		entry["credits"] = credits
 	}
+	if credits := antigravityCreditsEntry(auth); credits != nil {
+		entry["antigravity_credits"] = credits
+	}
 	if !opts.SkipRecentRequests {
 		if opts.RecentRequestSnapshotter != nil {
 			entry["recent_requests"] = opts.RecentRequestSnapshotter.Snapshot(auth)

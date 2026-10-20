@@ -906,6 +906,107 @@ func (b *StreamUsageBuffer) Detail() (usage.Detail, bool) {
 	return b.detail, true
 }
 
+func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
+	detail := usage.Detail{
+		InputTokens:     node.Get("promptTokenCount").Int(),
+		OutputTokens:    node.Get("candidatesTokenCount").Int(),
+		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
+		TotalTokens:     node.Get("totalTokenCount").Int(),
+		CachedTokens:    node.Get("cachedContentTokenCount").Int(),
+	}
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	}
+	return detail
+}
+
+func hasGeminiFamilyUsageTokenFields(node gjson.Result) bool {
+	return node.Get("promptTokenCount").Exists() ||
+		node.Get("candidatesTokenCount").Exists() ||
+		node.Get("thoughtsTokenCount").Exists() ||
+		node.Get("totalTokenCount").Exists() ||
+		node.Get("cachedContentTokenCount").Exists()
+}
+
+func firstExistingUsageNode(root gjson.Result, paths ...string) gjson.Result {
+	for _, path := range paths {
+		node := root.Get(path)
+		if node.Exists() {
+			return node
+		}
+	}
+	return gjson.Result{}
+}
+
+func ParseGeminiCLIUsage(data []byte) usage.Detail {
+	root := gjson.ParseBytes(data)
+	node := firstExistingUsageNode(root,
+		"response.usageMetadata", "response.usage_metadata",
+		"usageMetadata", "usage_metadata")
+	if !node.Exists() {
+		return usage.Detail{}
+	}
+	return parseGeminiFamilyUsageDetail(node)
+}
+
+func ParseGeminiUsage(data []byte) usage.Detail {
+	root := gjson.ParseBytes(data)
+	node := firstExistingUsageNode(root, "usageMetadata", "usage_metadata")
+	if !node.Exists() {
+		return usage.Detail{}
+	}
+	return parseGeminiFamilyUsageDetail(node)
+}
+
+func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return usage.Detail{}, false
+	}
+	root := gjson.ParseBytes(payload)
+	node := firstExistingUsageNode(root, "usageMetadata", "usage_metadata")
+	if !node.Exists() || !hasGeminiFamilyUsageTokenFields(node) {
+		return usage.Detail{}, false
+	}
+	return parseGeminiFamilyUsageDetail(node), true
+}
+
+func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return usage.Detail{}, false
+	}
+	node := firstExistingUsageNode(gjson.ParseBytes(payload),
+		"response.usageMetadata", "response.usage_metadata",
+		"usageMetadata", "usage_metadata")
+	if !node.Exists() || !hasGeminiFamilyUsageTokenFields(node) {
+		return usage.Detail{}, false
+	}
+	return parseGeminiFamilyUsageDetail(node), true
+}
+
+func ParseAntigravityUsage(data []byte) usage.Detail {
+	root := gjson.ParseBytes(data)
+	node := firstExistingUsageNode(root, "response.usageMetadata", "usageMetadata", "usage_metadata")
+	if !node.Exists() {
+		return usage.Detail{}
+	}
+	return parseGeminiFamilyUsageDetail(node)
+}
+
+func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return usage.Detail{}, false
+	}
+	node := firstExistingUsageNode(gjson.ParseBytes(payload),
+		"response.usageMetadata", "usageMetadata", "usage_metadata")
+	if !node.Exists() || !hasGeminiFamilyUsageTokenFields(node) {
+		return usage.Detail{}, false
+	}
+	return parseGeminiFamilyUsageDetail(node), true
+}
+
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	responseServiceTier := extractResponseServiceTier(data)
 	usageNode := gjson.ParseBytes(data).Get("response.usage")

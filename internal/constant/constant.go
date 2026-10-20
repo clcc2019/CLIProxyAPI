@@ -4,6 +4,12 @@
 package constant
 
 const (
+	// Gemini represents the Google Gemini provider identifier.
+	Gemini = "gemini"
+
+	// GeminiCLI represents the Google Gemini CLI provider identifier.
+	GeminiCLI = "gemini-cli"
+
 	// Codex represents the OpenAI Codex provider identifier.
 	Codex = "codex"
 
@@ -15,4 +21,7 @@ const (
 
 	// OpenaiResponse represents the OpenAI response format identifier.
 	OpenaiResponse = "openai-response"
+
+	// Antigravity represents the Antigravity provider identifier.
+	Antigravity = "antigravity"
 )

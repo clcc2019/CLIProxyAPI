@@ -121,6 +121,9 @@ type Options struct {
 	OriginalRequest []byte
 	// SourceFormat identifies the inbound schema.
 	SourceFormat sdktranslator.Format
+	// ResponseFormat identifies the downstream response schema. Empty falls back
+	// to SourceFormat for backward compatibility.
+	ResponseFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
 	// RequestMetadata carries immutable request facts parsed once by the handler.
@@ -130,6 +133,14 @@ type Options struct {
 	// attach lifecycle callbacks instead of allocating a relay channel. It is
 	// intended for built-in consumers that understand StreamResult.Buffered.
 	DirectStream bool
+}
+
+// ResponseFormatOrSource returns the response target format for an execution.
+func ResponseFormatOrSource(opts Options) sdktranslator.Format {
+	if opts.ResponseFormat != "" {
+		return opts.ResponseFormat
+	}
+	return opts.SourceFormat
 }
 
 // Response wraps either a full provider response or metadata for streaming flows.

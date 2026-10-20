@@ -152,8 +152,10 @@ func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 func newDefaultAuthManager() *sdkAuth.Manager {
 	return sdkAuth.NewManager(
 		sdkAuth.GetTokenStore(),
+		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
+		sdkAuth.NewAntigravityAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
 	)
 }
@@ -511,6 +513,14 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	switch {
 	case strings.EqualFold(a.Provider, "claude"):
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+	case strings.EqualFold(a.Provider, "gemini"), strings.EqualFold(a.Provider, "aistudio"):
+		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+	case strings.EqualFold(a.Provider, "vertex"):
+		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
+	case strings.EqualFold(a.Provider, "gemini-cli"):
+		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
+	case strings.EqualFold(a.Provider, "antigravity"):
+		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case strings.EqualFold(a.Provider, "kimi"):
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case strings.EqualFold(a.Provider, "xai"):
@@ -580,7 +590,7 @@ func executorRebindKeyForAuth(auth *coreauth.Auth) string {
 		return "compat:openai-compatibility"
 	}
 	switch provider {
-	case "claude", "kimi", "xai":
+	case "claude", "kimi", "xai", "gemini", "vertex", "gemini-cli", "aistudio", "antigravity":
 		return provider
 	default:
 		return "compat:" + provider
@@ -712,6 +722,10 @@ func (s *Service) registerHomeExecutors() {
 	// Register baseline executors so home-dispatched auth entries can execute without
 	// requiring any local auth-dir credentials.
 	s.coreManager.RegisterExecutor(s.newCodexAutoExecutor())
+	s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
@@ -1284,16 +1298,13 @@ func (s *Service) ensureAuthDir() error {
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
-	// Account-scoped Codex /models responses are a transport capability
-	// snapshot, not an entitlement list. Build request routing from the
-	// configured plan or API-key model set so a global catalog entry cannot be
-	// advertised to a ChatGPT account that cannot use it.
-	s.registerModelsForAuthWithOptions(a, false)
+	// The plan catalog is the baseline. A cached account catalog may only add
+	// newly discovered models and must never remove plan-supported models.
+	s.registerModelsForAuthWithOptions(a, true)
 }
 
 // registerModelsForAuthWithOptions rebuilds one auth registration. The optional
-// account-scoped catalog overlay is retained only for compatibility with the
-// legacy refresh path; normal registrations use plan/config permissions.
+// account-scoped catalog overlay supplements the selected plan/config catalog.
 func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRemoteCatalog bool) {
 	if a == nil || a.ID == "" {
 		return
@@ -1342,6 +1353,37 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 	}
 	var models []*ModelInfo
 	switch provider {
+	case "gemini":
+		models = registry.GetGeminiModels()
+		if entry := s.resolveConfigGeminiKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildGeminiConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "vertex":
+		models = registry.GetGeminiVertexModels()
+		if entry := s.resolveConfigVertexCompatKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildVertexCompatConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "gemini-cli":
+		models = registry.GetGeminiCLIModels()
+		models = applyExcludedModels(models, excluded)
+	case "aistudio":
+		models = registry.GetAIStudioModels()
+		models = applyExcludedModels(models, excluded)
+	case "antigravity":
+		models = registry.GetAntigravityModels()
+		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
 		if entry := s.resolveConfigClaudeKey(a); entry != nil {
@@ -1381,7 +1423,10 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 		case strings.EqualFold(codexPlanType, "free"):
 			models = registry.GetCodexFreeModels()
 		default:
-			models = registry.GetCodexProModels()
+			// An unknown OAuth entitlement is not evidence of a paid plan.
+			// Keep the exposed catalog least-privileged until metadata is
+			// populated by the auth file or a token refresh.
+			models = registry.GetCodexFreeModels()
 		}
 		if useCodexRemoteCatalog {
 			models = s.codexModelsFromRemoteCatalog(a, models)
@@ -1428,6 +1473,7 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 					GlobalModelRegistry().UnregisterClient(a.ID)
 					return
 				}
+				models = applyGlobalModelAliases(s.cfg.ModelAliases, models, models)
 				s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg.ForceModelPrefix))
 				return
 			}
@@ -1438,7 +1484,13 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 			}
 		}
 	}
+	sourceModels := models
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	var globalAliases []config.ModelAlias
+	if s.cfg != nil {
+		globalAliases = s.cfg.ModelAliases
+	}
+	models = applyGlobalModelAliases(globalAliases, sourceModels, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
@@ -1459,13 +1511,13 @@ func (s *Service) registerModelsForAuthWithOptions(a *coreauth.Auth, useCodexRem
 // as part of the previous registration snapshot and is cleared when the auth is
 // rebound to the refreshed model catalog.
 func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
-	return s.refreshModelRegistrationForAuthWithOptions(current, false)
+	return s.refreshModelRegistrationForAuthWithOptions(current, true)
 }
 
 // refreshModelRegistrationForAuthWithOptions re-applies one auth's model
 // registration and reconciles concurrent auth changes. When
-// useCodexRemoteCatalog is false, Codex registrations are built from the
-// synchronized official catalog instead of the account-scoped /models cache.
+// useCodexRemoteCatalog is true, the account-scoped /models response can only
+// supplement the plan-specific local catalog.
 func (s *Service) refreshModelRegistrationForAuthWithOptions(current *coreauth.Auth, useCodexRemoteCatalog bool) bool {
 	if s == nil || s.coreManager == nil || current == nil || current.ID == "" {
 		return false
@@ -1547,6 +1599,76 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 	return nil
 }
 
+func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	if entry := configEntryForAuthIndex(auth, s.cfg.GeminiKey); entry != nil {
+		if configGeminiKeyMatchesAuth(entry, auth) {
+			return entry
+		}
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.GeminiKey {
+		entry := &s.cfg.GeminiKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.VertexCompatKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	if entry := configEntryForAuthIndex(auth, s.cfg.VertexCompatAPIKey); entry != nil {
+		if configVertexCompatKeyMatchesAuth(entry, auth) {
+			return entry
+		}
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.VertexCompatAPIKey {
+		entry := &s.cfg.VertexCompatAPIKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range s.cfg.VertexCompatAPIKey {
+			entry := &s.cfg.VertexCompatAPIKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 	if auth == nil || s.cfg == nil {
 		return nil
@@ -1597,6 +1719,40 @@ func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
 }
 
 func configCodexKeyMatchesAuth(entry *config.CodexKey, auth *coreauth.Auth) bool {
+	if entry == nil || auth == nil {
+		return false
+	}
+	attrKey, attrBase := "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	cfgKey := strings.TrimSpace(entry.APIKey)
+	cfgBase := strings.TrimSpace(entry.BaseURL)
+	if attrKey != "" {
+		return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
+	}
+	return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
+}
+
+func configGeminiKeyMatchesAuth(entry *config.GeminiKey, auth *coreauth.Auth) bool {
+	if entry == nil || auth == nil {
+		return false
+	}
+	attrKey, attrBase := "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	cfgKey := strings.TrimSpace(entry.APIKey)
+	cfgBase := strings.TrimSpace(entry.BaseURL)
+	if attrKey != "" {
+		return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
+	}
+	return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
+}
+
+func configVertexCompatKeyMatchesAuth(entry *config.VertexCompatKey, auth *coreauth.Auth) bool {
 	if entry == nil || auth == nil {
 		return false
 	}
@@ -1826,6 +1982,20 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 	return out
 }
 
+func buildGeminiConfigModels(entry *config.GeminiKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "google", "gemini")
+}
+
+func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "google", "vertex")
+}
+
 func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 	if entry == nil {
 		return nil
@@ -2006,6 +2176,110 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 			seen[key] = struct{}{}
 			out = append(out, model)
 		}
+	}
+	return out
+}
+
+func applyGlobalModelAliases(rules []config.ModelAlias, sourceModels, currentModels []*ModelInfo) []*ModelInfo {
+	if len(rules) == 0 || len(sourceModels) == 0 {
+		return currentModels
+	}
+
+	type aliasEntry struct {
+		alias       string
+		model       *ModelInfo
+		matchedByID bool
+	}
+
+	entries := make([]aliasEntry, 0, len(rules))
+	globalAliases := make(map[string]struct{}, len(rules))
+	replacedTargets := make(map[string]struct{}, len(rules))
+	for _, rule := range rules {
+		name := strings.TrimSpace(rule.Name)
+		alias := strings.TrimSpace(rule.Alias)
+		if name == "" || alias == "" || strings.EqualFold(name, alias) {
+			continue
+		}
+		aliasKey := strings.ToLower(alias)
+		if _, exists := globalAliases[aliasKey]; exists {
+			continue
+		}
+		globalAliases[aliasKey] = struct{}{}
+
+		var matched *ModelInfo
+		matchedByID := false
+		for _, model := range sourceModels {
+			if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), name) {
+				matched = model
+				matchedByID = true
+				break
+			}
+		}
+		if matched == nil {
+			for _, model := range sourceModels {
+				if model != nil && strings.EqualFold(strings.TrimSpace(model.Name), name) {
+					matched = model
+					break
+				}
+			}
+		}
+		entries = append(entries, aliasEntry{
+			alias:       alias,
+			model:       matched,
+			matchedByID: matchedByID,
+		})
+		// A replacement removes the original upstream ID from the catalog.
+		// User-defined entries with a different ID are provider-specific aliases
+		// and remain available as legacy fallbacks.
+		if matched != nil && !rule.Fork && (matchedByID || !matched.UserDefined) {
+			replacedTargets[strings.ToLower(strings.TrimSpace(matched.ID))] = struct{}{}
+		}
+	}
+	if len(globalAliases) == 0 {
+		return currentModels
+	}
+
+	out := make([]*ModelInfo, 0, len(currentModels)+len(entries))
+	seen := make(map[string]struct{}, len(currentModels)+len(entries))
+	for _, model := range currentModels {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		// A global alias with the same client-facing ID takes precedence over
+		// any provider-specific model entry.
+		if _, shadowed := globalAliases[key]; shadowed {
+			continue
+		}
+		if _, replaced := replacedTargets[key]; replaced {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+
+	for _, entry := range entries {
+		if entry.model == nil {
+			continue
+		}
+		key := strings.ToLower(entry.alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		clone := *entry.model
+		clone.ID = entry.alias
+		if entry.matchedByID && clone.Name != "" {
+			clone.Name = rewriteModelInfoName(clone.Name, strings.TrimSpace(entry.model.ID), entry.alias)
+		}
+		out = append(out, &clone)
 	}
 	return out
 }

@@ -475,15 +475,22 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	return nil, shard.unavailableError(provider, model, filter)
 }
 
-// pickSingleStable returns a ready auth using rendezvous hashing over the session key.
-// It keeps session-affinity cache misses stable across process restarts while still
-// respecting priority, websocket preference, pins, tried auths, and cooldown state.
+// pickSingleStable returns a ready auth for a session-affinity cache miss.
+// Manager-backed schedulers use load-aware round-robin here so new sessions are
+// balanced, while standalone schedulers retain rendezvous stability.
 func (s *authScheduler) pickSingleStable(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, affinityKey string) (*Auth, error) {
 	if strings.TrimSpace(affinityKey) == "" {
 		return s.pickSingle(ctx, provider, model, opts, tried)
 	}
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	// A manager-backed scheduler has live in-flight accounting. A session
+	// affinity miss is a new binding, so it must use the same load-aware
+	// round-robin path as ordinary requests; the affinity cache keeps later
+	// requests for that session on the selected auth.
+	if s.authLoad != nil {
+		return s.pickSingle(ctx, provider, model, opts, tried)
 	}
 	if s.usesWeightedRoundRobin() {
 		// See pickMixedStableNormalized: session affinity supplies stickiness after
@@ -730,6 +737,13 @@ func (s *authScheduler) pickMixedStableNormalized(ctx context.Context, normalize
 	}
 	if s == nil {
 		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	// As with single-provider routing, a live scheduler should balance a new
+	// session binding across the eligible credentials/providers. Stickiness is
+	// provided by SessionCache after this first choice, not by bypassing the
+	// scheduler's load and cursor state.
+	if s.authLoad != nil {
+		return s.pickMixedNormalized(ctx, normalized, model, opts, tried)
 	}
 	if s.usesWeightedRoundRobin() {
 		// A weighted session-affinity miss must establish its binding with smooth

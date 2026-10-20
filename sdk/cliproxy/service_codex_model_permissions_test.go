@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -102,7 +103,52 @@ func TestRegisterModelsForAuthCodexAPIKeyStaleIndexFallsBackToMatchingCredential
 	}
 }
 
-func TestRegisterModelsForAuthCodexOAuthDoesNotUseAccountCatalogAsEntitlements(t *testing.T) {
+func TestRegisterModelsForAuthCodexFreePlanUsesFreeCatalog(t *testing.T) {
+	const authID = "codex-permissions-free-plan"
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(authID)
+	t.Cleanup(func() { registry.UnregisterClient(authID) })
+
+	service := &Service{cfg: &config.Config{}}
+	service.registerModelsForAuth(&coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"plan_type": "free",
+		},
+	})
+
+	got := modelIDs(registry.GetModelsForClient(authID))
+	if _, ok := got["gpt-6-astra"]; ok {
+		t.Fatalf("free Codex auth exposed paid model: %v", got)
+	}
+	if _, ok := got["gpt-5.5"]; !ok {
+		t.Fatalf("free Codex auth omitted free model: %v", got)
+	}
+}
+
+func TestManagerRegisterProjectsCodexPlanMetadataBeforeModelRegistration(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-permissions-metadata-plan",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"auth_kind":    "oauth",
+			"plan_type":    "pro",
+			"access_token": "oauth-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	if auth == nil || auth.Attributes["plan_type"] != "pro" {
+		t.Fatalf("registered auth plan_type = %q, want pro", auth.Attributes["plan_type"])
+	}
+}
+
+func TestRegisterModelsForAuthCodexOAuthKeepsPlanModelsAndAddsCatalogSupplements(t *testing.T) {
 	const authID = "codex-permissions-oauth"
 	registry := internalregistry.GetGlobalRegistry()
 	registry.UnregisterClient(authID)
@@ -127,8 +173,8 @@ func TestRegisterModelsForAuthCodexOAuthDoesNotUseAccountCatalogAsEntitlements(t
 
 	service.registerModelsForAuth(auth)
 	got := modelIDs(registry.GetModelsForClient(authID))
-	if _, ok := got["account-only-model"]; ok {
-		t.Fatalf("unsupported account-catalog model was registered: %v", got)
+	if _, ok := got["account-only-model"]; !ok {
+		t.Fatalf("remote catalog supplement was not registered: %v", got)
 	}
 	if _, ok := got["gpt-6.1-sol"]; !ok {
 		t.Fatalf("plus plan fixed model catalog omitted gpt-6.1-sol: %v", got)

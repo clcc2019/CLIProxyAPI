@@ -23,6 +23,46 @@ type oauthModelAliasRule struct {
 	reasoningEffort map[string]string
 }
 
+type globalModelAliasTable map[string]string
+
+func compileGlobalModelAliasTable(aliases []internalconfig.ModelAlias) globalModelAliasTable {
+	if len(aliases) == 0 {
+		return globalModelAliasTable{}
+	}
+	table := make(globalModelAliasTable, len(aliases))
+	for _, entry := range aliases {
+		name := strings.TrimSpace(entry.Name)
+		alias := strings.TrimSpace(entry.Alias)
+		if name == "" || alias == "" || strings.EqualFold(name, alias) {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := table[key]; exists {
+			continue
+		}
+		table[key] = name
+	}
+	return table
+}
+
+func (m *Manager) resolveGlobalModelAlias(requestedModel string) (string, bool) {
+	if m == nil || strings.TrimSpace(requestedModel) == "" {
+		return "", false
+	}
+	raw := m.globalModelAlias.Load()
+	table, _ := raw.(globalModelAliasTable)
+	if len(table) == 0 {
+		return "", false
+	}
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
+	for _, candidate := range candidates {
+		if resolved := strings.TrimSpace(table[strings.ToLower(strings.TrimSpace(candidate))]); resolved != "" {
+			return preserveResolvedModelSuffix(resolved, requestResult), true
+		}
+	}
+	return "", false
+}
+
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
 	if len(aliases) == 0 {
 		return &oauthModelAliasTable{}
@@ -114,6 +154,9 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.
 // If an alias exists, the returned model is the upstream model.
 func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string {
+	if resolved, ok := m.resolveGlobalModelAlias(requestedModel); ok {
+		return resolved
+	}
 	upstreamModel := m.resolveOAuthUpstreamModel(auth, requestedModel)
 	if upstreamModel == "" {
 		upstreamModel = resolveBuiltinCodexOAuthModelAlias(auth, requestedModel)
@@ -315,6 +358,11 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 
 func (m *Manager) oauthModelAliasReasoningEffort(auth *Auth, requestedModel, sourceEffort string) string {
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return ""
+	}
+	// A global alias owns the full rewrite. Do not apply a legacy OAuth
+	// reasoning-effort mapping after the global rule has matched.
+	if _, ok := m.resolveGlobalModelAlias(requestedModel); ok {
 		return ""
 	}
 	rule, _, ok := m.lookupOAuthModelAliasRule(auth, requestedModel, modelAliasChannel(auth))

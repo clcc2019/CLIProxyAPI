@@ -16,6 +16,7 @@ var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at
 const (
 	anthropicCallbackPort        = 54545
 	codexCallbackPort            = 1455
+	geminiCallbackPort           = 8085
 	maxAuthFileUploadBytes       = 2 << 20
 	maxAuthFilesListPageSize     = 200
 	defaultAuthFilesListPageSize = 50

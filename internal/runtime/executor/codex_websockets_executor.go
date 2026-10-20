@@ -1375,7 +1375,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					emittedPayload = true
 				}
 				reporter.ObserveResponsesText(eventType, payload)
-				if eventType == "response.incomplete" {
+				if eventType == "response.incomplete" && !strings.EqualFold(strings.TrimSpace(codexResponseIncompleteReason(payload)), "interrupted") {
 					terminalErr := codexResponseIncompleteEventErr(payload)
 					codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
 					if sess != nil {
@@ -1388,6 +1388,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					reporter.PublishFailureWithError(ctx, terminalErr)
 					_ = send(cliproxyexecutor.StreamChunk{Err: terminalErr})
 					return
+				} else if eventType == "response.incomplete" {
+					// An interrupt ends the current response but leaves the upstream
+					// websocket available for the next response.create request.
 				} else if terminalErr, ok := parseCodexStreamTerminalError(eventType, payload); ok {
 					codexPublishRateLimitsFromErrorBody(ctx, auth, payload)
 					retryErrorPayload := payload
@@ -1449,7 +1452,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					payload = completed.data
 					eventType = codexEventCompleted
 				}
-				if eventType == codexEventCompleted || eventType == "response.done" {
+				if eventType == codexEventCompleted || eventType == "response.done" || eventType == "response.incomplete" {
 					reporter.SetCodexResponseMetadata(codexServerModelFromResponseData(payload), false)
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(ctx, detail)
@@ -1471,7 +1474,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						emittedPayload = true
 					}
 				}
-				if eventType == codexEventCompleted || eventType == "response.done" {
+				if eventType == codexEventCompleted || eventType == "response.done" || eventType == "response.incomplete" {
 					if sess != nil {
 						sess.rememberLogicalRequestOwned(body)
 						sess.rememberCompletedResponse(payload)
@@ -3685,6 +3688,48 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChanIfExists(sessionID strin
 		return nil
 	}
 	return sess.upstreamDisconnectChan()
+}
+
+// InterruptExecutionSession forwards the original response.interrupt frame to
+// the active upstream socket for this execution session. It never dials or
+// selects a replacement credential.
+func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context, sessionID string, payload []byte) error {
+	if e == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	sess := e.existingSession(sessionID)
+	if sess == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	sess.connMu.Lock()
+	conn := sess.conn
+	authID := sess.authID
+	wsURL := sess.wsURL
+	sess.connMu.Unlock()
+	if conn == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	if _, _, active := sess.activeForConn(conn); !active {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	if !cliproxyexecutor.WebsocketAuthEnabled(ctx, authID) {
+		return fmt.Errorf("websocket credential is no longer enabled")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if err := writeCodexWebsocketMessage(sess, conn, payload); err != nil {
+		return err
+	}
+	log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=response.interrupt", strings.TrimSpace(sessionID), authID, wsURL)
+	return nil
 }
 
 func (e *CodexWebsocketsExecutor) existingSession(sessionID string) *codexWebsocketSession {

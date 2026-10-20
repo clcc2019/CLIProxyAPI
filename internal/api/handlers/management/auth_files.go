@@ -668,6 +668,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, codexSubscriptionMode co
 						}
 						applyCodexAuthModeEntry(fileData, auth)
 					}
+					if strings.EqualFold(strings.TrimSpace(typeValue), "antigravity") {
+						if credits := antigravityCreditsEntry(&coreauth.Auth{ID: name, Provider: typeValue}); credits != nil {
+							fileData["antigravity_credits"] = credits
+						}
+					}
 				}
 				if prefix := strings.TrimSpace(gjson.GetBytes(data, "prefix").String()); prefix != "" {
 					fileData["prefix"] = prefix

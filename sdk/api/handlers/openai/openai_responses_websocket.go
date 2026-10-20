@@ -110,9 +110,9 @@ func responsesWebsocketTimelineLimit(h *OpenAIResponsesAPIHandler) int {
 }
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
-	ReadBufferSize:    1024,
-	WriteBufferSize:   1024,
-	WriteBufferPool:   &responsesWebsocketWriteBufferPool,
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	WriteBufferPool: &responsesWebsocketWriteBufferPool,
 	CheckOrigin: func(r *http.Request) bool {
 		return responsesWebsocketOriginAllowed(r)
 	},
@@ -233,10 +233,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		return
 	}
 	conn.SetReadLimit(maxResponsesWebsocketInboundBytes)
+	socketCtx, cancelSocket := context.WithCancelCause(c.Request.Context())
+	defer cancelSocket(nil)
+	c.Request = c.Request.WithContext(socketCtx)
 	connectionID := uuid.NewString()
 	generatedExecutionSessionID := uuid.NewString()
 	activeExecutionSessionID := ""
 	headerExecutionSessionID := responsesExplicitExecutionSessionID(c.Request, nil)
+	interruptSessionID := headerExecutionSessionID
+	if interruptSessionID == "" {
+		interruptSessionID = generatedExecutionSessionID
+	}
+	interruptState := newResponsesWebsocketInterruptState(interruptSessionID)
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	if downstreamSessionKey == "" {
 		downstreamSessionKey = connectionID
@@ -257,6 +265,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	disconnectMonitor.subscribe(disconnectSessionID)
 	var wsTerminateErr error
 	wsTimelineLog := newResponsesWebsocketTimelineBuilder(h)
+	input := readResponsesWebsocketInput(socketCtx, cancelSocket, conn, interruptState, h)
 	defer func() {
 		releaseResponsesWebsocketToolCachesWithCaches(toolOutputCache, toolCallCache, toolSessionRefs, downstreamSessionKey)
 		if wsTerminateErr != nil {
@@ -327,7 +336,47 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	}
 
 	for {
-		msgType, payload, errReadMessage := conn.ReadMessage()
+		var frame responsesWebsocketReadFrame
+		var frameOK bool
+		var gotFrame bool
+		var interruptEvent responsesWebsocketInterruptEvent
+		var gotInterrupt bool
+		var errReadMessage error
+		select {
+		case interruptEvent = <-interruptState.events:
+			gotInterrupt = true
+		default:
+		}
+		if !gotInterrupt {
+			select {
+			case frame, frameOK = <-input:
+				gotFrame = true
+			case interruptEvent = <-interruptState.events:
+				gotInterrupt = true
+			case <-socketCtx.Done():
+				errReadMessage = context.Cause(socketCtx)
+			}
+		}
+		if gotInterrupt {
+			appendWebsocketTimelineEvent(&wsTimelineLog, "request", interruptEvent.payload, time.Now())
+			if interruptEvent.forwarded {
+				continue
+			}
+			if errWrite := writeResponsesWebsocketInterruptError(h, c, conn, &wsTimelineLog, interruptEvent, connectionID); errWrite != nil {
+				wsTerminateErr = errWrite
+				return
+			}
+			continue
+		}
+		var payload []byte
+		if gotFrame && frameOK {
+			payload = frame.payload
+		} else if gotFrame {
+			errReadMessage = context.Cause(socketCtx)
+			if errReadMessage == nil {
+				errReadMessage = context.Canceled
+			}
+		}
 		if errReadMessage != nil {
 			wsTerminateErr = errReadMessage
 			if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
@@ -336,9 +385,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				// log.Warnf("responses websocket: read message failed id=%s error=%v", connectionID, errReadMessage)
 			}
 			return
-		}
-		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
-			continue
 		}
 		// log.Infof(
 		// 	"responses websocket: downstream_in id=%s type=%d event=%s payload=%s",
@@ -350,6 +396,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		appendWebsocketTimelineEvent(&wsTimelineLog, "request", payload, time.Now())
 		if isResponsesWebsocketControlAck(payload) {
 			continue
+		}
+		if requestType := websocketPayloadEventTypeValue(payload); requestType == wsRequestTypeCreate || requestType == wsRequestTypeAppend {
+			interruptState.startRequest()
 		}
 		replacesTranscript := shouldReplaceWebsocketTranscript(payload, gjson.GetBytes(payload, "input"))
 
@@ -429,6 +478,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			allowCompactionReplayBypass,
 		)
 		if errMsg != nil {
+			interruptState.end()
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 			markAPIResponseTimestamp(c)
 			errorPayload, errWrite := writeResponsesWebsocketError(conn, &wsTimelineLog, errMsg)
@@ -467,6 +517,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			toolCachesReset = true
 		}
 		activeExecutionSessionID = currentExecutionSessionID
+		interruptState.setSessionID(currentExecutionSessionID)
 
 		if shouldHandleResponsesWebsocketPrewarmLocally(payload, normalizationLastRequest, allowIncrementalInputWithPreviousResponseID) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
@@ -481,9 +532,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastUpstreamResponseID = ""
 			lastResponsePendingToolCallIDs = nil
 			if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, conn, requestJSON, &wsTimelineLog, connectionID); errWrite != nil {
+				interruptState.end()
 				wsTerminateErr = errWrite
 				return
 			}
+			interruptState.end()
 			continue
 		}
 
@@ -513,6 +566,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				allowCompactionReplayBypass,
 			)
 			if fullTranscriptErr != nil {
+				interruptState.end()
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), fullTranscriptErr)
 				markAPIResponseTimestamp(c)
 				if _, errWrite := writeResponsesWebsocketError(conn, &wsTimelineLog, fullTranscriptErr); errWrite != nil {
@@ -594,6 +648,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				bufferRetryPrelude:       retryFullTranscript,
 				retryCredentialFailover:  retryCredentialFailoverWithFullTranscript,
 				retryState:               forwardRetryState,
+				interruptEvents:          interruptState.events,
 			},
 			toolCallCache,
 		)
@@ -618,6 +673,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				allowCompactionReplayBypass,
 			)
 			if retryErrMsg != nil {
+				interruptState.end()
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), retryErrMsg)
 				markAPIResponseTimestamp(c)
 				if _, errWrite := writeResponsesWebsocketError(conn, &wsTimelineLog, retryErrMsg); errWrite != nil {
@@ -651,10 +707,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				&wsTimelineLog,
 				connectionID,
 				downstreamSessionKey,
-				responsesWebsocketForwardOptions{retryState: forwardRetryState},
+				responsesWebsocketForwardOptions{
+					retryState:      forwardRetryState,
+					interruptEvents: interruptState.events,
+				},
 				toolCallCache,
 			)
 		}
+		interruptState.end()
 		if errForward != nil {
 			wsTerminateErr = errForward
 			if !errors.Is(errForward, websocket.ErrCloseSent) {
@@ -1652,6 +1712,7 @@ type responsesWebsocketForwardOptions struct {
 	bufferRetryPrelude       bool
 	retryCredentialFailover  bool
 	retryState               *responsesWebsocketForwardRetryState
+	interruptEvents          <-chan responsesWebsocketInterruptEvent
 }
 
 // responsesWebsocketForwardRetryState keeps a downstream response coherent
@@ -2000,12 +2061,66 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 	forwardTerminalError := func(errMsg *interfaces.ErrorMessage) error {
 		return terminateUpstreamError(errMsg, nil, "", time.Now())
 	}
+	consumeInterruptEvent := func(event responsesWebsocketInterruptEvent) (bool, error) {
+		appendWebsocketTimelineEvent(wsTimelineLog, "request", event.payload, time.Now())
+		if event.errMsg != nil {
+			return false, writeResponsesWebsocketInterruptError(h, c, conn, wsTimelineLog, event, sessionID)
+		}
+		if !event.local {
+			return false, nil
+		}
+
+		cancel(context.Canceled)
+		responseID := strings.TrimSpace(gjson.GetBytes(event.payload, "response_id").String())
+		completedOutput = responseCompletedOutputFromPayloadWithItems([]byte(`{"response":{"output":[]}}`), outputItemsByIndex, outputItemsFallback)
+		incomplete := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}`)
+		var errSet error
+		incomplete, errSet = sjson.SetBytes(incomplete, "response.id", responseID)
+		if errSet != nil {
+			return true, errSet
+		}
+		incomplete, errSet = sjson.SetRawBytes(incomplete, "response.output", completedOutput)
+		if errSet != nil {
+			return true, errSet
+		}
+		completed = true
+		completedResponseID = responseID
+		if errWrite := writeForwardedPayload(incomplete, "response.incomplete", time.Now()); errWrite != nil {
+			cancel(errWrite)
+			return true, errWrite
+		}
+		return true, nil
+	}
 	if data == nil && errs == nil {
 		return completedOutput, completedResponseID, completed, failNilStreamChannels()
 	}
 
 	for {
+		if options.interruptEvents != nil {
+			select {
+			case interruptEvent := <-options.interruptEvents:
+				done, errInterrupt := consumeInterruptEvent(interruptEvent)
+				if errInterrupt != nil {
+					cancel(errInterrupt)
+					return completedOutput, completedResponseID, completed, errInterrupt
+				}
+				if done {
+					return completedOutput, completedResponseID, completed, nil
+				}
+				continue
+			default:
+			}
+		}
 		select {
+		case interruptEvent := <-options.interruptEvents:
+			done, errInterrupt := consumeInterruptEvent(interruptEvent)
+			if errInterrupt != nil {
+				cancel(errInterrupt)
+				return completedOutput, completedResponseID, completed, errInterrupt
+			}
+			if done {
+				return completedOutput, completedResponseID, completed, nil
+			}
 		case <-requestCtx.Done():
 			cancel(requestCtx.Err())
 			return completedOutput, completedResponseID, completed, requestCtx.Err()
@@ -2097,7 +2212,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 						return false
 					}
 					collectResponsesWebsocketOutputItemWithType(eventType, filteredPayload, outputItemsByIndex, &outputItemsFallback)
-					if eventType == wsEventTypeCompleted {
+					terminalResponseEvent := eventType == wsEventTypeCompleted || eventType == "response.done" || eventType == "response.incomplete"
+					if terminalResponseEvent {
 						filteredPayload = restoreResponsesWebsocketCompletionOutput(filteredPayload, outputItemsByIndex, outputItemsFallback)
 					}
 					if options.retryState != nil {
@@ -2113,7 +2229,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 						return false
 					}
 					recordResponsesWebsocketToolCallsFromPayloadWithCacheAndType(toolCallCache, downstreamSessionKey, eventType, filteredPayload)
-					if eventType == wsEventTypeCompleted {
+					if terminalResponseEvent {
 						completed = true
 						completedOutput = responseCompletedOutputFromPayloadWithItems(filteredPayload, outputItemsByIndex, outputItemsFallback)
 						completedResponseID = responseCompletedIDFromPayload(filteredPayload)

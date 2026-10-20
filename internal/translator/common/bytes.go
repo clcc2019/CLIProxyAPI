@@ -20,6 +20,27 @@ func ClaudeInputTokensJSON(count int64) []byte {
 	return out
 }
 
+// WrapGeminiCLIResponse wraps a Gemini CLI response in the envelope expected by
+// the Gemini CLI-compatible endpoint.
+func WrapGeminiCLIResponse(response []byte) []byte {
+	out, err := sjson.SetRawBytes([]byte(`{"response":{}}`), "response", response)
+	if err != nil {
+		return response
+	}
+	return out
+}
+
+// GeminiTokenCountJSON formats a Gemini token-count response.
+func GeminiTokenCountJSON(count int64) []byte {
+	out := make([]byte, 0, 96)
+	out = append(out, `{"totalTokens":`...)
+	out = strconv.AppendInt(out, count, 10)
+	out = append(out, `,"promptTokensDetails":[{"modality":"TEXT","tokenCount":`...)
+	out = strconv.AppendInt(out, count, 10)
+	out = append(out, `}]}`...)
+	return out
+}
+
 // NewRawArrayItems creates a raw item slice sized for the expected input.
 func NewRawArrayItems(capacity int64) [][]byte {
 	if capacity <= 0 {

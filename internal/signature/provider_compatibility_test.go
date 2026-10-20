@@ -82,7 +82,7 @@ func TestSignatureProviderFromModelName(t *testing.T) {
 		{name: "openai contains", modelName: "custom-openAI-model", want: SignatureProviderGPT},
 		{name: "codex contains", modelName: "CODEX-mini", want: SignatureProviderGPT},
 		{name: "o prefix mixed case", modelName: " O4-mini ", want: SignatureProviderGPT},
-		{name: "unknown", modelName: "gemini-pro", want: SignatureProviderUnknown},
+		{name: "gemini", modelName: "gemini-pro", want: SignatureProviderGemini},
 	}
 
 	for _, tt := range tests {

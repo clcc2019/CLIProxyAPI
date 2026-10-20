@@ -73,6 +73,16 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
 }
 
+// InterruptExecutionSession forwards a control frame only through the active
+// Codex websocket transport. HTTP requests are interrupted locally by the
+// Responses websocket handler.
+func (e *CodexAutoExecutor) InterruptExecutionSession(ctx context.Context, sessionID string, payload []byte) error {
+	if e == nil || e.wsExec == nil {
+		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
+	}
+	return e.wsExec.InterruptExecutionSession(ctx, sessionID, payload)
+}
+
 func (e *CodexAutoExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if e == nil || e.httpExec == nil {
 		return nil, fmt.Errorf("codex auto executor: http executor is nil")

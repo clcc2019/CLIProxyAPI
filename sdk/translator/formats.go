@@ -7,6 +7,7 @@ const (
 	FormatClaude         Format = "claude"
 	FormatCodex          Format = "codex"
 	FormatGemini         Format = "gemini"
+	FormatGeminiCLI      Format = "gemini-cli"
 	FormatAntigravity    Format = "antigravity"
 	FormatInteractions   Format = "interactions"
 )

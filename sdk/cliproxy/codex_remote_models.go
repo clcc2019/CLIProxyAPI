@@ -42,9 +42,8 @@ func (s *Service) refreshCodexRemoteCatalog(ctx context.Context, auth *coreauth.
 
 // refreshCodexAuthModels synchronizes the official Codex model catalog and
 // rebuilds that auth's registered model set. The account-scoped /models
-// response is refreshed too; static definitions are used only as metadata
-// for remote entries with the same model ID. Ordinary request-path refreshes
-// continue to honor the five-minute/ETag cache.
+// response is used only to supplement newly discovered models; the selected
+// plan catalog remains the baseline for every auth.
 func (s *Service) refreshCodexAuthModels(ctx context.Context, auth *coreauth.Auth) error {
 	if s == nil || auth == nil || auth.ID == "" || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
@@ -68,7 +67,7 @@ func (s *Service) refreshCodexAuthModels(ctx context.Context, auth *coreauth.Aut
 		if _, err := s.refreshCodexRemoteCatalogForced(ctx, auth); err != nil {
 			return err
 		}
-		if !s.refreshModelRegistrationForAuth(auth) {
+		if !s.refreshModelRegistrationForAuthWithOptions(auth, true) {
 			return fmt.Errorf("auth file models could not be registered")
 		}
 		return nil
@@ -80,7 +79,7 @@ func (s *Service) refreshCodexAuthModels(ctx context.Context, auth *coreauth.Aut
 	if _, err := s.refreshCodexRemoteCatalogForced(ctx, auth); err != nil {
 		return err
 	}
-	s.refreshModelRegistrationForAuth(auth)
+	s.refreshModelRegistrationForAuthWithOptions(auth, true)
 	return nil
 }
 
@@ -269,8 +268,41 @@ func (s *Service) codexModelsFromRemoteCatalog(auth *coreauth.Auth, fallback []*
 	if err != nil || len(models) == 0 {
 		return fallback
 	}
+	if codexServiceAuthIsAPIKey(auth) {
+		return models
+	}
+	models = appendCodexFallbackModels(models, fallback)
 	models = appendCodexLocalAliases(models, fallback)
 	return registry.WithCodexBuiltins(models)
+}
+
+func appendCodexFallbackModels(models, fallback []*ModelInfo) []*ModelInfo {
+	seen := make(map[string]struct{}, len(models)+len(fallback))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if id := strings.ToLower(strings.TrimSpace(model.ID)); id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	for _, model := range fallback {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		clone := *model
+		models = append(models, &clone)
+		seen[key] = struct{}{}
+	}
+	return models
 }
 
 func codexServiceBaseURL(auth *coreauth.Auth) string {

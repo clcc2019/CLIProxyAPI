@@ -269,7 +269,7 @@ func TestRefreshCodexRemoteCatalogRefetchesExpiredEntry(t *testing.T) {
 	}
 }
 
-func TestRefreshCodexAuthModelsDoesNotUseAccountCatalogAsEntitlements(t *testing.T) {
+func TestRefreshCodexAuthModelsKeepsPlanCatalogAndAddsRemoteModels(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		call := calls.Add(1)
@@ -302,8 +302,8 @@ func TestRefreshCodexAuthModelsDoesNotUseAccountCatalogAsEntitlements(t *testing
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("initial upstream calls = %d, want 1", got)
 	}
-	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); containsModelID(ids, "old-account-model") {
-		t.Fatalf("initial registry exposed account catalog model: %#v", ids)
+	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); !containsModelID(ids, "old-account-model") || !containsModelID(ids, "gpt-6-luna") {
+		t.Fatalf("initial registry did not keep the free catalog and supplement it: %#v", ids)
 	}
 
 	if err = service.refreshCodexAuthModels(context.Background(), auth); err != nil {
@@ -313,8 +313,8 @@ func TestRefreshCodexAuthModelsDoesNotUseAccountCatalogAsEntitlements(t *testing
 		t.Fatalf("forced refresh upstream calls = %d, want 2", got)
 	}
 	ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID)
-	if containsModelID(ids, "new-account-model") || containsModelID(ids, "old-account-model") {
-		t.Fatalf("refreshed registry retained account catalog models: %#v", ids)
+	if containsModelID(ids, "old-account-model") || !containsModelID(ids, "new-account-model") || !containsModelID(ids, "gpt-6-luna") {
+		t.Fatalf("refreshed registry did not keep the plan catalog and current supplement: %#v", ids)
 	}
 }
 
@@ -326,6 +326,7 @@ func TestRefreshCodexAuthModelsUsesOfficialCatalogForOAuth(t *testing.T) {
 		Provider: "codex",
 		Attributes: map[string]string{
 			"auth_kind": "oauth",
+			"plan_type": "pro",
 		},
 		Metadata: map[string]any{"email": "oauth@example.test"},
 	})
@@ -350,8 +351,8 @@ func TestRefreshCodexAuthModelsUsesOfficialCatalogForOAuth(t *testing.T) {
 		sourceKey: codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), ""),
 	})
 	service.registerModelsForAuth(auth)
-	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); containsModelID(ids, "old-account-model") {
-		t.Fatalf("stale account catalog model was registered: %#v", ids)
+	if ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID); !containsModelID(ids, "old-account-model") {
+		t.Fatalf("remote catalog supplement was not registered: %#v", ids)
 	}
 
 	if err := service.refreshCodexAuthModels(context.Background(), auth); err != nil {
@@ -359,7 +360,7 @@ func TestRefreshCodexAuthModelsUsesOfficialCatalogForOAuth(t *testing.T) {
 	}
 	ids := registry.GetGlobalRegistry().GetModelIDsForClient(auth.ID)
 	if containsModelID(ids, "old-account-model") {
-		t.Fatalf("official refresh retained stale account model: %#v", ids)
+		t.Fatalf("forced refresh retained removed remote supplement: %#v", ids)
 	}
 	if !containsModelID(ids, "gpt-6-astra") {
 		t.Fatalf("official refresh omitted global catalog model: %#v", ids)
@@ -415,8 +416,8 @@ func TestCodexModelsFromRemoteCatalogUsesRemoteIDsWithStaticMetadata(t *testing.
 	if !containsModelID(modelInfoIDs(models), "account-model") {
 		t.Fatalf("remote catalog omitted account model: %#v", models)
 	}
-	if containsModelID(modelInfoIDs(models), "official-only-model") {
-		t.Fatalf("account catalog exposed static-only model: %#v", models)
+	if !containsModelID(modelInfoIDs(models), "official-only-model") {
+		t.Fatalf("plan catalog model was dropped by account catalog: %#v", models)
 	}
 	var accountModel *ModelInfo
 	for _, model := range models {
@@ -568,6 +569,59 @@ func loadCodexRemoteCatalogEntry(t *testing.T, service *Service, authID string) 
 		t.Fatalf("catalog entry type = %T, want codexRemoteCatalogCacheEntry", cached)
 	}
 	return entry
+}
+
+func TestCodexModelsFromRemoteCatalogAppendsPlanModels(t *testing.T) {
+	service := &Service{}
+	auth := &coreauth.Auth{
+		ID:       "auth-exact-catalog",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url":   "https://catalog.example.test",
+			"account_id": "acct-exact",
+		},
+	}
+	sourceKey := codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), "")
+	service.codexRemoteCatalogs.Store(auth.ID, codexRemoteCatalogCacheEntry{
+		payload:   []byte(`{"models":[{"slug":"account-model"}]}`),
+		fetchedAt: time.Now(),
+		sourceKey: sourceKey,
+	})
+	fallback := []*ModelInfo{
+		{ID: "account-model"},
+		{ID: "gpt-image-2"},
+		{ID: "local-alias", Description: "Alias for account-model"},
+	}
+
+	models := service.codexModelsFromRemoteCatalog(auth, fallback)
+	for _, want := range []string{"account-model", "gpt-image-2", "local-alias"} {
+		if !containsModelID(modelInfoIDs(models), want) {
+			t.Fatalf("account catalog omitted baseline model %q: %#v", want, models)
+		}
+	}
+}
+
+func TestCodexModelsFromRemoteCatalogAddsNewModelsWithoutDroppingPlanModels(t *testing.T) {
+	service := &Service{}
+	auth := &coreauth.Auth{
+		ID:       "auth-free-plan-catalog",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url":   "https://catalog.example.test",
+			"account_id": "acct-free",
+		},
+	}
+	sourceKey := codexRemoteCatalogSourceKey(auth, codexServiceBaseURL(auth), "")
+	service.codexRemoteCatalogs.Store(auth.ID, codexRemoteCatalogCacheEntry{
+		payload:   []byte(`{"models":[{"slug":"gpt-5.5"},{"slug":"gpt-6-astra"}]}`),
+		fetchedAt: time.Now(),
+		sourceKey: sourceKey,
+	})
+
+	models := service.codexModelsFromRemoteCatalog(auth, []*ModelInfo{{ID: "gpt-5.5"}})
+	if !containsModelID(modelInfoIDs(models), "gpt-5.5") || !containsModelID(modelInfoIDs(models), "gpt-6-astra") {
+		t.Fatalf("remote supplement or plan model missing: %#v", models)
+	}
 }
 
 func containsModelID(ids []string, want string) bool {

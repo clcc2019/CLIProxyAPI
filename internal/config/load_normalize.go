@@ -77,6 +77,10 @@ func (cfg *Config) normalizeLoadedConfig(configFile string) error {
 	// Sanitize client-facing API key configuration and keep legacy string entries compatible.
 	cfg.SanitizeClientAPIKeys()
 
+	// Sanitize Gemini and Vertex-compatible API key configuration.
+	cfg.SanitizeGeminiKeys()
+	cfg.SanitizeVertexCompatKeys()
+
 	cfg.ModelPrices = NormalizeModelPrices(cfg.ModelPrices)
 
 	// Sanitize Codex keys: drop entries without base-url.
@@ -99,6 +103,7 @@ func (cfg *Config) normalizeLoadedConfig(configFile string) error {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+	cfg.SanitizeModelAliases()
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()

@@ -253,6 +253,9 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string, disabl
 	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if !disableAlias {
+		if resolved, ok := m.resolveGlobalModelAlias(requestedModel); ok {
+			return []string{resolved}
+		}
 		requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	}
 	if !disableAlias {
@@ -282,7 +285,13 @@ func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string, disableMo
 	}
 	resolvedModel := requestedModel
 	if !disableAlias {
+		if resolved, ok := m.resolveGlobalModelAlias(requestedModel); ok {
+			return resolved
+		}
 		resolvedModel = m.applyOAuthModelAlias(auth, requestedModel)
+		if strings.EqualFold(strings.TrimSpace(resolvedModel), strings.TrimSpace(requestedModel)) {
+			resolvedModel = m.applyAPIKeyModelAlias(auth, requestedModel)
+		}
 	}
 	if strings.TrimSpace(resolvedModel) == "" {
 		resolvedModel = requestedModel

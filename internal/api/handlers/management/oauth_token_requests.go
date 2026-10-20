@@ -136,6 +136,13 @@ func (h *Handler) projectSavedTokenRecord(record *coreauth.Auth, savedPath strin
 		UseBaseNameAsFileName:  strings.TrimSpace(record.FileName) == "",
 		IncludeSourceAttribute: true,
 		Now:                    time.Now(),
+		ProviderMapper: func(provider string) string {
+			provider = strings.ToLower(strings.TrimSpace(provider))
+			if provider == "gemini" {
+				return "gemini-cli"
+			}
+			return provider
+		},
 	})
 	if errProject != nil || projected == nil {
 		return record

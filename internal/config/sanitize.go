@@ -173,6 +173,36 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	cfg.OAuthModelAlias = out
 }
 
+// SanitizeModelAliases trims global model aliases and keeps the first rule for each alias.
+func (cfg *Config) SanitizeModelAliases() {
+	if cfg == nil || len(cfg.ModelAliases) == 0 {
+		if cfg != nil {
+			cfg.ModelAliases = nil
+		}
+		return
+	}
+	out := make([]ModelAlias, 0, len(cfg.ModelAliases))
+	seen := make(map[string]struct{}, len(cfg.ModelAliases))
+	for _, entry := range cfg.ModelAliases {
+		name := strings.TrimSpace(entry.Name)
+		alias := strings.TrimSpace(entry.Alias)
+		if name == "" || alias == "" || strings.EqualFold(name, alias) {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
+	}
+	if len(out) == 0 {
+		cfg.ModelAliases = nil
+		return
+	}
+	cfg.ModelAliases = out
+}
+
 func sanitizeOAuthModelAliasReasoningEffort(efforts map[string]string) map[string]string {
 	if len(efforts) == 0 {
 		return nil
@@ -283,6 +313,33 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
+}
+
+// SanitizeGeminiKeys normalizes and deduplicates Gemini API key credentials.
+func (cfg *Config) SanitizeGeminiKeys() {
+	if cfg == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(cfg.GeminiKey))
+	out := cfg.GeminiKey[:0]
+	for _, entry := range cfg.GeminiKey {
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		key := entry.APIKey + "|" + entry.BaseURL
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, entry)
+	}
+	cfg.GeminiKey = out
 }
 
 func normalizeModelPrefix(prefix string) string {
