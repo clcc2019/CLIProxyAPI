@@ -110,12 +110,12 @@ func codexResolvedOriginator(target http.Header, source http.Header, auth *clipr
 
 func codexResolvedIdentity(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) codexRequestIdentity {
 	userAgent, _ := codexHeaderDefaults(cfg, auth)
-	return codexIdentity(target, source, auth, userAgent)
+	return codexIdentity(target, source, auth, userAgent, cfg)
 }
 
-func codexIdentity(target http.Header, source http.Header, auth *cliproxyauth.Auth, userAgent string) codexRequestIdentity {
+func codexIdentity(target http.Header, source http.Header, auth *cliproxyauth.Auth, userAgent string, cfg *config.Config) codexRequestIdentity {
 	identity := codexRequestIdentity{
-		originator: codexResolvedOriginatorValue(target, source, auth),
+		originator: codexResolvedOriginatorValue(target, source, auth, codexOriginatorFor(cfg)),
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	authUserAgent := codexAuthUserAgent(auth)
@@ -136,20 +136,33 @@ func codexIdentity(target http.Header, source http.Header, auth *cliproxyauth.Au
 			identity.userAgent = misc.CodexCLIUserAgentWithOriginator(identity.originator)
 		}
 	}
+	version := firstNonEmptyHeaderValue(target, source, "Version")
+	if version == "" {
+		version = codexDefaultVersionHeader()
+	}
+	identity.userAgent = codexUserAgentForIdentity(identity.userAgent, identity.originator, version)
 	return identity
 }
 
-func codexResolvedOriginatorValue(target http.Header, source http.Header, auth *cliproxyauth.Auth) string {
+func codexResolvedOriginatorValue(target http.Header, source http.Header, auth *cliproxyauth.Auth, defaultOriginator string) string {
 	if authOriginator := codexAuthOriginator(auth); authOriginator != "" {
 		if !codexGeneratedDefaultOriginator(auth, authOriginator) {
 			return authOriginator
 		}
 	}
+	defaultOriginator = strings.TrimSpace(defaultOriginator)
 	if originator := trimHeaderValue(target, "Originator"); originator != "" {
-		return originator
+		if !codexGeneratedDefaultOriginator(auth, originator) || strings.EqualFold(originator, defaultOriginator) {
+			return originator
+		}
 	}
 	if originator := trimHeaderValue(source, "Originator"); originator != "" {
-		return originator
+		if !codexGeneratedDefaultOriginator(auth, originator) || strings.EqualFold(originator, defaultOriginator) {
+			return originator
+		}
+	}
+	if defaultOriginator != "" {
+		return defaultOriginator
 	}
 	return codexOriginator
 }

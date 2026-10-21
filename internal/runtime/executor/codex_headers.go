@@ -15,6 +15,8 @@ const (
 	codexHeaderOfficialThreadID                 = "Thread-Id"
 	codexHeaderChatGPTAccountID                 = "ChatGPT-Account-ID"
 	codexHeaderOpenAIBeta                       = "OpenAI-Beta"
+	codexHeaderOpenAIOrganization               = "Openai-Organization"
+	codexHeaderOpenAIProject                    = "Openai-Project"
 	codexHeaderOpenAISubagent                   = "X-OpenAI-Subagent"
 	codexHeaderOpenAIFedramp                    = "X-OpenAI-Fedramp"
 	codexHeaderOpenAIInternalCodexResponsesLite = "X-OpenAI-Internal-Codex-Responses-Lite"

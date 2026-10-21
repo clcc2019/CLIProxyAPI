@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -41,6 +43,43 @@ func TestApplyCodexHeadersOmitsEmptyAuthorizationToken(t *testing.T) {
 
 	if got := req.Header.Get("Authorization"); got != "" {
 		t.Fatalf("Authorization = %q, want empty", got)
+	}
+}
+
+func TestApplyCodexHeadersUsesConfiguredOriginator(t *testing.T) {
+	cfg := &config.Config{CodexHeaderDefaults: config.CodexHeaderDefaults{Originator: "codex_custom"}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	applyCodexHeaders(req, nil, "", true, cfg)
+
+	if got := req.Header.Get("Originator"); got != "codex_custom" {
+		t.Fatalf("Originator = %q, want codex_custom", got)
+	}
+	if got := req.Header.Get("User-Agent"); !strings.HasPrefix(got, "codex_custom/") {
+		t.Fatalf("User-Agent = %q, want codex_custom/ prefix", got)
+	}
+}
+
+func TestApplyCodexHeadersForwardsOpenAIOrganizationAndProject(t *testing.T) {
+	ctx := contextWithGinHeaders(map[string]string{
+		"OpenAI-Organization": "org-test",
+		"OpenAI-Project":      "project-test",
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	applyCodexHeaders(req, nil, "", true, nil)
+
+	if got := req.Header.Get("OpenAI-Organization"); got != "org-test" {
+		t.Fatalf("OpenAI-Organization = %q, want org-test", got)
+	}
+	if got := req.Header.Get("OpenAI-Project"); got != "project-test" {
+		t.Fatalf("OpenAI-Project = %q, want project-test", got)
 	}
 }
 
@@ -858,8 +897,9 @@ func TestApplyCodexHeadersKeepsLegacyDefaultPinnedClientProfile(t *testing.T) {
 	if published != nil {
 		t.Fatalf("pinned legacy profile should not publish auth update: %#v", published.Metadata)
 	}
-	if got := req.Header.Get("User-Agent"); got != legacyDefaultUA {
-		t.Fatalf("request User-Agent = %q, want pinned %q", got, legacyDefaultUA)
+	wantUserAgent := "codex_cli_rs/" + misc.CodexCLIVersion + " (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	if got := req.Header.Get("User-Agent"); got != wantUserAgent {
+		t.Fatalf("request User-Agent = %q, want version-synced %q", got, wantUserAgent)
 	}
 	if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
 		t.Fatalf("request Originator = %q, want pinned codex_cli_rs", got)

@@ -89,9 +89,11 @@ func applyCodexHeadersForRequestKindWithGinHeaders(r *http.Request, auth *clipro
 	codexEnsureVersionHeader(headers, profileHeaders)
 	codexEnsureHeader(headers, profileHeaders, codexWireHeaderOpenAISubagent, "")
 	codexEnsureHeader(headers, profileHeaders, codexWireHeaderOAIAttestation, "")
+	codexEnsureHeader(headers, ginHeaders, codexHeaderOpenAIOrganization, "")
+	codexEnsureHeader(headers, ginHeaders, codexHeaderOpenAIProject, "")
 	codexEnsureHeader(headers, profileHeaders, "Traceparent", "")
 	codexEnsureHeader(headers, profileHeaders, "Tracestate", "")
-	identity := codexIdentity(headers, profileHeaders, auth, cfgUserAgent)
+	identity := codexIdentity(headers, profileHeaders, auth, cfgUserAgent, cfg)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: requestKind != codexFinalUpstreamCompact,
 	})
@@ -328,9 +330,49 @@ func codexEnsureVersionHeader(target http.Header, source http.Header) {
 	}
 	if codexVersionAtLeast(version, codexDefaultVersionHeader()) {
 		codexSetSingleHeaderValue(target, "Version", version)
+		codexSyncGeneratedUserAgentVersion(target, version)
 		return
 	}
-	codexSetSingleHeaderValue(target, "Version", codexDefaultVersionHeader())
+	version = codexDefaultVersionHeader()
+	codexSetSingleHeaderValue(target, "Version", version)
+	codexSyncGeneratedUserAgentVersion(target, version)
+}
+
+func codexSyncGeneratedUserAgentVersion(headers http.Header, version string) {
+	userAgent := trimHeaderValue(headers, "User-Agent")
+	product, _, ok := codexUserAgentProductVersion(userAgent)
+	if !ok {
+		return
+	}
+	if synced := codexUserAgentForIdentity(userAgent, product, version); synced != userAgent {
+		codexSetSingleHeaderValue(headers, "User-Agent", synced)
+	}
+}
+
+func codexUserAgentForIdentity(userAgent, originator, version string) string {
+	product, _, ok := codexUserAgentProductVersion(userAgent)
+	if !ok || !strings.EqualFold(product, misc.CodexDefaultOriginator) || !codexGeneratedDefaultUserAgent(userAgent) {
+		return userAgent
+	}
+
+	originator = strings.TrimSpace(originator)
+	if originator == "" {
+		originator = product
+	}
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return userAgent
+	}
+	tokenEnd := strings.IndexFunc(userAgent, func(r rune) bool { return r == ' ' || r == '\t' })
+	if tokenEnd < 0 {
+		tokenEnd = len(userAgent)
+	}
+	token := userAgent[:tokenEnd]
+	slash := strings.IndexByte(token, '/')
+	if slash < 0 {
+		return userAgent
+	}
+	return originator + "/" + version + userAgent[tokenEnd:]
 }
 
 type codexParsedVersion struct {

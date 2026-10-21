@@ -36,7 +36,7 @@ const (
 	// Keep bootstrap telemetry aligned with the current official Codex release.
 	// It is deliberately scoped to the control-plane request: regular proxy
 	// traffic continues to honour its configured compatibility profile.
-	codexAgentRegistrationVersion                = "0.145.0"
+	codexAgentRegistrationVersion                = misc.CodexCLIVersion
 	codexAgentRegistrationCapabilityResponsesAPI = "responsesapi"
 	codexAgentRegistrationCLIHarnessID           = "codex-cli"
 	codexAgentRegistrationAppHarnessID           = "codex-app"

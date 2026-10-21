@@ -1979,13 +1979,13 @@ func TestCodexEnsureVersionHeaderNormalizesMinimum(t *testing.T) {
 		},
 		{
 			name:          "newer prerelease is preserved",
-			sourceVersion: "0.154.1-alpha.1",
-			want:          "0.154.1-alpha.1",
+			sourceVersion: "0.164.1-alpha.1",
+			want:          "0.164.1-alpha.1",
 		},
 		{
 			name:          "newer stable client is preserved",
-			sourceVersion: "0.154.0",
-			want:          "0.154.0",
+			sourceVersion: "0.164.0",
+			want:          "0.164.0",
 		},
 		{
 			name:          "invalid client version is upgraded",
@@ -2239,6 +2239,35 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 	}
 	if got := headers.Get("x-responsesapi-include-timing-metrics"); got != "true" {
 		t.Fatalf("x-responsesapi-include-timing-metrics = %q, want true", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersUsesConfiguredOriginator(t *testing.T) {
+	cfg := &config.Config{CodexHeaderDefaults: config.CodexHeaderDefaults{Originator: "codex_custom"}}
+
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", cfg)
+
+	if got := headers.Get("Originator"); got != "codex_custom" {
+		t.Fatalf("Originator = %q, want codex_custom", got)
+	}
+	if got := headers.Get("User-Agent"); !strings.HasPrefix(got, "codex_custom/") {
+		t.Fatalf("User-Agent = %q, want codex_custom/ prefix", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersForwardsOpenAIOrganizationAndProject(t *testing.T) {
+	ctx := contextWithGinHeaders(map[string]string{
+		"OpenAI-Organization": "org-test",
+		"OpenAI-Project":      "project-test",
+	})
+
+	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, nil, "", nil)
+
+	if got := headers.Get("OpenAI-Organization"); got != "org-test" {
+		t.Fatalf("OpenAI-Organization = %q, want org-test", got)
+	}
+	if got := headers.Get("OpenAI-Project"); got != "project-test" {
+		t.Fatalf("OpenAI-Project = %q, want project-test", got)
 	}
 }
 

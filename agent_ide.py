@@ -47,7 +47,7 @@ USER_AGENT = (
 )
 
 # Codex CLI agent 版本信息
-AGENT_VERSION = "0.138.0-alpha.6"
+AGENT_VERSION = "0.163.0"
 AGENT_HARNESS_ID = "codex-cli"
 RUNNING_LOCATION = "local"
 

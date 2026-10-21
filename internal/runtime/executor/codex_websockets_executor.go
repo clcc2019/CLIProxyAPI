@@ -3387,9 +3387,11 @@ func applyCodexWebsocketHeadersForRequestKind(ctx context.Context, headers http.
 	codexEnsureVersionHeader(headers, profileHeaders)
 	codexEnsureHeader(headers, profileHeaders, codexWireHeaderOpenAISubagent, "")
 	codexEnsureHeader(headers, profileHeaders, codexWireHeaderOAIAttestation, "")
+	codexEnsureHeader(headers, ginHeaders, codexHeaderOpenAIOrganization, "")
+	codexEnsureHeader(headers, ginHeaders, codexHeaderOpenAIProject, "")
 
 	codexSetSingleHeaderValue(headers, codexWireHeaderOpenAIBeta, codexResponsesWebsocketBetaHeaderValue)
-	identity := codexIdentity(headers, profileHeaders, auth, cfgUserAgent)
+	identity := codexIdentity(headers, profileHeaders, auth, cfgUserAgent, cfg)
 	codexSetSingleHeaderValue(headers, "User-Agent", identity.userAgent)
 	sessionID := codexEnsureSessionHeaders(headers, ginHeaders, auth, codexSessionHeaderOptions{
 		includeRequestID: true,
