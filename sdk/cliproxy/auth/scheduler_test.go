@@ -517,7 +517,7 @@ func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T) {
+func TestSchedulerPick_CodexWebsocketDoesNotBiasAuthSelection(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -528,7 +528,7 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	)
 
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
-	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	want := []string{"codex-http", "codex-ws-a", "codex-ws-b"}
 	for index, wantID := range want {
 		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -543,7 +543,7 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
-func TestSchedulerPick_CodexPrefersUpstreamWebsocketForSSE(t *testing.T) {
+func TestSchedulerPick_CodexUpstreamWebsocketFlagDoesNotBiasAuthSelection(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -554,7 +554,7 @@ func TestSchedulerPick_CodexPrefersUpstreamWebsocketForSSE(t *testing.T) {
 	)
 
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
-	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	want := []string{"codex-http", "codex-ws-a", "codex-ws-b"}
 	for index, wantID := range want {
 		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -569,7 +569,7 @@ func TestSchedulerPick_CodexPrefersUpstreamWebsocketForSSE(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_MixedProvidersPrefersWebsocketAuthWithinCodexProvider(t *testing.T) {
+func TestSchedulerPick_MixedProvidersDoNotPreferWebsocketAuthWithinCodex(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -580,7 +580,7 @@ func TestSchedulerPick_MixedProvidersPrefersWebsocketAuthWithinCodexProvider(t *
 	)
 
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
-	want := []string{"codex-ws", "codex-ws"}
+	want := []string{"codex-http", "codex-ws"}
 	for index, wantID := range want {
 		got, provider, errPick := scheduler.pickMixed(ctx, []string{"codex", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -616,7 +616,7 @@ func TestSchedulerPick_MixedProvidersFallsBackToHTTPWhenWebsocketTried(t *testin
 	}
 }
 
-func TestSchedulerPick_MixedStablePrefersWebsocketAuthWithinCodexProvider(t *testing.T) {
+func TestSchedulerPick_MixedStableDoesNotPreferWebsocketAuthWithinCodex(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -649,8 +649,8 @@ func TestSchedulerPick_MixedStablePrefersWebsocketAuthWithinCodexProvider(t *tes
 	if provider != "codex" {
 		t.Fatalf("pickMixedStable() provider = %q, want %q", provider, "codex")
 	}
-	if got.ID != "codex-ws" {
-		t.Fatalf("pickMixedStable() auth.ID = %q, want %q", got.ID, "codex-ws")
+	if got.ID != "codex-http" {
+		t.Fatalf("pickMixedStable() auth.ID = %q, want %q", got.ID, "codex-http")
 	}
 }
 
@@ -677,7 +677,7 @@ func TestSchedulerPick_PinnedAuthDiagnosticWhenNoPinnedCandidateAvailable(t *tes
 	}
 }
 
-func TestSchedulerPick_CodexPriorityPrecedesWebsocketPreference(t *testing.T) {
+func TestSchedulerPick_CodexPrioritySelectionIgnoresWebsocketFlag(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -1120,7 +1120,7 @@ func TestManagerPickNextSessionAffinityUsesSchedulerAndFailsOver(t *testing.T) {
 	}
 }
 
-func TestManagerPickNextSessionAffinityNewSessionHonorsPriorityBeforeWebsocket(t *testing.T) {
+func TestManagerPickNextSessionAffinityNewSessionHonorsPriorityRegardlessOfWebsocketFlag(t *testing.T) {
 	t.Parallel()
 
 	selector := NewSessionAffinitySelector(&RoundRobinSelector{})

@@ -22,7 +22,13 @@ func init() {
 	_, _ = loadCodexClientModelsFromBytes(codexClientModelsJSON, "embed")
 }
 
-// GetCodexClientModelsJSON returns the embedded Codex client model catalog.
+// GetEmbeddedCodexClientModelsJSON returns a copy of the built-in catalog, which
+// remains available as a complete fallback when the remote catalog is compact.
+func GetEmbeddedCodexClientModelsJSON() []byte {
+	return append([]byte(nil), codexClientModelsJSON...)
+}
+
+// GetCodexClientModelsJSON returns the active Codex client model catalog.
 func GetCodexClientModelsJSON() []byte {
 	codexClientModelsStore.mu.RLock()
 	defer codexClientModelsStore.mu.RUnlock()

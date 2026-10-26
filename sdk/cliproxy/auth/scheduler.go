@@ -80,15 +80,14 @@ type authScheduler struct {
 }
 
 type mixedProviderCandidate struct {
-	shard           *modelScheduler
-	priority        int
-	readyCount      int
-	minLoad         int64
-	minLoadCount    int
-	preferWebsocket bool
-	weight          int
-	segmentStart    int
-	segmentEnd      int
+	shard        *modelScheduler
+	priority     int
+	readyCount   int
+	minLoad      int64
+	minLoadCount int
+	weight       int
+	segmentStart int
+	segmentEnd   int
 }
 
 type mixedCursorKey struct {
@@ -111,7 +110,6 @@ type scheduledAuthMeta struct {
 	providerKey       string
 	priority          int
 	weight            int64
-	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
 }
 
@@ -231,27 +229,9 @@ func authUnavailableMessageForFilter(filter authFilter) string {
 	return "no auth available"
 }
 
-// readyBucket keeps the ready views for one priority level.
+// readyBucket keeps the ready auths for one priority level.
 type readyBucket struct {
 	all readyView
-	ws  readyView
-}
-
-func (b *readyBucket) preferredView(preferWebsocket bool, filter authFilter) *readyView {
-	if b == nil {
-		return nil
-	}
-	if !preferWebsocket {
-		return &b.all
-	}
-	if filter.empty() {
-		if len(b.ws.flat) > 0 {
-			return &b.ws
-		}
-	} else if b.ws.pickFirst(filter) != nil {
-		return &b.ws
-	}
-	return &b.all
 }
 
 // readyView holds the selection order and per-view state for built-in strategies.
@@ -267,11 +247,6 @@ type cooldownQueue []*scheduledAuth
 type readyViewCursorState struct {
 	cursor        int
 	weightedState smoothWeightedState
-}
-
-type readyBucketCursorState struct {
-	all readyViewCursorState
-	ws  readyViewCursorState
 }
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
@@ -448,14 +423,13 @@ func (s *authScheduler) removeAuth(authID string) {
 }
 
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
-func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
+func (s *authScheduler) pickSingle(_ context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	preferWebsocket := cliproxyexecutor.PreferUpstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -469,7 +443,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if shard == nil {
 		return nil, authNotFoundErrorForFilter(filter)
 	}
-	if picked := shard.pickReady(preferWebsocket, s.strategy, filter, s.authLoad); picked != nil {
+	if picked := shard.pickReady(s.strategy, filter, s.authLoad); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableError(provider, model, filter)
@@ -500,7 +474,6 @@ func (s *authScheduler) pickSingleStable(ctx context.Context, provider, model st
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	preferWebsocket := cliproxyexecutor.PreferUpstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -516,7 +489,7 @@ func (s *authScheduler) pickSingleStable(ctx context.Context, provider, model st
 	if shard == nil {
 		return nil, authNotFoundErrorForFilter(filter)
 	}
-	if picked := shard.pickReadyStable(preferWebsocket, filter, affinityKey); picked != nil {
+	if picked := shard.pickReadyStable(filter, affinityKey); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableError(provider, model, filter)
@@ -537,8 +510,8 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	if len(normalized) == 1 {
-		// When a single provider is eligible, reuse pickSingle so provider-specific preferences
-		// (for example Codex websocket transport) are applied consistently.
+		// When a single provider is eligible, reuse pickSingle so provider-specific
+		// availability and priority rules are applied consistently.
 		providerKey := normalized[0]
 		picked, errPick := s.pickSingle(ctx, providerKey, model, opts, tried)
 		if errPick != nil {
@@ -551,7 +524,6 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
-	preferUpstreamWebsocket := cliproxyexecutor.PreferUpstreamWebsocket(ctx)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -567,7 +539,7 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 			return nil, "", authNotFoundErrorForFilter(filter)
 		}
 		shard := providerState.ensureModel(modelKey, time.Now())
-		if picked := shard.pickReady(false, s.strategy, filter, s.authLoad); picked != nil {
+		if picked := shard.pickReady(s.strategy, filter, s.authLoad); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableError("mixed", model, filter)
@@ -592,12 +564,11 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 		}
 		shard := providerState.ensureModel(modelKey, now)
 		candidates[providerIndex].shard = shard
-		candidates[providerIndex].preferWebsocket = preferWebsocketForProvider(preferUpstreamWebsocket, providerKey)
 		if shard == nil {
 			continue
 		}
 		shard.promoteExpired(now)
-		priorityReady, readyCount, minLoad, minLoadCount, okPriority := shard.highestReadyPriorityAndLoadStats(candidates[providerIndex].preferWebsocket, filter, s.authLoad)
+		priorityReady, readyCount, minLoad, minLoadCount, okPriority := shard.highestReadyPriorityAndLoadStats(filter, s.authLoad)
 		if !okPriority {
 			continue
 		}
@@ -620,7 +591,7 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriority(candidates[providerIndex].preferWebsocket, bestPriority, s.strategy, filter, s.authLoad)
+			picked := shard.pickReadyAtPriority(bestPriority, s.strategy, filter, s.authLoad)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -650,7 +621,7 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 			if candidate.shard == nil || candidate.priority != bestPriority || candidate.minLoad != bestLoad {
 				continue
 			}
-			entries = append(entries, candidate.shard.weightedEntriesAtPriority(candidate.preferWebsocket, bestPriority, filter, s.authLoad, bestLoad)...)
+			entries = append(entries, candidate.shard.weightedEntriesAtPriority(bestPriority, filter, s.authLoad, bestLoad)...)
 		}
 		sort.Slice(entries, func(i, j int) bool {
 			if entries[i] == nil || entries[i].auth == nil {
@@ -703,7 +674,7 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 	localOffset := startSlot - candidates[startProviderIndex].segmentStart
 	selectedShard := candidates[startProviderIndex].shard
 	if selectedShard != nil {
-		if picked := selectedShard.pickReadyAtPriorityOffset(candidates[startProviderIndex].preferWebsocket, bestPriority, localOffset, filter, s.authLoad); picked != nil {
+		if picked := selectedShard.pickReadyAtPriorityOffset(bestPriority, localOffset, filter, s.authLoad); picked != nil {
 			return picked, normalized[startProviderIndex], nil
 		}
 	}
@@ -718,7 +689,7 @@ func (s *authScheduler) pickMixedNormalized(ctx context.Context, normalized []st
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityOffset(candidates[providerIndex].preferWebsocket, bestPriority, 0, filter, s.authLoad)
+		picked := shard.pickReadyAtPriorityOffset(bestPriority, 0, filter, s.authLoad)
 		if picked == nil {
 			continue
 		}
@@ -767,7 +738,6 @@ func (s *authScheduler) pickMixedStableNormalized(ctx context.Context, normalize
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
-	preferUpstreamWebsocket := cliproxyexecutor.PreferUpstreamWebsocket(ctx)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -782,7 +752,7 @@ func (s *authScheduler) pickMixedStableNormalized(ctx context.Context, normalize
 			return nil, "", authNotFoundErrorForFilter(filter)
 		}
 		shard := providerState.ensureModel(modelKey, time.Now())
-		if picked := shard.pickReadyStable(false, filter, affinityKey); picked != nil {
+		if picked := shard.pickReadyStable(filter, affinityKey); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableError("mixed", model, filter)
@@ -827,7 +797,7 @@ func (s *authScheduler) pickMixedStableNormalized(ctx context.Context, normalize
 		if shard == nil {
 			continue
 		}
-		candidate := shard.pickReadyStableAtPriority(preferWebsocketForProvider(preferUpstreamWebsocket, providerKey), bestPriority, filter, affinityKey)
+		candidate := shard.pickReadyStableAtPriority(bestPriority, filter, affinityKey)
 		if candidate == nil {
 			continue
 		}
@@ -1119,7 +1089,6 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		providerKey:       providerKey,
 		priority:          authPriority(auth),
 		weight:            authWeight(auth),
-		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: supportedModelSetForAuth(auth.ID),
 	}
 }
@@ -1397,10 +1366,8 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousState := entry.state
 	previousNextRetryAt := entry.nextRetryAt
 	previousPriority := 0
-	previousWebsocketEnabled := false
 	if entry.meta != nil {
 		previousPriority = entry.meta.priority
-		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
 
 	entry.meta = meta
@@ -1420,7 +1387,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -1501,17 +1468,17 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 	}
 }
 
-func (m *modelScheduler) pickReady(preferWebsocket bool, strategy schedulerStrategy, filter authFilter, load authLoadFunc) *Auth {
+func (m *modelScheduler) pickReady(strategy schedulerStrategy, filter authFilter, load authLoadFunc) *Auth {
 	if m == nil {
 		return nil
 	}
 	m.mu.Lock()
-	picked := m.pickReadyLocked(preferWebsocket, strategy, filter, load)
+	picked := m.pickReadyLocked(strategy, filter, load)
 	m.mu.Unlock()
 	return picked
 }
 
-func (m *modelScheduler) pickReadyStable(preferWebsocket bool, filter authFilter, affinityKey string) *Auth {
+func (m *modelScheduler) pickReadyStable(filter authFilter, affinityKey string) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1522,13 +1489,13 @@ func (m *modelScheduler) pickReadyStable(preferWebsocket bool, filter authFilter
 		m.mu.Unlock()
 		return nil
 	}
-	picked := m.pickReadyStableAtPriorityLocked(preferWebsocket, priorityReady, filter, affinityKey)
+	picked := m.pickReadyStableAtPriorityLocked(priorityReady, filter, affinityKey)
 	m.mu.Unlock()
 	return picked
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, filter authFilter, load authLoadFunc) *Auth {
+func (m *modelScheduler) pickReadyLocked(strategy schedulerStrategy, filter authFilter, load authLoadFunc) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1537,7 +1504,7 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 	if !okPriority {
 		return nil
 	}
-	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, filter, load)
+	return m.pickReadyAtPriorityLocked(priorityReady, strategy, filter, load)
 }
 
 func (m *modelScheduler) highestReadyPriority(filter authFilter) (int, bool) {
@@ -1550,7 +1517,7 @@ func (m *modelScheduler) highestReadyPriority(filter authFilter) (int, bool) {
 	return priorityReady, okPriority
 }
 
-func (m *modelScheduler) highestReadyPriorityAndCount(preferWebsocket bool, filter authFilter) (int, int, bool) {
+func (m *modelScheduler) highestReadyPriorityAndCount(filter authFilter) (int, int, bool) {
 	if m == nil {
 		return 0, 0, false
 	}
@@ -1560,12 +1527,12 @@ func (m *modelScheduler) highestReadyPriorityAndCount(preferWebsocket bool, filt
 		m.mu.RUnlock()
 		return 0, 0, false
 	}
-	readyCount := m.matchingReadyCountAtPriorityLocked(preferWebsocket, priorityReady, filter)
+	readyCount := m.matchingReadyCountAtPriorityLocked(priorityReady, filter)
 	m.mu.RUnlock()
 	return priorityReady, readyCount, true
 }
 
-func (m *modelScheduler) highestReadyPriorityAndLoadStats(preferWebsocket bool, filter authFilter, load authLoadFunc) (int, int, int64, int, bool) {
+func (m *modelScheduler) highestReadyPriorityAndLoadStats(filter authFilter, load authLoadFunc) (int, int, int64, int, bool) {
 	if m == nil {
 		return 0, 0, 0, 0, false
 	}
@@ -1575,7 +1542,7 @@ func (m *modelScheduler) highestReadyPriorityAndLoadStats(preferWebsocket bool, 
 		m.mu.RUnlock()
 		return 0, 0, 0, 0, false
 	}
-	readyCount, minLoad, minLoadCount := m.loadStatsAtPriorityLocked(preferWebsocket, priorityReady, filter, load)
+	readyCount, minLoad, minLoadCount := m.loadStatsAtPriorityLocked(priorityReady, filter, load)
 	m.mu.RUnlock()
 	return priorityReady, readyCount, minLoad, minLoadCount, true
 }
@@ -1607,27 +1574,27 @@ func (m *modelScheduler) highestReadyPriorityLocked(filter authFilter) (int, boo
 	return 0, false
 }
 
-func (m *modelScheduler) pickReadyAtPriority(preferWebsocket bool, priority int, strategy schedulerStrategy, filter authFilter, load authLoadFunc) *Auth {
+func (m *modelScheduler) pickReadyAtPriority(priority int, strategy schedulerStrategy, filter authFilter, load authLoadFunc) *Auth {
 	if m == nil {
 		return nil
 	}
 	m.mu.Lock()
-	picked := m.pickReadyAtPriorityLocked(preferWebsocket, priority, strategy, filter, load)
+	picked := m.pickReadyAtPriorityLocked(priority, strategy, filter, load)
 	m.mu.Unlock()
 	return picked
 }
 
-func (m *modelScheduler) pickReadyStableAtPriority(preferWebsocket bool, priority int, filter authFilter, affinityKey string) *Auth {
+func (m *modelScheduler) pickReadyStableAtPriority(priority int, filter authFilter, affinityKey string) *Auth {
 	if m == nil {
 		return nil
 	}
 	m.mu.RLock()
-	picked := m.pickReadyStableAtPriorityLocked(preferWebsocket, priority, filter, affinityKey)
+	picked := m.pickReadyStableAtPriorityLocked(priority, filter, affinityKey)
 	m.mu.RUnlock()
 	return picked
 }
 
-func (m *modelScheduler) pickReadyStableAtPriorityLocked(preferWebsocket bool, priority int, filter authFilter, affinityKey string) *Auth {
+func (m *modelScheduler) pickReadyStableAtPriorityLocked(priority int, filter authFilter, affinityKey string) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1635,8 +1602,7 @@ func (m *modelScheduler) pickReadyStableAtPriorityLocked(preferWebsocket bool, p
 	if bucket == nil {
 		return nil
 	}
-	view := bucket.preferredView(preferWebsocket, filter)
-	picked := view.pickStable(filter, affinityKey)
+	picked := bucket.all.pickStable(filter, affinityKey)
 	if picked == nil || picked.auth == nil {
 		return nil
 	}
@@ -1645,7 +1611,7 @@ func (m *modelScheduler) pickReadyStableAtPriorityLocked(preferWebsocket bool, p
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, filter authFilter, load authLoadFunc) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityLocked(priority int, strategy schedulerStrategy, filter authFilter, load authLoadFunc) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1653,7 +1619,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	if bucket == nil {
 		return nil
 	}
-	view := bucket.preferredView(preferWebsocket, filter)
+	view := &bucket.all
 	var picked *scheduledAuth
 	if strategy == schedulerStrategyWeightedRoundRobin {
 		picked = view.pickWeighted(filter, load)
@@ -1678,17 +1644,17 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	return picked.auth
 }
 
-func (m *modelScheduler) readyCountAtPriority(preferWebsocket bool, priority int) int {
+func (m *modelScheduler) readyCountAtPriority(priority int) int {
 	if m == nil {
 		return 0
 	}
 	m.mu.RLock()
-	readyCount := m.readyCountAtPriorityLocked(preferWebsocket, priority)
+	readyCount := m.readyCountAtPriorityLocked(priority)
 	m.mu.RUnlock()
 	return readyCount
 }
 
-func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
+func (m *modelScheduler) readyCountAtPriorityLocked(priority int) int {
 	if m == nil {
 		return 0
 	}
@@ -1696,10 +1662,10 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 	if bucket == nil {
 		return 0
 	}
-	return len(bucket.preferredView(preferWebsocket, authFilter{}).flat)
+	return len(bucket.all.flat)
 }
 
-func (m *modelScheduler) matchingReadyCountAtPriorityLocked(preferWebsocket bool, priority int, filter authFilter) int {
+func (m *modelScheduler) matchingReadyCountAtPriorityLocked(priority int, filter authFilter) int {
 	if m == nil {
 		return 0
 	}
@@ -1707,7 +1673,7 @@ func (m *modelScheduler) matchingReadyCountAtPriorityLocked(preferWebsocket bool
 	if bucket == nil {
 		return 0
 	}
-	view := bucket.preferredView(preferWebsocket, filter)
+	view := &bucket.all
 	if filter.empty() {
 		return len(view.flat)
 	}
@@ -1720,7 +1686,7 @@ func (m *modelScheduler) matchingReadyCountAtPriorityLocked(preferWebsocket bool
 	return count
 }
 
-func (m *modelScheduler) weightedEntriesAtPriority(preferWebsocket bool, priority int, filter authFilter, load authLoadFunc, targetLoad int64) []*scheduledAuth {
+func (m *modelScheduler) weightedEntriesAtPriority(priority int, filter authFilter, load authLoadFunc, targetLoad int64) []*scheduledAuth {
 	if m == nil {
 		return nil
 	}
@@ -1730,13 +1696,12 @@ func (m *modelScheduler) weightedEntriesAtPriority(preferWebsocket bool, priorit
 		m.mu.RUnlock()
 		return nil
 	}
-	view := bucket.preferredView(preferWebsocket, filter)
-	entries := append([]*scheduledAuth(nil), view.entriesAtLoad(filter, load, targetLoad)...)
+	entries := append([]*scheduledAuth(nil), bucket.all.entriesAtLoad(filter, load, targetLoad)...)
 	m.mu.RUnlock()
 	return entries
 }
 
-func (m *modelScheduler) loadStatsAtPriorityLocked(preferWebsocket bool, priority int, filter authFilter, load authLoadFunc) (int, int64, int) {
+func (m *modelScheduler) loadStatsAtPriorityLocked(priority int, filter authFilter, load authLoadFunc) (int, int64, int) {
 	if m == nil {
 		return 0, 0, 0
 	}
@@ -1744,7 +1709,7 @@ func (m *modelScheduler) loadStatsAtPriorityLocked(preferWebsocket bool, priorit
 	if bucket == nil {
 		return 0, 0, 0
 	}
-	view := bucket.preferredView(preferWebsocket, filter)
+	view := &bucket.all
 	if len(view.flat) == 0 {
 		return 0, 0, 0
 	}
@@ -1806,17 +1771,17 @@ func (m *modelScheduler) unavailableError(provider, model string, filter authFil
 	return errUnavailable
 }
 
-func (m *modelScheduler) pickReadyAtPriorityOffset(preferWebsocket bool, priority, offset int, filter authFilter, load authLoadFunc) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityOffset(priority, offset int, filter authFilter, load authLoadFunc) *Auth {
 	if m == nil {
 		return nil
 	}
 	m.mu.RLock()
-	picked := m.pickReadyAtPriorityOffsetLocked(preferWebsocket, priority, offset, filter, load)
+	picked := m.pickReadyAtPriorityOffsetLocked(priority, offset, filter, load)
 	m.mu.RUnlock()
 	return picked
 }
 
-func (m *modelScheduler) pickReadyAtPriorityOffsetLocked(preferWebsocket bool, priority, offset int, filter authFilter, load authLoadFunc) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityOffsetLocked(priority, offset int, filter authFilter, load authLoadFunc) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1824,7 +1789,7 @@ func (m *modelScheduler) pickReadyAtPriorityOffsetLocked(preferWebsocket bool, p
 	if bucket == nil {
 		return nil
 	}
-	view := bucket.preferredView(preferWebsocket, filter)
+	view := &bucket.all
 	var picked *scheduledAuth
 	if load == nil {
 		if filter.empty() {
@@ -1901,15 +1866,12 @@ func (m *modelScheduler) availabilitySummaryLocked(filter authFilter) (int, int,
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
 func (m *modelScheduler) rebuildIndexesLocked() {
-	cursorStates := make(map[int]readyBucketCursorState, len(m.readyByPriority))
+	cursorStates := make(map[int]readyViewCursorState, len(m.readyByPriority))
 	for priority, bucket := range m.readyByPriority {
 		if bucket == nil {
 			continue
 		}
-		cursorStates[priority] = readyBucketCursorState{
-			all: snapshotReadyViewCursors(bucket.all),
-			ws:  snapshotReadyViewCursors(bucket.ws),
-		}
+		cursorStates[priority] = snapshotReadyViewCursors(bucket.all)
 	}
 
 	m.readyByPriority = make(map[int]*readyBucket)
@@ -1935,8 +1897,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		})
 		bucket := buildReadyBucket(entries)
 		if cursorState, ok := cursorStates[priority]; ok && bucket != nil {
-			restoreReadyViewCursors(&bucket.all, cursorState.all)
-			restoreReadyViewCursors(&bucket.ws, cursorState.ws)
+			restoreReadyViewCursors(&bucket.all, cursorState)
 		}
 		m.readyByPriority[priority] = bucket
 		m.priorityOrder = append(m.priorityOrder, priority)
@@ -1970,18 +1931,9 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 	}
 }
 
-// buildReadyBucket prepares the general and websocket-only ready views for one priority bucket.
+// buildReadyBucket prepares the ready view for one priority bucket.
 func buildReadyBucket(entries []*scheduledAuth) *readyBucket {
-	bucket := &readyBucket{}
-	bucket.all = buildReadyView(entries)
-	wsEntries := make([]*scheduledAuth, 0, len(entries))
-	for _, entry := range entries {
-		if entry != nil && entry.meta != nil && entry.meta.websocketEnabled {
-			wsEntries = append(wsEntries, entry)
-		}
-	}
-	bucket.ws = buildReadyView(wsEntries)
-	return bucket
+	return &readyBucket{all: buildReadyView(entries)}
 }
 
 func buildReadyView(entries []*scheduledAuth) readyView {
@@ -2030,13 +1982,6 @@ func stableAffinityScore(affinityKey, authID string) uint64 {
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(authID))
 	return h.Sum64()
-}
-
-func preferWebsocketForProvider(preferUpstreamWebsocket bool, provider string) bool {
-	if !preferUpstreamWebsocket {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(provider), "codex")
 }
 
 func (v *readyView) pickRoundRobin(filter authFilter) *scheduledAuth {

@@ -210,10 +210,6 @@ func authWebsocketsEnabled(auth *Auth) bool {
 	return false
 }
 
-func preferCodexWebsocketProvider(ctx context.Context, provider string) bool {
-	return cliproxyexecutor.PreferUpstreamWebsocket(ctx) && strings.EqualFold(strings.TrimSpace(provider), "codex")
-}
-
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
@@ -234,15 +230,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 	return available, cooldownCount, earliest
 }
 
-func getAvailableAuths(ctx context.Context, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getAvailableAuthsWithWebsocketPreference(preferCodexWebsocketProvider(ctx, provider), auths, provider, model, now)
-}
-
-func getAvailableAuthsWithoutWebsocketPreference(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getAvailableAuthsWithWebsocketPreference(false, auths, provider, model, now)
-}
-
-func getAvailableAuthsWithWebsocketPreference(preferWebsocket bool, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -273,17 +261,6 @@ func getAvailableAuthsWithWebsocketPreference(preferWebsocket bool, auths []*Aut
 	}
 
 	available := availableByPriority[bestPriority]
-	if preferWebsocket {
-		websocketAuths := make([]*Auth, 0, len(available))
-		for _, candidate := range available {
-			if authWebsocketsEnabled(candidate) {
-				websocketAuths = append(websocketAuths, candidate)
-			}
-		}
-		if len(websocketAuths) > 0 {
-			available = websocketAuths
-		}
-	}
 	if len(available) > 1 {
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}
@@ -291,10 +268,10 @@ func getAvailableAuthsWithWebsocketPreference(preferWebsocket bool, auths []*Aut
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
-func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *RoundRobinSelector) Pick(_ context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(ctx, auths, provider, model, now)
+	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
@@ -368,9 +345,9 @@ func positiveWeightAuths(auths []*Auth) []*Auth {
 }
 
 // Pick selects the next available auth using smooth weighted round-robin.
-func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *WeightedRoundRobinSelector) Pick(_ context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	available, err := getAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
+	available, err := getAvailableAuths(positiveWeightAuths(auths), provider, model, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -478,10 +455,10 @@ func saturatingAddInt64(value, delta int64) int64 {
 }
 
 // Pick selects the first available auth for the provider in a deterministic manner.
-func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *FillFirstSelector) Pick(_ context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(ctx, auths, provider, model, now)
+	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
@@ -675,7 +652,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
-	available, err := getAvailableAuthsWithoutWebsocketPreference(availabilityCandidates, provider, model, now)
+	available, err := getAvailableAuths(availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
 	}

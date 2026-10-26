@@ -19,12 +19,17 @@ type codexClientModelsPayload struct {
 
 const codexClientContextWindow = 272000
 
-var (
-	codexClientModelTemplatesOnce sync.Once
-	codexClientModelTemplates     map[string]map[string]any
-	codexClientDefaultTemplate    map[string]any
-	codexClientModelTemplatesErr  error
-)
+// Cached maps are immutable after publication; response builders clone entries.
+type codexClientModelTemplateCache struct {
+	mu              sync.Mutex
+	loaded          bool
+	revision        uint64
+	templates       map[string]map[string]any
+	defaultTemplate map[string]any
+	err             error
+}
+
+var codexClientModelTemplates codexClientModelTemplateCache
 
 var codexClientAllowedReasoningLevels = map[string]struct{}{
 	"none":   {},
@@ -92,9 +97,12 @@ func codexClientModelsETagMatches(condition string, current string) bool {
 func buildCodexClientModels(models []map[string]any) []map[string]any {
 	templates, defaultTemplate, err := loadCodexClientModelTemplates()
 	if err != nil || defaultTemplate == nil {
-		return nil
+		return []map[string]any{}
 	}
+	return buildCodexClientModelsWithTemplates(models, templates, defaultTemplate)
+}
 
+func buildCodexClientModelsWithTemplates(models []map[string]any, templates map[string]map[string]any, defaultTemplate map[string]any) []map[string]any {
 	result := make([]map[string]any, 0, len(models))
 	for _, model := range models {
 		id := strings.TrimSpace(stringModelValue(model, "id"))
@@ -130,31 +138,64 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 }
 
 func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any, error) {
-	codexClientModelTemplatesOnce.Do(func() {
-		var payload codexClientModelsPayload
-		codexClientModelTemplatesErr = json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload)
-		if codexClientModelTemplatesErr != nil {
-			return
-		}
+	data, revision := registry.GetCodexClientModelsSnapshot()
+	return codexClientModelTemplates.load(data, revision)
+}
 
-		codexClientModelTemplates = make(map[string]map[string]any, len(payload.Models))
-		for _, model := range payload.Models {
-			slug := strings.TrimSpace(stringModelValue(model, "slug"))
-			if slug == "" {
-				continue
-			}
-			codexClientModelTemplates[slug] = cloneCodexClientModelMap(model)
-			if slug == "gpt-5.5" {
-				codexClientDefaultTemplate = cloneCodexClientModelMap(model)
-			}
-		}
-	})
+func (cache *codexClientModelTemplateCache) load(data []byte, revision uint64) (map[string]map[string]any, map[string]any, error) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.loaded && cache.revision == revision {
+		return cache.templates, cache.defaultTemplate, cache.err
+	}
 
-	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
+	// Remote catalogs may remove old models or contain only compact capability
+	// entries. Always obtain complete defaults from the immutable built-in catalog.
+	_, defaultTemplate, err := parseCodexClientModelTemplates(registry.GetEmbeddedCodexClientModelsJSON())
+	var templates map[string]map[string]any
+	if err == nil {
+		templates, _, err = parseCodexClientModelTemplates(data)
+	}
+	cache.loaded = true
+	cache.revision = revision
+	cache.templates = templates
+	cache.defaultTemplate = defaultTemplate
+	cache.err = err
+	return templates, defaultTemplate, err
+}
+
+func parseCodexClientModelTemplates(data []byte) (map[string]map[string]any, map[string]any, error) {
+	var payload codexClientModelsPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, nil, err
+	}
+	templates := make(map[string]map[string]any, len(payload.Models))
+	var defaultTemplate map[string]any
+	for _, model := range payload.Models {
+		slug := stringModelValue(model, "slug")
+		if slug == "" {
+			slug = stringModelValue(model, "id")
+		}
+		if slug == "" {
+			continue
+		}
+		entry := cloneCodexClientModelMap(model)
+		entry["slug"] = slug
+		templates[slug] = entry
+		// Prefer the established complete template, but do not require its slug
+		// to exist if a future built-in catalog replaces it.
+		if defaultTemplate == nil || slug == "gpt-5.5" {
+			defaultTemplate = entry
+		}
+	}
+	if defaultTemplate == nil {
+		return nil, nil, fmt.Errorf("Codex client model catalog has no templates")
+	}
+	return templates, defaultTemplate, nil
 }
 
 // mergeCodexClientModelDefaults fills fields omitted by a compact capability
-// entry from the complete gpt-5.5 template. This keeps newly added official
+// entry from the complete built-in template. This keeps newly added official
 // models usable by clients while preserving their model-specific capabilities.
 func mergeCodexClientModelDefaults(entry, defaults map[string]any) {
 	if len(entry) == 0 || len(defaults) == 0 {

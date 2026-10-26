@@ -90,18 +90,18 @@ func TestManagerWeightedSchedulerHonorsCodexQuotaUrgency(t *testing.T) {
 	}
 }
 
-func TestManagerWeightedSchedulerPriorityPrecedesCodexWebsocketPreference(t *testing.T) {
+func TestManagerWeightedSchedulerUsesWeightsRegardlessOfCodexWebsocketFlag(t *testing.T) {
 	t.Parallel()
 
 	manager := newWeightedSchedulerManager(t, &WeightedRoundRobinSelector{},
-		&Auth{ID: "http-high", Provider: "codex", Attributes: map[string]string{"priority": "10", AttributeWeight: "100"}},
-		&Auth{ID: "ws-low", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true", AttributeWeight: "1"}},
+		&Auth{ID: "http", Provider: "codex", Attributes: map[string]string{"priority": "10", AttributeWeight: "100"}},
+		&Auth{ID: "ws", Provider: "codex", Attributes: map[string]string{"priority": "10", "websockets": "true", AttributeWeight: "1"}},
 	)
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
 	for i := 0; i < 4; i++ {
 		picked, _, err := manager.pickNext(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
-		if err != nil || picked == nil || picked.ID != "http-high" {
-			t.Fatalf("pickNext() #%d = %#v, %v; want http-high", i, picked, err)
+		if err != nil || picked == nil || picked.ID != "http" {
+			t.Fatalf("pickNext() #%d = %#v, %v; want http", i, picked, err)
 		}
 	}
 }

@@ -111,7 +111,7 @@ func TestWeightedRoundRobinSelectorPick_ResetsCreditsWhenWeightsChange(t *testin
 	}
 }
 
-func TestWeightedRoundRobinSelectorPick_PreservesPriorityAndWebsocketPreference(t *testing.T) {
+func TestWeightedRoundRobinSelectorPick_UsesPriorityAndWeightRegardlessOfWebsocketFlag(t *testing.T) {
 	t.Parallel()
 
 	selector := &WeightedRoundRobinSelector{}
@@ -126,13 +126,13 @@ func TestWeightedRoundRobinSelectorPick_PreservesPriorityAndWebsocketPreference(
 		}
 	}
 
-	websocketAuths := []*Auth{
+	samePriorityAuths := []*Auth{
 		{ID: "http", Attributes: map[string]string{"priority": "10", AttributeWeight: "100"}},
-		{ID: "ws", Attributes: map[string]string{"priority": "0", "websockets": "true", AttributeWeight: "1"}},
+		{ID: "ws", Attributes: map[string]string{"priority": "10", "websockets": "true", AttributeWeight: "1"}},
 	}
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
 	for i := 0; i < 4; i++ {
-		got, err := selector.Pick(ctx, "codex", "model", cliproxyexecutor.Options{}, websocketAuths)
+		got, err := selector.Pick(ctx, "codex", "model", cliproxyexecutor.Options{}, samePriorityAuths)
 		if err != nil || got == nil || got.ID != "http" {
 			t.Fatalf("websocket Pick() #%d = %#v, %v; want high-priority http", i, got, err)
 		}
@@ -234,7 +234,7 @@ func TestAuthWebsocketsEnabledAcceptsLegacyWebsocketField(t *testing.T) {
 	}
 }
 
-func TestRoundRobinSelectorPick_PrefersWebsocketAuthsForUpstreamPreference(t *testing.T) {
+func TestRoundRobinSelectorPick_DoesNotBiasTowardWebsocketAuths(t *testing.T) {
 	t.Parallel()
 
 	selector := &RoundRobinSelector{}
@@ -245,7 +245,7 @@ func TestRoundRobinSelectorPick_PrefersWebsocketAuthsForUpstreamPreference(t *te
 	}
 
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
-	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	want := []string{"codex-http", "codex-ws-a", "codex-ws-b"}
 	for i, id := range want {
 		got, err := selector.Pick(ctx, "codex", "", cliproxyexecutor.Options{}, auths)
 		if err != nil {
@@ -260,7 +260,7 @@ func TestRoundRobinSelectorPick_PrefersWebsocketAuthsForUpstreamPreference(t *te
 	}
 }
 
-func TestRoundRobinSelectorPick_PriorityPrecedesWebsocketPreference(t *testing.T) {
+func TestRoundRobinSelectorPick_HonorsPriorityRegardlessOfWebsocketFlag(t *testing.T) {
 	t.Parallel()
 
 	selector := &RoundRobinSelector{}
